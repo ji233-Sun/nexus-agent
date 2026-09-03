@@ -26,7 +26,7 @@ claude --version
 claude auth status --json
 ```
 
-## 构建与运行
+## 启动指南
 
 先构建整个 workspace，确保 Desktop 的同级目录存在 `nexus-runner`：
 
