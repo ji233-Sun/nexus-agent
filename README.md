@@ -72,6 +72,10 @@ cargo build --workspace --release
 
 测试中的 Fake Claude 只验证进程和协议闭环，不发起真实模型请求。
 
+## 致谢
+
+界面视觉语言参考了 [Vercel Design MD](https://github.com/educlopez/design-bites/blob/main/design-mds/vercel.com/DESIGN.md)。感谢 design-bites 项目对 Vercel 设计体系的整理与分享。
+
 ## 当前边界
 
 这个 Alpha 不包含 Codex、远程控制、Worktree 管理、Git 提交、附件、多 Agent、交互式审批、签名或公证。模型别名是否可用取决于本机 Claude Code 版本和账户权限。

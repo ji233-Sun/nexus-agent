@@ -4,12 +4,13 @@ mod storage;
 use std::{path::Path, process::Command as SystemCommand, str::FromStr as _, time::Duration};
 
 use gpui::{
-    App, AppContext as _, Application, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Timer,
-    Window, WindowOptions, div, prelude::FluentBuilder as _, px, rgb,
+    App, AppContext as _, Application, Bounds, Context, Entity, Hsla, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Timer, Window, WindowBounds, WindowOptions, div, prelude::FluentBuilder as _, px,
+    relative, rgb, rgba, size,
 };
 use gpui_component::{
-    Disableable as _, Root, Sizable as _,
+    Disableable as _, Root, Sizable as _, Theme, ThemeMode, box_shadow,
     button::{Button, ButtonVariants as _},
     input::{Input, InputState},
 };
@@ -21,15 +22,19 @@ use runner_client::RunnerClient;
 use storage::Storage;
 use uuid::Uuid;
 
-const BG: u32 = 0x0b0d12;
-const PANEL: u32 = 0x121620;
-const PANEL_ALT: u32 = 0x181d29;
-const BORDER: u32 = 0x252c3a;
-const TEXT: u32 = 0xe7eaf0;
-const MUTED: u32 = 0x8d96a8;
-const ACCENT: u32 = 0x8b7cf6;
-const SUCCESS: u32 = 0x52c79a;
-const DANGER: u32 = 0xf07178;
+const BG: u32 = 0xfafafa;
+const SURFACE: u32 = 0xffffff;
+const RECESSED: u32 = 0xf2f2f2;
+const HOVER: u32 = 0xebebeb;
+const TEXT: u32 = 0x171717;
+const TEXT_SECONDARY: u32 = 0x4d4d4d;
+const MUTED: u32 = 0x8f8f8f;
+const ACCENT: u32 = 0x0072f5;
+const ACCENT_HOVER: u32 = 0x0062d1;
+const SUCCESS: u32 = 0x398e4a;
+const WARNING: u32 = 0xff990a;
+const DANGER: u32 = 0xe5484d;
+const TOOL: u32 = 0x7820bc;
 
 struct NexusApp {
     storage: Storage,
@@ -427,91 +432,166 @@ impl NexusApp {
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let selected_project_id = self.selected_project.as_ref().map(|project| project.id);
         div()
-            .w(px(244.))
+            .w(px(260.))
             .h_full()
             .flex_none()
-            .bg(rgb(PANEL))
-            .border_r_1()
-            .border_color(rgb(BORDER))
-            .p_3()
+            .bg(rgb(BG))
+            .shadow(surface_border_shadow())
+            .p_4()
             .flex()
             .flex_col()
-            .gap_3()
+            .gap_4()
             .child(
                 div()
+                    .h(px(32.))
                     .flex()
                     .items_center()
                     .justify_between()
                     .child(
                         div()
-                            .text_lg()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("Nexus Agent"),
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .size(px(24.))
+                                    .rounded(px(6.))
+                                    .bg(rgb(TEXT))
+                                    .text_color(rgb(SURFACE))
+                                    .text_xs()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child("N"),
+                            )
+                            .child(
+                                div()
+                                    .text_base()
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .child("Nexus Agent"),
+                            ),
                     )
                     .child(
                         Button::new("open-project")
-                            .label("＋ 项目")
+                            .ghost()
                             .small()
+                            .child(button_label("新项目", TEXT))
                             .on_click(cx.listener(Self::choose_project)),
                     ),
             )
-            .child(div().text_xs().text_color(rgb(MUTED)).child("最近项目"))
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap_1()
-                    .children(self.projects.iter().map(|project| {
-                        let id = project.id;
-                        let selected = selected_project_id == Some(id);
-                        let display_name = project.display_name.clone();
-                        let project = project.clone();
+                    .gap_2()
+                    .child(section_label("项目"))
+                    .child(
                         div()
-                            .id(SharedString::from(format!("project-{id}")))
-                            .px_2()
-                            .py_2()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .when(selected, |element| element.bg(rgb(PANEL_ALT)))
-                            .hover(|style| style.bg(rgb(PANEL_ALT)))
-                            .on_click(cx.listener(move |app, _, _, cx| {
-                                app.select_project(project.clone());
-                                cx.notify();
-                            }))
-                            .child(display_name)
-                    })),
-            )
-            .child(div().mt_2().text_xs().text_color(rgb(MUTED)).child("任务"))
-            .child(
-                div()
-                    .id("task-list")
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .children(self.tasks.iter().map(|task| {
-                        let task_id = task.id;
-                        let selected = self.selected_task == Some(task_id);
-                        div()
-                            .id(SharedString::from(format!("task-{task_id}")))
-                            .p_2()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .when(selected, |element| element.bg(rgb(PANEL_ALT)))
-                            .hover(|style| style.bg(rgb(PANEL_ALT)))
-                            .on_click(
-                                cx.listener(move |app, _, _, cx| app.select_task(task_id, cx)),
-                            )
-                            .child(div().text_sm().line_clamp(2).child(task.title.clone()))
-                            .child(
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .when(self.projects.is_empty(), |element| {
+                                element.child(
+                                    div()
+                                        .px_2()
+                                        .py_3()
+                                        .text_xs()
+                                        .text_color(rgb(MUTED))
+                                        .child("尚未打开项目"),
+                                )
+                            })
+                            .children(self.projects.iter().map(|project| {
+                                let id = project.id;
+                                let selected = selected_project_id == Some(id);
+                                let display_name = project.display_name.clone();
+                                let project = project.clone();
                                 div()
-                                    .mt_1()
-                                    .text_xs()
-                                    .text_color(status_color(task.status))
-                                    .child(task.status.to_string()),
+                                    .id(SharedString::from(format!("project-{id}")))
+                                    .h(px(36.))
+                                    .px_3()
+                                    .rounded(px(6.))
+                                    .cursor_pointer()
+                                    .flex()
+                                    .items_center()
+                                    .text_sm()
+                                    .text_color(rgb(TEXT_SECONDARY))
+                                    .when(selected, |element| {
+                                        element
+                                            .bg(rgb(SURFACE))
+                                            .text_color(rgb(TEXT))
+                                            .shadow(surface_border_shadow())
+                                    })
+                                    .hover(|style| style.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        app.select_project(project.clone());
+                                        cx.notify();
+                                    }))
+                                    .child(display_name)
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(section_label("任务"))
+                    .child(
+                        div()
+                            .id("task-list")
+                            .flex_1()
+                            .overflow_y_scroll()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .when(
+                                self.selected_project.is_some() && self.tasks.is_empty(),
+                                |element| {
+                                    element.child(
+                                        div()
+                                            .px_2()
+                                            .py_3()
+                                            .text_xs()
+                                            .text_color(rgb(MUTED))
+                                            .child("发送 Prompt 后，任务会显示在这里"),
+                                    )
+                                },
                             )
-                    })),
+                            .children(self.tasks.iter().map(|task| {
+                                let task_id = task.id;
+                                let selected = self.selected_task == Some(task_id);
+                                div()
+                                    .id(SharedString::from(format!("task-{task_id}")))
+                                    .p_3()
+                                    .rounded(px(6.))
+                                    .cursor_pointer()
+                                    .text_color(rgb(TEXT_SECONDARY))
+                                    .when(selected, |element| {
+                                        element
+                                            .bg(rgb(SURFACE))
+                                            .text_color(rgb(TEXT))
+                                            .shadow(surface_border_shadow())
+                                    })
+                                    .hover(|style| style.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        app.select_task(task_id, cx)
+                                    }))
+                                    .child(div().text_sm().line_clamp(2).child(task.title.clone()))
+                                    .child(
+                                        div()
+                                            .mt_2()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .text_xs()
+                                            .text_color(rgb(MUTED))
+                                            .child(status_dot(run_status_color(task.status)))
+                                            .child(task.status.to_string()),
+                                    )
+                            })),
+                    ),
             )
     }
 
@@ -522,136 +602,199 @@ impl NexusApp {
             .flex_1()
             .h_full()
             .overflow_y_scroll()
-            .p_5()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .when(empty, |element| {
-                element.child(
-                    div()
-                        .flex_1()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_color(rgb(MUTED))
-                        .child(if self.selected_project.is_some() {
-                            "输入 Prompt，开始一个 Claude Code 任务"
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(760.))
+                    .min_h_full()
+                    .mx_auto()
+                    .p_6()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .when(empty, |element| {
+                        let (title, description) = if self.selected_project.is_some() {
+                            (
+                                "准备开始新任务",
+                                "在下方描述目标，Claude Code 的执行过程会显示在这里。",
+                            )
                         } else {
-                            "选择一个本地项目开始"
-                        }),
-                )
-            })
-            .children(self.messages.iter().map(render_message))
-            .when(!self.streaming_text.is_empty(), |element| {
-                element.child(message_card(
-                    "Claude · streaming",
-                    &self.streaming_text,
-                    MessageKind::Text,
-                ))
-            })
+                            (
+                                "选择一个本地项目",
+                                "Nexus Agent 会在所选目录中运行 Claude Code。",
+                            )
+                        };
+                        element.child(
+                            div()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .items_center()
+                                .justify_center()
+                                .gap_2()
+                                .text_center()
+                                .child(
+                                    div()
+                                        .text_xl()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .child(title),
+                                )
+                                .child(
+                                    div()
+                                        .max_w(px(420.))
+                                        .text_sm()
+                                        .text_color(rgb(MUTED))
+                                        .line_height(relative(1.5))
+                                        .child(description),
+                                ),
+                        )
+                    })
+                    .children(self.messages.iter().map(render_message))
+                    .when(!self.streaming_text.is_empty(), |element| {
+                        element.child(message_card(
+                            "Claude · 正在生成",
+                            &self.streaming_text,
+                            MessageKind::Text,
+                            rgb(ACCENT).into(),
+                        ))
+                    }),
+            )
     }
 
     fn render_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let harness_color = self
+        let harness_color: Hsla = self
             .harness
             .as_ref()
             .map(|probe| {
                 if probe.available && probe.authenticated {
-                    rgb(SUCCESS)
+                    rgb(SUCCESS).into()
                 } else {
-                    rgb(DANGER)
+                    rgb(DANGER).into()
                 }
             })
-            .unwrap_or_else(|| rgb(MUTED));
+            .unwrap_or_else(|| rgb(MUTED).into());
         div()
-            .w(px(272.))
+            .id("settings-panel")
+            .w(px(288.))
             .h_full()
             .flex_none()
-            .bg(rgb(PANEL))
-            .border_l_1()
-            .border_color(rgb(BORDER))
-            .p_4()
+            .overflow_y_scroll()
+            .bg(rgb(SURFACE))
+            .shadow(surface_border_shadow())
+            .p_6()
             .flex()
             .flex_col()
-            .gap_4()
-            .child(
-                div()
-                    .text_base()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("运行配置"),
-            )
-            .child(label_value("Harness", "Claude Code"))
+            .gap_6()
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap_2()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_base()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .child("运行配置"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MUTED))
+                            .child("Claude Code 本地执行参数"),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(section_label("HARNESS"))
+                    .child(label_value("类型", "Claude Code"))
                     .child(div().text_xs().text_color(rgb(MUTED)).child("可执行文件"))
                     .child(Input::new(&self.executable_input))
                     .child(
                         Button::new("probe")
-                            .label("重新探测")
+                            .outline()
                             .small()
+                            .w_full()
+                            .child(button_label("重新探测", TEXT))
                             .on_click(cx.listener(Self::probe)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_start()
+                            .gap_2()
+                            .text_xs()
+                            .text_color(rgb(TEXT_SECONDARY))
+                            .child(status_dot(harness_color))
+                            .child(
+                                self.harness
+                                    .as_ref()
+                                    .map(|probe| probe.message.clone())
+                                    .unwrap_or_else(|| "尚未探测".into()),
+                            ),
+                    )
+                    .when_some(
+                        self.harness
+                            .as_ref()
+                            .and_then(|probe| probe.version.clone()),
+                        |element, version| element.child(label_value("版本", version)),
                     ),
             )
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap_2()
+                    .gap_3()
+                    .child(section_label("MODEL"))
                     .child(
                         div()
                             .text_xs()
                             .text_color(rgb(MUTED))
-                            .child("模型（点击切换）"),
+                            .child("模型 · 点击切换"),
                     )
                     .child(
                         Button::new("model")
-                            .label(self.model.to_string())
+                            .outline()
+                            .w_full()
+                            .child(button_label(self.model.to_string(), TEXT))
                             .on_click(cx.listener(Self::cycle_model)),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
+                    )
                     .child(
                         div()
                             .text_xs()
                             .text_color(rgb(MUTED))
-                            .child("思考层级（点击切换）"),
+                            .child("思考层级 · 点击切换"),
                     )
                     .child(
                         Button::new("effort")
-                            .label(self.effort.to_string())
+                            .outline()
+                            .w_full()
+                            .child(button_label(self.effort.to_string(), TEXT))
                             .on_click(cx.listener(Self::cycle_effort)),
                     ),
             )
-            .child(
-                div().text_sm().text_color(harness_color).child(
-                    self.harness
-                        .as_ref()
-                        .map(|probe| probe.message.clone())
-                        .unwrap_or_else(|| "尚未探测".into()),
-                ),
-            )
-            .when_some(
-                self.harness
-                    .as_ref()
-                    .and_then(|probe| probe.version.clone()),
-                |element, version| element.child(label_value("版本", version)),
-            )
             .when_some(self.selected_project.as_ref(), |element, project| {
                 element
-                    .child(label_value("工作目录", project.canonical_path.clone()))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .child(section_label("WORKSPACE"))
+                            .child(label_value("工作目录", project.canonical_path.clone())),
+                    )
                     .when(self.project_dirty, |element| {
                         element.child(
                             div()
+                                .flex()
+                                .items_start()
+                                .gap_2()
                                 .text_xs()
-                                .text_color(rgb(0xe6b450))
-                                .child("此目录存在未提交修改；Nexus 不会自动还原或提交。"),
+                                .text_color(rgb(TEXT_SECONDARY))
+                                .child(status_dot(rgb(WARNING).into()))
+                                .child("目录存在未提交修改；Nexus 不会自动还原或提交。"),
                         )
                     })
             })
@@ -659,8 +802,10 @@ impl NexusApp {
             .when(self.active_run.is_some(), |element| {
                 element.child(
                     Button::new("cancel")
-                        .label("取消运行")
                         .danger()
+                        .outline()
+                        .w_full()
+                        .child(button_label("取消运行", DANGER))
                         .on_click(cx.listener(Self::cancel)),
                 )
             })
@@ -675,10 +820,25 @@ impl Render for NexusApp {
                 .harness
                 .as_ref()
                 .is_some_and(|probe| probe.available && probe.authenticated);
+        let header_status_color = if self.active_run.is_some() {
+            rgb(ACCENT).into()
+        } else {
+            self.harness
+                .as_ref()
+                .map(|probe| {
+                    if probe.available && probe.authenticated {
+                        rgb(SUCCESS).into()
+                    } else {
+                        rgb(DANGER).into()
+                    }
+                })
+                .unwrap_or_else(|| rgb(MUTED).into())
+        };
         div()
             .size_full()
             .bg(rgb(BG))
             .text_color(rgb(TEXT))
+            .text_sm()
             .flex()
             .child(self.render_sidebar(cx))
             .child(
@@ -690,52 +850,87 @@ impl Render for NexusApp {
                     .flex_col()
                     .child(
                         div()
-                            .h(px(54.))
+                            .h(px(64.))
                             .flex_none()
-                            .border_b_1()
-                            .border_color(rgb(BORDER))
-                            .px_5()
+                            .bg(rgb(BG))
+                            .shadow(composer_shadow())
+                            .px_6()
                             .flex()
                             .items_center()
                             .justify_between()
                             .child(
-                                self.selected_project
-                                    .as_ref()
-                                    .map(|project| project.display_name.clone())
-                                    .unwrap_or_else(|| "未选择项目".into()),
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div().font_weight(gpui::FontWeight::MEDIUM).child(
+                                            self.selected_project
+                                                .as_ref()
+                                                .map(|project| project.display_name.clone())
+                                                .unwrap_or_else(|| "未选择项目".into()),
+                                        ),
+                                    )
+                                    .when_some(self.selected_task, |element, _| {
+                                        element.child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(MUTED))
+                                                .child("任务时间线"),
+                                        )
+                                    }),
                             )
                             .child(
                                 div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
                                     .text_xs()
                                     .text_color(rgb(MUTED))
-                                    .child(self.status.clone()),
+                                    .child(status_dot(header_status_color))
+                                    .child(
+                                        div().max_w(px(420.)).truncate().child(self.status.clone()),
+                                    ),
                             ),
                     )
                     .child(self.render_timeline())
                     .child(
                         div()
                             .flex_none()
-                            .border_t_1()
-                            .border_color(rgb(BORDER))
-                            .p_4()
-                            .flex()
-                            .gap_3()
-                            .items_end()
+                            .bg(rgb(BG))
+                            .shadow(header_shadow())
+                            .px_6()
+                            .py_4()
                             .child(
                                 div()
-                                    .flex_1()
-                                    .child(Input::new(&self.prompt_input).h(px(94.))),
-                            )
-                            .child(
-                                Button::new("submit")
-                                    .label(if self.active_run.is_some() {
-                                        "运行中"
-                                    } else {
-                                        "发送"
-                                    })
-                                    .primary()
-                                    .disabled(!can_submit)
-                                    .on_click(cx.listener(Self::submit)),
+                                    .w_full()
+                                    .max_w(px(760.))
+                                    .mx_auto()
+                                    .flex()
+                                    .gap_3()
+                                    .items_end()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .child(Input::new(&self.prompt_input).h(px(96.))),
+                                    )
+                                    .child(
+                                        Button::new("submit")
+                                            .primary()
+                                            .h(px(40.))
+                                            .px_5()
+                                            .child(button_label(
+                                                if self.active_run.is_some() {
+                                                    "运行中"
+                                                } else {
+                                                    "发送"
+                                                },
+                                                SURFACE,
+                                            ))
+                                            .when(!can_submit, |button| button.opacity(0.5))
+                                            .disabled(!can_submit)
+                                            .on_click(cx.listener(Self::submit)),
+                                    ),
                             ),
                     ),
             )
@@ -750,33 +945,48 @@ fn render_message(message: &Message) -> impl IntoElement {
         MessageRole::Tool => "Tool",
         MessageRole::System => "System",
     };
-    message_card(label, &message.content, message.kind)
+    let indicator = match message.kind {
+        MessageKind::Error => rgb(DANGER).into(),
+        MessageKind::ToolCall | MessageKind::ToolResult => rgb(TOOL).into(),
+        _ => rgb(MUTED).into(),
+    };
+    message_card(label, &message.content, message.kind, indicator)
 }
 
-fn message_card(label: &str, content: &str, kind: MessageKind) -> impl IntoElement {
-    let border = match kind {
-        MessageKind::Error => rgb(DANGER),
-        MessageKind::ToolCall | MessageKind::ToolResult => rgb(0x4d7caa),
-        _ => rgb(BORDER),
-    };
+fn message_card(
+    label: &str,
+    content: &str,
+    kind: MessageKind,
+    indicator: Hsla,
+) -> impl IntoElement {
     div()
         .w_full()
-        .rounded_lg()
-        .border_1()
-        .border_color(border)
-        .bg(rgb(PANEL))
-        .p_4()
+        .rounded(px(12.))
+        .bg(rgb(SURFACE))
+        .shadow(surface_card_shadow())
+        .p_6()
         .child(
             div()
+                .flex()
+                .items_center()
+                .gap_2()
                 .text_xs()
-                .text_color(rgb(MUTED))
-                .mb_2()
+                .text_color(rgb(TEXT_SECONDARY))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .mb_3()
+                .child(status_dot(indicator))
                 .child(label.to_owned()),
         )
         .child(
             div()
                 .text_sm()
+                .text_color(rgb(TEXT))
                 .whitespace_normal()
+                .line_height(relative(1.5))
+                .when(
+                    matches!(kind, MessageKind::ToolCall | MessageKind::ToolResult),
+                    |element| element.font_family("SF Mono"),
+                )
                 .child(content.to_owned()),
         )
 }
@@ -789,16 +999,107 @@ fn label_value(label: impl Into<SharedString>, value: impl Into<SharedString>) -
         .flex_col()
         .gap_1()
         .child(div().text_xs().text_color(rgb(MUTED)).child(label))
-        .child(div().text_sm().child(value))
+        .child(
+            div()
+                .text_sm()
+                .text_color(rgb(TEXT_SECONDARY))
+                .whitespace_normal()
+                .child(value),
+        )
 }
 
-fn status_color(status: RunStatus) -> gpui::Hsla {
+fn section_label(label: impl Into<SharedString>) -> impl IntoElement {
+    div()
+        .text_xs()
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(rgb(MUTED))
+        .child(label.into())
+}
+
+fn button_label(label: impl Into<SharedString>, color: u32) -> impl IntoElement {
+    div().text_color(rgb(color)).child(label.into())
+}
+
+fn status_dot(color: Hsla) -> impl IntoElement {
+    div()
+        .size(px(8.))
+        .mt(px(3.))
+        .flex_none()
+        .rounded_full()
+        .bg(color)
+}
+
+fn run_status_color(status: RunStatus) -> Hsla {
     match status {
         RunStatus::Completed => rgb(SUCCESS).into(),
         RunStatus::Failed => rgb(DANGER).into(),
         RunStatus::Running | RunStatus::Starting | RunStatus::Cancelling => rgb(ACCENT).into(),
         _ => rgb(MUTED).into(),
     }
+}
+
+fn surface_border_shadow() -> Vec<gpui::BoxShadow> {
+    vec![box_shadow(0., 0., 0., 1., rgba(0x00000014).into())]
+}
+
+fn surface_card_shadow() -> Vec<gpui::BoxShadow> {
+    vec![
+        box_shadow(0., 0., 0., 1., rgba(0x00000014).into()),
+        box_shadow(0., 2., 2., 0., rgba(0x0000000a).into()),
+        box_shadow(0., 8., 8., -8., rgba(0x0000000a).into()),
+    ]
+}
+
+fn header_shadow() -> Vec<gpui::BoxShadow> {
+    vec![box_shadow(0., 1., 0., 0., rgba(0x0000001a).into())]
+}
+
+fn composer_shadow() -> Vec<gpui::BoxShadow> {
+    vec![box_shadow(0., -1., 0., 0., rgba(0x0000001a).into())]
+}
+
+fn configure_theme(cx: &mut App) {
+    Theme::change(ThemeMode::Light, None, cx);
+    let theme = Theme::global_mut(cx);
+    theme.font_family = ".SystemUIFont".into();
+    theme.font_size = px(14.);
+    theme.mono_font_family = "SF Mono".into();
+    theme.mono_font_size = px(13.);
+    theme.radius = px(6.);
+    theme.radius_lg = px(12.);
+    theme.shadow = true;
+
+    theme.background = rgb(BG).into();
+    theme.foreground = rgb(TEXT).into();
+    theme.border = rgba(0x00000014).into();
+    theme.input = rgba(0x00000024).into();
+    theme.caret = rgb(TEXT).into();
+    theme.ring = rgb(0x005fcc).into();
+    theme.selection = rgba(0x0072f533).into();
+    theme.muted = rgb(RECESSED).into();
+    theme.muted_foreground = rgb(MUTED).into();
+    theme.accent = rgb(HOVER).into();
+    theme.accent_foreground = rgb(TEXT).into();
+    theme.primary = rgb(ACCENT).into();
+    theme.primary_hover = rgb(ACCENT_HOVER).into();
+    theme.primary_active = rgb(0x005fcc).into();
+    theme.primary_foreground = rgb(SURFACE).into();
+    theme.secondary = rgb(SURFACE).into();
+    theme.secondary_hover = rgb(HOVER).into();
+    theme.secondary_active = rgb(RECESSED).into();
+    theme.secondary_foreground = rgb(TEXT_SECONDARY).into();
+    theme.link = rgb(ACCENT).into();
+    theme.link_hover = rgb(ACCENT_HOVER).into();
+    theme.link_active = rgb(0x005fcc).into();
+    theme.danger = rgb(DANGER).into();
+    theme.danger_hover = rgb(0xc93439).into();
+    theme.danger_active = rgb(0xa9272c).into();
+    theme.danger_foreground = rgb(SURFACE).into();
+    theme.sidebar = rgb(BG).into();
+    theme.sidebar_foreground = rgb(TEXT).into();
+    theme.sidebar_accent = rgb(HOVER).into();
+    theme.sidebar_accent_foreground = rgb(TEXT).into();
+    theme.sidebar_border = rgba(0x00000014).into();
 }
 
 fn is_git_dirty(path: &Path) -> bool {
@@ -813,8 +1114,14 @@ fn is_git_dirty(path: &Path) -> bool {
 fn main() {
     Application::new().run(|cx: &mut App| {
         gpui_component::init(cx);
+        configure_theme(cx);
+        let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
         cx.spawn(async move |cx| {
-            cx.open_window(WindowOptions::default(), |window, cx| {
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                ..Default::default()
+            };
+            cx.open_window(options, |window, cx| {
                 let view = cx.new(|cx| NexusApp::new(window, cx));
                 cx.new(|cx| Root::new(view, window, cx))
             })?;
