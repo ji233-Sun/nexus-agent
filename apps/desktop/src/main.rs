@@ -273,17 +273,23 @@ impl NexusApp {
     }
 
     fn choose_project(&mut self, _: &gpui::ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(path) = rfd::FileDialog::new().pick_folder() else {
-            return;
-        };
-        match self.storage.open_project(&path) {
-            Ok(project) => {
-                self.select_project(project);
-                self.projects = self.storage.projects().unwrap_or_default();
-            }
-            Err(error) => self.status = format!("无法打开项目：{error}"),
-        }
-        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let Some(folder) = rfd::AsyncFileDialog::new().pick_folder().await else {
+                return;
+            };
+            let path = folder.path().to_owned();
+            let _ = this.update(cx, |app, cx| {
+                match app.storage.open_project(&path) {
+                    Ok(project) => {
+                        app.select_project(project);
+                        app.projects = app.storage.projects().unwrap_or_default();
+                    }
+                    Err(error) => app.status = format!("无法打开项目：{error}"),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn select_project(&mut self, project: Project) {
