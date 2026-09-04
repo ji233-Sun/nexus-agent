@@ -52,6 +52,7 @@ const SUCCESS: u32 = 0x398e4a;
 const WARNING: u32 = 0xff990a;
 const DANGER: u32 = 0xe5484d;
 const TOOL: u32 = 0xa35c16;
+const RUNNER_MODE_ARG: &str = "--nexus-runner";
 
 struct NexusApp {
     storage: Storage,
@@ -1602,7 +1603,14 @@ fn is_git_dirty(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn main() {
+fn main() -> anyhow::Result<()> {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == RUNNER_MODE_ARG)
+    {
+        return nexus_runner::run();
+    }
+
     Application::new().run(|cx: &mut App| {
         gpui_component::init(cx);
         configure_theme(cx);
@@ -1620,4 +1628,5 @@ fn main() {
         })
         .detach();
     });
+    Ok(())
 }

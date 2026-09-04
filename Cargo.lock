@@ -3561,6 +3561,7 @@ dependencies = [
  "gpui-component",
  "nexus-domain",
  "nexus-protocol",
+ "nexus-runner",
  "rfd",
  "rusqlite",
  "serde_json",
