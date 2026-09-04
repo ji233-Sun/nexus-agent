@@ -1,7 +1,6 @@
 use std::{
     env,
     io::{BufRead as _, BufReader, Write as _},
-    path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
     sync::{Arc, Mutex, mpsc},
     thread,
@@ -20,13 +19,14 @@ pub struct RunnerClient {
 
 impl RunnerClient {
     pub fn spawn() -> Result<Self> {
-        let executable = runner_executable()?;
-        let mut child = Command::new(&executable)
+        let mut command = runner_command()?;
+        let executable = command.get_program().to_string_lossy().into_owned();
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .with_context(|| format!("启动 Runner：{}", executable.display()))?;
+            .with_context(|| format!("启动 Runner：{executable}"))?;
         let stdin = child.stdin.take().context("获取 Runner stdin")?;
         let stdout = child.stdout.take().context("获取 Runner stdout")?;
         let stderr = child.stderr.take().context("获取 Runner stderr")?;
@@ -86,11 +86,11 @@ impl Drop for RunnerClient {
     }
 }
 
-fn runner_executable() -> Result<PathBuf> {
+fn runner_command() -> Result<Command> {
     if let Some(path) = env::var_os("NEXUS_RUNNER_PATH") {
-        let path = PathBuf::from(path);
+        let path = std::path::PathBuf::from(path);
         if path.is_file() {
-            return Ok(path);
+            return Ok(Command::new(path));
         }
         return Err(anyhow!(
             "NEXUS_RUNNER_PATH 指向的文件不存在：{}",
@@ -99,16 +99,7 @@ fn runner_executable() -> Result<PathBuf> {
     }
 
     let current = env::current_exe().context("定位 Desktop 可执行文件")?;
-    let candidate = current
-        .parent()
-        .context("定位 Desktop 可执行文件目录")?
-        .join(format!("nexus-runner{}", env::consts::EXE_SUFFIX));
-    if candidate.is_file() {
-        Ok(candidate)
-    } else {
-        Err(anyhow!(
-            "未找到 Runner：{}。请先运行 `cargo build --workspace`，或设置 NEXUS_RUNNER_PATH。",
-            candidate.display()
-        ))
-    }
+    let mut command = Command::new(current);
+    command.arg(crate::RUNNER_MODE_ARG);
+    Ok(command)
 }

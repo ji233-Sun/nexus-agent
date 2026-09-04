@@ -12,6 +12,7 @@ gpui.workspace = true
 gpui-component.workspace = true
 nexus-domain = { path = "../../crates/domain" }
 nexus-protocol = { path = "../../crates/protocol" }
+nexus-runner = { path = "../runner" }
 rfd.workspace = true
 rusqlite.workspace = true
 serde_json.workspace = true
@@ -20,4 +21,3 @@ uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-

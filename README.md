@@ -36,14 +36,11 @@ codex login status
 
 ## 启动指南
 
-先构建整个 workspace，确保 Desktop 的同级目录存在 `nexus-runner`：
-
 ```bash
-cargo build --workspace
 cargo run -p nexus-desktop
 ```
 
-如果单独移动 Desktop，可通过 `NEXUS_RUNNER_PATH` 指定 Runner 的完整路径。应用数据保存在：
+Desktop 默认以独立子进程运行内置 Runner，确保两者始终使用相同协议版本。若需要改用外部 Runner，可通过 `NEXUS_RUNNER_PATH` 指定其完整路径。应用数据保存在：
 
 ```text
 ~/Library/Application Support/Nexus Agent/nexus.db
