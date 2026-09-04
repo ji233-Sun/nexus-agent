@@ -33,6 +33,15 @@ Read-only discovery is always allowed. If the task has not already authorized it
 - Deleting or overwriting user data, discarding uncommitted work, rewriting history, or dropping data
 - Keeping two implementations of the same behavior alive
 
+## Git checkpoints
+
+- The user authorizes local commits in this repository after each completed,
+  independently verifiable operation.
+- Commit one operation at a time before starting the next so each change can be
+  rolled back independently.
+- Keep unrelated work out of each commit, and never push unless the user
+  explicitly requests it.
+
 ## Testing
 
 - Run the narrowest existing tests that exercise the changed behavior.
