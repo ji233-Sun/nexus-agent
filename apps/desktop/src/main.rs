@@ -15,15 +15,16 @@ use codex_history::{
     ThreadSummary as CodexThreadSummary,
 };
 use gpui::{
-    App, AppContext as _, Application, Bounds, Context, Entity, Hsla, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Timer, Window, WindowBounds, WindowOptions, div, prelude::FluentBuilder as _, px,
-    relative, rgb, rgba, size,
+    App, AppContext as _, Application, Bounds, Context, Corner, Entity, Hsla,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Timer, Window, WindowBounds, WindowOptions, div,
+    prelude::FluentBuilder as _, px, relative, rgb, rgba, size,
 };
 use gpui_component::{
     Disableable as _, Root, Sizable as _, Theme, ThemeMode, box_shadow,
     button::{Button, ButtonVariants as _},
     input::{Input, InputState},
+    menu::{DropdownMenu as _, PopupMenuItem},
 };
 use nexus_domain::{
     ClaudeModel, HarnessKind, Message, MessageKind, MessageRole, Project, RunStatus, TaskSummary,
@@ -606,8 +607,13 @@ impl NexusApp {
         }
     }
 
-    fn cycle_harness(&mut self, _: &gpui::ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.active_run.is_some() {
+    fn select_harness(
+        &mut self,
+        harness: HarnessKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_run.is_some() || self.selected_harness == harness {
             return;
         }
         let current_executable = self.executable_input.read(cx).value().trim().to_owned();
@@ -618,7 +624,7 @@ impl NexusApp {
             );
         }
 
-        self.selected_harness = self.selected_harness.next();
+        self.selected_harness = harness;
         let _ = self
             .storage
             .set_setting("default_harness", self.selected_harness.as_str());
@@ -640,23 +646,114 @@ impl NexusApp {
         cx.notify();
     }
 
-    fn cycle_model(&mut self, _: &gpui::ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_harness != HarnessKind::Claude {
+    fn select_model(&mut self, model: ClaudeModel, cx: &mut Context<Self>) {
+        if self.active_run.is_some()
+            || self.selected_harness != HarnessKind::Claude
+            || self.model == model
+        {
             return;
         }
-        self.model = self.model.next();
+        self.model = model;
         let _ = self
             .storage
             .set_setting("claude_model", self.model.as_str());
         cx.notify();
     }
 
-    fn cycle_effort(&mut self, _: &gpui::ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.effort = self.effort.next();
+    fn select_effort(&mut self, effort: ThinkingEffort, cx: &mut Context<Self>) {
+        if self.active_run.is_some() || self.effort == effort {
+            return;
+        }
+        self.effort = effort;
         let _ = self
             .storage
             .set_setting("thinking_effort", self.effort.as_str());
         cx.notify();
+    }
+
+    fn harness_selector(
+        &self,
+        id: &'static str,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let selected = self.selected_harness;
+        let app = cx.entity().clone();
+        Button::new(id)
+            .label(format!("{selected}  ⌄"))
+            .disabled(self.active_run.is_some())
+            .when(compact, |button| button.ghost().small())
+            .when(!compact, |button| button.outline().w_full())
+            .dropdown_menu_with_anchor(Corner::TopLeft, move |menu, _, _| {
+                HarnessKind::ALL.into_iter().fold(
+                    menu.min_w(if compact { px(160.) } else { px(220.) }),
+                    |menu, harness| {
+                        let app = app.clone();
+                        menu.item(
+                            PopupMenuItem::new(harness.to_string())
+                                .checked(harness == selected)
+                                .on_click(move |_, window, cx| {
+                                    app.update(cx, |app, cx| {
+                                        app.select_harness(harness, window, cx)
+                                    });
+                                }),
+                        )
+                    },
+                )
+            })
+    }
+
+    fn model_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let selected = self.model;
+        let app = cx.entity().clone();
+        let label = if self.selected_harness == HarnessKind::Claude {
+            selected.to_string()
+        } else {
+            "CLI 默认模型".into()
+        };
+        Button::new("composer-model")
+            .ghost()
+            .small()
+            .label(format!("{label}  ⌄"))
+            .disabled(self.selected_harness == HarnessKind::Codex || self.active_run.is_some())
+            .dropdown_menu_with_anchor(Corner::TopLeft, move |menu, _, _| {
+                ClaudeModel::ALL
+                    .into_iter()
+                    .fold(menu.min_w(px(160.)), |menu, model| {
+                        let app = app.clone();
+                        menu.item(
+                            PopupMenuItem::new(model.to_string())
+                                .checked(model == selected)
+                                .on_click(move |_, _, cx| {
+                                    app.update(cx, |app, cx| app.select_model(model, cx));
+                                }),
+                        )
+                    })
+            })
+    }
+
+    fn effort_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let selected = self.effort;
+        let app = cx.entity().clone();
+        Button::new("composer-effort")
+            .ghost()
+            .small()
+            .label(format!("{selected}  ⌄"))
+            .disabled(self.active_run.is_some())
+            .dropdown_menu_with_anchor(Corner::TopLeft, move |menu, _, _| {
+                ThinkingEffort::ALL
+                    .into_iter()
+                    .fold(menu.min_w(px(140.)), |menu, effort| {
+                        let app = app.clone();
+                        menu.item(
+                            PopupMenuItem::new(effort.to_string())
+                                .checked(effort == selected)
+                                .on_click(move |_, _, cx| {
+                                    app.update(cx, |app, cx| app.select_effort(effort, cx));
+                                }),
+                        )
+                    })
+            })
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1027,16 +1124,9 @@ impl NexusApp {
                         div()
                             .text_xs()
                             .text_color(rgb(MUTED))
-                            .child("类型 · 点击切换"),
+                            .child("类型 · 点击选择"),
                     )
-                    .child(
-                        Button::new("harness")
-                            .outline()
-                            .w_full()
-                            .child(button_label(self.selected_harness.to_string(), TEXT))
-                            .disabled(self.active_run.is_some())
-                            .on_click(cx.listener(Self::cycle_harness)),
-                    )
+                    .child(self.harness_selector("settings-harness", false, cx))
                     .child(div().text_xs().text_color(rgb(MUTED)).child("可执行文件"))
                     .child(Input::new(&self.executable_input))
                     .child(
@@ -1248,58 +1338,13 @@ impl Render for NexusApp {
                                                     .flex()
                                                     .items_center()
                                                     .gap_1()
-                                                    .child(
-                                                        Button::new("composer-harness")
-                                                            .ghost()
-                                                            .small()
-                                                            .child(button_label(
-                                                                format!(
-                                                                    "{}  ⌄",
-                                                                    self.selected_harness
-                                                                ),
-                                                                TEXT_SECONDARY,
-                                                            ))
-                                                            .disabled(self.active_run.is_some())
-                                                            .on_click(
-                                                                cx.listener(Self::cycle_harness),
-                                                            ),
-                                                    )
-                                                    .child(
-                                                        Button::new("composer-model")
-                                                            .ghost()
-                                                            .small()
-                                                            .child(button_label(
-                                                                if self.selected_harness
-                                                                    == HarnessKind::Claude
-                                                                {
-                                                                    self.model.to_string()
-                                                                } else {
-                                                                    "CLI 默认模型".into()
-                                                                },
-                                                                TEXT_SECONDARY,
-                                                            ))
-                                                            .disabled(
-                                                                self.selected_harness
-                                                                    == HarnessKind::Codex
-                                                                    || self.active_run.is_some(),
-                                                            )
-                                                            .on_click(
-                                                                cx.listener(Self::cycle_model),
-                                                            ),
-                                                    )
-                                                    .child(
-                                                        Button::new("composer-effort")
-                                                            .ghost()
-                                                            .small()
-                                                            .child(button_label(
-                                                                format!("{}  ⌄", self.effort),
-                                                                TEXT_SECONDARY,
-                                                            ))
-                                                            .disabled(self.active_run.is_some())
-                                                            .on_click(
-                                                                cx.listener(Self::cycle_effort),
-                                                            ),
-                                                    ),
+                                                    .child(self.harness_selector(
+                                                        "composer-harness",
+                                                        true,
+                                                        cx,
+                                                    ))
+                                                    .child(self.model_selector(cx))
+                                                    .child(self.effort_selector(cx)),
                                             )
                                             .child(
                                                 Button::new("submit")
