@@ -9,6 +9,8 @@ rust-version.workspace = true
 anyhow.workspace = true
 nexus-domain = { path = "../../crates/domain" }
 nexus-harness-claude = { path = "../../crates/harness-claude" }
+nexus-harness-codex = { path = "../../crates/harness-codex" }
+nexus-harness-core = { path = "../../crates/harness-core" }
 nexus-protocol = { path = "../../crates/protocol" }
 nix.workspace = true
 serde_json.workspace = true
@@ -17,4 +19,3 @@ uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-

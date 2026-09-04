@@ -4,6 +4,60 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum HarnessKind {
+    #[default]
+    Claude,
+    Codex,
+}
+
+impl HarnessKind {
+    pub const ALL: [Self; 2] = [Self::Claude, Self::Codex];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Claude => Self::Codex,
+            Self::Codex => Self::Claude,
+        }
+    }
+
+    pub fn default_executable(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
+}
+
+impl fmt::Display for HarnessKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Claude => "Claude Code",
+            Self::Codex => "Codex CLI",
+        })
+    }
+}
+
+impl FromStr for HarnessKind {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "claude" => Ok(Self::Claude),
+            "codex" => Ok(Self::Codex),
+            _ => Err(format!("unknown harness: {value}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunStatus {
@@ -257,6 +311,8 @@ mod tests {
 
     #[test]
     fn model_and_effort_cycle_through_supported_values() {
+        assert_eq!(HarnessKind::Claude.next(), HarnessKind::Codex);
+        assert_eq!(HarnessKind::Codex.default_executable(), "codex");
         assert_eq!(ClaudeModel::Haiku.next(), ClaudeModel::Default);
         assert_eq!(ThinkingEffort::Max.next(), ThinkingEffort::Low);
         assert_eq!(ThinkingEffort::XHigh.as_str(), "xhigh");

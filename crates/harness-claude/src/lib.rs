@@ -1,26 +1,17 @@
-use std::{
-    env,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
-use nexus_domain::{ClaudeModel, ThinkingEffort};
+use nexus_domain::{HarnessKind, ThinkingEffort};
+pub use nexus_harness_core::{DecodedEvent, LaunchSpec};
+use nexus_harness_core::{LineDecoder, resolve_executable, summarize_json};
 use nexus_protocol::HarnessProbe;
 use serde_json::Value;
 use tokio::process::Command;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LaunchSpec {
-    pub executable: PathBuf,
-    pub args: Vec<String>,
-    pub cwd: PathBuf,
-    pub stdin: String,
-}
 
 pub fn build_launch_spec(
     executable: &str,
     cwd: &Path,
     prompt: &str,
-    model: ClaudeModel,
+    model: Option<&str>,
     effort: ThinkingEffort,
 ) -> LaunchSpec {
     let mut args = vec![
@@ -37,7 +28,7 @@ pub fn build_launch_spec(
         "--effort".into(),
         effort.as_str().into(),
     ];
-    if let Some(model) = model.cli_value() {
+    if let Some(model) = model {
         args.push("--model".into());
         args.push(model.into());
     }
@@ -54,6 +45,7 @@ pub async fn probe(configured_executable: &str) -> HarnessProbe {
     let executable = resolve_executable(configured_executable);
     let Some(executable) = executable else {
         return HarnessProbe {
+            harness: HarnessKind::Claude,
             available: false,
             authenticated: false,
             executable: configured_executable.to_owned(),
@@ -65,6 +57,7 @@ pub async fn probe(configured_executable: &str) -> HarnessProbe {
     let version = Command::new(&executable).arg("--version").output().await;
     let Ok(version) = version else {
         return HarnessProbe {
+            harness: HarnessKind::Claude,
             available: false,
             authenticated: false,
             executable: executable.display().to_string(),
@@ -74,6 +67,7 @@ pub async fn probe(configured_executable: &str) -> HarnessProbe {
     };
     if !version.status.success() {
         return HarnessProbe {
+            harness: HarnessKind::Claude,
             available: false,
             authenticated: false,
             executable: executable.display().to_string(),
@@ -95,6 +89,7 @@ pub async fn probe(configured_executable: &str) -> HarnessProbe {
         .unwrap_or(false);
 
     HarnessProbe {
+        harness: HarnessKind::Claude,
         available: true,
         authenticated,
         executable: executable.display().to_string(),
@@ -107,66 +102,11 @@ pub async fn probe(configured_executable: &str) -> HarnessProbe {
     }
 }
 
-pub fn resolve_executable(configured: &str) -> Option<PathBuf> {
-    let configured_path = PathBuf::from(configured);
-    if configured_path.components().count() > 1 {
-        return is_executable_file(&configured_path).then_some(configured_path);
-    }
-
-    if let Some(path) = env::var_os("PATH").and_then(|paths| {
-        env::split_paths(&paths)
-            .map(|path| path.join(configured))
-            .find(|path| is_executable_file(path))
-    }) {
-        return Some(path);
-    }
-
-    let mut candidates = vec![
-        PathBuf::from("/opt/homebrew/bin").join(configured),
-        PathBuf::from("/usr/local/bin").join(configured),
-    ];
-    if let Some(home) = env::var_os("HOME") {
-        candidates.insert(0, PathBuf::from(home).join(".local/bin").join(configured));
-    }
-    candidates.into_iter().find(|path| is_executable_file(path))
-}
-
-#[cfg(unix)]
-fn is_executable_file(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    path.metadata()
-        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
-}
-
-#[cfg(not(unix))]
-fn is_executable_file(path: &Path) -> bool {
-    path.is_file()
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum DecodedEvent {
-    TextDelta(String),
-    MessageCompleted(String),
-    ToolStarted {
-        id: String,
-        name: String,
-        summary: String,
-    },
-    ToolCompleted {
-        id: String,
-        output: String,
-        is_error: bool,
-    },
-    Status(String),
-}
-
 #[derive(Default)]
 pub struct EventDecoder;
 
-impl EventDecoder {
-    pub fn decode_line(&mut self, line: &str) -> Result<Vec<DecodedEvent>, serde_json::Error> {
+impl LineDecoder for EventDecoder {
+    fn decode_line(&mut self, line: &str) -> Result<Vec<DecodedEvent>, serde_json::Error> {
         let frame: Value = serde_json::from_str(line)?;
         Ok(decode_frame(&frame))
     }
@@ -266,21 +206,6 @@ fn decode_tool_results(frame: &Value) -> Vec<DecodedEvent> {
         .collect()
 }
 
-fn summarize_json(value: &Value) -> String {
-    const MAX_CHARS: usize = 400;
-    let raw = value
-        .as_str()
-        .map(str::to_owned)
-        .unwrap_or_else(|| value.to_string());
-    if raw.chars().count() <= MAX_CHARS {
-        raw
-    } else {
-        let mut summary: String = raw.chars().take(MAX_CHARS).collect();
-        summary.push('…');
-        summary
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,7 +216,7 @@ mod tests {
             "/usr/local/bin/claude",
             Path::new("/tmp/project"),
             "secret prompt",
-            ClaudeModel::Opus,
+            Some("opus"),
             ThinkingEffort::XHigh,
         );
         assert!(spec.args.windows(2).any(|pair| pair == ["--model", "opus"]));

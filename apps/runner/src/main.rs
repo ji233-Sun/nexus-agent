@@ -8,8 +8,10 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
-use nexus_domain::RunStatus;
-use nexus_harness_claude::{DecodedEvent, EventDecoder, build_launch_spec, probe};
+use nexus_domain::{HarnessKind, RunStatus};
+use nexus_harness_claude as claude;
+use nexus_harness_codex as codex;
+use nexus_harness_core::{DecodedEvent, LaunchSpec, LineDecoder};
 use nexus_protocol::{
     Command, CommandEnvelope, ErrorCode, Event, EventEnvelope, PROTOCOL_VERSION, StartRun,
 };
@@ -93,8 +95,14 @@ async fn main() -> Result<()> {
 
         match command.command {
             Command::RunnerHello => emitter.send(Event::RunnerReady).await,
-            Command::HarnessProbe { executable } => {
-                let result = probe(&executable).await;
+            Command::HarnessProbe {
+                harness,
+                executable,
+            } => {
+                let result = match harness {
+                    HarnessKind::Claude => claude::probe(&executable).await,
+                    HarnessKind::Codex => codex::probe(&executable).await,
+                };
                 emitter.send(Event::HarnessDetected(result)).await;
             }
             Command::RunStart(request) => {
@@ -127,7 +135,7 @@ async fn start_run(request: StartRun, active: Arc<Mutex<Option<ActiveRun>>>, emi
             .send(Event::RunFailed {
                 run_id: request.run_id,
                 code: ErrorCode::RunAlreadyActive,
-                message: "已有 Claude Code 任务正在运行，请先等待或取消。".into(),
+                message: "已有 Agent 任务正在运行，请先等待或取消。".into(),
             })
             .await;
         emitter
@@ -171,7 +179,7 @@ async fn start_run(request: StartRun, active: Arc<Mutex<Option<ActiveRun>>>, emi
     let run_id = request.run_id;
     let active_for_task = active.clone();
     tokio::spawn(async move {
-        run_claude(request, cwd, cancel_rx, emitter).await;
+        run_harness(request, cwd, cancel_rx, emitter).await;
         let mut guard = active_for_task.lock().await;
         if guard.as_ref().is_some_and(|run| run.id == run_id) {
             *guard = None;
@@ -191,25 +199,41 @@ async fn cancel_run(run_id: Uuid, active: &Mutex<Option<ActiveRun>>, emitter: &E
             .send(Event::RunStatusChanged {
                 run_id,
                 status: RunStatus::Cancelling,
-                message: Some("正在停止 Claude Code…".into()),
+                message: Some("正在停止 Agent…".into()),
             })
             .await;
     }
 }
 
-async fn run_claude(
+async fn run_harness(
     request: StartRun,
     cwd: std::path::PathBuf,
     mut cancel: watch::Receiver<bool>,
     emitter: Emitter,
 ) {
-    let spec = build_launch_spec(
-        &request.executable,
-        &cwd,
-        &request.prompt,
-        request.model,
-        request.effort,
-    );
+    let harness = request.harness;
+    let (spec, decoder): (LaunchSpec, Box<dyn LineDecoder>) = match harness {
+        HarnessKind::Claude => (
+            claude::build_launch_spec(
+                &request.executable,
+                &cwd,
+                &request.prompt,
+                request.model.as_deref(),
+                request.effort,
+            ),
+            Box::new(claude::EventDecoder),
+        ),
+        HarnessKind::Codex => (
+            codex::build_launch_spec(
+                &request.executable,
+                &cwd,
+                &request.prompt,
+                request.model.as_deref(),
+                request.effort,
+            ),
+            Box::new(codex::EventDecoder),
+        ),
+    };
     let mut command = ProcessCommand::new(&spec.executable);
     command
         .args(&spec.args)
@@ -228,7 +252,7 @@ async fn run_claude(
                 .send(Event::RunFailed {
                     run_id: request.run_id,
                     code: ErrorCode::LaunchFailed,
-                    message: "无法启动 Claude Code，请重新探测可执行文件。".into(),
+                    message: format!("无法启动 {harness}，请重新探测可执行文件。"),
                 })
                 .await;
             emitter
@@ -257,7 +281,7 @@ async fn run_claude(
             .send(Event::RunFailed {
                 run_id: request.run_id,
                 code: ErrorCode::LaunchFailed,
-                message: "无法向 Claude Code 发送 Prompt。".into(),
+                message: format!("无法向 {harness} 发送 Prompt。"),
             })
             .await;
         emitter
@@ -272,7 +296,13 @@ async fn run_claude(
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    let stdout_task = tokio::spawn(read_stdout(stdout, request.run_id, emitter.clone()));
+    let stdout_task = tokio::spawn(read_stdout(
+        stdout,
+        request.run_id,
+        harness,
+        decoder,
+        emitter.clone(),
+    ));
     let stderr_task = tokio::spawn(async move {
         let mut captured = String::new();
         if let Some(stderr) = stderr {
@@ -306,24 +336,24 @@ async fn run_claude(
         }
     };
 
-    let _ = stdout_task.await;
+    let provider_error = stdout_task.await.ok().flatten();
     let _ = stderr_task.await;
     let exit_code = status.as_ref().ok().and_then(|status| status.code());
     let final_status = if was_cancelled {
         RunStatus::Cancelled
-    } else if status.as_ref().is_ok_and(|status| status.success()) {
+    } else if provider_error.is_none() && status.as_ref().is_ok_and(|status| status.success()) {
         RunStatus::Completed
     } else {
         emitter
             .send(Event::RunFailed {
                 run_id: request.run_id,
                 code: ErrorCode::UnexpectedExit,
-                message: match exit_code {
+                message: provider_error.unwrap_or_else(|| match exit_code {
                     Some(code) => {
-                        format!("Claude Code 异常退出（代码 {code}）。请检查登录状态或诊断日志。")
+                        format!("{harness} 异常退出（代码 {code}）。请检查登录状态或诊断日志。")
                     }
-                    None => "Claude Code 异常退出。请检查登录状态或诊断日志。".into(),
-                },
+                    None => format!("{harness} 异常退出。请检查登录状态或诊断日志。"),
+                }),
             })
             .await;
         RunStatus::Failed
@@ -337,16 +367,23 @@ async fn run_claude(
         .await;
 }
 
-async fn read_stdout(stdout: Option<tokio::process::ChildStdout>, run_id: Uuid, emitter: Emitter) {
-    let Some(stdout) = stdout else {
-        return;
-    };
+async fn read_stdout(
+    stdout: Option<tokio::process::ChildStdout>,
+    run_id: Uuid,
+    harness: HarnessKind,
+    mut decoder: Box<dyn LineDecoder>,
+    emitter: Emitter,
+) -> Option<String> {
+    let stdout = stdout?;
     let mut lines = BufReader::new(stdout).lines();
-    let mut decoder = EventDecoder;
+    let mut provider_error = None;
     while let Ok(Some(line)) = lines.next_line().await {
         match decoder.decode_line(&line) {
             Ok(events) => {
                 for event in events {
+                    if let DecodedEvent::Error(message) = &event {
+                        provider_error = Some(message.clone());
+                    }
                     emit_decoded(run_id, event, &emitter).await;
                 }
             }
@@ -355,12 +392,13 @@ async fn read_stdout(stdout: Option<tokio::process::ChildStdout>, run_id: Uuid, 
                     .send(Event::RunStatusChanged {
                         run_id,
                         status: RunStatus::Running,
-                        message: Some("已忽略一条无法解析的 Claude Code 输出。".into()),
+                        message: Some(format!("已忽略一条无法解析的 {harness} 输出。")),
                     })
                     .await;
             }
         }
     }
+    provider_error
 }
 
 async fn emit_decoded(run_id: Uuid, decoded: DecodedEvent, emitter: &Emitter) {
@@ -384,6 +422,11 @@ async fn emit_decoded(run_id: Uuid, decoded: DecodedEvent, emitter: &Emitter) {
             is_error,
         },
         DecodedEvent::Status(message) => Event::RunStatusChanged {
+            run_id,
+            status: RunStatus::Running,
+            message: Some(message),
+        },
+        DecodedEvent::Error(message) => Event::RunStatusChanged {
             run_id,
             status: RunStatus::Running,
             message: Some(message),

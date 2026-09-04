@@ -7,7 +7,7 @@ use std::{
 use anyhow::{Context as _, Result, anyhow};
 use chrono::{DateTime, Utc};
 use nexus_domain::{
-    ClaudeModel, Message, MessageKind, MessageRole, Project, RunStatus, TaskSummary, ThinkingEffort,
+    HarnessKind, Message, MessageKind, MessageRole, Project, RunStatus, TaskSummary, ThinkingEffort,
 };
 use rusqlite::{Connection, OptionalExtension as _, params};
 use uuid::Uuid;
@@ -50,6 +50,7 @@ impl Storage {
                  id TEXT PRIMARY KEY,
                  task_id TEXT NOT NULL REFERENCES tasks(id),
                  status TEXT NOT NULL,
+                 harness_kind TEXT NOT NULL DEFAULT 'claude',
                  model TEXT NOT NULL,
                  effort TEXT NOT NULL,
                  harness_version TEXT,
@@ -77,6 +78,13 @@ impl Storage {
              );
              PRAGMA user_version = 1;",
         )?;
+        if !table_has_column(&connection, "runs", "harness_kind")? {
+            connection.execute(
+                "ALTER TABLE runs ADD COLUMN harness_kind TEXT NOT NULL DEFAULT 'claude'",
+                [],
+            )?;
+        }
+        connection.execute_batch("PRAGMA user_version = 2;")?;
         let storage = Self { connection };
         storage.recover_interrupted()?;
         Ok(storage)
@@ -183,7 +191,8 @@ impl Storage {
         project_id: Uuid,
         title: &str,
         prompt: &str,
-        model: ClaudeModel,
+        harness: HarnessKind,
+        model: Option<&str>,
         effort: ThinkingEffort,
     ) -> Result<(Uuid, Uuid)> {
         let task_id = Uuid::new_v4();
@@ -197,12 +206,13 @@ impl Storage {
             params![task_id.to_string(), project_id.to_string(), title, now],
         )?;
         transaction.execute(
-            "INSERT INTO runs(id, task_id, status, model, effort, started_at)
-             VALUES(?1, ?2, 'starting', ?3, ?4, ?5)",
+            "INSERT INTO runs(id, task_id, status, harness_kind, model, effort, started_at)
+             VALUES(?1, ?2, 'starting', ?3, ?4, ?5, ?6)",
             params![
                 run_id.to_string(),
                 task_id.to_string(),
-                model.as_str(),
+                harness.as_str(),
+                model.unwrap_or("default"),
                 effort.as_str(),
                 now
             ],
@@ -335,6 +345,17 @@ impl Storage {
     }
 }
 
+fn table_has_column(connection: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+    for name in columns {
+        if name? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn project_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
     Ok(Project {
         id: parse_uuid(row.get::<_, String>(0)?)?,
@@ -428,7 +449,8 @@ mod tests {
                 project.id,
                 "Test task",
                 "hello",
-                ClaudeModel::Sonnet,
+                HarnessKind::Claude,
+                Some("sonnet"),
                 ThinkingEffort::High,
             )
             .unwrap();
@@ -445,10 +467,92 @@ mod tests {
     }
 
     #[test]
+    fn persists_completed_codex_runs_for_later_browsing() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("nexus.db");
+        let project_dir = directory.path().join("project");
+        fs::create_dir(&project_dir).unwrap();
+
+        let mut storage = Storage::open(&database).unwrap();
+        let project = storage.open_project(&project_dir).unwrap();
+        let (task_id, run_id) = storage
+            .create_task_run(
+                project.id,
+                "Codex task",
+                "describe this project",
+                HarnessKind::Codex,
+                None,
+                ThinkingEffort::Medium,
+            )
+            .unwrap();
+        storage
+            .append_message(
+                task_id,
+                run_id,
+                MessageRole::Assistant,
+                MessageKind::Text,
+                "project summary",
+            )
+            .unwrap();
+        storage
+            .update_run_status(run_id, RunStatus::Running)
+            .unwrap();
+        storage
+            .finish_run(run_id, RunStatus::Completed, Some(0))
+            .unwrap();
+        drop(storage);
+
+        let storage = Storage::open(&database).unwrap();
+        let tasks = storage.tasks(project.id).unwrap();
+        assert_eq!(tasks[0].status, RunStatus::Completed);
+        let messages = storage.messages(task_id).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].content, "describe this project");
+        assert_eq!(messages[1].content, "project summary");
+    }
+
+    #[test]
     fn settings_round_trip() {
         let directory = tempfile::tempdir().unwrap();
         let storage = Storage::open(&directory.path().join("nexus.db")).unwrap();
         storage.set_setting("model", "opus").unwrap();
         assert_eq!(storage.setting("model").unwrap().as_deref(), Some("opus"));
+    }
+
+    #[test]
+    fn migrates_existing_runs_to_a_claude_harness() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("nexus.db");
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE runs (
+                    id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    effort TEXT NOT NULL,
+                    harness_version TEXT,
+                    started_at TEXT NOT NULL,
+                    ended_at TEXT,
+                    exit_code INTEGER,
+                    failure_code TEXT
+                );
+                INSERT INTO runs(id, task_id, status, model, effort, started_at)
+                VALUES('run-1', 'task-1', 'completed', 'sonnet', 'high', '2026-09-03');",
+            )
+            .unwrap();
+        drop(connection);
+
+        let storage = Storage::open(&database).unwrap();
+        let harness: String = storage
+            .connection
+            .query_row(
+                "SELECT harness_kind FROM runs WHERE id = 'run-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(harness, "claude");
     }
 }

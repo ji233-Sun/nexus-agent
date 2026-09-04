@@ -1,8 +1,8 @@
-use nexus_domain::{ClaudeModel, RunStatus, ThinkingEffort};
+use nexus_domain::{HarnessKind, RunStatus, ThinkingEffort};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandEnvelope {
@@ -28,7 +28,10 @@ pub enum Command {
     #[serde(rename = "runner.hello")]
     RunnerHello,
     #[serde(rename = "harness.probe")]
-    HarnessProbe { executable: String },
+    HarnessProbe {
+        harness: HarnessKind,
+        executable: String,
+    },
     #[serde(rename = "run.start")]
     RunStart(StartRun),
     #[serde(rename = "run.cancel")]
@@ -43,8 +46,9 @@ pub struct StartRun {
     pub task_id: Uuid,
     pub cwd: String,
     pub prompt: String,
+    pub harness: HarnessKind,
     pub executable: String,
-    pub model: ClaudeModel,
+    pub model: Option<String>,
     pub effort: ThinkingEffort,
 }
 
@@ -106,6 +110,7 @@ pub enum Event {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HarnessProbe {
+    pub harness: HarnessKind,
     pub available: bool,
     pub authenticated: bool,
     pub executable: String,
@@ -134,14 +139,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn protocol_round_trip_preserves_model_and_effort() {
+    fn protocol_round_trip_preserves_harness_model_and_effort() {
         let command = CommandEnvelope::new(Command::RunStart(StartRun {
             run_id: Uuid::new_v4(),
             task_id: Uuid::new_v4(),
             cwd: "/tmp/project".into(),
             prompt: "fix it".into(),
-            executable: "claude".into(),
-            model: ClaudeModel::Opus,
+            harness: HarnessKind::Codex,
+            executable: "codex".into(),
+            model: Some("gpt-test".into()),
             effort: ThinkingEffort::XHigh,
         }));
         let json = serde_json::to_string(&command).unwrap();
@@ -150,7 +156,8 @@ mod tests {
         let Command::RunStart(request) = decoded.command else {
             panic!("expected run.start")
         };
-        assert_eq!(request.model, ClaudeModel::Opus);
+        assert_eq!(request.harness, HarnessKind::Codex);
+        assert_eq!(request.model.as_deref(), Some("gpt-test"));
         assert_eq!(request.effort, ThinkingEffort::XHigh);
     }
 }

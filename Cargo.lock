@@ -3583,9 +3583,28 @@ name = "nexus-harness-claude"
 version = "0.1.0-alpha.1"
 dependencies = [
  "nexus-domain",
+ "nexus-harness-core",
  "nexus-protocol",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "nexus-harness-codex"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "nexus-domain",
+ "nexus-harness-core",
+ "nexus-protocol",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "nexus-harness-core"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
@@ -3605,6 +3624,8 @@ dependencies = [
  "anyhow",
  "nexus-domain",
  "nexus-harness-claude",
+ "nexus-harness-codex",
+ "nexus-harness-core",
  "nexus-protocol",
  "nix 0.30.1",
  "serde_json",

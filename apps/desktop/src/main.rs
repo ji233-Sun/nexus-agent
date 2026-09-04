@@ -1,8 +1,19 @@
+mod codex_history;
 mod runner_client;
 mod storage;
 
-use std::{path::Path, process::Command as SystemCommand, str::FromStr as _, time::Duration};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    process::Command as SystemCommand,
+    str::FromStr as _,
+    time::Duration,
+};
 
+use codex_history::{
+    Client as CodexHistoryClient, Event as CodexHistoryEvent, HistoryMessage,
+    ThreadSummary as CodexThreadSummary,
+};
 use gpui::{
     App, AppContext as _, Application, Bounds, Context, Entity, Hsla, InteractiveElement as _,
     IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
@@ -15,26 +26,31 @@ use gpui_component::{
     input::{Input, InputState},
 };
 use nexus_domain::{
-    ClaudeModel, Message, MessageKind, MessageRole, Project, RunStatus, TaskSummary, ThinkingEffort,
+    ClaudeModel, HarnessKind, Message, MessageKind, MessageRole, Project, RunStatus, TaskSummary,
+    ThinkingEffort,
 };
 use nexus_protocol::{Command, CommandEnvelope, Event, HarnessProbe, StartRun};
 use runner_client::RunnerClient;
 use storage::Storage;
 use uuid::Uuid;
 
-const BG: u32 = 0xfafafa;
+const BG: u32 = 0xffffff;
 const SURFACE: u32 = 0xffffff;
-const RECESSED: u32 = 0xf2f2f2;
-const HOVER: u32 = 0xebebeb;
-const TEXT: u32 = 0x171717;
-const TEXT_SECONDARY: u32 = 0x4d4d4d;
-const MUTED: u32 = 0x8f8f8f;
-const ACCENT: u32 = 0x0072f5;
-const ACCENT_HOVER: u32 = 0x0062d1;
+const SIDEBAR: u32 = 0xf7f7f5;
+const RECESSED: u32 = 0xf3f3f1;
+const HOVER: u32 = 0xededeb;
+const SELECTED: u32 = 0xe7e7e4;
+const BORDER: u32 = 0xe5e5e2;
+const TEXT: u32 = 0x242424;
+const TEXT_SECONDARY: u32 = 0x555555;
+const MUTED: u32 = 0x858585;
+const ACCENT: u32 = 0x202124;
+const ACCENT_HOVER: u32 = 0x0f1011;
+const LINK: u32 = 0x2f6fca;
 const SUCCESS: u32 = 0x398e4a;
 const WARNING: u32 = 0xff990a;
 const DANGER: u32 = 0xe5484d;
-const TOOL: u32 = 0x7820bc;
+const TOOL: u32 = 0xa35c16;
 
 struct NexusApp {
     storage: Storage,
@@ -46,9 +62,19 @@ struct NexusApp {
     messages: Vec<Message>,
     active_run: Option<Uuid>,
     active_task: Option<Uuid>,
+    active_harness: Option<HarnessKind>,
     streaming_text: String,
     status: String,
-    harness: Option<HarnessProbe>,
+    harnesses: BTreeMap<HarnessKind, HarnessProbe>,
+    codex_history_client: Option<CodexHistoryClient>,
+    codex_history_executable: Option<String>,
+    codex_threads: Vec<CodexThreadSummary>,
+    selected_codex_thread: Option<String>,
+    codex_history_messages: Vec<HistoryMessage>,
+    codex_history_loading: bool,
+    codex_thread_loading: bool,
+    codex_history_error: Option<String>,
+    selected_harness: HarnessKind,
     project_dirty: bool,
     model: ClaudeModel,
     effort: ThinkingEffort,
@@ -68,6 +94,12 @@ impl NexusApp {
             ),
         };
         let projects = storage.projects().unwrap_or_default();
+        let selected_harness = storage
+            .setting("default_harness")
+            .ok()
+            .flatten()
+            .and_then(|value| HarnessKind::from_str(&value).ok())
+            .unwrap_or_default();
         let model = storage
             .setting("claude_model")
             .ok()
@@ -81,19 +113,19 @@ impl NexusApp {
             .and_then(|value| ThinkingEffort::from_str(&value).ok())
             .unwrap_or_default();
         let executable = storage
-            .setting("claude_executable")
+            .setting(executable_setting_key(selected_harness))
             .ok()
             .flatten()
-            .unwrap_or_else(|| "claude".into());
+            .unwrap_or_else(|| selected_harness.default_executable().into());
         let prompt_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .auto_grow(3, 8)
-                .placeholder("描述你希望 Claude Code 完成的工作…")
+                .placeholder("描述你希望 Agent 完成的工作…")
         });
         let executable_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .default_value(executable.clone())
-                .placeholder("claude 或完整路径")
+                .placeholder("命令名或完整路径")
         });
         let has_storage_error = storage_error.is_some();
         let (runner, runner_error) = match RunnerClient::spawn() {
@@ -110,9 +142,19 @@ impl NexusApp {
             messages: Vec::new(),
             active_run: None,
             active_task: None,
+            active_harness: None,
             streaming_text: String::new(),
             status: storage_error.unwrap_or_else(|| "正在连接本地 Runner…".into()),
-            harness: None,
+            harnesses: BTreeMap::new(),
+            codex_history_client: None,
+            codex_history_executable: None,
+            codex_threads: Vec::new(),
+            selected_codex_thread: None,
+            codex_history_messages: Vec::new(),
+            codex_history_loading: false,
+            codex_thread_loading: false,
+            codex_history_error: None,
+            selected_harness,
             project_dirty: false,
             model,
             effort,
@@ -121,12 +163,27 @@ impl NexusApp {
         };
         if let Some(runner) = &app.runner {
             let _ = runner.send(CommandEnvelope::new(Command::RunnerHello));
-            let _ = runner.send(CommandEnvelope::new(Command::HarnessProbe { executable }));
+            for harness in HarnessKind::ALL {
+                let executable = app
+                    .storage
+                    .setting(executable_setting_key(harness))
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| harness.default_executable().into());
+                let _ = runner.send(CommandEnvelope::new(Command::HarnessProbe {
+                    harness,
+                    executable,
+                }));
+            }
         } else if !has_storage_error {
             app.status = runner_error.unwrap_or_default();
         }
         app.start_event_pump(cx);
         app
+    }
+
+    fn selected_probe(&self) -> Option<&HarnessProbe> {
+        self.harnesses.get(&self.selected_harness)
     }
 
     fn start_event_pump(&self, cx: &mut Context<Self>) {
@@ -148,30 +205,50 @@ impl NexusApp {
     }
 
     fn drain_runner_events(&mut self, cx: &mut Context<Self>) {
-        let events = self
+        let runner_events = self
             .runner
             .as_ref()
             .map(RunnerClient::drain_events)
             .unwrap_or_default();
-        if events.is_empty() {
-            return;
-        }
-        for envelope in events {
+        let history_events = self
+            .codex_history_client
+            .as_ref()
+            .map(CodexHistoryClient::drain_events)
+            .unwrap_or_default();
+        let changed = !runner_events.is_empty() || !history_events.is_empty();
+        for envelope in runner_events {
             self.handle_event(envelope.event);
         }
-        cx.notify();
+        for event in history_events {
+            self.handle_codex_history_event(event);
+        }
+        if changed {
+            cx.notify();
+        }
     }
 
     fn handle_event(&mut self, event: Event) {
         match event {
-            Event::RunnerReady => self.status = "Runner 已连接，正在探测 Claude Code…".into(),
+            Event::RunnerReady => {
+                self.status = format!("Runner 已连接，正在探测 {}…", self.selected_harness)
+            }
             Event::HarnessDetected(probe) => {
-                self.status = probe.message.clone();
-                self.harness = Some(probe);
+                let harness = probe.harness;
+                let message = probe.message.clone();
+                let history_executable =
+                    (harness == HarnessKind::Codex).then(|| probe.executable.clone());
+                self.harnesses.insert(harness, probe);
+                if harness == self.selected_harness {
+                    self.status = message;
+                }
+                if let Some(executable) = history_executable {
+                    self.connect_codex_history(executable);
+                }
             }
             Event::RunStarted { run_id, .. } => {
                 self.active_run = Some(run_id);
-                self.status = "Claude Code 正在执行…".into();
+                let harness = self.active_harness.unwrap_or(self.selected_harness);
+                self.status = format!("{harness} 正在执行…");
                 let _ = self.storage.update_run_status(run_id, RunStatus::Running);
             }
             Event::RunOutputDelta { run_id, text } if self.active_run == Some(run_id) => {
@@ -247,6 +324,7 @@ impl NexusApp {
                 self.streaming_text.clear();
                 self.active_run = None;
                 self.active_task = None;
+                self.active_harness = None;
                 self.status = match status {
                     RunStatus::Completed => "任务已完成".into(),
                     RunStatus::Cancelled => "任务已取消".into(),
@@ -256,6 +334,60 @@ impl NexusApp {
                 self.reload_tasks();
             }
             _ => {}
+        }
+    }
+
+    fn connect_codex_history(&mut self, executable: String) {
+        if self.codex_history_executable.as_deref() != Some(&executable) {
+            self.codex_history_client = Some(CodexHistoryClient::spawn(PathBuf::from(&executable)));
+            self.codex_history_executable = Some(executable);
+        }
+        self.request_codex_history_refresh();
+    }
+
+    fn request_codex_history_refresh(&mut self) {
+        self.codex_history_error = None;
+        self.codex_history_loading = self
+            .codex_history_client
+            .as_ref()
+            .is_some_and(CodexHistoryClient::refresh);
+        if !self.codex_history_loading {
+            self.codex_history_error = Some("Codex 历史服务不可用。".into());
+        }
+    }
+
+    fn handle_codex_history_event(&mut self, event: CodexHistoryEvent) {
+        match event {
+            CodexHistoryEvent::ThreadsLoaded(result) => {
+                self.codex_history_loading = false;
+                match result {
+                    Ok(threads) => {
+                        self.codex_threads = threads;
+                        self.codex_history_error = None;
+                    }
+                    Err(error) => self.codex_history_error = Some(error),
+                }
+            }
+            CodexHistoryEvent::ThreadLoaded { thread_id, result }
+                if self.selected_codex_thread.as_deref() == Some(&thread_id) =>
+            {
+                self.codex_thread_loading = false;
+                match result {
+                    Ok(messages) => {
+                        self.codex_history_messages = messages;
+                        self.status = "Codex 历史会话已载入".into();
+                    }
+                    Err(error) => {
+                        self.codex_history_messages = vec![HistoryMessage {
+                            role: MessageRole::System,
+                            kind: MessageKind::Error,
+                            content: error,
+                        }];
+                        self.status = "无法读取 Codex 历史会话".into();
+                    }
+                }
+            }
+            CodexHistoryEvent::ThreadLoaded { .. } => {}
         }
     }
 
@@ -301,7 +433,10 @@ impl NexusApp {
         self.project_dirty = is_git_dirty(Path::new(&project.canonical_path));
         self.selected_project = Some(project);
         self.selected_task = None;
+        self.selected_codex_thread = None;
         self.messages.clear();
+        self.codex_history_messages.clear();
+        self.codex_thread_loading = false;
         self.streaming_text.clear();
         self.reload_tasks();
     }
@@ -316,7 +451,43 @@ impl NexusApp {
 
     fn select_task(&mut self, task_id: Uuid, cx: &mut Context<Self>) {
         self.selected_task = Some(task_id);
+        self.selected_codex_thread = None;
+        self.codex_history_messages.clear();
+        self.codex_thread_loading = false;
         self.messages = self.storage.messages(task_id).unwrap_or_default();
+        cx.notify();
+    }
+
+    fn select_codex_thread(&mut self, thread_id: String, cx: &mut Context<Self>) {
+        if self.active_run.is_some() {
+            self.status = "任务执行期间不能切换历史会话。".into();
+            cx.notify();
+            return;
+        }
+        self.selected_task = None;
+        self.selected_codex_thread = Some(thread_id.clone());
+        self.messages.clear();
+        self.streaming_text.clear();
+        self.codex_history_messages.clear();
+        self.codex_thread_loading = self
+            .codex_history_client
+            .as_ref()
+            .is_some_and(|client| client.read_thread(thread_id));
+        self.status = if self.codex_thread_loading {
+            "正在读取 Codex 历史会话…".into()
+        } else {
+            "Codex 历史服务不可用。".into()
+        };
+        cx.notify();
+    }
+
+    fn refresh_codex_history(
+        &mut self,
+        _: &gpui::ClickEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.request_codex_history_refresh();
         cx.notify();
     }
 
@@ -335,25 +506,35 @@ impl NexusApp {
             cx.notify();
             return;
         }
-        let executable = self.executable_input.read(cx).value().trim().to_owned();
-        if executable.is_empty() {
-            self.status = "Claude Code 可执行文件不能为空。".into();
+        let configured_executable = self.executable_input.read(cx).value().trim().to_owned();
+        if configured_executable.is_empty() {
+            self.status = format!("{} 可执行文件不能为空。", self.selected_harness);
             cx.notify();
             return;
         }
-        if !self
-            .harness
-            .as_ref()
-            .is_some_and(|probe| probe.available && probe.authenticated)
-        {
-            self.status = "Claude Code 尚未就绪，请先完成探测和登录。".into();
+        let Some(probe) = self
+            .selected_probe()
+            .filter(|probe| probe.available && probe.authenticated)
+        else {
+            self.status = format!("{} 尚未就绪，请先完成探测和登录。", self.selected_harness);
             cx.notify();
             return;
-        }
+        };
+        let executable = probe.executable.clone();
+        let harness = self.selected_harness;
+        let model = match harness {
+            HarnessKind::Claude => self.model.cli_value().map(str::to_owned),
+            HarnessKind::Codex => None,
+        };
         let title: String = prompt.chars().take(48).collect();
-        let created =
-            self.storage
-                .create_task_run(project.id, &title, &prompt, self.model, self.effort);
+        let created = self.storage.create_task_run(
+            project.id,
+            &title,
+            &prompt,
+            harness,
+            model.as_deref(),
+            self.effort,
+        );
         let Ok((task_id, run_id)) = created else {
             self.status = "无法保存新任务。".into();
             cx.notify();
@@ -364,8 +545,9 @@ impl NexusApp {
             task_id,
             cwd: project.canonical_path,
             prompt: prompt.clone(),
+            harness,
             executable: executable.clone(),
-            model: self.model,
+            model,
             effort: self.effort,
         }));
         if let Some(runner) = &self.runner
@@ -373,10 +555,16 @@ impl NexusApp {
         {
             self.active_run = Some(run_id);
             self.active_task = Some(task_id);
+            self.active_harness = Some(harness);
             self.selected_task = Some(task_id);
+            self.selected_codex_thread = None;
+            self.codex_history_messages.clear();
+            self.codex_thread_loading = false;
             self.messages = self.storage.messages(task_id).unwrap_or_default();
-            self.status = format!("正在启动 Claude Code · {} · {}", self.model, self.effort);
-            let _ = self.storage.set_setting("claude_executable", &executable);
+            self.status = format!("正在启动 {harness} · {}", self.effort);
+            let _ = self
+                .storage
+                .set_setting(executable_setting_key(harness), &configured_executable);
             self.prompt_input
                 .update(cx, |input, cx| input.set_value("", window, cx));
             self.reload_tasks();
@@ -396,24 +584,66 @@ impl NexusApp {
             let _ = self
                 .storage
                 .update_run_status(run_id, RunStatus::Cancelling);
-            self.status = "正在停止 Claude Code…".into();
+            let harness = self.active_harness.unwrap_or(self.selected_harness);
+            self.status = format!("正在停止 {harness}…");
             cx.notify();
         }
     }
 
     fn probe(&mut self, _: &gpui::ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
         let executable = self.executable_input.read(cx).value().trim().to_owned();
+        let harness = self.selected_harness;
         if let Some(runner) = &self.runner {
             let _ = runner.send(CommandEnvelope::new(Command::HarnessProbe {
+                harness,
                 executable: executable.clone(),
             }));
-            let _ = self.storage.set_setting("claude_executable", &executable);
-            self.status = "正在探测 Claude Code…".into();
+            let _ = self
+                .storage
+                .set_setting(executable_setting_key(harness), &executable);
+            self.status = format!("正在探测 {harness}…");
             cx.notify();
         }
     }
 
+    fn cycle_harness(&mut self, _: &gpui::ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_run.is_some() {
+            return;
+        }
+        let current_executable = self.executable_input.read(cx).value().trim().to_owned();
+        if !current_executable.is_empty() {
+            let _ = self.storage.set_setting(
+                executable_setting_key(self.selected_harness),
+                &current_executable,
+            );
+        }
+
+        self.selected_harness = self.selected_harness.next();
+        let _ = self
+            .storage
+            .set_setting("default_harness", self.selected_harness.as_str());
+        let executable = self
+            .storage
+            .setting(executable_setting_key(self.selected_harness))
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| self.selected_harness.default_executable().into());
+        self.executable_input
+            .update(cx, |input, cx| input.set_value(&executable, window, cx));
+        if let Some(runner) = &self.runner {
+            let _ = runner.send(CommandEnvelope::new(Command::HarnessProbe {
+                harness: self.selected_harness,
+                executable,
+            }));
+            self.status = format!("正在探测 {}…", self.selected_harness);
+        }
+        cx.notify();
+    }
+
     fn cycle_model(&mut self, _: &gpui::ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_harness != HarnessKind::Claude {
+            return;
+        }
         self.model = self.model.next();
         let _ = self
             .storage
@@ -431,19 +661,31 @@ impl NexusApp {
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let selected_project_id = self.selected_project.as_ref().map(|project| project.id);
+        let selected_codex_thread = self.selected_codex_thread.as_deref();
+        let history_status = if self.codex_history_loading {
+            "正在读取…".to_owned()
+        } else if let Some(error) = &self.codex_history_error {
+            format!("不可用：{error}")
+        } else if self.codex_history_client.is_some() {
+            format!("{} 条本机会话", self.codex_threads.len())
+        } else {
+            "等待检测 Codex CLI".to_owned()
+        };
         div()
-            .w(px(260.))
+            .w(px(248.))
             .h_full()
             .flex_none()
-            .bg(rgb(BG))
-            .shadow(surface_border_shadow())
-            .p_4()
+            .bg(rgb(SIDEBAR))
+            .border_r_1()
+            .border_color(rgb(BORDER))
+            .p_3()
             .flex()
             .flex_col()
-            .gap_4()
+            .gap_3()
             .child(
                 div()
-                    .h(px(32.))
+                    .h(px(40.))
+                    .px_2()
                     .flex()
                     .items_center()
                     .justify_between()
@@ -454,37 +696,27 @@ impl NexusApp {
                             .gap_2()
                             .child(
                                 div()
-                                    .size(px(24.))
-                                    .rounded(px(6.))
-                                    .bg(rgb(TEXT))
-                                    .text_color(rgb(SURFACE))
-                                    .text_xs()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child("N"),
-                            )
-                            .child(
-                                div()
                                     .text_base()
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .child("Nexus Agent"),
-                            ),
-                    )
-                    .child(
-                        Button::new("open-project")
-                            .ghost()
-                            .small()
-                            .child(button_label("新项目", TEXT))
-                            .on_click(cx.listener(Self::choose_project)),
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child("Nexus"),
+                            )
+                            .child(div().text_xs().text_color(rgb(MUTED)).child("⌄")),
                     ),
+            )
+            .child(
+                Button::new("open-project")
+                    .ghost()
+                    .w_full()
+                    .justify_start()
+                    .child(button_label("＋  打开项目", TEXT))
+                    .on_click(cx.listener(Self::choose_project)),
             )
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap_2()
-                    .child(section_label("项目"))
+                    .gap_1()
+                    .child(div().px_2().py_1().child(section_label("项目")))
                     .child(
                         div()
                             .flex()
@@ -507,25 +739,24 @@ impl NexusApp {
                                 let project = project.clone();
                                 div()
                                     .id(SharedString::from(format!("project-{id}")))
-                                    .h(px(36.))
-                                    .px_3()
-                                    .rounded(px(6.))
+                                    .h(px(34.))
+                                    .px_2()
+                                    .rounded(px(8.))
                                     .cursor_pointer()
                                     .flex()
                                     .items_center()
+                                    .gap_2()
                                     .text_sm()
                                     .text_color(rgb(TEXT_SECONDARY))
                                     .when(selected, |element| {
-                                        element
-                                            .bg(rgb(SURFACE))
-                                            .text_color(rgb(TEXT))
-                                            .shadow(surface_border_shadow())
+                                        element.bg(rgb(SELECTED)).text_color(rgb(TEXT))
                                     })
                                     .hover(|style| style.bg(rgb(HOVER)).text_color(rgb(TEXT)))
                                     .on_click(cx.listener(move |app, _, _, cx| {
                                         app.select_project(project.clone());
                                         cx.notify();
                                     }))
+                                    .child(div().text_color(rgb(MUTED)).child("▱"))
                                     .child(display_name)
                             })),
                     ),
@@ -536,8 +767,8 @@ impl NexusApp {
                     .min_h_0()
                     .flex()
                     .flex_col()
-                    .gap_2()
-                    .child(section_label("任务"))
+                    .gap_1()
+                    .child(div().px_2().py_1().child(section_label("Nexus 记录")))
                     .child(
                         div()
                             .id("task-list")
@@ -564,15 +795,12 @@ impl NexusApp {
                                 let selected = self.selected_task == Some(task_id);
                                 div()
                                     .id(SharedString::from(format!("task-{task_id}")))
-                                    .p_3()
-                                    .rounded(px(6.))
+                                    .p_2()
+                                    .rounded(px(8.))
                                     .cursor_pointer()
                                     .text_color(rgb(TEXT_SECONDARY))
                                     .when(selected, |element| {
-                                        element
-                                            .bg(rgb(SURFACE))
-                                            .text_color(rgb(TEXT))
-                                            .shadow(surface_border_shadow())
+                                        element.bg(rgb(SELECTED)).text_color(rgb(TEXT))
                                     })
                                     .hover(|style| style.bg(rgb(HOVER)).text_color(rgb(TEXT)))
                                     .on_click(cx.listener(move |app, _, _, cx| {
@@ -581,7 +809,7 @@ impl NexusApp {
                                     .child(div().text_sm().line_clamp(2).child(task.title.clone()))
                                     .child(
                                         div()
-                                            .mt_2()
+                                            .mt_1()
                                             .flex()
                                             .items_center()
                                             .gap_2()
@@ -590,38 +818,107 @@ impl NexusApp {
                                             .child(status_dot(run_status_color(task.status)))
                                             .child(task.status.to_string()),
                                     )
+                            }))
+                            .child(
+                                div()
+                                    .mt_3()
+                                    .px_2()
+                                    .py_1()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(section_label("Codex 历史"))
+                                    .child(
+                                        Button::new("refresh-codex-history")
+                                            .ghost()
+                                            .small()
+                                            .child(button_label("刷新", TEXT))
+                                            .disabled(
+                                                self.codex_history_client.is_none()
+                                                    || self.codex_history_loading,
+                                            )
+                                            .on_click(cx.listener(Self::refresh_codex_history)),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .px_2()
+                                    .py_1()
+                                    .text_xs()
+                                    .text_color(rgb(MUTED))
+                                    .line_clamp(3)
+                                    .child(history_status),
+                            )
+                            .children(self.codex_threads.iter().map(|thread| {
+                                let thread_id = thread.id.clone();
+                                let selected = selected_codex_thread == Some(thread.id.as_str());
+                                div()
+                                    .id(SharedString::from(format!("codex-thread-{}", thread.id)))
+                                    .p_2()
+                                    .rounded(px(8.))
+                                    .cursor_pointer()
+                                    .text_color(rgb(TEXT_SECONDARY))
+                                    .when(selected, |element| {
+                                        element.bg(rgb(SELECTED)).text_color(rgb(TEXT))
+                                    })
+                                    .hover(|style| style.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        app.select_codex_thread(thread_id.clone(), cx)
+                                    }))
+                                    .child(
+                                        div().text_sm().line_clamp(2).child(thread.title.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .mt_1()
+                                            .text_xs()
+                                            .text_color(rgb(MUTED))
+                                            .child(thread.detail()),
+                                    )
                             })),
                     ),
             )
     }
 
     fn render_timeline(&self) -> impl IntoElement {
-        let empty = self.messages.is_empty() && self.streaming_text.is_empty();
+        let showing_codex_history = self.selected_codex_thread.is_some();
+        let empty = if showing_codex_history {
+            self.codex_history_messages.is_empty()
+        } else {
+            self.messages.is_empty() && self.streaming_text.is_empty()
+        };
         div()
             .id("timeline")
             .flex_1()
             .h_full()
             .overflow_y_scroll()
+            .bg(rgb(SURFACE))
             .child(
                 div()
                     .w_full()
-                    .max_w(px(760.))
+                    .max_w(px(720.))
                     .min_h_full()
                     .mx_auto()
-                    .p_6()
+                    .px_8()
+                    .pt_8()
+                    .pb_12()
                     .flex()
                     .flex_col()
-                    .gap_4()
+                    .gap_6()
                     .when(empty, |element| {
-                        let (title, description) = if self.selected_project.is_some() {
+                        let (title, description) = if self.codex_thread_loading {
+                            ("正在读取 Codex 历史", "正在从本机 Codex 会话中加载消息。")
+                        } else if showing_codex_history {
+                            ("此会话没有消息", "没有可显示的用户或助手消息。")
+                        } else if self.selected_project.is_some() {
                             (
                                 "准备开始新任务",
-                                "在下方描述目标，Claude Code 的执行过程会显示在这里。",
+                                "在下方描述目标，Agent 的执行过程会显示在这里。",
                             )
                         } else {
                             (
                                 "选择一个本地项目",
-                                "Nexus Agent 会在所选目录中运行 Claude Code。",
+                                "选择项目开始任务，或从左侧浏览 Codex 历史。",
                             )
                         };
                         element.child(
@@ -649,22 +946,34 @@ impl NexusApp {
                                 ),
                         )
                     })
-                    .children(self.messages.iter().map(render_message))
-                    .when(!self.streaming_text.is_empty(), |element| {
-                        element.child(message_card(
-                            "Claude · 正在生成",
-                            &self.streaming_text,
-                            MessageKind::Text,
-                            rgb(ACCENT).into(),
-                        ))
-                    }),
+                    .when(!showing_codex_history, |element| {
+                        element.children(self.messages.iter().map(render_message))
+                    })
+                    .when(showing_codex_history, |element| {
+                        element.children(
+                            self.codex_history_messages
+                                .iter()
+                                .map(render_history_message),
+                        )
+                    })
+                    .when(
+                        !showing_codex_history && !self.streaming_text.is_empty(),
+                        |element| {
+                            element.child(message_card(
+                                MessageRole::Assistant,
+                                "Agent · 正在生成",
+                                &self.streaming_text,
+                                MessageKind::Text,
+                                rgb(ACCENT).into(),
+                            ))
+                        },
+                    ),
             )
     }
 
     fn render_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let harness_color: Hsla = self
-            .harness
-            .as_ref()
+        let probe = self.selected_probe();
+        let harness_color: Hsla = probe
             .map(|probe| {
                 if probe.available && probe.authenticated {
                     rgb(SUCCESS).into()
@@ -675,16 +984,17 @@ impl NexusApp {
             .unwrap_or_else(|| rgb(MUTED).into());
         div()
             .id("settings-panel")
-            .w(px(288.))
+            .w(px(264.))
             .h_full()
             .flex_none()
             .overflow_y_scroll()
-            .bg(rgb(SURFACE))
-            .shadow(surface_border_shadow())
-            .p_6()
+            .bg(rgb(SIDEBAR))
+            .border_l_1()
+            .border_color(rgb(BORDER))
+            .p_4()
             .flex()
             .flex_col()
-            .gap_6()
+            .gap_5()
             .child(
                 div()
                     .flex()
@@ -693,14 +1003,14 @@ impl NexusApp {
                     .child(
                         div()
                             .text_base()
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .child("运行配置"),
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("运行设置"),
                     )
                     .child(
                         div()
                             .text_xs()
                             .text_color(rgb(MUTED))
-                            .child("Claude Code 本地执行参数"),
+                            .child("当前项目的本地执行环境"),
                     ),
             )
             .child(
@@ -708,8 +1018,25 @@ impl NexusApp {
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .child(section_label("HARNESS"))
-                    .child(label_value("类型", "Claude Code"))
+                    .rounded(px(10.))
+                    .bg(rgb(SURFACE))
+                    .shadow(surface_border_shadow())
+                    .p_3()
+                    .child(section_label("AGENT"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MUTED))
+                            .child("类型 · 点击切换"),
+                    )
+                    .child(
+                        Button::new("harness")
+                            .outline()
+                            .w_full()
+                            .child(button_label(self.selected_harness.to_string(), TEXT))
+                            .disabled(self.active_run.is_some())
+                            .on_click(cx.listener(Self::cycle_harness)),
+                    )
                     .child(div().text_xs().text_color(rgb(MUTED)).child("可执行文件"))
                     .child(Input::new(&self.executable_input))
                     .child(
@@ -718,6 +1045,7 @@ impl NexusApp {
                             .small()
                             .w_full()
                             .child(button_label("重新探测", TEXT))
+                            .disabled(self.active_run.is_some())
                             .on_click(cx.listener(Self::probe)),
                     )
                     .child(
@@ -729,50 +1057,14 @@ impl NexusApp {
                             .text_color(rgb(TEXT_SECONDARY))
                             .child(status_dot(harness_color))
                             .child(
-                                self.harness
-                                    .as_ref()
+                                probe
                                     .map(|probe| probe.message.clone())
                                     .unwrap_or_else(|| "尚未探测".into()),
                             ),
                     )
                     .when_some(
-                        self.harness
-                            .as_ref()
-                            .and_then(|probe| probe.version.clone()),
+                        probe.and_then(|probe| probe.version.clone()),
                         |element, version| element.child(label_value("版本", version)),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(section_label("MODEL"))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(MUTED))
-                            .child("模型 · 点击切换"),
-                    )
-                    .child(
-                        Button::new("model")
-                            .outline()
-                            .w_full()
-                            .child(button_label(self.model.to_string(), TEXT))
-                            .on_click(cx.listener(Self::cycle_model)),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(MUTED))
-                            .child("思考层级 · 点击切换"),
-                    )
-                    .child(
-                        Button::new("effort")
-                            .outline()
-                            .w_full()
-                            .child(button_label(self.effort.to_string(), TEXT))
-                            .on_click(cx.listener(Self::cycle_effort)),
                     ),
             )
             .when_some(self.selected_project.as_ref(), |element, project| {
@@ -782,6 +1074,10 @@ impl NexusApp {
                             .flex()
                             .flex_col()
                             .gap_3()
+                            .rounded(px(10.))
+                            .bg(rgb(SURFACE))
+                            .shadow(surface_border_shadow())
+                            .p_3()
                             .child(section_label("WORKSPACE"))
                             .child(label_value("工作目录", project.canonical_path.clone())),
                     )
@@ -814,17 +1110,14 @@ impl NexusApp {
 
 impl Render for NexusApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let probe = self.selected_probe();
         let can_submit = self.selected_project.is_some()
             && self.active_run.is_none()
-            && self
-                .harness
-                .as_ref()
-                .is_some_and(|probe| probe.available && probe.authenticated);
+            && probe.is_some_and(|probe| probe.available && probe.authenticated);
         let header_status_color = if self.active_run.is_some() {
             rgb(ACCENT).into()
         } else {
-            self.harness
-                .as_ref()
+            probe
                 .map(|probe| {
                     if probe.available && probe.authenticated {
                         rgb(SUCCESS).into()
@@ -833,6 +1126,28 @@ impl Render for NexusApp {
                     }
                 })
                 .unwrap_or_else(|| rgb(MUTED).into())
+        };
+        let header_title = self
+            .selected_codex_thread
+            .as_ref()
+            .and_then(|thread_id| {
+                self.codex_threads
+                    .iter()
+                    .find(|thread| &thread.id == thread_id)
+            })
+            .map(|thread| format!("Codex 历史 · {}", thread.title))
+            .or_else(|| {
+                self.selected_project
+                    .as_ref()
+                    .map(|project| project.display_name.clone())
+            })
+            .unwrap_or_else(|| "未选择项目".into());
+        let header_context = if self.selected_codex_thread.is_some() {
+            Some("Codex 原有会话")
+        } else if self.selected_task.is_some() {
+            Some("任务时间线")
+        } else {
+            None
         };
         div()
             .size_full()
@@ -846,37 +1161,40 @@ impl Render for NexusApp {
                     .flex_1()
                     .h_full()
                     .min_w_0()
+                    .bg(rgb(SURFACE))
                     .flex()
                     .flex_col()
                     .child(
                         div()
-                            .h(px(64.))
+                            .h(px(50.))
                             .flex_none()
-                            .bg(rgb(BG))
-                            .shadow(composer_shadow())
-                            .px_6()
+                            .bg(rgb(SURFACE))
+                            .border_b_1()
+                            .border_color(rgb(BORDER))
+                            .px_5()
                             .flex()
                             .items_center()
                             .justify_between()
                             .child(
                                 div()
+                                    .min_w_0()
                                     .flex()
-                                    .flex_col()
-                                    .gap_1()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(div().text_color(rgb(MUTED)).child("▱"))
                                     .child(
-                                        div().font_weight(gpui::FontWeight::MEDIUM).child(
-                                            self.selected_project
-                                                .as_ref()
-                                                .map(|project| project.display_name.clone())
-                                                .unwrap_or_else(|| "未选择项目".into()),
-                                        ),
+                                        div()
+                                            .truncate()
+                                            .font_weight(gpui::FontWeight::MEDIUM)
+                                            .child(header_title),
                                     )
-                                    .when_some(self.selected_task, |element, _| {
+                                    .when_some(header_context, |element, context| {
                                         element.child(
                                             div()
+                                                .flex_none()
                                                 .text_xs()
                                                 .text_color(rgb(MUTED))
-                                                .child("任务时间线"),
+                                                .child(format!("· {context}")),
                                         )
                                     }),
                             )
@@ -889,7 +1207,7 @@ impl Render for NexusApp {
                                     .text_color(rgb(MUTED))
                                     .child(status_dot(header_status_color))
                                     .child(
-                                        div().max_w(px(420.)).truncate().child(self.status.clone()),
+                                        div().max_w(px(260.)).truncate().child(self.status.clone()),
                                     ),
                             ),
                     )
@@ -897,39 +1215,112 @@ impl Render for NexusApp {
                     .child(
                         div()
                             .flex_none()
-                            .bg(rgb(BG))
-                            .shadow(header_shadow())
+                            .bg(rgb(SURFACE))
                             .px_6()
-                            .py_4()
+                            .pt_2()
+                            .pb_5()
                             .child(
                                 div()
                                     .w_full()
-                                    .max_w(px(760.))
+                                    .max_w(px(720.))
                                     .mx_auto()
+                                    .rounded(px(18.))
+                                    .bg(rgb(SURFACE))
+                                    .shadow(surface_card_shadow())
+                                    .p_2()
                                     .flex()
-                                    .gap_3()
-                                    .items_end()
+                                    .flex_col()
                                     .child(
-                                        div()
-                                            .flex_1()
-                                            .child(Input::new(&self.prompt_input).h(px(96.))),
+                                        Input::new(&self.prompt_input)
+                                            .h(px(72.))
+                                            .appearance(false)
+                                            .focus_bordered(false),
                                     )
                                     .child(
-                                        Button::new("submit")
-                                            .primary()
-                                            .h(px(40.))
-                                            .px_5()
-                                            .child(button_label(
-                                                if self.active_run.is_some() {
-                                                    "运行中"
-                                                } else {
-                                                    "发送"
-                                                },
-                                                SURFACE,
-                                            ))
-                                            .when(!can_submit, |button| button.opacity(0.5))
-                                            .disabled(!can_submit)
-                                            .on_click(cx.listener(Self::submit)),
+                                        div()
+                                            .h(px(38.))
+                                            .px_1()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_1()
+                                                    .child(
+                                                        Button::new("composer-harness")
+                                                            .ghost()
+                                                            .small()
+                                                            .child(button_label(
+                                                                format!(
+                                                                    "{}  ⌄",
+                                                                    self.selected_harness
+                                                                ),
+                                                                TEXT_SECONDARY,
+                                                            ))
+                                                            .disabled(self.active_run.is_some())
+                                                            .on_click(
+                                                                cx.listener(Self::cycle_harness),
+                                                            ),
+                                                    )
+                                                    .child(
+                                                        Button::new("composer-model")
+                                                            .ghost()
+                                                            .small()
+                                                            .child(button_label(
+                                                                if self.selected_harness
+                                                                    == HarnessKind::Claude
+                                                                {
+                                                                    self.model.to_string()
+                                                                } else {
+                                                                    "CLI 默认模型".into()
+                                                                },
+                                                                TEXT_SECONDARY,
+                                                            ))
+                                                            .disabled(
+                                                                self.selected_harness
+                                                                    == HarnessKind::Codex
+                                                                    || self.active_run.is_some(),
+                                                            )
+                                                            .on_click(
+                                                                cx.listener(Self::cycle_model),
+                                                            ),
+                                                    )
+                                                    .child(
+                                                        Button::new("composer-effort")
+                                                            .ghost()
+                                                            .small()
+                                                            .child(button_label(
+                                                                format!("{}  ⌄", self.effort),
+                                                                TEXT_SECONDARY,
+                                                            ))
+                                                            .disabled(self.active_run.is_some())
+                                                            .on_click(
+                                                                cx.listener(Self::cycle_effort),
+                                                            ),
+                                                    ),
+                                            )
+                                            .child(
+                                                Button::new("submit")
+                                                    .primary()
+                                                    .rounded(px(18.))
+                                                    .size(px(36.))
+                                                    .p_0()
+                                                    .child(button_label(
+                                                        if self.active_run.is_some() {
+                                                            "…"
+                                                        } else {
+                                                            "↑"
+                                                        },
+                                                        SURFACE,
+                                                    ))
+                                                    .when(!can_submit, |button| {
+                                                        button.opacity(0.42)
+                                                    })
+                                                    .disabled(!can_submit)
+                                                    .on_click(cx.listener(Self::submit)),
+                                            ),
                                     ),
                             ),
                     ),
@@ -941,53 +1332,109 @@ impl Render for NexusApp {
 fn render_message(message: &Message) -> impl IntoElement {
     let label = match message.role {
         MessageRole::User => "You",
-        MessageRole::Assistant => "Claude",
+        MessageRole::Assistant => "Agent",
         MessageRole::Tool => "Tool",
         MessageRole::System => "System",
     };
-    let indicator = match message.kind {
+    message_card(
+        message.role,
+        label,
+        &message.content,
+        message.kind,
+        message_indicator(message.kind),
+    )
+}
+
+fn render_history_message(message: &HistoryMessage) -> impl IntoElement {
+    let label = match message.role {
+        MessageRole::User => "You · Codex 历史",
+        MessageRole::Assistant => "Codex · 历史",
+        MessageRole::Tool => "Tool · Codex 历史",
+        MessageRole::System => "System · Codex 历史",
+    };
+    message_card(
+        message.role,
+        label,
+        &message.content,
+        message.kind,
+        message_indicator(message.kind),
+    )
+}
+
+fn message_indicator(kind: MessageKind) -> Hsla {
+    match kind {
         MessageKind::Error => rgb(DANGER).into(),
         MessageKind::ToolCall | MessageKind::ToolResult => rgb(TOOL).into(),
         _ => rgb(MUTED).into(),
-    };
-    message_card(label, &message.content, message.kind, indicator)
+    }
 }
 
 fn message_card(
+    role: MessageRole,
     label: &str,
     content: &str,
     kind: MessageKind,
     indicator: Hsla,
 ) -> impl IntoElement {
+    let is_user = role == MessageRole::User;
+    let is_panel = matches!(
+        kind,
+        MessageKind::ToolCall | MessageKind::ToolResult | MessageKind::Error
+    );
+    let show_label = !is_user && (role != MessageRole::Assistant || is_panel);
     div()
         .w_full()
-        .rounded(px(12.))
-        .bg(rgb(SURFACE))
-        .shadow(surface_card_shadow())
-        .p_6()
+        .flex()
+        .when(is_user, |element| element.justify_end())
         .child(
             div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .text_xs()
-                .text_color(rgb(TEXT_SECONDARY))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .mb_3()
-                .child(status_dot(indicator))
-                .child(label.to_owned()),
-        )
-        .child(
-            div()
-                .text_sm()
-                .text_color(rgb(TEXT))
-                .whitespace_normal()
-                .line_height(relative(1.5))
-                .when(
-                    matches!(kind, MessageKind::ToolCall | MessageKind::ToolResult),
-                    |element| element.font_family("SF Mono"),
-                )
-                .child(content.to_owned()),
+                .when(is_user, |element| {
+                    element
+                        .max_w(px(600.))
+                        .rounded(px(18.))
+                        .bg(rgb(RECESSED))
+                        .px_4()
+                        .py_3()
+                })
+                .when(!is_user, |element| element.w_full())
+                .when(!is_user && is_panel, |element| {
+                    element
+                        .rounded(px(10.))
+                        .bg(rgb(SIDEBAR))
+                        .shadow(surface_border_shadow())
+                        .p_4()
+                })
+                .when(!is_user && !is_panel, |element| element.px_1().py_2())
+                .when(show_label, |element| {
+                    element.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_xs()
+                            .text_color(rgb(MUTED))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .mb_2()
+                            .child(status_dot(indicator))
+                            .child(label.to_owned()),
+                    )
+                })
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(if kind == MessageKind::Status {
+                            rgb(TEXT_SECONDARY)
+                        } else {
+                            rgb(TEXT)
+                        })
+                        .whitespace_normal()
+                        .line_height(relative(1.55))
+                        .when(
+                            matches!(kind, MessageKind::ToolCall | MessageKind::ToolResult),
+                            |element| element.font_family("SF Mono"),
+                        )
+                        .child(content.to_owned()),
+                ),
         )
 }
 
@@ -1006,6 +1453,13 @@ fn label_value(label: impl Into<SharedString>, value: impl Into<SharedString>) -
                 .whitespace_normal()
                 .child(value),
         )
+}
+
+fn executable_setting_key(harness: HarnessKind) -> &'static str {
+    match harness {
+        HarnessKind::Claude => "claude_executable",
+        HarnessKind::Codex => "codex_executable",
+    }
 }
 
 fn section_label(label: impl Into<SharedString>) -> impl IntoElement {
@@ -1039,23 +1493,15 @@ fn run_status_color(status: RunStatus) -> Hsla {
 }
 
 fn surface_border_shadow() -> Vec<gpui::BoxShadow> {
-    vec![box_shadow(0., 0., 0., 1., rgba(0x00000014).into())]
+    vec![box_shadow(0., 0., 0., 1., rgba(0x00000012).into())]
 }
 
 fn surface_card_shadow() -> Vec<gpui::BoxShadow> {
     vec![
-        box_shadow(0., 0., 0., 1., rgba(0x00000014).into()),
-        box_shadow(0., 2., 2., 0., rgba(0x0000000a).into()),
-        box_shadow(0., 8., 8., -8., rgba(0x0000000a).into()),
+        box_shadow(0., 0., 0., 1., rgba(0x00000018).into()),
+        box_shadow(0., 2., 6., -2., rgba(0x00000014).into()),
+        box_shadow(0., 14., 32., -12., rgba(0x00000024).into()),
     ]
-}
-
-fn header_shadow() -> Vec<gpui::BoxShadow> {
-    vec![box_shadow(0., 1., 0., 0., rgba(0x0000001a).into())]
-}
-
-fn composer_shadow() -> Vec<gpui::BoxShadow> {
-    vec![box_shadow(0., -1., 0., 0., rgba(0x0000001a).into())]
 }
 
 fn configure_theme(cx: &mut App) {
@@ -1067,39 +1513,39 @@ fn configure_theme(cx: &mut App) {
     theme.mono_font_size = px(13.);
     theme.radius = px(6.);
     theme.radius_lg = px(12.);
-    theme.shadow = true;
+    theme.shadow = false;
 
     theme.background = rgb(BG).into();
     theme.foreground = rgb(TEXT).into();
-    theme.border = rgba(0x00000014).into();
+    theme.border = rgb(BORDER).into();
     theme.input = rgba(0x00000024).into();
     theme.caret = rgb(TEXT).into();
-    theme.ring = rgb(0x005fcc).into();
-    theme.selection = rgba(0x0072f533).into();
+    theme.ring = rgb(TEXT_SECONDARY).into();
+    theme.selection = rgba(0x20212424).into();
     theme.muted = rgb(RECESSED).into();
     theme.muted_foreground = rgb(MUTED).into();
     theme.accent = rgb(HOVER).into();
     theme.accent_foreground = rgb(TEXT).into();
     theme.primary = rgb(ACCENT).into();
     theme.primary_hover = rgb(ACCENT_HOVER).into();
-    theme.primary_active = rgb(0x005fcc).into();
+    theme.primary_active = rgb(0x000000).into();
     theme.primary_foreground = rgb(SURFACE).into();
     theme.secondary = rgb(SURFACE).into();
     theme.secondary_hover = rgb(HOVER).into();
     theme.secondary_active = rgb(RECESSED).into();
     theme.secondary_foreground = rgb(TEXT_SECONDARY).into();
-    theme.link = rgb(ACCENT).into();
-    theme.link_hover = rgb(ACCENT_HOVER).into();
-    theme.link_active = rgb(0x005fcc).into();
+    theme.link = rgb(LINK).into();
+    theme.link_hover = rgb(0x245aa6).into();
+    theme.link_active = rgb(0x1e4c8e).into();
     theme.danger = rgb(DANGER).into();
     theme.danger_hover = rgb(0xc93439).into();
     theme.danger_active = rgb(0xa9272c).into();
     theme.danger_foreground = rgb(SURFACE).into();
-    theme.sidebar = rgb(BG).into();
+    theme.sidebar = rgb(SIDEBAR).into();
     theme.sidebar_foreground = rgb(TEXT).into();
     theme.sidebar_accent = rgb(HOVER).into();
     theme.sidebar_accent_foreground = rgb(TEXT).into();
-    theme.sidebar_border = rgba(0x00000014).into();
+    theme.sidebar_border = rgb(BORDER).into();
 }
 
 fn is_git_dirty(path: &Path) -> bool {

@@ -3,6 +3,8 @@ members = [
     "apps/desktop",
     "apps/runner",
     "crates/domain",
+    "crates/harness-core",
+    "crates/harness-codex",
     "crates/harness-claude",
     "crates/protocol",
 ]
