@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Duration};
 
 use super::*;
 use crate::{
@@ -9,7 +9,7 @@ use nexus_domain::{MessageKind, MessageRole, RunStatus};
 use nexus_protocol::{ErrorCode, Event, HarnessProbe, PROTOCOL_VERSION};
 
 #[derive(Clone, Default)]
-struct FakeRunner(Rc<RefCell<FakeRunnerState>>);
+pub(crate) struct FakeRunner(Rc<RefCell<FakeRunnerState>>);
 
 #[derive(Default)]
 struct FakeRunnerState {
@@ -53,7 +53,7 @@ impl RunnerPort for FakeRunner {
 }
 
 impl FakeRunner {
-    fn emit(&self, event: Event) {
+    pub(crate) fn emit(&self, event: Event) {
         self.0.borrow_mut().events.push(EventEnvelope {
             protocol_version: PROTOCOL_VERSION,
             id: Uuid::new_v4(),
@@ -63,7 +63,7 @@ impl FakeRunner {
     }
 }
 
-fn fixture() -> (Presenter, FakeRunner, tempfile::TempDir) {
+pub(crate) fn fixture() -> (Presenter, FakeRunner, tempfile::TempDir) {
     let directory = tempfile::tempdir().unwrap();
     let storage = Storage::open(Path::new(":memory:")).unwrap();
     let runner = FakeRunner::default();
@@ -211,6 +211,8 @@ fn invalid_submissions_never_create_tasks_or_send_commands() {
     }
     assert!(presenter.storage.tasks(project.id).unwrap().is_empty());
     assert!(runner.0.borrow().commands.is_empty());
+    assert!(presenter.active_run_started_at.is_none());
+    assert!(presenter.model().active_run_elapsed_seconds.is_none());
 }
 
 #[test]
@@ -291,6 +293,8 @@ fn send_failure_finishes_saved_run_without_entering_busy_state() {
     runner.0.borrow_mut().fail_send = true;
     assert!(!presenter.submit("hello", "claude"));
     assert!(presenter.model().active_run.is_none());
+    assert!(presenter.active_run_started_at.is_none());
+    assert!(presenter.model().active_run_elapsed_seconds.is_none());
     assert_eq!(presenter.model().status, "Runner 不可用，任务未启动。");
     let project_id = presenter.model().selected_project.as_ref().unwrap().id;
     let tasks = presenter.storage.tasks(project_id).unwrap();
@@ -308,6 +312,8 @@ fn runner_events_update_timeline_and_persist_terminal_statuses() {
     ] {
         let (mut presenter, runner, _directory) = fixture();
         assert!(presenter.submit("hello", "claude"));
+        let started = presenter.active_run_started_at.unwrap();
+        assert!(presenter.refresh_run_elapsed(started + Duration::from_secs(5)));
         let run_id = presenter.model().active_run.unwrap();
         let task_id = presenter.model().active_task.unwrap();
         runner.emit(Event::RunStarted { run_id, pid: 42 });
@@ -339,6 +345,9 @@ fn runner_events_update_timeline_and_persist_terminal_statuses() {
         assert!(presenter.model().active_run.is_none());
         assert!(presenter.model().active_task.is_none());
         assert!(presenter.model().active_harness.is_none());
+        assert!(presenter.active_run_started_at.is_none());
+        assert!(presenter.model().active_run_elapsed_seconds.is_none());
+        assert!(!presenter.refresh_run_elapsed(started + Duration::from_secs(10)));
         assert_eq!(presenter.model().tasks[0].status, status);
         let messages = presenter.storage.messages(task_id).unwrap();
         assert_eq!(messages[1].content, "answer");
@@ -346,7 +355,41 @@ fn runner_events_update_timeline_and_persist_terminal_statuses() {
         if status == RunStatus::Failed {
             assert_eq!(messages[2].kind, MessageKind::Error);
         }
+        assert!(presenter.submit("next task", "claude"));
+        assert_eq!(presenter.model().active_run_elapsed_seconds, Some(0));
+        assert!(presenter.active_run_started_at.unwrap() >= started);
     }
+}
+
+#[test]
+fn run_elapsed_advances_without_output_and_only_changes_each_second() {
+    let (mut presenter, runner, _directory) = fixture();
+    assert!(!presenter.refresh_run_elapsed(Instant::now()));
+    assert!(presenter.submit("hello", "claude"));
+    let started = presenter.active_run_started_at.unwrap();
+    let run_id = presenter.model().active_run.unwrap();
+    assert_eq!(presenter.model().active_run_elapsed_seconds, Some(0));
+    assert!(!presenter.refresh_run_elapsed(started + Duration::from_millis(999)));
+    assert!(!presenter.drain_events());
+    assert!(presenter.refresh_run_elapsed(started + Duration::from_secs(1)));
+    assert_eq!(presenter.model().active_run_elapsed_seconds, Some(1));
+    assert!(!presenter.refresh_run_elapsed(started + Duration::from_millis(1999)));
+
+    runner.emit(Event::RunStarted { run_id, pid: 42 });
+    runner.emit(Event::RunOutputDelta {
+        run_id,
+        text: "partial".into(),
+    });
+    assert!(presenter.drain_events());
+    assert_eq!(presenter.active_run_started_at, Some(started));
+    assert!(presenter.refresh_run_elapsed(started + Duration::from_secs(65)));
+    assert_eq!(presenter.model().active_run_elapsed_seconds, Some(65));
+
+    presenter.cancel();
+    assert!(presenter.refresh_run_elapsed(started + Duration::from_secs(66)));
+    assert_eq!(presenter.model().active_run_elapsed_seconds, Some(66));
+    assert_eq!(presenter.active_run_started_at, Some(started));
+    assert!(presenter.model().active_run.is_some());
 }
 
 #[test]
@@ -354,6 +397,7 @@ fn unrelated_run_events_cannot_replace_the_active_run() {
     let (mut presenter, runner, _directory) = fixture();
     assert!(presenter.submit("hello", "claude"));
     let active_run = presenter.model().active_run;
+    let started = presenter.active_run_started_at;
     let other_run = Uuid::new_v4();
     runner.emit(Event::RunStarted {
         run_id: other_run,
@@ -374,6 +418,8 @@ fn unrelated_run_events_cannot_replace_the_active_run() {
     });
     presenter.drain_events();
     assert_eq!(presenter.model().active_run, active_run);
+    assert_eq!(presenter.active_run_started_at, started);
+    assert_eq!(presenter.model().active_run_elapsed_seconds, Some(0));
     assert_eq!(presenter.model().messages.len(), 1);
     assert!(presenter.model().streaming_text.is_empty());
 }

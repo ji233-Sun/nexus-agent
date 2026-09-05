@@ -2,9 +2,21 @@ use super::{Presenter, executable_setting_key};
 use crate::infrastructure::storage::NewTaskRun;
 use nexus_domain::{HarnessKind, MessageKind, MessageRole, RunStatus};
 use nexus_protocol::{Command, CommandEnvelope, Event, StartRun};
+use std::time::Instant;
 use uuid::Uuid;
 
 impl Presenter {
+    pub(crate) fn refresh_run_elapsed(&mut self, now: Instant) -> bool {
+        let elapsed = self
+            .active_run_started_at
+            .map(|started| now.saturating_duration_since(started).as_secs());
+        if self.model.active_run_elapsed_seconds == elapsed {
+            return false;
+        }
+        self.model.active_run_elapsed_seconds = elapsed;
+        true
+    }
+
     pub(super) fn handle_event(&mut self, event: Event) {
         match event {
             Event::RunnerReady => {
@@ -106,6 +118,8 @@ impl Presenter {
                 let _ = self.storage.finish_run(run_id, status, exit_code);
                 self.model.streaming_text.clear();
                 self.model.active_run = None;
+                self.active_run_started_at = None;
+                self.model.active_run_elapsed_seconds = None;
                 self.model.active_task = None;
                 self.model.active_harness = None;
                 self.model.status = match status {
@@ -215,6 +229,8 @@ impl Presenter {
             && runner.send(command).is_ok()
         {
             self.model.active_run = Some(run_id);
+            self.active_run_started_at = Some(Instant::now());
+            self.model.active_run_elapsed_seconds = Some(0);
             self.model.active_task = Some(task_id);
             self.model.active_harness = Some(harness);
             self.model.selected_task = Some(task_id);
