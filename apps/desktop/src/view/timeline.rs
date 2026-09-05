@@ -31,14 +31,14 @@ impl NexusView {
                     .child(
                         div()
                             .w_full()
-                            .max_w(px(880.))
+                            .max_w(px(if empty { 880. } else { 784. }))
                             .min_h_full()
                             .mx_auto()
                             .px_8()
                             .py(px(if compact { 16. } else { 32. }))
                             .flex()
                             .flex_col()
-                            .gap_3()
+                            .gap(px(24.))
                             .when(empty, |element| {
                                 element.child(self.render_welcome(compact, cx))
                             })

@@ -174,30 +174,39 @@ impl NexusView {
                     })
                     .child(if kind == MessageKind::Text {
                         TextView::markdown(id.clone(), content.to_owned())
-                            .text_size(px(15.))
-                            .line_height(relative(1.45))
+                            .text_size(px(16.))
+                            .font_weight(gpui::FontWeight::NORMAL)
+                            .line_height(relative(1.7))
                             .style(
                                 TextViewStyle::default()
-                                    .paragraph_gap(gpui::rems(0.5))
+                                    .paragraph_gap(gpui::rems(16. / 14.))
                                     .heading_font_size(|level, _| {
                                         px(match level {
-                                            1 => 24.,
-                                            2 => 20.,
-                                            3 => 17.,
-                                            4 => 16.,
-                                            _ => 15.,
+                                            1 => 30.,
+                                            2 => 24.,
+                                            3 => 20.,
+                                            4 => 18.,
+                                            _ => 16.,
                                         })
                                     })
                                     .code_block(
                                         gpui::StyleRefinement::default()
                                             .font_family(MONO_FONT)
                                             .text_size(px(14.))
-                                            .line_height(relative(1.4)),
+                                            .line_height(relative(1.6))
+                                            .p(px(16.))
+                                            .bg(rgb(SURFACE))
+                                            .border_1()
+                                            .border_color(rgb(BORDER))
+                                            .rounded(px(8.)),
                                     )
                                     .table_head(
                                         gpui::StyleRefinement::default()
                                             .bg(rgb(SURFACE))
                                             .text_color(rgb(TEXT_SECONDARY)),
+                                    )
+                                    .table_cell(
+                                        gpui::StyleRefinement::default().px(px(12.)).py(px(8.)),
                                     ),
                             )
                             .selectable(true)
