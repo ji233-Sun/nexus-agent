@@ -65,7 +65,9 @@ nexus-runner (lifecycle + process group)
 - `crates/harness-core`：Harness 共用的启动规格、事件和可执行文件解析。
 - `crates/harness-claude`：Claude Code 探测、启动参数和事件解码。
 - `crates/harness-codex`：Codex CLI 探测、非交互启动参数和 JSONL 事件解码。
-- `apps/runner`：运行独占、流式转发、取消和进程清理。
+- `apps/runner/src/transport.rs`：JSONL 命令读取、协议版本校验和事件写出。
+- `apps/runner/src/application`：命令调度、运行独占、取消和统一事件转换。
+- `apps/runner/src/infrastructure`：Harness 适配器选择、子进程执行和进程组清理。
 - `apps/desktop`：GPUI 界面与 SQLite 历史。
 
 ## 验证
