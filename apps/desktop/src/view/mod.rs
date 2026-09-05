@@ -8,11 +8,11 @@ mod timeline;
 use crate::{model::history::HistoryMessage, presenter::Presenter};
 use components::*;
 use gpui::{
-    Anchor, Animation, AnimationExt as _, AnyElement, AppContext as _, Context, ElementId, Entity,
-    FocusHandle, Focusable as _, Hsla, InteractiveElement as _, IntoElement, KeyBinding,
-    ParentElement as _, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Window, div, ease_out_quint, prelude::FluentBuilder as _, pulsating_between, px,
-    relative, rgb, rgba,
+    Anchor, Animation, AnimationExt as _, AnyElement, AppContext as _, ClipboardItem, Context,
+    ElementId, Entity, FocusHandle, Focusable as _, Hsla, InteractiveElement as _, IntoElement,
+    KeyBinding, ParentElement as _, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Window, div, ease_out_quint,
+    prelude::FluentBuilder as _, pulsating_between, px, relative, rgb, rgba,
 };
 use gpui_kit as gpui;
 use gpui_kit::component::{
@@ -154,6 +154,7 @@ impl NexusView {
             };
             let _ = this.update(cx, |view, cx| {
                 view.presenter.open_project(folder.path());
+                view.presenter.notify_remote_changed();
                 cx.notify();
             });
         })
@@ -169,6 +170,7 @@ impl NexusView {
         self.presenter.new_task();
         self.expanded_messages.clear();
         self.focus_prompt(window, cx);
+        self.presenter.notify_remote_changed();
         cx.notify();
     }
 
@@ -176,6 +178,7 @@ impl NexusView {
         self.presenter.select_project(project);
         self.expanded_messages.clear();
         self.timeline_scroll.scroll_to_bottom();
+        self.presenter.notify_remote_changed();
     }
 
     fn select_task(&mut self, task_id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
@@ -183,6 +186,7 @@ impl NexusView {
         self.expanded_messages.clear();
         self.timeline_scroll.scroll_to_bottom();
         self.sync_executable(window, cx);
+        self.presenter.notify_remote_changed();
         cx.notify();
     }
 
@@ -190,6 +194,7 @@ impl NexusView {
         self.presenter.select_codex_thread(thread_id);
         self.expanded_messages.clear();
         self.timeline_scroll.scroll_to_bottom();
+        self.presenter.notify_remote_changed();
         cx.notify();
     }
 
@@ -219,6 +224,7 @@ impl NexusView {
             self.expanded_messages.clear();
             self.timeline_scroll.scroll_to_bottom();
         }
+        self.presenter.notify_remote_changed();
         cx.notify();
     }
 
@@ -252,12 +258,28 @@ impl NexusView {
 
     fn cancel(&mut self, _: &gpui::ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.presenter.cancel();
+        self.presenter.notify_remote_changed();
         cx.notify();
+    }
+
+    fn copy_remote_link(&mut self, _: &gpui::ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(link) = self.presenter.copyable_remote_link() {
+            cx.write_to_clipboard(ClipboardItem::new_string(link));
+            cx.notify();
+        }
+    }
+
+    fn copy_remote_token(&mut self, _: &gpui::ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(token) = self.presenter.copyable_remote_token() {
+            cx.write_to_clipboard(ClipboardItem::new_string(token));
+            cx.notify();
+        }
     }
 
     fn probe(&mut self, _: &gpui::ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
         let executable = self.executable_input.read(cx).value().to_string();
         self.presenter.probe(&executable);
+        self.presenter.notify_remote_changed();
         cx.notify();
     }
 
@@ -271,16 +293,19 @@ impl NexusView {
         if self.presenter.select_harness(harness, &executable) {
             self.sync_executable(window, cx);
         }
+        self.presenter.notify_remote_changed();
         cx.notify();
     }
 
     fn select_model(&mut self, model: ClaudeModel, cx: &mut Context<Self>) {
         self.presenter.select_model(model);
+        self.presenter.notify_remote_changed();
         cx.notify();
     }
 
     fn select_effort(&mut self, effort: ThinkingEffort, cx: &mut Context<Self>) {
         self.presenter.select_effort(effort);
+        self.presenter.notify_remote_changed();
         cx.notify();
     }
 

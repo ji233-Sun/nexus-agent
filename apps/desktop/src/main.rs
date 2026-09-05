@@ -4,6 +4,7 @@ mod bootstrap;
 mod infrastructure;
 mod model;
 mod presenter;
+mod remote_control;
 mod view;
 
 fn main() -> anyhow::Result<()> {

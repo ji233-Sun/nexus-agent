@@ -18,7 +18,9 @@ rust-version = "1.98"
 
 [workspace.dependencies]
 anyhow = "1.0"
+axum = { version = "0.8", features = ["ws"] }
 chrono = { version = "0.4", features = ["serde"] }
+futures-util = "0.3"
 gpui-kit = "0.6.0"
 nix = { version = "0.30", features = ["signal"] }
 rfd = "0.17.2"
@@ -29,6 +31,8 @@ smol = "2.0"
 tempfile = "3.23"
 thiserror = "2.0"
 tokio = { version = "1.48", features = ["io-std", "io-util", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["cors"] }
 uuid = { version = "1.18", features = ["serde", "v4"] }
 
 # GPUI builds the element tree and computes layout on every scrolling frame.
