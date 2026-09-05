@@ -29,7 +29,8 @@ use gpui_kit::component::{
     text::{TextView, TextViewStyle},
 };
 use nexus_domain::{
-    ClaudeModel, HarnessKind, Message, MessageKind, MessageRole, Project, RunStatus, ThinkingEffort,
+    ClaudeModel, HarnessKind, Message, MessageKind, MessageRole, Project, ProviderProfile,
+    RunStatus, ThinkingEffort,
 };
 use pane::{PaneKind, WorkspacePane};
 use std::{
@@ -80,10 +81,23 @@ impl NexusView {
                 .default_value(presenter.model().executable.clone())
                 .placeholder("命令名或完整路径")
         });
-        let (api_key_env, base_url_env) =
-            provider_environment_defaults(presenter.model().selected_harness);
-        let provider_name_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("例如 DeepSeek Production"));
+        let ProviderProfileDraft {
+            id: editing_provider_profile,
+            name,
+            api_key_env,
+            api_key: _,
+            base_url_env,
+            base_url,
+            model,
+        } = profile_form_draft(
+            presenter.model().selected_provider_profile(),
+            presenter.model().selected_harness,
+        );
+        let provider_name_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(name)
+                .placeholder("例如 DeepSeek Production")
+        });
         let provider_api_key_env_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .default_value(api_key_env)
@@ -100,10 +114,14 @@ impl NexusView {
                 .placeholder("可选，例如 OPENAI_BASE_URL")
         });
         let provider_base_url_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("可选，例如 https://api.example.com/v1")
+            InputState::new(window, cx)
+                .default_value(base_url)
+                .placeholder("可选，例如 https://api.example.com/v1")
         });
         let provider_model_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("可选，例如 deepseek/deepseek-v4-pro")
+            InputState::new(window, cx)
+                .default_value(model)
+                .placeholder("可选，例如 deepseek/deepseek-v4-pro")
         });
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("搜索任务与历史…"));
         cx.subscribe(&prompt_input, |_, _, event: &InputEvent, cx| {
@@ -155,7 +173,7 @@ impl NexusView {
             codex_history_visible_count: sidebar::HISTORY_PAGE_SIZE,
             settings_open: false,
             reduced_motion: false,
-            editing_provider_profile: None,
+            editing_provider_profile,
         };
         view.focus_handle.focus(window, cx);
         view.start_event_pump(cx);
@@ -287,14 +305,6 @@ impl NexusView {
     fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_open = !self.settings_open;
         if self.settings_open {
-            self.sync_provider_profile_form(
-                self.presenter
-                    .model()
-                    .selected_provider_profile()
-                    .map(|profile| profile.id),
-                window,
-                cx,
-            );
             self.focus_handle.focus(window, cx);
         } else {
             self.focus_prompt(window, cx);
@@ -447,35 +457,15 @@ impl NexusView {
                 .find(|profile| profile.id == profile_id)
                 .cloned()
         });
-        self.editing_provider_profile = profile.as_ref().map(|profile| profile.id);
-        let (default_api_key_env, default_base_url_env) =
-            provider_environment_defaults(self.presenter.model().selected_harness);
-        let values = profile
-            .map(|profile| {
-                (
-                    profile.name,
-                    profile.api_key_env,
-                    profile.base_url_env.unwrap_or_default(),
-                    profile.base_url.unwrap_or_default(),
-                    profile.model.unwrap_or_default(),
-                )
-            })
-            .unwrap_or_else(|| {
-                (
-                    String::new(),
-                    default_api_key_env.into(),
-                    default_base_url_env.into(),
-                    String::new(),
-                    String::new(),
-                )
-            });
+        let draft = profile_form_draft(profile.as_ref(), self.presenter.model().selected_harness);
+        self.editing_provider_profile = draft.id;
         for (input, value) in [
-            (&self.provider_name_input, values.0),
-            (&self.provider_api_key_env_input, values.1),
-            (&self.provider_base_url_env_input, values.2),
-            (&self.provider_base_url_input, values.3),
-            (&self.provider_model_input, values.4),
-            (&self.provider_api_key_input, String::new()),
+            (&self.provider_name_input, draft.name),
+            (&self.provider_api_key_env_input, draft.api_key_env),
+            (&self.provider_api_key_input, draft.api_key),
+            (&self.provider_base_url_env_input, draft.base_url_env),
+            (&self.provider_base_url_input, draft.base_url),
+            (&self.provider_model_input, draft.model),
         ] {
             input.update(cx, |input, cx| input.set_value(&value, window, cx));
         }
@@ -1035,4 +1025,30 @@ fn provider_environment_defaults(harness: HarnessKind) -> (&'static str, &'stati
         HarnessKind::Codex => ("CODEX_API_KEY", "OPENAI_BASE_URL"),
         HarnessKind::Omp => ("DEEPSEEK_API_KEY", ""),
     }
+}
+
+fn profile_form_draft(
+    profile: Option<&ProviderProfile>,
+    harness: HarnessKind,
+) -> ProviderProfileDraft {
+    let (default_api_key_env, default_base_url_env) = provider_environment_defaults(harness);
+    profile
+        .map(|profile| ProviderProfileDraft {
+            id: Some(profile.id),
+            name: profile.name.clone(),
+            api_key_env: profile.api_key_env.clone(),
+            api_key: String::new(),
+            base_url_env: profile.base_url_env.clone().unwrap_or_default(),
+            base_url: profile.base_url.clone().unwrap_or_default(),
+            model: profile.model.clone().unwrap_or_default(),
+        })
+        .unwrap_or_else(|| ProviderProfileDraft {
+            id: None,
+            name: String::new(),
+            api_key_env: default_api_key_env.into(),
+            api_key: String::new(),
+            base_url_env: default_base_url_env.into(),
+            base_url: String::new(),
+            model: String::new(),
+        })
 }

@@ -886,6 +886,9 @@ mod tests {
                 input.set_value("custom-agent", window, cx);
                 input.focus(window, cx);
             });
+            view.provider_name_input.update(cx, |input, cx| {
+                input.set_value("Keep this provider draft", window, cx);
+            });
         });
         cx.run_until_parked();
         let settings_shortcut = if cfg!(target_os = "macos") {
@@ -907,7 +910,13 @@ mod tests {
             assert_eq!(view.presenter.model().selected_task, selected_task);
         });
         cx.simulate_keystrokes(settings_shortcut);
-        assert!(view.read_with(cx, |view, _| view.settings_open));
+        view.read_with(cx, |view, cx| {
+            assert!(view.settings_open);
+            assert_eq!(
+                view.provider_name_input.read(cx).value(),
+                "Keep this provider draft"
+            );
+        });
         cx.simulate_keystrokes(if cfg!(target_os = "macos") {
             "cmd-k"
         } else {
