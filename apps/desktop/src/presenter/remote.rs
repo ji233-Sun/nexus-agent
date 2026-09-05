@@ -18,6 +18,9 @@ impl Presenter {
                 prompt,
                 reply,
             } => {
+                if reply.is_closed() {
+                    return false;
+                }
                 let result = if self.model.active_run.is_some() {
                     Err("已有任务正在执行".into())
                 } else if let Some(project) = self

@@ -613,6 +613,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn timed_out_run_request_closes_the_queued_reply() {
+        let (commands, receiver) = mpsc::sync_channel(4);
+        let response = test_router(commands)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/runs")
+                    .header(header::AUTHORIZATION, "Bearer secret-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "project_id": Uuid::new_v4(),
+                            "prompt": "expired request"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let RemoteCommand::StartRun { reply, .. } = receiver.try_recv().unwrap() else {
+            panic!("expected run request")
+        };
+        assert!(reply.is_closed());
+    }
+
+    #[tokio::test]
     async fn run_endpoint_validates_and_forwards_the_prompt() {
         let project_id = Uuid::new_v4();
         let (commands, receiver) = mpsc::sync_channel(4);

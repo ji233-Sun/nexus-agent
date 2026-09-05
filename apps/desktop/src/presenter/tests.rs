@@ -118,6 +118,43 @@ fn invalid_submissions_never_create_tasks_or_send_commands() {
 }
 
 #[test]
+fn expired_remote_start_does_not_change_selection_or_start_a_run() {
+    let (mut presenter, runner, _directory) = fixture();
+    let project_id = presenter.model.selected_project.as_ref().unwrap().id;
+    let other_directory = tempfile::tempdir().unwrap();
+    presenter.open_project(other_directory.path());
+    let selected_project_id = presenter.model.selected_project.as_ref().unwrap().id;
+    let status = presenter.model.status.clone();
+    let (reply, response) = tokio::sync::oneshot::channel();
+    drop(response);
+
+    assert!(!presenter.handle_remote_command(RemoteCommand::StartRun {
+        project_id,
+        prompt: "expired request".into(),
+        reply,
+    }));
+
+    assert_eq!(
+        presenter.model.selected_project.as_ref().unwrap().id,
+        selected_project_id
+    );
+    assert_eq!(presenter.model.status, status);
+    assert!(presenter.model.active_run.is_none());
+    assert!(presenter.storage.tasks(project_id).unwrap().is_empty());
+    assert!(runner.0.borrow().commands.is_empty());
+
+    let (reply, mut response) = tokio::sync::oneshot::channel();
+    assert!(presenter.handle_remote_command(RemoteCommand::StartRun {
+        project_id,
+        prompt: "retry request".into(),
+        reply,
+    }));
+    assert_eq!(response.try_recv().unwrap(), Ok(()));
+    assert_eq!(presenter.storage.tasks(project_id).unwrap().len(), 1);
+    assert_eq!(runner.0.borrow().commands.len(), 1);
+}
+
+#[test]
 fn submit_persists_configuration_and_prevents_duplicate_runs() {
     let (mut presenter, runner, _directory) = fixture();
     presenter.select_model(ClaudeModel::Opus);
