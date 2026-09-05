@@ -1,4 +1,31 @@
 use super::*;
+use gpui::App;
+use gpui_kit::base::{Transition, transition};
+
+fn control_transition(reduced_motion: bool) -> Transition {
+    Transition::new(if reduced_motion {
+        Duration::ZERO
+    } else {
+        Duration::from_millis(180)
+    })
+    .ease(ease_out_quint())
+}
+
+pub(super) fn disclosure_progress(
+    id: impl Into<ElementId>,
+    open: bool,
+    reduced_motion: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> f32 {
+    transition(
+        id.into(),
+        if open { 1. } else { 0. },
+        control_transition(reduced_motion),
+        window,
+        cx,
+    )
+}
 
 pub(super) fn brand_mark(size: f32) -> impl IntoElement {
     div()
