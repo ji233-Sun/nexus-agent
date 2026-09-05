@@ -116,7 +116,9 @@ CI 验证构建和自动化行为；窗口显示、输入法、目录选择、�
 
 ## 致谢
 
-界面视觉语言参考了 [Vercel Design MD](https://github.com/educlopez/design-bites/blob/main/design-mds/vercel.com/DESIGN.md)。感谢 design-bites 项目对 Vercel 设计体系的整理与分享。
+[Vercel Design MD](https://github.com/educlopez/design-bites/blob/main/design-mds/vercel.com/DESIGN.md)
+
+[Synara](https://github.com/Emanuele-web04/synara)
 
 ## 当前边界
 
