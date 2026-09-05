@@ -38,7 +38,7 @@ impl NexusView {
                             .py(px(if compact { 16. } else { 32. }))
                             .flex()
                             .flex_col()
-                            .gap_6()
+                            .gap_3()
                             .when(empty, |element| {
                                 element.child(self.render_welcome(compact, cx))
                             })

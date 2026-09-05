@@ -134,7 +134,7 @@ impl NexusView {
                             .shadow(surface_border_shadow())
                             .p_4()
                     })
-                    .when(!is_user && !is_panel, |element| element.px_1().py_2())
+                    .when(!is_user && !is_panel, |element| element.px_1().py_1())
                     .when(show_label, |element| {
                         element.child(
                             div()
@@ -174,6 +174,32 @@ impl NexusView {
                     })
                     .child(if kind == MessageKind::Text {
                         TextView::markdown(id.clone(), content.to_owned())
+                            .text_size(px(15.))
+                            .line_height(relative(1.45))
+                            .style(
+                                TextViewStyle::default()
+                                    .paragraph_gap(gpui::rems(0.5))
+                                    .heading_font_size(|level, _| {
+                                        px(match level {
+                                            1 => 24.,
+                                            2 => 20.,
+                                            3 => 17.,
+                                            4 => 16.,
+                                            _ => 15.,
+                                        })
+                                    })
+                                    .code_block(
+                                        gpui::StyleRefinement::default()
+                                            .font_family(MONO_FONT)
+                                            .text_size(px(14.))
+                                            .line_height(relative(1.4)),
+                                    )
+                                    .table_head(
+                                        gpui::StyleRefinement::default()
+                                            .bg(rgb(SURFACE))
+                                            .text_color(rgb(TEXT_SECONDARY)),
+                                    ),
+                            )
                             .selectable(true)
                             .into_any_element()
                     } else {

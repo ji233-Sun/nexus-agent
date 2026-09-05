@@ -23,7 +23,7 @@ use gpui_kit::component::{
     menu::{DropdownMenu as _, PopupMenuItem},
     sidebar::{Sidebar, SidebarMenu, SidebarMenuItem},
     switch::Switch,
-    text::TextView,
+    text::{TextView, TextViewStyle},
 };
 use nexus_domain::{
     ClaudeModel, HarnessKind, Message, MessageKind, MessageRole, Project, RunStatus, ThinkingEffort,
