@@ -15,8 +15,8 @@ use codex_history::{
     ThreadSummary as CodexThreadSummary,
 };
 use gpui::{
-    App, AppContext as _, Application, Bounds, Context, Corner, Entity, Hsla,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    AnyElement, App, AppContext as _, Application, Bounds, Context, Corner, ElementId, Entity,
+    Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, Timer, Window, WindowBounds, WindowOptions, div,
     prelude::FluentBuilder as _, px, relative, rgb, rgba, size,
 };
@@ -25,6 +25,7 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     input::{Input, InputState},
     menu::{DropdownMenu as _, PopupMenuItem},
+    text::TextView,
 };
 use nexus_domain::{
     ClaudeModel, HarnessKind, Message, MessageKind, MessageRole, Project, RunStatus, TaskSummary,
@@ -999,7 +1000,7 @@ impl NexusApp {
             )
     }
 
-    fn render_timeline(&self) -> impl IntoElement {
+    fn render_timeline(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let showing_codex_history = self.selected_codex_thread.is_some();
         let empty = if showing_codex_history {
             self.codex_history_messages.is_empty()
@@ -1066,24 +1067,28 @@ impl NexusApp {
                         )
                     })
                     .when(!showing_codex_history, |element| {
-                        element.children(self.messages.iter().map(render_message))
+                        element.children(
+                            self.messages
+                                .iter()
+                                .map(|message| render_message(message, window, cx)),
+                        )
                     })
                     .when(showing_codex_history, |element| {
-                        element.children(
-                            self.codex_history_messages
-                                .iter()
-                                .map(render_history_message),
-                        )
+                        element.children(self.codex_history_messages.iter().enumerate().map(
+                            |(index, message)| render_history_message(index, message, window, cx),
+                        ))
                     })
                     .when(
                         !showing_codex_history && !self.streaming_text.is_empty(),
                         |element| {
                             element.child(message_card(
+                                "streaming-message",
                                 MessageRole::Assistant,
                                 "Agent · 正在生成",
                                 &self.streaming_text,
                                 MessageKind::Text,
-                                rgb(ACCENT).into(),
+                                window,
+                                cx,
                             ))
                         },
                     ),
@@ -1221,7 +1226,7 @@ impl NexusApp {
 }
 
 impl Render for NexusApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let probe = self.selected_probe();
         let can_submit = self.selected_project.is_some()
             && self.active_run.is_none()
@@ -1323,7 +1328,7 @@ impl Render for NexusApp {
                                     ),
                             ),
                     )
-                    .child(self.render_timeline())
+                    .child(self.render_timeline(window, cx))
                     .child(
                         div()
                             .flex_none()
@@ -1396,7 +1401,11 @@ impl Render for NexusApp {
     }
 }
 
-fn render_message(message: &Message) -> impl IntoElement {
+fn render_message(
+    message: &Message,
+    window: &mut Window,
+    cx: &mut Context<NexusApp>,
+) -> AnyElement {
     let label = match message.role {
         MessageRole::User => "You",
         MessageRole::Assistant => "Agent",
@@ -1404,15 +1413,22 @@ fn render_message(message: &Message) -> impl IntoElement {
         MessageRole::System => "System",
     };
     message_card(
+        message.id,
         message.role,
         label,
         &message.content,
         message.kind,
-        message_indicator(message.kind),
+        window,
+        cx,
     )
 }
 
-fn render_history_message(message: &HistoryMessage) -> impl IntoElement {
+fn render_history_message(
+    index: usize,
+    message: &HistoryMessage,
+    window: &mut Window,
+    cx: &mut Context<NexusApp>,
+) -> AnyElement {
     let label = match message.role {
         MessageRole::User => "You · Codex 历史",
         MessageRole::Assistant => "Codex · 历史",
@@ -1420,11 +1436,13 @@ fn render_history_message(message: &HistoryMessage) -> impl IntoElement {
         MessageRole::System => "System · Codex 历史",
     };
     message_card(
+        ("history-message", index),
         message.role,
         label,
         &message.content,
         message.kind,
-        message_indicator(message.kind),
+        window,
+        cx,
     )
 }
 
@@ -1437,12 +1455,14 @@ fn message_indicator(kind: MessageKind) -> Hsla {
 }
 
 fn message_card(
+    id: impl Into<ElementId>,
     role: MessageRole,
     label: &str,
     content: &str,
     kind: MessageKind,
-    indicator: Hsla,
-) -> impl IntoElement {
+    window: &mut Window,
+    cx: &mut Context<NexusApp>,
+) -> AnyElement {
     let is_user = role == MessageRole::User;
     let is_panel = matches!(
         kind,
@@ -1482,11 +1502,15 @@ fn message_card(
                             .text_color(rgb(MUTED))
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .mb_2()
-                            .child(status_dot(indicator))
+                            .child(status_dot(message_indicator(kind)))
                             .child(label.to_owned()),
                     )
                 })
-                .child(
+                .child(if kind == MessageKind::Text {
+                    TextView::markdown(id, content.to_owned(), window, cx)
+                        .selectable(true)
+                        .into_any_element()
+                } else {
                     div()
                         .text_sm()
                         .text_color(if kind == MessageKind::Status {
@@ -1500,9 +1524,11 @@ fn message_card(
                             matches!(kind, MessageKind::ToolCall | MessageKind::ToolResult),
                             |element| element.font_family("SF Mono"),
                         )
-                        .child(content.to_owned()),
-                ),
+                        .child(content.to_owned())
+                        .into_any_element()
+                }),
         )
+        .into_any_element()
 }
 
 fn label_value(label: impl Into<SharedString>, value: impl Into<SharedString>) -> impl IntoElement {
