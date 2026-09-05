@@ -3,7 +3,7 @@ mod remote;
 mod runs;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use crate::{
     infrastructure::{
@@ -18,7 +18,7 @@ use crate::{
 use anyhow::{Result, bail};
 use nexus_domain::{ClaudeModel, HarnessKind, Project, ProviderProfile, ThinkingEffort};
 use nexus_protocol::{Command, CommandEnvelope, EnvironmentVariable, EventEnvelope};
-use std::{collections::BTreeMap, path::Path, str::FromStr as _};
+use std::{collections::BTreeMap, path::Path, str::FromStr as _, time::Instant};
 use uuid::Uuid;
 
 const PROVIDER_PROFILE_NAME_MAX_CHARS: usize = 48;
@@ -31,6 +31,7 @@ pub(crate) trait RunnerPort {
 
 pub(crate) struct Presenter {
     model: AppModel,
+    active_run_started_at: Option<Instant>,
     storage: Storage,
     runner: Option<Box<dyn RunnerPort>>,
     codex_history_client: Option<CodexHistoryClient>,
@@ -139,6 +140,7 @@ impl Presenter {
         let mut presenter = Self {
             storage,
             runner,
+            active_run_started_at: None,
             model: AppModel {
                 projects,
                 selected_harness,

@@ -188,19 +188,26 @@ impl NexusView {
                     .await;
                 let Some(this) = this.upgrade() else { break };
                 this.update(cx, |app, cx| {
-                    let follow_latest = app.timeline_scroll.max_offset().y
-                        + app.timeline_scroll.offset().y
-                        <= px(48.);
-                    if app.presenter.drain_events() {
-                        if follow_latest {
-                            app.timeline_scroll.scroll_to_bottom();
-                        }
-                        cx.notify();
-                    }
+                    app.poll_events(Instant::now(), cx);
                 });
             }
         })
         .detach();
+    }
+
+    fn poll_events(&mut self, now: Instant, cx: &mut Context<Self>) {
+        let follow_latest =
+            self.timeline_scroll.max_offset().y + self.timeline_scroll.offset().y <= px(48.);
+        if self.presenter.drain_events() {
+            if follow_latest {
+                self.timeline_scroll.scroll_to_bottom();
+            }
+            cx.notify();
+        }
+        if self.presenter.refresh_run_elapsed(now) {
+            // Clock ticks are not new output: preserve scroll and skip remote broadcasts.
+            self.timeline_pane.update(cx, |_, cx| cx.notify());
+        }
     }
 
     fn choose_project(&mut self, _: &gpui::ClickEvent, _: &mut Window, cx: &mut Context<Self>) {

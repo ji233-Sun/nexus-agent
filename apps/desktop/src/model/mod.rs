@@ -16,6 +16,7 @@ pub(crate) struct AppModel {
     pub(crate) selected_task: Option<Uuid>,
     pub(crate) messages: Vec<Message>,
     pub(crate) active_run: Option<Uuid>,
+    pub(crate) active_run_elapsed_seconds: Option<u64>,
     pub(crate) active_task: Option<Uuid>,
     pub(crate) active_harness: Option<HarnessKind>,
     pub(crate) streaming_text: String,
