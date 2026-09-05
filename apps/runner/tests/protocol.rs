@@ -6,7 +6,9 @@ use std::{
 };
 
 use nexus_domain::{HarnessKind, RunStatus, ThinkingEffort};
-use nexus_protocol::{Command, CommandEnvelope, Event, EventEnvelope, StartRun};
+use nexus_protocol::{
+    Command, CommandEnvelope, EnvironmentVariable, Event, EventEnvelope, StartRun,
+};
 use tokio::{
     io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader, Lines},
     process::{Child, ChildStdin, ChildStdout},
@@ -115,6 +117,7 @@ fn request(directory: &Path, executable: PathBuf, harness: HarnessKind, prompt: 
         executable: executable.to_string_lossy().into_owned(),
         model: None,
         effort: ThinkingEffort::High,
+        environment: Vec::new(),
     }
 }
 
@@ -199,6 +202,59 @@ async fn runner_streams_fake_codex_and_uses_non_interactive_mode() {
     );
     assert_eq!(args.last().copied(), Some("-"));
     assert!(!args.contains(&"test prompt"));
+}
+
+#[tokio::test]
+async fn runner_streams_fake_omp_and_uses_guarded_json_mode() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut request = request(
+        directory.path(),
+        fake_harness(directory.path()),
+        HarnessKind::Omp,
+        "test prompt",
+    );
+    request.model = Some("deepseek/deepseek-v4-pro".into());
+    request.environment.push(EnvironmentVariable {
+        name: "TEST_PROVIDER_API_KEY".into(),
+        value: "test-secret".into(),
+    });
+    let run_id = request.run_id;
+    let mut runner = TestRunner::spawn();
+    runner.send(Command::RunStart(request)).await;
+    let events = runner.collect_run(run_id, RunStatus::Completed).await;
+    runner.shutdown().await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::RunOutputDelta { text, .. } if text == "hello"))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::RunToolStarted { name, .. } if name == "read"))
+    );
+    assert!(events.iter().any(|event| matches!(event, Event::RunToolCompleted { output, is_error: false, .. } if output == "project")));
+    assert!(
+        events.iter().any(
+            |event| matches!(event, Event::RunMessageCompleted { text, .. } if text == "done")
+        )
+    );
+    let args = fs::read_to_string(directory.path().join("omp-args.txt")).unwrap();
+    let args = args.lines().collect::<Vec<_>>();
+    assert!(args.windows(2).any(|pair| pair == ["--mode", "json"]));
+    assert!(
+        args.windows(2)
+            .any(|pair| pair == ["--approval-mode", "write"])
+    );
+    assert!(
+        args.windows(2)
+            .any(|pair| pair == ["--model", "deepseek/deepseek-v4-pro"])
+    );
+    assert!(!args.contains(&"test prompt"));
+    assert_eq!(
+        fs::read_to_string(directory.path().join("provider-env.txt")).unwrap(),
+        "test-secret"
+    );
 }
 
 #[tokio::test]

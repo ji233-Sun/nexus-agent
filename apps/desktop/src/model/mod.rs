@@ -1,7 +1,9 @@
 pub(crate) mod history;
 
 use history::{HistoryMessage, ThreadSummary};
-use nexus_domain::{ClaudeModel, HarnessKind, Message, Project, TaskSummary, ThinkingEffort};
+use nexus_domain::{
+    ClaudeModel, HarnessKind, Message, Project, ProviderProfile, TaskSummary, ThinkingEffort,
+};
 use nexus_protocol::HarnessProbe;
 use std::collections::BTreeMap;
 use uuid::Uuid;
@@ -30,6 +32,8 @@ pub(crate) struct AppModel {
     pub(crate) claude_model: ClaudeModel,
     pub(crate) effort: ThinkingEffort,
     pub(crate) executable: String,
+    pub(crate) provider_profiles: Vec<ProviderProfile>,
+    pub(crate) active_provider_profiles: BTreeMap<HarnessKind, Uuid>,
 }
 
 impl AppModel {
@@ -38,10 +42,20 @@ impl AppModel {
     }
 
     pub(crate) fn can_submit(&self) -> bool {
+        let profile_ready = self
+            .selected_provider_profile()
+            .is_some_and(|profile| profile.credential_configured);
         self.selected_project.is_some()
             && self.active_run.is_none()
             && self
                 .selected_probe()
-                .is_some_and(|probe| probe.available && probe.authenticated)
+                .is_some_and(|probe| probe.available && (probe.authenticated || profile_ready))
+    }
+
+    pub(crate) fn selected_provider_profile(&self) -> Option<&ProviderProfile> {
+        let profile_id = self.active_provider_profiles.get(&self.selected_harness)?;
+        self.provider_profiles
+            .iter()
+            .find(|profile| profile.id == *profile_id && profile.harness == self.selected_harness)
     }
 }

@@ -1,13 +1,14 @@
 # Nexus Agent ADE
 
-Nexus Agent 是一个面向 Linux、macOS 和 Windows 的本地桌面应用，用统一时间线驱动本机已安装的 Claude Code 或 Codex CLI。当前版本是 `0.1.0-alpha.1`。
+Nexus Agent 是一个面向 Linux、macOS 和 Windows 的本地桌面应用，用统一时间线驱动本机已安装的 Claude Code、Codex CLI 或 Oh My Pi（OMP）。当前版本是 `0.1.0-alpha.1`。
 
 ## 当前能力
 
 - 选择本地项目并记录最近项目。
-- 启动时自动探测 Claude Code 与 Codex CLI 的可执行文件、版本和登录状态，仍可手动覆盖路径。
+- 启动时自动探测 Claude Code、Codex CLI 与 OMP 的可执行文件、版本和登录状态，仍可手动覆盖路径。
 - 通过 Codex 本地 `app-server` 只读浏览 CLI、Desktop 及已归档的原有会话。
-- 为 Claude Code 选择 `默认 / Sonnet / Opus / Haiku` 模型；Codex 使用 CLI 当前默认模型。
+- 管理多个 Provider Profile，在任务输入区快捷切换 API Key、Base URL 和默认模型。
+- 为 Claude Code 选择 `默认 / Sonnet / Opus / Haiku` 模型；Codex 与 OMP 可使用 CLI 默认模型或当前 Profile 的模型。
 - 配置 `Low / Medium / High / XHigh / Max` 思考层级。
 - 通过 JSON Lines Runner 启动 Harness，显示文本、工具调用、状态和错误。
 - 取消和关闭时清理 Harness 进程树：Unix 先中断再超时终止，Windows 使用系统 `taskkill /T /F`。
@@ -19,13 +20,17 @@ Claude Code 以 `--permission-mode acceptEdits` 运行：文件编辑按 Claude 
 
 Codex 按[官方非交互模式](https://learn.chatgpt.com/docs/non-interactive-mode)通过 `codex exec --skip-git-repo-check --json --sandbox workspace-write --ephemeral -` 运行。用户已在 Nexus 中明确选择工作目录，因此也允许运行非 Git 项目。Prompt 由 stdin 传入，Codex 可以修改所选工作目录，但不能通过 Nexus 请求交互式提权。当前版本没有交互式审批面板。
 
+OMP 通过 `omp --print --mode json --no-session --approval-mode write` 运行，Prompt 同样由 stdin 传入。OMP 的本地 Session 被关闭，但 Nexus 仍会把任务、运行状态和最终消息保存到自己的历史记录中。
+
+Provider Profile 的名称、Base URL、环境变量名和默认模型保存在 `nexus.db`；API Key 持久化时只保存在系统凭据库（macOS Keychain、Windows Credential Manager 或 Linux Secret Service），不会写入数据库、命令参数、运行记录或 Debug 输出。选中的配置只在单次 Harness 子进程中注入，不修改全局 shell 环境。系统凭据库不可用时 Nexus 会显示错误，不会退回明文存储。Codex 非交互运行默认使用官方支持的 [`CODEX_API_KEY`](https://learn.chatgpt.com/docs/config-file/environment-variables)；DeepSeek 等 Provider 可按目标 Harness 要求填写自己的环境变量名。
+
 Codex 原有历史通过 CLI 自带的实验性 `codex app-server` 协议读取，不复制到 Nexus 数据库，也不会被 Nexus 修改。若独立 CLI 无法读取 Desktop 创建的新版分页会话，Nexus 会自动尝试 Desktop 内置的 Codex。Nexus 自己完成或失败的任务继续保存在 `nexus.db` 中。
 
 ## 环境要求
 
 - Linux（X11 或 Wayland）、macOS 或 Windows（MSVC 工具链）
 - Rust 1.98 或更高版本（GPUI Kit 0.6 使用新版 GPUI）
-- 已安装并登录至少一种 Harness
+- 已安装至少一种 Harness，并已完成 CLI 登录或在 Nexus 中配置对应的 Provider Profile
 
 ```bash
 claude --version
@@ -33,6 +38,9 @@ claude auth status --json
 
 codex --version
 codex login status
+
+omp --version
+omp models --json
 ```
 
 macOS 构建需要 Xcode 与命令行工具。Windows 构建需要 Visual Studio 的 C++ 桌面开发组件、Windows SDK 和 CMake。Linux 构建依赖可参照 [GPUI/Zed Linux 构建说明](https://zed.dev/docs/development/linux)；Ubuntu/Debian 安装命令为：
@@ -73,7 +81,7 @@ Desktop 默认以独立子进程运行内置 Runner，确保两者始终使用�
 
 Windows 的程序探测支持 `PATHEXT` 中的 `.exe`、`.com`、`.bat` 和 `.cmd`，包括 npm 安装生成的命令入口。
 
-应用内可切换 Harness 并修改各自的可执行文件路径。Claude 模型与通用思考层级会持久化：Claude 分别转换为 `--model` 与 `--effort` 参数，Codex 使用 CLI 默认模型并通过 `model_reasoning_effort` 配置覆盖思考层级。两种 Harness 的 Prompt 都通过子进程 stdin 传递，不会出现在进程参数中。
+应用内可切换 Harness 并修改各自的可执行文件路径。Claude 模型与通用思考层级会持久化：Claude 分别转换为 `--model` 与 `--effort` 参数，Codex 通过 `model_reasoning_effort` 配置覆盖思考层级，OMP 使用 `--thinking`；OMP 不支持 `Max`，因此会映射为其最高层级 `xhigh`。三个 Harness 的 Prompt 都通过子进程 stdin 传递，不会出现在进程参数中。
 
 ## Remote Control
 
@@ -112,7 +120,7 @@ React Remote Web ── authenticated HTTP/WebSocket ──┐
                                         View (GPUI) ──▶ Presenter ──▶ Model
                                              └────────读取 Model────────┘
                                                         │
-                                      SQLite / RunnerClient / Codex 历史
+                         SQLite / 系统凭据库 / RunnerClient / Codex 历史
                                                         │ versioned JSONL over stdio
                                                         ▼
                                       nexus-runner
@@ -120,7 +128,8 @@ React Remote Web ── authenticated HTTP/WebSocket ──┐
                                         JSONL         调度、独占、取消   Harness / 进程组
                                                         │
                                                         ├── stream-json ──▶ Claude Code
-                                                        └── exec --json ──▶ Codex CLI
+                                                        ├── exec --json ──▶ Codex CLI
+                                                        └── --print --mode json ──▶ Oh My Pi
 ```
 
 - `crates/domain`：领域状态、模型和思考层级。
@@ -128,6 +137,7 @@ React Remote Web ── authenticated HTTP/WebSocket ──┐
 - `crates/harness-core`：Harness 共用的启动规格、事件和可执行文件解析。
 - `crates/harness-claude`：Claude Code 探测、启动参数和事件解码。
 - `crates/harness-codex`：Codex CLI 探测、非交互启动参数和 JSONL 事件解码。
+- `crates/harness-omp`：Oh My Pi 探测、受控写入模式和 JSON 事件解码。
 - `apps/runner/src/transport.rs`：JSONL 命令读取、协议版本校验和事件写出。
 - `apps/runner/src/application`：命令调度、运行独占、取消和统一事件转换。
 - `apps/runner/src/infrastructure`：Harness 适配器选择、子进程执行和平台相关的进程树清理。
@@ -135,11 +145,11 @@ React Remote Web ── authenticated HTTP/WebSocket ──┐
 - `apps/desktop/src/model`：界面状态、历史消息数据和提交可用性，不依赖 GPUI。
 - `apps/desktop/src/presenter`：项目选择、配置、提交、远程命令、事件处理和持久化协调，不依赖 GPUI；通过 `RunnerPort` 注入真实或测试 Runner。
 - `apps/desktop/src/view`：GPUI 渲染、控件状态和事件转交，按侧栏、时间线、设置、组件和主题拆分。
-- `apps/desktop/src/infrastructure`：平台数据目录、SQLite、Runner 进程通信、Codex 历史和 Git 状态读取。
+- `apps/desktop/src/infrastructure`：平台数据目录、SQLite、系统凭据库、Runner 进程通信、Codex 历史和 Git 状态读取。
 - `apps/desktop/src/remote_control.rs`：带令牌鉴权的 HTTP/WebSocket 服务及静态资源托管。
 - `apps/remote-web`：React + Vite 静态 Remote Client，生产构建产物嵌入 Desktop。
 
-View 只能通过 Presenter 的只读 `model()` 获取业务状态，通过 Presenter 方法发起操作。SQLite 格式和 Desktop–Runner JSONL 协议保持兼容；已有领域与 Harness crate 继续复用，不额外引入框架或空 crate。
+View 只能通过 Presenter 的只读 `model()` 获取业务状态，通过 Presenter 方法发起操作。SQLite 格式保持向后兼容；Desktop 与 Runner 使用配对的版本化 JSONL 协议，并拒绝不匹配的外置 Runner。已有领域与 Harness crate 继续复用，不额外引入框架或空 crate。
 
 ## 验证
 

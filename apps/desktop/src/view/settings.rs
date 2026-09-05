@@ -5,9 +5,11 @@ impl NexusView {
     pub(super) fn render_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let model = self.presenter.model();
         let probe = model.selected_probe();
+        let selected_profile = model.selected_provider_profile();
+        let profile_ready = selected_profile.is_some_and(|profile| profile.credential_configured);
         let harness_color: Hsla = probe
             .map(|probe| {
-                if probe.available && probe.authenticated {
+                if probe.available && (probe.authenticated || profile_ready) {
                     rgb(SUCCESS).into()
                 } else {
                     rgb(DANGER).into()
@@ -18,7 +20,16 @@ impl NexusView {
         let remote_available = remote_endpoint.is_some();
         let remote_token = self.presenter.remote_token().map(masked_token);
         let remote_error = self.presenter.remote_control_error().map(str::to_owned);
-
+        let harness_status = match (probe, selected_profile) {
+            (Some(probe), Some(profile)) if probe.available && profile.credential_configured => {
+                format!(
+                    "{} 可执行文件已就绪，将使用 Provider Profile：{}",
+                    model.selected_harness, profile.name
+                )
+            }
+            (Some(probe), _) => probe.message.clone(),
+            (None, _) => "尚未探测".into(),
+        };
         let content = div()
             .w_full()
             .max_w(px(880.))
@@ -98,11 +109,11 @@ impl NexusView {
                                     .text_color(rgb(TEXT_SECONDARY))
                                     .child(status_dot(harness_color))
                                     .child(
-                                        div().flex_1().min_w_0().whitespace_normal().child(
-                                            probe
-                                                .map(|probe| probe.message.clone())
-                                                .unwrap_or_else(|| "尚未探测".into()),
-                                        ),
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .whitespace_normal()
+                                            .child(harness_status),
                                     ),
                             )
                             .when_some(
@@ -111,6 +122,7 @@ impl NexusView {
                             ),
                     ),
             )
+            .child(self.render_provider_profiles(cx))
             .child(
                 div()
                     .pt_5()
@@ -268,6 +280,146 @@ impl NexusView {
                     .vertical_scrollbar(&self.settings_scroll),
             )
     }
+
+    fn render_provider_profiles(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let model = self.presenter.model();
+        let active_run = model.active_run.is_some();
+        let editing_profile = self.editing_provider_profile.and_then(|profile_id| {
+            model
+                .provider_profiles
+                .iter()
+                .find(|profile| profile.id == profile_id)
+        });
+        let form_title = editing_profile
+            .map(|profile| format!("编辑 · {}", profile.name))
+            .unwrap_or_else(|| "新建 Provider Profile".into());
+        let api_key_label = match editing_profile {
+            Some(profile) if profile.credential_configured => "API Key · 已安全保存",
+            Some(_) => "API Key · 需要重新填写",
+            None => "API Key",
+        };
+        div()
+            .pt_5()
+            .border_t_1()
+            .border_color(rgb(BORDER))
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(section_label("PROVIDER · 凭据配置"))
+                    .child(
+                        Button::new("new-provider-profile")
+                            .ghost()
+                            .small()
+                            .size(px(COMPACT_CONTROL_HEIGHT))
+                            .icon(IconName::Plus)
+                            .tooltip("新建 Provider Profile")
+                            .disabled(active_run)
+                            .on_click(cx.listener(Self::new_provider_profile)),
+                    ),
+            )
+            .child(self.provider_profile_selector("settings-provider-profile", false, true, cx))
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_xs()
+                    .text_color(rgb(TEXT_SECONDARY))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .child(form_title),
+            )
+            .child(profile_form_field(
+                "名称",
+                Input::new(&self.provider_name_input)
+                    .small()
+                    .min_h(px(CONTROL_HEIGHT))
+                    .text_sm()
+                    .prefix(Icon::new(IconName::Bot).small()),
+            ))
+            .child(profile_form_field(
+                "API Key 环境变量",
+                Input::new(&self.provider_api_key_env_input)
+                    .small()
+                    .min_h(px(CONTROL_HEIGHT))
+                    .text_sm()
+                    .prefix(Icon::new(IconName::SquareTerminal).small()),
+            ))
+            .child(profile_form_field(
+                api_key_label,
+                Input::new(&self.provider_api_key_input)
+                    .small()
+                    .min_h(px(CONTROL_HEIGHT))
+                    .text_sm()
+                    .prefix(Icon::new(IconName::EyeOff).small()),
+            ))
+            .child(profile_form_field(
+                "Base URL 环境变量",
+                Input::new(&self.provider_base_url_env_input)
+                    .small()
+                    .min_h(px(CONTROL_HEIGHT))
+                    .text_sm()
+                    .prefix(Icon::new(IconName::SquareTerminal).small()),
+            ))
+            .child(profile_form_field(
+                "Base URL",
+                Input::new(&self.provider_base_url_input)
+                    .small()
+                    .min_h(px(CONTROL_HEIGHT))
+                    .text_sm()
+                    .prefix(Icon::new(IconName::Globe).small()),
+            ))
+            .child(profile_form_field(
+                "默认模型",
+                Input::new(&self.provider_model_input)
+                    .small()
+                    .min_h(px(CONTROL_HEIGHT))
+                    .text_sm()
+                    .prefix(Icon::new(IconName::Cpu).small()),
+            ))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Button::new("save-provider-profile")
+                            .primary()
+                            .small()
+                            .h(px(CONTROL_HEIGHT))
+                            .flex_1()
+                            .icon(IconName::Check)
+                            .label("保存并启用")
+                            .disabled(active_run)
+                            .on_click(cx.listener(Self::save_provider_profile)),
+                    )
+                    .child(
+                        Button::new("delete-provider-profile")
+                            .danger()
+                            .outline()
+                            .small()
+                            .size(px(CONTROL_HEIGHT))
+                            .icon(IconName::Delete)
+                            .tooltip("删除当前 Provider Profile")
+                            .disabled(active_run || editing_profile.is_none())
+                            .on_click(cx.listener(Self::delete_provider_profile)),
+                    ),
+            )
+    }
+}
+
+fn profile_form_field(label: &'static str, input: impl IntoElement) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(section_label(label))
+        .child(input)
 }
 
 fn masked_token(token: &str) -> String {

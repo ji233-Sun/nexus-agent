@@ -1,7 +1,10 @@
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use super::*;
-use crate::{infrastructure::codex_history::Event as HistoryEvent, model::history::HistoryMessage};
+use crate::{
+    infrastructure::{codex_history::Event as HistoryEvent, credentials::CredentialStore},
+    model::history::HistoryMessage,
+};
 use nexus_domain::{MessageKind, MessageRole, RunStatus};
 use nexus_protocol::{ErrorCode, Event, HarnessProbe, PROTOCOL_VERSION};
 
@@ -13,6 +16,25 @@ struct FakeRunnerState {
     commands: Vec<CommandEnvelope>,
     events: Vec<EventEnvelope>,
     fail_send: bool,
+}
+
+#[derive(Clone, Default)]
+struct FakeCredentialStore(Rc<RefCell<HashMap<Uuid, String>>>);
+
+impl CredentialStore for FakeCredentialStore {
+    fn set_api_key(&self, profile_id: Uuid, api_key: &str) -> Result<()> {
+        self.0.borrow_mut().insert(profile_id, api_key.to_owned());
+        Ok(())
+    }
+
+    fn api_key(&self, profile_id: Uuid) -> Result<Option<String>> {
+        Ok(self.0.borrow().get(&profile_id).cloned())
+    }
+
+    fn delete_api_key(&self, profile_id: Uuid) -> Result<()> {
+        self.0.borrow_mut().remove(&profile_id);
+        Ok(())
+    }
 }
 
 impl RunnerPort for FakeRunner {
@@ -66,8 +88,20 @@ fn ready_probe(harness: HarnessKind) -> HarnessProbe {
     }
 }
 
+fn profile_draft(id: Option<Uuid>, name: &str, api_key: &str) -> ProviderProfileDraft {
+    ProviderProfileDraft {
+        id,
+        name: name.into(),
+        api_key_env: "DEEPSEEK_API_KEY".into(),
+        api_key: api_key.into(),
+        base_url_env: String::new(),
+        base_url: String::new(),
+        model: "deepseek/deepseek-v4-pro".into(),
+    }
+}
+
 #[test]
-fn startup_restores_preferences_and_probes_both_harnesses() {
+fn startup_restores_preferences_and_probes_all_harnesses() {
     let storage = Storage::open(Path::new(":memory:")).unwrap();
     for (key, value) in [
         ("default_harness", "codex"),
@@ -85,11 +119,73 @@ fn startup_restores_preferences_and_probes_both_harnesses() {
     assert_eq!(presenter.model().effort, ThinkingEffort::High);
     assert_eq!(presenter.model().executable, "/custom/codex");
     let state = runner.0.borrow();
-    assert_eq!(state.commands.len(), 3);
+    assert_eq!(state.commands.len(), 4);
     assert!(matches!(state.commands[0].command, Command::RunnerHello));
     assert!(state.commands.iter().any(|command| matches!(&command.command,
         Command::HarnessProbe { harness: HarnessKind::Codex, executable } if executable == "/custom/codex")));
     assert!(!presenter.model().can_submit());
+}
+
+#[test]
+fn startup_reads_profile_credential_state_from_the_system_store() {
+    let storage = Storage::open(Path::new(":memory:")).unwrap();
+    let configured_id = Uuid::new_v4();
+    let missing_id = Uuid::new_v4();
+    storage
+        .set_provider_profiles(&[
+            ProviderProfile {
+                id: configured_id,
+                name: "Configured".into(),
+                harness: HarnessKind::Codex,
+                api_key_env: "CODEX_API_KEY".into(),
+                base_url_env: None,
+                base_url: None,
+                model: None,
+                credential_configured: false,
+            },
+            ProviderProfile {
+                id: missing_id,
+                name: "Missing".into(),
+                harness: HarnessKind::Codex,
+                api_key_env: "CODEX_API_KEY".into(),
+                base_url_env: None,
+                base_url: None,
+                model: None,
+                credential_configured: true,
+            },
+        ])
+        .unwrap();
+    let credentials = FakeCredentialStore::default();
+    credentials
+        .0
+        .borrow_mut()
+        .insert(configured_id, "stored-key".into());
+
+    let presenter = Presenter::new_with_credentials(
+        storage,
+        Err(anyhow::anyhow!("runner unavailable")),
+        None,
+        Box::new(credentials),
+    );
+
+    assert!(
+        presenter
+            .model()
+            .provider_profiles
+            .iter()
+            .find(|profile| profile.id == configured_id)
+            .unwrap()
+            .credential_configured
+    );
+    assert!(
+        !presenter
+            .model()
+            .provider_profiles
+            .iter()
+            .find(|profile| profile.id == missing_id)
+            .unwrap()
+            .credential_configured
+    );
 }
 
 #[test]
@@ -337,6 +433,174 @@ fn switching_harnesses_restores_each_executable_and_codex_uses_default_model() {
     };
     assert_eq!(request.harness, HarnessKind::Codex);
     assert!(request.model.is_none());
+}
+
+#[test]
+fn provider_profile_keeps_secret_out_of_storage_and_injects_only_the_selected_run() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Storage::open(Path::new(":memory:")).unwrap();
+    let runner = FakeRunner::default();
+    let credentials = FakeCredentialStore::default();
+    let mut presenter = Presenter::new_with_credentials(
+        storage,
+        Ok(Box::new(runner.clone())),
+        None,
+        Box::new(credentials.clone()),
+    );
+    presenter.open_project(directory.path());
+    assert!(presenter.select_harness(HarnessKind::Omp, "claude"));
+    presenter.model.harnesses.insert(
+        HarnessKind::Omp,
+        HarnessProbe {
+            authenticated: false,
+            ..ready_probe(HarnessKind::Omp)
+        },
+    );
+    runner.0.borrow_mut().commands.clear();
+
+    let profile_id = presenter
+        .save_provider_profile(profile_draft(None, "DeepSeek", "super-secret"))
+        .unwrap();
+
+    assert!(presenter.model().can_submit());
+    assert_eq!(
+        credentials.0.borrow().get(&profile_id).map(String::as_str),
+        Some("super-secret")
+    );
+    assert!(
+        !presenter
+            .storage
+            .setting("provider_profiles")
+            .unwrap()
+            .unwrap()
+            .contains("super-secret")
+    );
+    assert!(presenter.submit("use the selected provider", "omp"));
+    let state = runner.0.borrow();
+    let Command::RunStart(request) = &state.commands[0].command else {
+        panic!("expected start");
+    };
+    assert_eq!(request.harness, HarnessKind::Omp);
+    assert_eq!(request.model.as_deref(), Some("deepseek/deepseek-v4-pro"));
+    assert_eq!(request.environment.len(), 1);
+    assert_eq!(request.environment[0].name, "DEEPSEEK_API_KEY");
+    assert_eq!(request.environment[0].value, "super-secret");
+    assert!(!format!("{:?}", state.commands[0]).contains("super-secret"));
+}
+
+#[test]
+fn remote_state_uses_the_selected_provider_profile() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Storage::open(Path::new(":memory:")).unwrap();
+    let credentials = FakeCredentialStore::default();
+    let mut presenter = Presenter::new_with_credentials(
+        storage,
+        Err(anyhow::anyhow!("runner unavailable")),
+        None,
+        Box::new(credentials),
+    );
+    presenter.open_project(directory.path());
+    assert!(presenter.select_harness(HarnessKind::Omp, "claude"));
+    presenter.model.harnesses.insert(
+        HarnessKind::Omp,
+        HarnessProbe {
+            authenticated: false,
+            ..ready_probe(HarnessKind::Omp)
+        },
+    );
+    presenter
+        .save_provider_profile(profile_draft(None, "DeepSeek", "super-secret"))
+        .unwrap();
+    let (reply, mut response) = tokio::sync::oneshot::channel();
+
+    assert!(!presenter.handle_remote_command(RemoteCommand::GetState { reply }));
+    let state = response.try_recv().unwrap();
+    assert_eq!(state.harness, HarnessKind::Omp);
+    assert_eq!(state.model.as_deref(), Some("deepseek/deepseek-v4-pro"));
+    assert!(state.harness_ready);
+}
+
+#[test]
+fn provider_profiles_can_be_updated_switched_and_deleted() {
+    let storage = Storage::open(Path::new(":memory:")).unwrap();
+    let runner = FakeRunner::default();
+    let credentials = FakeCredentialStore::default();
+    let mut presenter = Presenter::new_with_credentials(
+        storage,
+        Ok(Box::new(runner)),
+        None,
+        Box::new(credentials.clone()),
+    );
+    assert!(presenter.select_harness(HarnessKind::Omp, "claude"));
+    let profile_id = presenter
+        .save_provider_profile(profile_draft(None, "DeepSeek", "first-key"))
+        .unwrap();
+    assert_eq!(
+        presenter.model().selected_provider_profile().unwrap().id,
+        profile_id
+    );
+
+    assert_eq!(
+        presenter.save_provider_profile(profile_draft(Some(profile_id), "DeepSeek Production", "")),
+        Some(profile_id)
+    );
+    assert_eq!(
+        credentials.0.borrow().get(&profile_id).map(String::as_str),
+        Some("first-key")
+    );
+    assert!(presenter.select_provider_profile(None));
+    assert!(presenter.model().selected_provider_profile().is_none());
+    credentials.0.borrow_mut().remove(&profile_id);
+    assert!(presenter.select_provider_profile(Some(profile_id)));
+    assert!(
+        !presenter
+            .model()
+            .selected_provider_profile()
+            .unwrap()
+            .credential_configured
+    );
+    assert!(presenter.model().status.contains("没有 API Key"));
+    assert!(presenter.delete_provider_profile(profile_id));
+    assert!(presenter.model().provider_profiles.is_empty());
+    assert!(!credentials.0.borrow().contains_key(&profile_id));
+}
+
+#[test]
+fn provider_profiles_reject_process_control_environment_variables() {
+    let storage = Storage::open(Path::new(":memory:")).unwrap();
+    let mut presenter = Presenter::new_with_credentials(
+        storage,
+        Err(anyhow::anyhow!("runner unavailable")),
+        None,
+        Box::new(FakeCredentialStore::default()),
+    );
+    let mut draft = profile_draft(None, "Unsafe", "secret");
+    draft.api_key_env = "LD_PRELOAD".into();
+
+    assert!(presenter.save_provider_profile(draft).is_none());
+    assert!(presenter.model().provider_profiles.is_empty());
+    assert!(presenter.model().status.contains("*_API_KEY"));
+}
+
+#[test]
+fn provider_profiles_bound_visible_name_and_model_lengths() {
+    let storage = Storage::open(Path::new(":memory:")).unwrap();
+    let mut presenter = Presenter::new_with_credentials(
+        storage,
+        Err(anyhow::anyhow!("runner unavailable")),
+        None,
+        Box::new(FakeCredentialStore::default()),
+    );
+    let mut draft = profile_draft(None, &"n".repeat(49), "secret");
+
+    assert!(presenter.save_provider_profile(draft).is_none());
+    assert!(presenter.model().status.contains("48"));
+
+    draft = profile_draft(None, "Valid name", "secret");
+    draft.model = "m".repeat(129);
+    assert!(presenter.save_provider_profile(draft).is_none());
+    assert!(presenter.model().status.contains("128"));
+    assert!(presenter.model().provider_profiles.is_empty());
 }
 
 #[test]

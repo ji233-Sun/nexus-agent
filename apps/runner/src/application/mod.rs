@@ -2,7 +2,7 @@ pub(crate) mod events;
 
 use nexus_domain::RunStatus;
 use nexus_protocol::{Command, ErrorCode, Event, StartRun};
-use std::{path::Path, sync::Arc};
+use std::{collections::HashSet, path::Path, sync::Arc};
 use tokio::sync::{Mutex, watch};
 use uuid::Uuid;
 
@@ -79,6 +79,27 @@ async fn start_run(request: StartRun, active: Arc<Mutex<Option<ActiveRun>>>, emi
         return;
     }
 
+    let mut environment_names = HashSet::new();
+    if request.environment.iter().any(|variable| {
+        !variable.has_safe_name() || !environment_names.insert(variable.name.as_str())
+    }) {
+        emitter
+            .send(Event::RunFailed {
+                run_id: request.run_id,
+                code: ErrorCode::InvalidEnvironment,
+                message: "Provider Profile 包含无效或重复的环境变量。".into(),
+            })
+            .await;
+        emitter
+            .send(Event::RunExited {
+                run_id: request.run_id,
+                status: RunStatus::Failed,
+                exit_code: None,
+            })
+            .await;
+        return;
+    }
+
     let cwd = match Path::new(&request.cwd).canonicalize() {
         Ok(cwd) if cwd.is_dir() => cwd,
         _ => {
@@ -140,6 +161,7 @@ async fn cancel_run(run_id: Uuid, active: &Mutex<Option<ActiveRun>>, emitter: &E
 mod tests {
     use super::*;
     use nexus_domain::{HarnessKind, ThinkingEffort};
+    use nexus_protocol::EnvironmentVariable;
 
     fn request(cwd: String) -> StartRun {
         StartRun {
@@ -151,6 +173,7 @@ mod tests {
             executable: "unused".into(),
             model: None,
             effort: ThinkingEffort::Medium,
+            environment: Vec::new(),
         }
     }
 
@@ -173,6 +196,27 @@ mod tests {
             Event::RunFailed { run_id: id, code: ErrorCode::ProjectNotFound, .. } if id == run_id));
         assert!(matches!(events.recv().await.unwrap().event,
             Event::RunExited { run_id: id, status: RunStatus::Failed, exit_code: None } if id == run_id));
+        assert!(runner.active.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn unsafe_environment_fails_without_starting_a_run() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut request = request(directory.path().to_string_lossy().into_owned());
+        request.environment.push(EnvironmentVariable {
+            name: "LD_PRELOAD".into(),
+            value: "unsafe".into(),
+        });
+        let run_id = request.run_id;
+        let (emitter, mut events) = Emitter::channel();
+        let mut runner = Runner::new(emitter);
+
+        runner.handle(Command::RunStart(request)).await;
+
+        assert!(matches!(events.recv().await.unwrap().event,
+            Event::RunFailed { run_id: id, code: ErrorCode::InvalidEnvironment, .. } if id == run_id));
+        assert!(matches!(events.recv().await.unwrap().event,
+            Event::RunExited { run_id: id, status: RunStatus::Failed, .. } if id == run_id));
         assert!(runner.active.lock().await.is_none());
     }
 

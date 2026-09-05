@@ -11,6 +11,7 @@ nexus-domain = { path = "../../crates/domain" }
 nexus-harness-claude = { path = "../../crates/harness-claude" }
 nexus-harness-codex = { path = "../../crates/harness-codex" }
 nexus-harness-core = { path = "../../crates/harness-core" }
+nexus-harness-omp = { path = "../../crates/harness-omp" }
 nexus-protocol = { path = "../../crates/protocol" }
 serde_json.workspace = true
 tokio.workspace = true

@@ -14,11 +14,23 @@ fn main() {
         }
     }
     let codex = args.first().map(String::as_str) == Some("exec");
+    let omp = args
+        .windows(2)
+        .any(|pair| pair == ["--mode", "json"]);
     fs::write(
-        if codex { "codex-args.txt" } else { "args.txt" },
+        if codex {
+            "codex-args.txt"
+        } else if omp {
+            "omp-args.txt"
+        } else {
+            "args.txt"
+        },
         args.join("\n"),
     )
     .unwrap();
+    if let Ok(value) = env::var("TEST_PROVIDER_API_KEY") {
+        fs::write("provider-env.txt", value).unwrap();
+    }
     let mut prompt = String::new();
     io::stdin().read_to_string(&mut prompt).unwrap();
     if prompt == "wait-for-cancel" {
@@ -45,6 +57,19 @@ fn main() {
         );
         println!(
             r#"{{"type":"item.completed","item":{{"id":"item-2","type":"agent_message","text":"done"}}}}"#
+        );
+    } else if omp {
+        println!(
+            r#"{{"type":"message_update","assistantMessageEvent":{{"type":"text_delta","contentIndex":0,"delta":"hello"}}}}"#
+        );
+        println!(
+            r#"{{"type":"tool_execution_start","toolCallId":"tool-1","toolName":"read","args":{{"path":"README.md"}}}}"#
+        );
+        println!(
+            r#"{{"type":"tool_execution_end","toolCallId":"tool-1","toolName":"read","result":{{"content":[{{"type":"text","text":"project"}}]}},"isError":false}}"#
+        );
+        println!(
+            r#"{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"done"}}],"stopReason":"stop"}}}}"#
         );
     } else {
         println!(

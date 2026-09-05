@@ -156,10 +156,14 @@ impl Presenter {
             self.model.status = format!("{} 可执行文件不能为空。", self.model.selected_harness);
             return false;
         }
+        let profile_ready = self
+            .model
+            .selected_provider_profile()
+            .is_some_and(|profile| profile.credential_configured);
         let Some(probe) = self
             .model
             .selected_probe()
-            .filter(|probe| probe.available && probe.authenticated)
+            .filter(|probe| probe.available && (probe.authenticated || profile_ready))
         else {
             self.model.status = format!(
                 "{} 尚未就绪，请先完成探测和登录。",
@@ -170,10 +174,17 @@ impl Presenter {
         let executable = probe.executable.clone();
         let harness_version = probe.version.clone();
         let harness = self.model.selected_harness;
-        let model = match harness {
-            HarnessKind::Claude => self.model.claude_model.cli_value().map(str::to_owned),
-            HarnessKind::Codex => None,
+        let (environment, profile_model) = match self.provider_launch_configuration() {
+            Ok(configuration) => configuration,
+            Err(error) => {
+                self.model.status = format!("无法读取 Provider Profile：{error}");
+                return false;
+            }
         };
+        let model = profile_model.or_else(|| match harness {
+            HarnessKind::Claude => self.model.claude_model.cli_value().map(str::to_owned),
+            HarnessKind::Codex | HarnessKind::Omp => None,
+        });
         let title: String = prompt.chars().take(48).collect();
         let created = self.storage.create_task_run(NewTaskRun {
             project_id: project.id,
@@ -198,6 +209,7 @@ impl Presenter {
             executable: executable.clone(),
             model,
             effort: self.model.effort,
+            environment,
         }));
         if let Some(runner) = &self.runner
             && runner.send(command).is_ok()

@@ -22,6 +22,12 @@ pub(crate) async fn run_harness(
     let mut command = ProcessCommand::new(&spec.executable);
     command
         .args(&spec.args)
+        .envs(
+            request
+                .environment
+                .iter()
+                .map(|variable| (&variable.name, &variable.value)),
+        )
         .current_dir(&spec.cwd)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())

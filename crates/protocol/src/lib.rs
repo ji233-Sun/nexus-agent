@@ -1,8 +1,9 @@
 use nexus_domain::{HarnessKind, RunStatus, ThinkingEffort};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandEnvelope {
@@ -50,6 +51,49 @@ pub struct StartRun {
     pub executable: String,
     pub model: Option<String>,
     pub effort: ThinkingEffort,
+    #[serde(default)]
+    pub environment: Vec<EnvironmentVariable>,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvironmentVariable {
+    pub name: String,
+    pub value: String,
+}
+
+impl EnvironmentVariable {
+    pub fn has_safe_name(&self) -> bool {
+        let mut characters = self.name.chars();
+        let valid_identifier = characters
+            .next()
+            .is_some_and(|character| character == '_' || character.is_ascii_uppercase())
+            && characters.all(|character| {
+                character == '_' || character.is_ascii_uppercase() || character.is_ascii_digit()
+            });
+        valid_identifier
+            && !matches!(
+                self.name.as_str(),
+                "HOME"
+                    | "PATH"
+                    | "PATHEXT"
+                    | "SHELL"
+                    | "COMSPEC"
+                    | "LD_PRELOAD"
+                    | "LD_LIBRARY_PATH"
+            )
+            && !self.name.starts_with("DYLD_")
+            && !self.name.starts_with("NEXUS_")
+    }
+}
+
+impl fmt::Debug for EnvironmentVariable {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EnvironmentVariable")
+            .field("name", &self.name)
+            .field("value", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,6 +168,7 @@ pub enum ErrorCode {
     HarnessNotFound,
     HarnessNotExecutable,
     HarnessNotAuthenticated,
+    InvalidEnvironment,
     ProjectNotFound,
     ProjectPermissionDenied,
     ProtocolVersionMismatch,
@@ -149,9 +194,14 @@ mod tests {
             executable: "codex".into(),
             model: Some("gpt-test".into()),
             effort: ThinkingEffort::XHigh,
+            environment: vec![EnvironmentVariable {
+                name: "OPENAI_API_KEY".into(),
+                value: "secret-value".into(),
+            }],
         }));
         let json = serde_json::to_string(&command).unwrap();
         assert!(json.contains(r#""kind":"run.start""#));
+        assert!(!format!("{command:?}").contains("secret-value"));
         let decoded: CommandEnvelope = serde_json::from_str(&json).unwrap();
         let Command::RunStart(request) = decoded.command else {
             panic!("expected run.start")
@@ -159,5 +209,29 @@ mod tests {
         assert_eq!(request.harness, HarnessKind::Codex);
         assert_eq!(request.model.as_deref(), Some("gpt-test"));
         assert_eq!(request.effort, ThinkingEffort::XHigh);
+        assert_eq!(request.environment[0].name, "OPENAI_API_KEY");
+        assert_eq!(request.environment[0].value, "secret-value");
+    }
+
+    #[test]
+    fn environment_names_reject_process_control_variables() {
+        for name in ["OPENAI_API_KEY", "ANTHROPIC_BASE_URL", "_PRIVATE_TOKEN"] {
+            assert!(
+                EnvironmentVariable {
+                    name: name.into(),
+                    value: "secret".into(),
+                }
+                .has_safe_name()
+            );
+        }
+        for name in ["PATH", "LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "lowercase"] {
+            assert!(
+                !EnvironmentVariable {
+                    name: name.into(),
+                    value: "secret".into(),
+                }
+                .has_safe_name()
+            );
+        }
     }
 }

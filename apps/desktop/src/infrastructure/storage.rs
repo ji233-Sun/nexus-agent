@@ -3,7 +3,8 @@ use std::{fs, path::Path, str::FromStr as _};
 use anyhow::{Context as _, Result, anyhow};
 use chrono::{DateTime, Utc};
 use nexus_domain::{
-    HarnessKind, Message, MessageKind, MessageRole, Project, RunStatus, TaskSummary, ThinkingEffort,
+    HarnessKind, Message, MessageKind, MessageRole, Project, ProviderProfile, RunStatus,
+    TaskSummary, ThinkingEffort,
 };
 use rusqlite::{Connection, OptionalExtension as _, params};
 use uuid::Uuid;
@@ -388,6 +389,18 @@ impl Storage {
         )?;
         Ok(())
     }
+
+    pub fn provider_profiles(&self) -> Result<Vec<ProviderProfile>> {
+        self.setting("provider_profiles")?
+            .map(|profiles| serde_json::from_str(&profiles).context("解析 Provider Profile"))
+            .transpose()
+            .map(Option::unwrap_or_default)
+    }
+
+    pub fn set_provider_profiles(&self, profiles: &[ProviderProfile]) -> Result<()> {
+        let profiles = serde_json::to_string(profiles).context("序列化 Provider Profile")?;
+        self.set_setting("provider_profiles", &profiles)
+    }
 }
 
 fn table_has_column(connection: &Connection, table: &str, column: &str) -> Result<bool> {
@@ -580,6 +593,33 @@ mod tests {
         let storage = Storage::open(&directory.path().join("nexus.db")).unwrap();
         storage.set_setting("model", "opus").unwrap();
         assert_eq!(storage.setting("model").unwrap().as_deref(), Some("opus"));
+    }
+
+    #[test]
+    fn provider_profile_metadata_round_trips_without_a_secret() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&directory.path().join("nexus.db")).unwrap();
+        let profile = ProviderProfile {
+            id: Uuid::new_v4(),
+            name: "DeepSeek".into(),
+            harness: HarnessKind::Omp,
+            api_key_env: "DEEPSEEK_API_KEY".into(),
+            base_url_env: None,
+            base_url: None,
+            model: Some("deepseek/deepseek-v4-pro".into()),
+            credential_configured: true,
+        };
+
+        storage
+            .set_provider_profiles(std::slice::from_ref(&profile))
+            .unwrap();
+
+        let mut expected = profile;
+        expected.credential_configured = false;
+        assert_eq!(storage.provider_profiles().unwrap(), vec![expected]);
+        let metadata = storage.setting("provider_profiles").unwrap().unwrap();
+        assert!(!metadata.contains("secret"));
+        assert!(!metadata.contains("credential_configured"));
     }
 
     #[test]
