@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use nexus_domain::{HarnessKind, ThinkingEffort};
 pub use nexus_harness_core::{DecodedEvent, LaunchSpec};
-use nexus_harness_core::{LineDecoder, resolve_executable, summarize_json};
+use nexus_harness_core::{LineDecoder, resolve_executable, tool_content};
 use nexus_protocol::HarnessProbe;
 use serde_json::Value;
 use tokio::process::Command;
@@ -171,7 +171,7 @@ fn decode_assistant(frame: &Value) -> Vec<DecodedEvent> {
                     .and_then(Value::as_str)
                     .unwrap_or("Tool")
                     .to_owned();
-                let summary = block.get("input").map(summarize_json).unwrap_or_default();
+                let summary = block.get("input").map(tool_content).unwrap_or_default();
                 events.push(DecodedEvent::ToolStarted { id, name, summary });
             }
             _ => {}
@@ -197,7 +197,7 @@ fn decode_tool_results(frame: &Value) -> Vec<DecodedEvent> {
                 .and_then(Value::as_str)
                 .unwrap_or("unknown")
                 .to_owned(),
-            output: block.get("content").map(summarize_json).unwrap_or_default(),
+            output: block.get("content").map(tool_content).unwrap_or_default(),
             is_error: block
                 .get("is_error")
                 .and_then(Value::as_bool)
@@ -242,6 +242,25 @@ mod tests {
         assert!(matches!(
             decoder.decode_line(tool).unwrap().as_slice(),
             [DecodedEvent::ToolStarted { id, name, .. }] if id == "t1" && name == "Read"
+        ));
+
+        let code = "let value = \"完整内容\";\n".repeat(100);
+        let input = serde_json::json!({"file_path": "src/main.rs", "content": code});
+        let tool = serde_json::json!({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "write-1", "name": "Write", "input": input}
+        ]}});
+        assert!(matches!(
+            decoder.decode_line(&tool.to_string()).unwrap().as_slice(),
+            [DecodedEvent::ToolStarted { summary, .. }]
+                if serde_json::from_str::<Value>(summary).unwrap() == input
+        ));
+        let result = serde_json::json!({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "write-1", "content": code, "is_error": true}
+        ]}});
+        assert!(matches!(
+            decoder.decode_line(&result.to_string()).unwrap().as_slice(),
+            [DecodedEvent::ToolCompleted { id, output, is_error: true }]
+                if id == "write-1" && output == &code
         ));
     }
 

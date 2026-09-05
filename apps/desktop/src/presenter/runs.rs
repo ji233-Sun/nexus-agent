@@ -1,6 +1,6 @@
 use super::{Presenter, executable_setting_key};
 use crate::infrastructure::storage::NewTaskRun;
-use nexus_domain::{HarnessKind, MessageKind, MessageRole, RunStatus};
+use nexus_domain::{HarnessKind, MessageKind, MessageRole, RunStatus, ToolMetadata};
 use nexus_protocol::{Command, CommandEnvelope, Event, StartRun};
 use std::time::Instant;
 use uuid::Uuid;
@@ -51,13 +51,19 @@ impl Presenter {
                 if self.model.active_run == Some(run_id) =>
             {
                 self.model.streaming_text.clear();
-                self.persist_live_message(run_id, MessageRole::Assistant, MessageKind::Text, &text);
+                self.persist_live_message(
+                    run_id,
+                    MessageRole::Assistant,
+                    MessageKind::Text,
+                    &text,
+                    None,
+                );
             }
             Event::RunToolStarted {
                 run_id,
+                tool_id,
                 name,
                 summary,
-                ..
             } if self.model.active_run == Some(run_id) => {
                 let content = if summary.is_empty() {
                     name
@@ -69,13 +75,17 @@ impl Presenter {
                     MessageRole::Tool,
                     MessageKind::ToolCall,
                     &content,
+                    Some(ToolMetadata {
+                        id: tool_id,
+                        is_error: false,
+                    }),
                 );
             }
             Event::RunToolCompleted {
                 run_id,
+                tool_id,
                 output,
                 is_error,
-                ..
             } if self.model.active_run == Some(run_id) => {
                 let content = if is_error {
                     format!("工具执行失败\n{output}")
@@ -87,6 +97,10 @@ impl Presenter {
                     MessageRole::Tool,
                     MessageKind::ToolResult,
                     &content,
+                    Some(ToolMetadata {
+                        id: tool_id,
+                        is_error,
+                    }),
                 );
             }
             Event::RunStatusChanged {
@@ -108,6 +122,7 @@ impl Presenter {
                     MessageRole::System,
                     MessageKind::Error,
                     &message,
+                    None,
                 );
             }
             Event::RunExited {
@@ -140,13 +155,14 @@ impl Presenter {
         role: MessageRole,
         kind: MessageKind,
         content: &str,
+        tool: Option<ToolMetadata>,
     ) {
         let Some(task_id) = self.model.active_task else {
             return;
         };
         if let Ok(message) = self
             .storage
-            .append_message(task_id, run_id, role, kind, content)
+            .append_message(task_id, run_id, role, kind, content, tool)
         {
             self.model.messages.push(message);
         }

@@ -4,7 +4,7 @@ use anyhow::{Context as _, Result, anyhow};
 use chrono::{DateTime, Utc};
 use nexus_domain::{
     HarnessKind, Message, MessageKind, MessageRole, Project, ProviderProfile, RunStatus,
-    TaskSummary, ThinkingEffort,
+    TaskSummary, ThinkingEffort, ToolMetadata,
 };
 use rusqlite::{Connection, OptionalExtension as _, params};
 use uuid::Uuid;
@@ -103,7 +103,10 @@ impl Storage {
                 [],
             )?;
         }
-        connection.execute_batch("PRAGMA user_version = 3;")?;
+        if !table_has_column(&connection, "messages", "tool")? {
+            connection.execute("ALTER TABLE messages ADD COLUMN tool TEXT", [])?;
+        }
+        connection.execute_batch("PRAGMA user_version = 4;")?;
         let storage = Self { connection };
         storage.recover_interrupted()?;
         Ok(storage)
@@ -318,6 +321,7 @@ impl Storage {
         role: MessageRole,
         kind: MessageKind,
         content: &str,
+        tool: Option<ToolMetadata>,
     ) -> Result<Message> {
         let sequence = self.connection.query_row(
             "SELECT COALESCE(MAX(sequence), 0) + 1 FROM messages WHERE task_id = ?1",
@@ -332,11 +336,12 @@ impl Storage {
             role,
             kind,
             content: content.to_owned(),
+            tool,
             created_at: Utc::now(),
         };
         self.connection.execute(
-            "INSERT INTO messages(id, task_id, run_id, sequence, role, kind, content, created_at)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO messages(id, task_id, run_id, sequence, role, kind, content, created_at, tool)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 message.id.to_string(),
                 task_id.to_string(),
@@ -345,7 +350,8 @@ impl Storage {
                 role_string(role),
                 kind_string(kind),
                 content,
-                message.created_at.to_rfc3339()
+                message.created_at.to_rfc3339(),
+                message.tool.as_ref().map(serde_json::to_string).transpose()?
             ],
         )?;
         Ok(message)
@@ -353,7 +359,7 @@ impl Storage {
 
     pub fn messages(&self, task_id: Uuid) -> Result<Vec<Message>> {
         let mut statement = self.connection.prepare(
-            "SELECT id, task_id, run_id, sequence, role, kind, content, created_at
+            "SELECT id, task_id, run_id, sequence, role, kind, content, created_at, tool
              FROM messages WHERE task_id = ?1 ORDER BY sequence",
         )?;
         let rows = statement.query_map([task_id.to_string()], |row| {
@@ -366,6 +372,10 @@ impl Storage {
                 kind: parse_kind(row.get::<_, String>(5)?)?,
                 content: row.get(6)?,
                 created_at: parse_date(row.get::<_, String>(7)?)?,
+                tool: row
+                    .get::<_, Option<String>>(8)?
+                    .map(|tool| serde_json::from_str(&tool).map_err(to_sql_error))
+                    .transpose()?,
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -568,6 +578,7 @@ mod tests {
                 MessageRole::Assistant,
                 MessageKind::Text,
                 "project summary",
+                None,
             )
             .unwrap();
         storage
@@ -585,6 +596,39 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].content, "describe this project");
         assert_eq!(messages[1].content, "project summary");
+        assert!(messages.iter().all(|message| message.tool.is_none()));
+
+        // Simulate the previous schema with real messages, then migrate in place.
+        storage
+            .connection
+            .execute("ALTER TABLE messages DROP COLUMN tool", [])
+            .unwrap();
+        drop(storage);
+        let storage = Storage::open(&database).unwrap();
+        assert_eq!(
+            storage.messages(task_id).unwrap()[1].content,
+            "project summary"
+        );
+        let content = "完整工具输出\n".repeat(100);
+        let metadata = ToolMetadata {
+            id: "command-1".into(),
+            is_error: true,
+        };
+        storage
+            .append_message(
+                task_id,
+                run_id,
+                MessageRole::Tool,
+                MessageKind::ToolResult,
+                &content,
+                Some(metadata.clone()),
+            )
+            .unwrap();
+        drop(storage);
+        let storage = Storage::open(&database).unwrap();
+        let messages = storage.messages(task_id).unwrap();
+        assert_eq!(messages[2].content, content);
+        assert_eq!(messages[2].tool.as_ref(), Some(&metadata));
     }
 
     #[test]

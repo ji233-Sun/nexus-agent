@@ -5,7 +5,7 @@ use std::{
 
 use nexus_domain::{HarnessKind, ThinkingEffort};
 pub use nexus_harness_core::{DecodedEvent, LaunchSpec};
-use nexus_harness_core::{LineDecoder, resolve_executable, summarize_json, summarize_text};
+use nexus_harness_core::{LineDecoder, resolve_executable, summarize_text, tool_content};
 use nexus_protocol::HarnessProbe;
 use serde_json::Value;
 use tokio::process::Command;
@@ -146,19 +146,16 @@ fn decode_started_item(item: &Value) -> Vec<DecodedEvent> {
         Some("command_execution") => vec![DecodedEvent::ToolStarted {
             id,
             name: "Command".into(),
-            summary: summarize_text(
-                item.get("command")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
-            ),
+            summary: item
+                .get("command")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
         }],
         Some("mcp_tool_call") => vec![DecodedEvent::ToolStarted {
             id,
             name: mcp_tool_name(item),
-            summary: item
-                .get("arguments")
-                .map(summarize_json)
-                .unwrap_or_default(),
+            summary: item.get("arguments").map(tool_content).unwrap_or_default(),
         }],
         Some("web_search") => vec![DecodedEvent::ToolStarted {
             id,
@@ -200,7 +197,7 @@ fn decode_completed_item(item: &Value) -> Vec<DecodedEvent> {
                 .get("aggregated_output")
                 .and_then(Value::as_str)
                 .filter(|output| !output.is_empty())
-                .map(summarize_text)
+                .map(str::to_owned)
                 .unwrap_or_else(|| match exit_code {
                     Some(code) => format!("退出代码：{code}"),
                     None => format!("命令状态：{status}"),
@@ -212,7 +209,7 @@ fn decode_completed_item(item: &Value) -> Vec<DecodedEvent> {
             }]
         }
         Some("file_change") => {
-            let summary = summarize_file_changes(item);
+            let summary = tool_content(item);
             let status = item
                 .get("status")
                 .and_then(Value::as_str)
@@ -234,7 +231,7 @@ fn decode_completed_item(item: &Value) -> Vec<DecodedEvent> {
             let error = item.pointer("/error/message").and_then(Value::as_str);
             let output = error
                 .map(str::to_owned)
-                .or_else(|| item.get("result").map(summarize_json))
+                .or_else(|| item.get("result").map(tool_content))
                 .unwrap_or_else(|| "MCP 工具调用已完成".into());
             vec![DecodedEvent::ToolCompleted {
                 id,
@@ -278,28 +275,6 @@ fn mcp_tool_name(item: &Value) -> String {
     let server = item.get("server").and_then(Value::as_str).unwrap_or("MCP");
     let tool = item.get("tool").and_then(Value::as_str).unwrap_or("Tool");
     format!("MCP · {server}/{tool}")
-}
-
-fn summarize_file_changes(item: &Value) -> String {
-    let summary = item
-        .get("changes")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .map(|change| {
-            let kind = change
-                .get("kind")
-                .and_then(Value::as_str)
-                .unwrap_or("update");
-            let path = change
-                .get("path")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            format!("{kind}: {path}")
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    summarize_text(&summary)
 }
 
 fn decode_todo_list(item: &Value) -> Vec<DecodedEvent> {
@@ -385,6 +360,32 @@ mod tests {
             decoder.decode_line(message).unwrap(),
             vec![DecodedEvent::MessageCompleted("done".into())]
         );
+
+        let long_text = "完整命令和输出\n".repeat(100);
+        let started = serde_json::json!({"type": "item.started", "item": {
+            "id": "long", "type": "command_execution", "command": long_text
+        }});
+        assert!(matches!(
+            decoder.decode_line(&started.to_string()).unwrap().as_slice(),
+            [DecodedEvent::ToolStarted { summary, .. }] if summary == &long_text
+        ));
+        let completed = serde_json::json!({"type": "item.completed", "item": {
+            "id": "long", "type": "command_execution", "aggregated_output": long_text,
+            "status": "completed", "exit_code": 1
+        }});
+        assert!(matches!(
+            decoder.decode_line(&completed.to_string()).unwrap().as_slice(),
+            [DecodedEvent::ToolCompleted { output, is_error: true, .. }] if output == &long_text
+        ));
+        let item = serde_json::json!({"id": "edit", "type": "file_change", "status": "completed",
+            "changes": [{"kind": "update", "path": "main.rs", "diff": long_text}]
+        });
+        let completed = serde_json::json!({"type": "item.completed", "item": item});
+        assert!(matches!(
+            decoder.decode_line(&completed.to_string()).unwrap().as_slice(),
+            [DecodedEvent::ToolStarted { summary, .. }, DecodedEvent::ToolCompleted { .. }]
+                if serde_json::from_str::<Value>(summary).unwrap() == item
+        ));
     }
 
     #[test]

@@ -4,6 +4,7 @@ mod settings;
 mod sidebar;
 pub(crate) mod theme;
 mod timeline;
+mod tools;
 
 use crate::{
     model::history::HistoryMessage,

@@ -1,4 +1,5 @@
 use super::*;
+use crate::model::tools::{TimelineItem, timeline_items};
 
 impl NexusView {
     pub(super) fn render_timeline(
@@ -41,12 +42,16 @@ impl NexusView {
                             .gap(px(20.))
                             .when(empty, |element| element.child(self.render_welcome(compact)))
                             .when(!history, |element| {
-                                element.children(
-                                    model
-                                        .messages
-                                        .iter()
-                                        .map(|message| self.render_message(message, window, cx)),
-                                )
+                                element.children(timeline_items(&model.messages).iter().map(
+                                    |item| match item {
+                                        TimelineItem::Message(message) => {
+                                            self.render_message(message, window, cx)
+                                        }
+                                        TimelineItem::Tools(batch) => {
+                                            self.render_tool_batch(batch, window, cx)
+                                        }
+                                    },
+                                ))
                             })
                             .when(history, |element| {
                                 element.children(

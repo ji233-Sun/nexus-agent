@@ -77,6 +77,52 @@ pub(crate) fn fixture() -> (Presenter, FakeRunner, tempfile::TempDir) {
     (presenter, runner, directory)
 }
 
+#[test]
+fn tool_events_preserve_ids_and_full_payloads_after_reloading_a_task() {
+    let (mut presenter, runner, _directory) = fixture();
+    assert!(presenter.submit("run tools", "claude"));
+    let run_id = presenter.model().active_run.unwrap();
+    let task_id = presenter.model().active_task.unwrap();
+    let long_text = "完整内容\n".repeat(100);
+    for tool_id in ["a", "b"] {
+        runner.emit(Event::RunToolStarted {
+            run_id,
+            tool_id: tool_id.into(),
+            name: "Bash".into(),
+            summary: long_text.clone(),
+        });
+    }
+    for tool_id in ["b", "a"] {
+        runner.emit(Event::RunToolCompleted {
+            run_id,
+            tool_id: tool_id.into(),
+            output: long_text.clone(),
+            is_error: tool_id == "b",
+        });
+    }
+    presenter.drain_events();
+    presenter.select_task(task_id);
+    let messages = &presenter.model().messages;
+    assert_eq!(messages.len(), 5);
+    assert_eq!(messages[1].tool.as_ref().unwrap().id, "a");
+    assert_eq!(messages[2].tool.as_ref().unwrap().id, "b");
+    assert_eq!(messages[3].tool.as_ref().unwrap().id, "b");
+    assert!(messages[3].tool.as_ref().unwrap().is_error);
+    assert!(!messages[4].tool.as_ref().unwrap().is_error);
+    assert_eq!(messages[1].content, format!("Bash\n{long_text}"));
+    assert_eq!(messages[4].content, long_text);
+    let items = crate::model::tools::timeline_items(messages);
+    let crate::model::tools::TimelineItem::Tools(batch) = &items[1] else {
+        panic!("expected one tool batch")
+    };
+    assert_eq!(items.len(), 2);
+    assert_eq!(batch.len(), 2);
+    assert_eq!(batch[0].result.unwrap().id, messages[4].id);
+    assert_eq!(batch[1].result.unwrap().id, messages[3].id);
+    assert!(!batch[0].is_error());
+    assert!(batch[1].is_error());
+}
+
 fn ready_probe(harness: HarnessKind) -> HarnessProbe {
     HarnessProbe {
         harness,

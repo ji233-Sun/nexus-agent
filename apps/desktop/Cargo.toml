@@ -20,6 +20,7 @@ rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 smol.workspace = true
+syntect = { version = "5.3.0", default-features = false, features = ["default-syntaxes", "default-themes", "regex-fancy"] }
 tokio = { workspace = true, features = ["net"] }
 tower-http.workspace = true
 uuid.workspace = true

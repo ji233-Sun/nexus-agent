@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use nexus_domain::{HarnessKind, ThinkingEffort};
 pub use nexus_harness_core::{DecodedEvent, LaunchSpec};
-use nexus_harness_core::{LineDecoder, resolve_executable, summarize_json, summarize_text};
+use nexus_harness_core::{LineDecoder, resolve_executable, summarize_text, tool_content};
 use nexus_protocol::HarnessProbe;
 use serde_json::Value;
 use tokio::process::Command;
@@ -129,13 +129,13 @@ fn decode_frame(frame: &Value) -> Vec<DecodedEvent> {
         Some("tool_execution_start") => vec![DecodedEvent::ToolStarted {
             id: event_string(frame, "toolCallId", "unknown"),
             name: event_string(frame, "toolName", "Tool"),
-            summary: frame.get("args").map(summarize_json).unwrap_or_default(),
+            summary: frame.get("args").map(tool_content).unwrap_or_default(),
         }],
         Some("tool_execution_end") => vec![DecodedEvent::ToolCompleted {
             id: event_string(frame, "toolCallId", "unknown"),
             output: frame
                 .get("result")
-                .map(summarize_tool_result)
+                .map(format_tool_result)
                 .unwrap_or_default(),
             is_error: frame
                 .get("isError")
@@ -195,7 +195,11 @@ fn decode_message(frame: &Value) -> Vec<DecodedEvent> {
         .collect()
 }
 
-fn summarize_tool_result(result: &Value) -> String {
+fn format_tool_result(result: &Value) -> String {
+    // Edit tools include the actual patch in details (including hashline edits).
+    if result.get("details").is_some() {
+        return tool_content(result);
+    }
     let text = result
         .get("content")
         .and_then(Value::as_array)
@@ -206,9 +210,9 @@ fn summarize_tool_result(result: &Value) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     if text.is_empty() {
-        summarize_json(result)
+        tool_content(result)
     } else {
-        summarize_text(&text)
+        text
     }
 }
 
@@ -298,6 +302,31 @@ mod tests {
         assert_eq!(
             decoder.decode_line(message).unwrap(),
             vec![DecodedEvent::MessageCompleted("done".into())]
+        );
+
+        let code = "完整修改内容\n".repeat(100);
+        let args = serde_json::json!({"path": "main.rs", "content": code});
+        let started = serde_json::json!({"type": "tool_execution_start", "toolCallId": "write",
+            "toolName": "write", "args": args});
+        assert!(matches!(
+            decoder.decode_line(&started.to_string()).unwrap().as_slice(),
+            [DecodedEvent::ToolStarted { summary, .. }]
+                if serde_json::from_str::<Value>(summary).unwrap() == args
+        ));
+        let result = serde_json::json!({"content": [{"type": "text", "text": code}],
+            "details": {"diff": "-old\n+new"}});
+        let completed = serde_json::json!({"type": "tool_execution_end", "toolCallId": "write",
+            "result": result, "isError": false});
+        assert!(matches!(
+            decoder.decode_line(&completed.to_string()).unwrap().as_slice(),
+            [DecodedEvent::ToolCompleted { output, .. }]
+                if serde_json::from_str::<Value>(output).unwrap() == result
+        ));
+        assert_eq!(
+            format_tool_result(&serde_json::json!({
+                "content": [{"type": "text", "text": code}]
+            })),
+            code
         );
     }
 

@@ -267,14 +267,10 @@ impl NexusView {
         content: &str,
         kind: MessageKind,
         _window: &mut Window,
-        cx: &mut Context<NexusView>,
+        _cx: &mut Context<NexusView>,
     ) -> AnyElement {
         let id = id.into();
-        let expanded = self.expanded_messages.contains(&id);
         let animated = !self.reduced_motion;
-        let collapsible = matches!(kind, MessageKind::ToolCall | MessageKind::ToolResult)
-            && (content.lines().count() > 6 || content.chars().count() > 400);
-        let toggle_id = id.clone();
         let label = match role {
             MessageRole::User => "You",
             MessageRole::Assistant => "Agent",
@@ -327,29 +323,6 @@ impl NexusView {
                                 .child(label.to_owned()),
                         )
                     })
-                    .when(collapsible, |element| {
-                        element.child(
-                            Button::new((id.clone(), "disclosure"))
-                                .ghost()
-                                .small()
-                                .icon(if expanded {
-                                    IconName::ChevronDown
-                                } else {
-                                    IconName::ChevronRight
-                                })
-                                .label(if expanded {
-                                    "收起工具输出"
-                                } else {
-                                    "展开完整工具输出"
-                                })
-                                .on_click(cx.listener(move |app, _, _, cx| {
-                                    if !app.expanded_messages.remove(&toggle_id) {
-                                        app.expanded_messages.insert(toggle_id.clone());
-                                    }
-                                    cx.notify();
-                                })),
-                        )
-                    })
                     .child(if kind == MessageKind::Text {
                         TextView::markdown(id.clone(), content.to_owned())
                             .text_size(px(15.))
@@ -399,7 +372,6 @@ impl NexusView {
                             })
                             .whitespace_normal()
                             .line_height(relative(1.55))
-                            .when(collapsible && !expanded, |element| element.line_clamp(3))
                             .when(
                                 matches!(kind, MessageKind::ToolCall | MessageKind::ToolResult),
                                 |element| element.font_family(MONO_FONT),
@@ -498,6 +470,135 @@ mod tests {
     use nexus_protocol::HarnessProbe;
     use std::path::Path;
 
+    #[gpui::test]
+    fn tool_batches_collapse_and_scroll_without_moving_the_timeline(cx: &mut gpui::TestAppContext) {
+        use crate::infrastructure::storage::NewTaskRun;
+        use gpui::{ScrollDelta, ScrollWheelEvent, point};
+        use nexus_domain::ToolMetadata;
+
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let directory = tempfile::tempdir().unwrap();
+        let mut storage = Storage::open(Path::new(":memory:")).unwrap();
+        let project = storage.open_project(directory.path()).unwrap();
+        let (task_id, run_id) = storage
+            .create_task_run(NewTaskRun {
+                project_id: project.id,
+                title: "Tool details",
+                prompt: "Check these tools",
+                harness: HarnessKind::Claude,
+                executable: "claude",
+                model: None,
+                effort: ThinkingEffort::Low,
+                harness_version: None,
+            })
+            .unwrap();
+        let mut ids = Vec::new();
+        for index in 0..12 {
+            let tool = ToolMetadata {
+                id: format!("tool-{index}"),
+                is_error: false,
+            };
+            let message = storage
+                .append_message(
+                    task_id,
+                    run_id,
+                    MessageRole::Tool,
+                    MessageKind::ToolCall,
+                    "Command\ncargo test",
+                    Some(tool.clone()),
+                )
+                .unwrap();
+            ids.push(message.id);
+            storage
+                .append_message(
+                    task_id,
+                    run_id,
+                    MessageRole::Tool,
+                    MessageKind::ToolResult,
+                    &"A complete output line\n".repeat(100),
+                    Some(tool),
+                )
+                .unwrap();
+        }
+        storage
+            .append_message(
+                task_id,
+                run_id,
+                MessageRole::Assistant,
+                MessageKind::Text,
+                &"Assistant message after the tools.\n\n".repeat(80),
+                None,
+            )
+            .unwrap();
+        let mut presenter = Presenter::new(storage, Err(anyhow::anyhow!("test")), None);
+        presenter.select_project(project);
+        presenter.select_task(task_id);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut view = NexusView::new(presenter, window, cx);
+            view.reduced_motion = true;
+            view
+        });
+        dropdown_frame(cx, 0);
+        let batch_selector = format!("tool-batch-{}", ids[0]).leak();
+        let viewport_selector = format!("tool-batch-viewport-{}", ids[0]).leak();
+        let row_selector = format!("tool-row-{}", ids[0]).leak();
+        let detail_selector = format!("tool-detail-{}-0", ids[0]).leak();
+        assert!(cx.debug_bounds(row_selector).is_none());
+        let trigger = cx.debug_bounds(batch_selector).unwrap().center();
+        cx.simulate_click(trigger, Default::default());
+        dropdown_frame(cx, 0);
+        assert!(
+            view.read_with(cx, |view, _| view
+                .expanded_messages
+                .contains(&(ElementId::from(ids[0]), "tool-batch").into())),
+            "batch trigger at {trigger:?} should expand its content"
+        );
+        let viewport = cx.debug_bounds(viewport_selector).unwrap();
+        assert!(viewport.size.height <= px(240.));
+        assert!(cx.debug_bounds(detail_selector).is_none());
+        let timeline = view.read_with(cx, |view, _| view.timeline_scroll.clone());
+        let before = timeline.offset();
+        let first_y = cx.debug_bounds(row_selector).unwrap().top();
+        cx.simulate_event(ScrollWheelEvent {
+            position: viewport.center(),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-50.))),
+            ..Default::default()
+        });
+        dropdown_frame(cx, 0);
+        assert!(cx.debug_bounds(row_selector).unwrap().top() < first_y);
+        assert_eq!(timeline.offset(), before);
+        cx.simulate_event(ScrollWheelEvent {
+            position: viewport.center(),
+            delta: ScrollDelta::Pixels(point(px(0.), px(50.))),
+            ..Default::default()
+        });
+        dropdown_frame(cx, 0);
+        let trigger = cx.debug_bounds(row_selector).unwrap().center();
+        cx.simulate_click(trigger, Default::default());
+        dropdown_frame(cx, 0);
+        assert!(cx.debug_bounds(detail_selector).unwrap().size.height <= px(200.));
+        assert!(cx.debug_bounds(viewport_selector).unwrap().size.height <= px(240.));
+        let row_before = cx.debug_bounds(row_selector).unwrap();
+        let output_selector = format!("tool-detail-{}-1", ids[0]).leak();
+        let output = cx.debug_bounds(output_selector).unwrap();
+        let content_selector = format!("tool-detail-content-{}-1", ids[0]).leak();
+        let content_before = cx.debug_bounds(content_selector).unwrap();
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(output.left() + px(24.), output.top() + px(12.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-45.))),
+            ..Default::default()
+        });
+        dropdown_frame(cx, 0);
+        assert!(cx.debug_bounds(content_selector).unwrap().top() < content_before.top());
+        assert_eq!(cx.debug_bounds(row_selector).unwrap(), row_before);
+        assert_eq!(timeline.offset(), before);
+        let trigger = cx.debug_bounds(batch_selector).unwrap().center();
+        cx.simulate_click(trigger, Default::default());
+        dropdown_frame(cx, 0);
+        assert!(cx.debug_bounds(viewport_selector).is_none());
+    }
+
     struct DropdownHarness {
         reduced_motion: bool,
         disabled: bool,
@@ -556,6 +657,8 @@ mod tests {
     fn dropdown_frame(cx: &mut gpui::VisualTestContext, millis: u64) {
         cx.executor().advance_clock(Duration::from_millis(millis));
         cx.update(|window, cx| {
+            // Cached panes must repaint to repopulate the frame's debug selectors.
+            window.refresh();
             window.simulate_next_frame(cx);
             let _ = window.draw(cx);
         });
