@@ -118,7 +118,7 @@ impl Presenter {
             remote_control.endpoint(),
             remote_control.token()
         );
-        self.model.status = "远程控制链接已复制；使用 FRP 时请替换其中的主机和端口。".into();
+        self.model.status = "远程控制链接已复制。".into();
         self.notify_remote_changed();
         Some(link)
     }

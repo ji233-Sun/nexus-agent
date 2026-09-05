@@ -28,7 +28,11 @@ pub const TOKEN_SETTING_KEY: &str = "remote_control_token";
 
 const DEFAULT_BIND_ADDRESS: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3210);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
+const COMMAND_QUEUE_CAPACITY: usize = 128;
 const MAX_PROMPT_BYTES: usize = 64 * 1024;
+const WEB_INDEX: &str = include_str!("../../remote-web/dist/index.html");
+const WEB_SCRIPT: &str = include_str!("../../remote-web/dist/assets/app.js");
+const WEB_STYLES: &str = include_str!("../../remote-web/dist/assets/app.css");
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RemoteProject {
@@ -88,7 +92,7 @@ enum RemoteSignal {
 #[derive(Clone)]
 struct ServerState {
     token: Arc<str>,
-    commands: mpsc::Sender<RemoteCommand>,
+    commands: mpsc::SyncSender<RemoteCommand>,
     signals: broadcast::Sender<RemoteSignal>,
 }
 
@@ -123,7 +127,7 @@ impl RemoteControl {
             .enable_all()
             .build()
             .context("创建远程控制运行时")?;
-        let (command_tx, commands) = mpsc::channel();
+        let (command_tx, commands) = mpsc::sync_channel(COMMAND_QUEUE_CAPACITY);
         let (signals, _) = broadcast::channel(64);
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let token: Arc<str> = token.into();
@@ -204,7 +208,10 @@ fn router(state: ServerState) -> Router {
         .allow_methods([Method::GET, Method::POST])
         .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
     Router::new()
-        .route("/", get(service_info))
+        .route("/", get(web_app))
+        .route("/assets/app.js", get(web_script))
+        .route("/assets/app.css", get(web_styles))
+        .route("/api/v1", get(service_info))
         .route("/health", get(health))
         .route("/api/v1/state", get(get_state))
         .route("/api/v1/tasks/{task_id}/messages", get(get_messages))
@@ -213,6 +220,29 @@ fn router(state: ServerState) -> Router {
         .route("/api/v1/events", get(events))
         .layer(cors)
         .with_state(state)
+}
+
+async fn web_app() -> Response {
+    static_response("text/html; charset=utf-8", WEB_INDEX)
+}
+
+async fn web_script() -> Response {
+    static_response("text/javascript; charset=utf-8", WEB_SCRIPT)
+}
+
+async fn web_styles() -> Response {
+    static_response("text/css; charset=utf-8", WEB_STYLES)
+}
+
+fn static_response(content_type: &'static str, body: &'static str) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 #[derive(Serialize)]
@@ -243,10 +273,7 @@ async fn get_state(
 ) -> Result<Json<RemoteState>, ApiError> {
     authorize(&state, &headers)?;
     let (reply, response) = oneshot::channel();
-    state
-        .commands
-        .send(RemoteCommand::GetState { reply })
-        .map_err(|_| ApiError::unavailable("Nexus 界面已断开"))?;
+    enqueue(&state, RemoteCommand::GetState { reply })?;
     Ok(Json(wait_for_response(response).await?))
 }
 
@@ -257,10 +284,7 @@ async fn get_messages(
 ) -> Result<Json<Vec<Message>>, ApiError> {
     authorize(&state, &headers)?;
     let (reply, response) = oneshot::channel();
-    state
-        .commands
-        .send(RemoteCommand::GetMessages { task_id, reply })
-        .map_err(|_| ApiError::unavailable("Nexus 界面已断开"))?;
+    enqueue(&state, RemoteCommand::GetMessages { task_id, reply })?;
     Ok(Json(wait_for_response(response).await?))
 }
 
@@ -289,14 +313,14 @@ async fn start_run(
         return Err(ApiError::invalid("Prompt 超过 64 KiB 限制"));
     }
     let (reply, response) = oneshot::channel();
-    state
-        .commands
-        .send(RemoteCommand::StartRun {
+    enqueue(
+        &state,
+        RemoteCommand::StartRun {
             project_id: request.project_id,
             prompt,
             reply,
-        })
-        .map_err(|_| ApiError::unavailable("Nexus 界面已断开"))?;
+        },
+    )?;
     wait_for_response(response)
         .await?
         .map_err(ApiError::conflict)?;
@@ -312,10 +336,7 @@ async fn cancel_run(
 ) -> Result<(StatusCode, Json<ActionResponse>), ApiError> {
     authorize(&state, &headers)?;
     let (reply, response) = oneshot::channel();
-    state
-        .commands
-        .send(RemoteCommand::CancelRun { reply })
-        .map_err(|_| ApiError::unavailable("Nexus 界面已断开"))?;
+    enqueue(&state, RemoteCommand::CancelRun { reply })?;
     wait_for_response(response)
         .await?
         .map_err(ApiError::conflict)?;
@@ -384,6 +405,17 @@ fn authorize(state: &ServerState, headers: &HeaderMap) -> Result<(), ApiError> {
         Ok(())
     } else {
         Err(ApiError::unauthorized())
+    }
+}
+
+fn enqueue(state: &ServerState, command: RemoteCommand) -> Result<(), ApiError> {
+    match state.commands.try_send(command) {
+        Ok(()) => Ok(()),
+        Err(mpsc::TrySendError::Full(_)) => Err(ApiError {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: "远程请求过多，请稍后重试".into(),
+        }),
+        Err(mpsc::TrySendError::Disconnected(_)) => Err(ApiError::unavailable("Nexus 界面已断开")),
     }
 }
 
@@ -459,7 +491,7 @@ mod tests {
 
     use super::*;
 
-    fn test_router(commands: mpsc::Sender<RemoteCommand>) -> Router {
+    fn test_router(commands: mpsc::SyncSender<RemoteCommand>) -> Router {
         let (signals, _) = broadcast::channel(4);
         router(ServerState {
             token: "secret-token".into(),
@@ -504,8 +536,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn websocket_accepts_the_token_and_streams_change_notifications() {
+        let remote =
+            RemoteControl::start_on("127.0.0.1:0".parse().unwrap(), "secret-token".into()).unwrap();
+        let socket_url = format!("ws://{}/api/v1/events?token=secret-token", remote.address);
+        let (mut socket, _) = tokio_tungstenite::connect_async(socket_url).await.unwrap();
+
+        let initial = socket.next().await.unwrap().unwrap();
+        assert_eq!(initial.into_text().unwrap(), r#"{"kind":"state.changed"}"#);
+        remote.notify_changed();
+        let changed = socket.next().await.unwrap().unwrap();
+        assert_eq!(changed.into_text().unwrap(), r#"{"kind":"state.changed"}"#);
+
+        socket.close(None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn web_app_is_available_without_exposing_api_data() {
+        let (commands, _) = mpsc::sync_channel(4);
+        let response = test_router(commands)
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/html; charset=utf-8"
+        );
+        let body = to_bytes(response.into_body(), 16 * 1024).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("Nexus Remote"));
+    }
+
+    #[tokio::test]
     async fn state_endpoint_requires_the_access_token() {
-        let (commands, _) = mpsc::channel();
+        let (commands, _) = mpsc::sync_channel(4);
         let response = test_router(commands)
             .oneshot(
                 Request::builder()
@@ -521,7 +586,7 @@ mod tests {
 
     #[tokio::test]
     async fn state_endpoint_returns_the_ui_snapshot() {
-        let (commands, receiver) = mpsc::channel();
+        let (commands, receiver) = mpsc::sync_channel(4);
         let responder = thread::spawn(move || {
             let RemoteCommand::GetState { reply } = receiver.recv().unwrap() else {
                 panic!("expected state request")
@@ -550,7 +615,7 @@ mod tests {
     #[tokio::test]
     async fn run_endpoint_validates_and_forwards_the_prompt() {
         let project_id = Uuid::new_v4();
-        let (commands, receiver) = mpsc::channel();
+        let (commands, receiver) = mpsc::sync_channel(4);
         let responder = thread::spawn(move || {
             let RemoteCommand::StartRun {
                 project_id: received_project_id,

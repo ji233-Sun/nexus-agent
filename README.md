@@ -12,6 +12,7 @@ Nexus Agent 是一个面向 Linux、macOS 和 Windows 的本地桌面应用，�
 - 通过 JSON Lines Runner 启动 Harness，显示文本、工具调用、状态和错误。
 - 取消和关闭时清理 Harness 进程树：Unix 先中断再超时终止，Windows 使用系统 `taskkill /T /F`。
 - SQLite 持久化 Nexus 发起的项目、任务、Run 和最终消息；启动时将遗留运行标为 `Interrupted`。
+- 在本机回环地址提供带令牌鉴权的 Remote Control 服务，并内置 React Web Client，可通过 FRP TCP 转发后远程查看会话、发起任务和取消运行。
 - 提示项目中的未提交修改，但不创建 Worktree，也不执行 Git 写操作。
 
 Claude Code 以 `--permission-mode acceptEdits` 运行：文件编辑按 Claude Code 的该模式处理，其余受限工具仍遵循 Claude Code 自身权限策略。
@@ -74,6 +75,30 @@ Windows 的程序探测支持 `PATHEXT` 中的 `.exe`、`.com`、`.bat` 和 `.cm
 
 应用内可切换 Harness 并修改各自的可执行文件路径。Claude 模型与通用思考层级会持久化：Claude 分别转换为 `--model` 与 `--effort` 参数，Codex 使用 CLI 默认模型并通过 `model_reasoning_effort` 配置覆盖思考层级。两种 Harness 的 Prompt 都通过子进程 stdin 传递，不会出现在进程参数中。
 
+## Remote Control
+
+Desktop 启动后默认在 `127.0.0.1:3210` 提供 HTTP/WebSocket 服务。右侧 `REMOTE CONTROL` 面板会显示服务地址，并提供“复制链接”和“复制令牌”按钮。访问令牌保存在现有 SQLite `settings` 表中；API 请求必须使用 Bearer Token，WebSocket 使用页面生成的临时连接参数。
+
+直接在本机打开复制的链接即可进入内置 React 页面。通过 FRP 时，创建一个 TCP 代理，将公网端口转发到本机 `127.0.0.1:3210`，再把链接中的主机和端口替换成 FRP 公网地址。令牌放在 URL Fragment（`#token=...`）中，不会随 HTTP 请求发送；页面读取后会立即清除地址栏 Fragment，并只在当前标签页的 `sessionStorage` 中保留令牌。
+
+远程页面可以：
+
+- 浏览 Nexus 自己保存的项目、会话和消息；Codex CLI/Desktop 的只读导入历史不通过 Remote API 暴露。
+- 使用 Desktop 当前选择的 Harness、模型和思考层级发起任务。
+- 通过 WebSocket 接收状态变化和流式输出，并取消当前运行。
+
+默认只监听回环地址，不直接暴露给局域网。端口冲突时可以在启动 Desktop 前设置 `NEXUS_REMOTE_ADDR`，例如 `127.0.0.1:4310`。本版本不内置 TLS 或 FRP 配置；公网暴露时应优先使用支持 HTTPS/WSS 的入口，并妥善保管访问令牌。
+
+修改远程页面后需要重新生成 Desktop 内嵌的静态资源：
+
+```bash
+cd apps/remote-web
+npm ci
+npm run build
+cd ../..
+cargo build --workspace
+```
+
 ## 架构
 
 桌面 UI 基于 [GPUI Kit 0.6](https://github.com/longbridge/gpui-kit)，使用其 Sidebar 导航、图标资源、Button、Input / Textarea、下拉菜单、Switch 和 Markdown 组件，统一石墨灰主题与控件交互。环境面板覆盖在主内容右侧，打开时不会压缩任务输入区。界面保留 `⌘/Ctrl K` 搜索、`⌘/Ctrl N` 新任务、`⌘/Ctrl ,` 环境和 `⌘/Ctrl Enter` 发送快捷键。
@@ -81,19 +106,21 @@ Windows 的程序探测支持 `PATHEXT` 中的 `.exe`、`.com`、`.bat` 和 `.cm
 桌面 UI 使用 MVP（Model–View–Presenter），Runner 使用分层架构。两个进程的入口只负责启动装配，业务逻辑放在独立模块中。
 
 ```text
-nexus-desktop
-  View (GPUI) ──用户操作──▶ Presenter ──更新──▶ Model
-       └────────────读取 Model 渲染──────────────┘
-                            │
-                     基础设施（SQLite / RunnerClient / Codex 历史）
-       │ versioned JSONL over stdio
-       ▼
-nexus-runner
-  Transport ──▶ Application ──▶ Infrastructure
-  JSONL         调度、独占、取消   Harness / 进程组
-       │
-       ├── stream-json ──▶ Claude Code
-       └── exec --json ──▶ Codex CLI
+React Remote Web ── authenticated HTTP/WebSocket ──┐
+                                                   ▼
+                                      nexus-desktop
+                                        View (GPUI) ──▶ Presenter ──▶ Model
+                                             └────────读取 Model────────┘
+                                                        │
+                                      SQLite / RunnerClient / Codex 历史
+                                                        │ versioned JSONL over stdio
+                                                        ▼
+                                      nexus-runner
+                                        Transport ──▶ Application ──▶ Infrastructure
+                                        JSONL         调度、独占、取消   Harness / 进程组
+                                                        │
+                                                        ├── stream-json ──▶ Claude Code
+                                                        └── exec --json ──▶ Codex CLI
 ```
 
 - `crates/domain`：领域状态、模型和思考层级。
@@ -106,9 +133,11 @@ nexus-runner
 - `apps/runner/src/infrastructure`：Harness 适配器选择、子进程执行和平台相关的进程树清理。
 - `apps/desktop/src/bootstrap.rs`：窗口、主题、存储和 Runner 的启动装配。
 - `apps/desktop/src/model`：界面状态、历史消息数据和提交可用性，不依赖 GPUI。
-- `apps/desktop/src/presenter`：项目选择、配置、提交、事件处理和持久化协调，不依赖 GPUI；通过 `RunnerPort` 注入真实或测试 Runner。
+- `apps/desktop/src/presenter`：项目选择、配置、提交、远程命令、事件处理和持久化协调，不依赖 GPUI；通过 `RunnerPort` 注入真实或测试 Runner。
 - `apps/desktop/src/view`：GPUI 渲染、控件状态和事件转交，按侧栏、时间线、设置、组件和主题拆分。
 - `apps/desktop/src/infrastructure`：平台数据目录、SQLite、Runner 进程通信、Codex 历史和 Git 状态读取。
+- `apps/desktop/src/remote_control.rs`：带令牌鉴权的 HTTP/WebSocket 服务及静态资源托管。
+- `apps/remote-web`：React + Vite 静态 Remote Client，生产构建产物嵌入 Desktop。
 
 View 只能通过 Presenter 的只读 `model()` 获取业务状态，通过 Presenter 方法发起操作。SQLite 格式和 Desktop–Runner JSONL 协议保持兼容；已有领域与 Harness crate 继续复用，不额外引入框架或空 crate。
 
@@ -118,7 +147,8 @@ View 只能通过 Presenter 的只读 `model()` 获取业务状态，通过 Pres
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
-cargo build --workspace --locked
+cargo build --workspace --release --locked
+cd apps/remote-web && npm ci && npm run typecheck && npm run build
 ```
 
 测试中的 Fake Claude / Fake Codex 只验证进程和协议闭环，不发起真实模型请求。
@@ -136,4 +166,4 @@ CI 验证构建和自动化行为；窗口显示、输入法、目录选择、�
 
 ## 当前边界
 
-这个 Alpha 不包含远程控制、Worktree 管理、Git 提交、附件、多 Agent、交互式审批、从 Nexus 续聊 Codex 原有会话、签名或公证。Codex 历史浏览依赖当前 CLI 的实验性 `app-server` 协议。Codex CLI 的 `--json` 模式会实时提供生命周期和工具事件，但 Assistant 文本按完成消息输出，不提供 token 级文本增量。模型与思考层级是否可用取决于本机 CLI 版本和账户权限。
+这个 Alpha 的 Remote Control 仅包含单机 TCP、令牌鉴权和静态 Web Client，不包含 UDP、内置 TLS、FRP 自动配置、云端 Control Plane 或多设备账户。它同样不包含 Worktree 管理、Git 提交、附件、多 Agent、交互式审批、从 Nexus 续聊 Codex 原有会话、签名或公证。Codex 历史浏览依赖当前 CLI 的实验性 `app-server` 协议。Codex CLI 的 `--json` 模式会实时提供生命周期和工具事件，但 Assistant 文本按完成消息输出，不提供 token 级文本增量。模型与思考层级是否可用取决于本机 CLI 版本和账户权限。

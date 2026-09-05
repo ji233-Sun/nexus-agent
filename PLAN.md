@@ -75,7 +75,7 @@
 
 ### 4.2 明确不做
 
-- Remote Control、移动端、Web Client。
+- UDP Remote、移动端原生客户端、云端 Remote Control Plane。
 - 后台常驻 Daemon、局域网监听、云端 Control Plane。
 - 部署到服务器或多节点调度。
 - Agent 中途切换和跨 Harness Handoff。
@@ -813,7 +813,7 @@ MVP 只做本地可观测性：
 ### Phase 4：Remote 与服务器部署
 
 - Runner 后台服务化。
-- Web Remote Client。
+- Web Remote Client（首个本机 TCP + Token 版本已实现）。
 - Control Plane、设备配对和权限 Scope。
 - Runner 主动出站连接。
 - 多环境、断线重连和事件游标重放。
@@ -838,7 +838,7 @@ v0.1.0 Alpha 只有在以下条件全部满足时才算完成：
 - [ ] 关键状态机、协议和进程生命周期测试通过。
 - [ ] Release 性能基准已记录。
 - [ ] Linux、macOS 和 Windows Release 包可以在各自干净环境安装和运行。
-- [ ] 未实现 Remote、Connector、自动 Worktree 等非 MVP 功能。
+- [ ] 未实现 UDP Remote、Control Plane、Connector、自动 Worktree 等非 MVP 功能。
 - [ ] 仓库中没有调试代码、备用实现、无用依赖或未说明的生成文件。
 
 ## 26. 开工前待确认事项

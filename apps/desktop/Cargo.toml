@@ -26,4 +26,5 @@ uuid.workspace = true
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
+tokio-tungstenite.workspace = true
 tower.workspace = true

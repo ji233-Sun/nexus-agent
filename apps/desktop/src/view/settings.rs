@@ -177,7 +177,7 @@ impl NexusView {
                                     .text_xs()
                                     .text_color(rgb(MUTED))
                                     .line_height(relative(1.6))
-                                    .child("默认仅监听本机回环地址；通过 FRP TCP 转发后访问。"),
+                                    .child("监听范围 · 本机回环地址 · FRP TCP"),
                             )
                     })
                     .when_some(remote_error, |element, error| {

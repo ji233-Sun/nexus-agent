@@ -4282,6 +4282,7 @@ dependencies = [
  "smol",
  "tempfile",
  "tokio",
+ "tokio-tungstenite",
  "tower",
  "tower-http",
  "uuid",
