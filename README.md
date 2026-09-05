@@ -81,7 +81,7 @@ Desktop 默认以独立子进程运行内置 Runner，确保两者始终使用�
 
 Windows 的程序探测支持 `PATHEXT` 中的 `.exe`、`.com`、`.bat` 和 `.cmd`，包括 npm 安装生成的命令入口。
 
-应用内可切换 Harness 并修改各自的可执行文件路径。Claude 模型与通用思考层级会持久化：Claude 分别转换为 `--model` 与 `--effort` 参数，Codex 通过 `model_reasoning_effort` 配置覆盖思考层级，OMP 使用 `--thinking`。三个 Harness 的 Prompt 都通过子进程 stdin 传递，不会出现在进程参数中。
+应用内可切换 Harness 并修改各自的可执行文件路径。Claude 模型与通用思考层级会持久化：Claude 分别转换为 `--model` 与 `--effort` 参数，Codex 通过 `model_reasoning_effort` 配置覆盖思考层级，OMP 使用 `--thinking`；OMP 不支持 `Max`，因此会映射为其最高层级 `xhigh`。三个 Harness 的 Prompt 都通过子进程 stdin 传递，不会出现在进程参数中。
 
 ## Remote Control
 

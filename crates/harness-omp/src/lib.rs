@@ -23,7 +23,7 @@ pub fn build_launch_spec(
         "--approval-mode".into(),
         "write".into(),
         "--thinking".into(),
-        effort.as_str().into(),
+        omp_thinking_value(effort).into(),
     ];
     if let Some(model) = model {
         args.push("--model".into());
@@ -35,6 +35,13 @@ pub fn build_launch_spec(
         args,
         cwd: cwd.to_path_buf(),
         stdin: prompt.to_owned(),
+    }
+}
+
+fn omp_thinking_value(effort: ThinkingEffort) -> &'static str {
+    match effort {
+        ThinkingEffort::Max => ThinkingEffort::XHigh.as_str(),
+        _ => effort.as_str(),
     }
 }
 
@@ -244,6 +251,21 @@ mod tests {
         );
         assert!(!spec.args.iter().any(|arg| arg.contains("secret prompt")));
         assert_eq!(spec.stdin, "secret prompt");
+
+        let max_spec = build_launch_spec(
+            "omp",
+            Path::new("/tmp/project"),
+            "prompt",
+            None,
+            ThinkingEffort::Max,
+        );
+        assert!(
+            max_spec
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--thinking", "xhigh"])
+        );
+        assert!(!max_spec.args.iter().any(|arg| arg == "max"));
     }
 
     #[test]
