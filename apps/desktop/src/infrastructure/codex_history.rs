@@ -468,11 +468,24 @@ mod tests {
 
     use super::*;
 
+    fn write_executable(path: &Path, contents: &str) {
+        let mut file = fs::File::create(path).unwrap();
+        file.lock().unwrap();
+        file.write_all(contents.as_bytes()).unwrap();
+        file.set_permissions(fs::Permissions::from_mode(0o755))
+            .unwrap();
+        drop(file);
+
+        // A concurrent fork can inherit the writable handle. Wait for every copy
+        // to close before executing the script, avoiding ETXTBSY on Linux.
+        fs::File::open(path).unwrap().lock_shared().unwrap();
+    }
+
     #[test]
     fn client_lists_active_and_archived_threads_and_reads_messages() {
         let directory = tempfile::tempdir().unwrap();
         let executable = directory.path().join("codex");
-        fs::write(
+        write_executable(
             &executable,
             r#"#!/bin/sh
 while IFS= read -r line; do
@@ -492,11 +505,7 @@ while IFS= read -r line; do
   esac
 done
 "#,
-        )
-        .unwrap();
-        let mut permissions = fs::metadata(&executable).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&executable, permissions).unwrap();
+        );
 
         let client = Client::spawn(executable);
         assert!(client.refresh());
@@ -528,7 +537,7 @@ done
         let directory = tempfile::tempdir().unwrap();
         let primary = directory.path().join("codex-cli");
         let desktop = directory.path().join("codex-desktop");
-        fs::write(
+        write_executable(
             &primary,
             r#"#!/bin/sh
 while IFS= read -r line; do
@@ -542,9 +551,8 @@ while IFS= read -r line; do
   esac
 done
 "#,
-        )
-        .unwrap();
-        fs::write(
+        );
+        write_executable(
             &desktop,
             r#"#!/bin/sh
 while IFS= read -r line; do
@@ -558,13 +566,7 @@ while IFS= read -r line; do
   esac
 done
 "#,
-        )
-        .unwrap();
-        for executable in [&primary, &desktop] {
-            let mut permissions = fs::metadata(executable).unwrap().permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(executable, permissions).unwrap();
-        }
+        );
 
         let client = Client::spawn_with_fallbacks(primary, vec![desktop]);
         assert!(client.read_thread("paginated-thread".into()));
@@ -583,7 +585,7 @@ done
         let directory = tempfile::tempdir().unwrap();
         let missing_cli = directory.path().join("missing-codex-cli");
         let desktop = directory.path().join("codex-desktop");
-        fs::write(
+        write_executable(
             &desktop,
             r#"#!/bin/sh
 while IFS= read -r line; do
@@ -600,11 +602,7 @@ while IFS= read -r line; do
   esac
 done
 "#,
-        )
-        .unwrap();
-        let mut permissions = fs::metadata(&desktop).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&desktop, permissions).unwrap();
+        );
 
         let client = Client::spawn_with_fallbacks(missing_cli, vec![desktop]);
         assert!(client.refresh());

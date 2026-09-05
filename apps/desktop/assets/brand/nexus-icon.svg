@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 512 512" fill="none" role="img" aria-labelledby="title description">
+  <title id="title">Nexus Agent</title>
+  <desc id="description">A white geometric N joined by a blue connector on a graphite rounded square.</desc>
+  <rect x="32" y="32" width="448" height="448" rx="106" fill="#151515"/>
+  <rect x="33" y="33" width="446" height="446" rx="105" stroke="#303030" stroke-width="2"/>
+  <g stroke-width="64" stroke-linejoin="round">
+    <path d="M148 364V148L218 218" stroke="#F5F5F5"/>
+    <path d="M230 230L282 282" stroke="#477AF5"/>
+    <path d="M364 148V364L294 294" stroke="#F5F5F5"/>
+  </g>
+</svg>
