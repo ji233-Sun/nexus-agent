@@ -7,7 +7,7 @@ pub(super) fn brand_mark(size: f32) -> impl IntoElement {
         .rounded(px(size * 0.3))
         .bg(rgb(SELECTED))
         .border_1()
-        .border_color(rgba(0xa99bff40))
+        .border_color(rgba(0x4bd5bd40))
         .flex()
         .items_center()
         .justify_center()

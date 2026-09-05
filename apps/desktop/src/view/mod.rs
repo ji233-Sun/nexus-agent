@@ -21,7 +21,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     input::{Enter, Input, InputEvent, InputState, Textarea, TextareaState},
     menu::{DropdownMenu as _, PopupMenuItem},
-    sidebar::{Sidebar, SidebarGroup, SidebarMenu, SidebarMenuItem},
+    sidebar::{Sidebar, SidebarMenu, SidebarMenuItem},
     switch::Switch,
     text::TextView,
 };
@@ -55,7 +55,7 @@ impl NexusView {
     pub(crate) fn new(presenter: Presenter, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let prompt_input = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .auto_grow(3, 8)
+                .auto_grow(2, 8)
                 .placeholder("描述一个目标，让 Agent 开始工作…")
         });
         let executable_input = cx.new(|cx| {
@@ -276,8 +276,13 @@ impl NexusView {
             .label(selected.to_string())
             .dropdown_caret(true)
             .disabled(model.active_run.is_some())
-            .when(compact, |button| button.ghost().small())
-            .when(!compact, |button| button.outline().w_full())
+            .small()
+            .when(compact, |button| {
+                button.ghost().h(px(COMPACT_CONTROL_HEIGHT))
+            })
+            .when(!compact, |button| {
+                button.outline().w_full().h(px(CONTROL_HEIGHT))
+            })
             .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
                 HarnessKind::ALL.into_iter().fold(
                     menu.min_w(if compact { px(160.) } else { px(220.) }),
@@ -309,6 +314,7 @@ impl NexusView {
         Button::new("composer-model")
             .ghost()
             .small()
+            .h(px(COMPACT_CONTROL_HEIGHT))
             .label(label)
             .dropdown_caret(true)
             .disabled(model.selected_harness == HarnessKind::Codex || model.active_run.is_some())
@@ -335,6 +341,7 @@ impl NexusView {
         Button::new("composer-effort")
             .ghost()
             .small()
+            .h(px(COMPACT_CONTROL_HEIGHT))
             .icon(IconName::Cpu)
             .label(selected.to_string())
             .dropdown_caret(true)
@@ -466,7 +473,7 @@ impl Render for NexusView {
                     .flex_col()
                     .child(
                         div()
-                            .h(px(68.))
+                            .h(px(HEADER_HEIGHT))
                             .flex_none()
                             .bg(rgb(CANVAS))
                             .border_b_1()
@@ -532,6 +539,7 @@ impl Render for NexusView {
                                         Button::new("toggle-environment")
                                             .ghost()
                                             .small()
+                                            .h(px(COMPACT_CONTROL_HEIGHT))
                                             .icon(IconName::PanelRight)
                                             .selected(self.settings_open)
                                             .label("环境")
@@ -568,7 +576,7 @@ impl Render for NexusView {
                                         element.border_color(rgb(ACCENT))
                                     })
                                     .shadow(glass_shadow())
-                                    .p_4()
+                                    .p_3()
                                     .flex()
                                     .flex_col()
                                     .child(
@@ -580,9 +588,9 @@ impl Render for NexusView {
                                     )
                                     .child(
                                         div()
-                                            .min_h(px(44.))
-                                            .mt_3()
-                                            .pt_3()
+                                            .min_h(px(CONTROL_HEIGHT))
+                                            .mt_2()
+                                            .pt_2()
                                             .border_t_1()
                                             .border_color(rgb(BORDER))
                                             .flex()
@@ -610,6 +618,7 @@ impl Render for NexusView {
                                                         .danger()
                                                         .outline()
                                                         .small()
+                                                        .h(px(COMPACT_CONTROL_HEIGHT))
                                                         .icon(IconName::Pause)
                                                         .label("停止")
                                                         .tooltip("停止当前运行，保留已有输出")
@@ -620,8 +629,8 @@ impl Render for NexusView {
                                                 element.child(
                                                     Button::new("submit")
                                                         .primary()
-                                                        .rounded(px(10.))
-                                                        .size(px(36.))
+                                                        .small()
+                                                        .size(px(COMPACT_CONTROL_HEIGHT))
                                                         .p_0()
                                                         .icon(IconName::ArrowUp)
                                                         .accessibility_label("发送任务")
@@ -659,6 +668,7 @@ impl Render for NexusView {
                                                 Button::new("setup-agent")
                                                     .ghost()
                                                     .small()
+                                                    .h(px(COMPACT_CONTROL_HEIGHT))
                                                     .label("检查环境")
                                                     .on_click(cx.listener(|app, _, window, cx| {
                                                         if !app.settings_open {
@@ -675,7 +685,7 @@ impl Render for NexusView {
                 element.child(
                     div()
                         .absolute()
-                        .top(px(68.))
+                        .top(px(HEADER_HEIGHT))
                         .bottom_0()
                         .right(px(-320. * (1. - settings_progress)))
                         .w(px(320.))

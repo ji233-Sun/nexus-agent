@@ -108,6 +108,7 @@ impl NexusView {
                                 Button::new("latest-message")
                                     .outline()
                                     .small()
+                                    .h(px(COMPACT_CONTROL_HEIGHT))
                                     .rounded_full()
                                     .icon(IconName::ArrowDown)
                                     .label("回到最新消息")
@@ -159,7 +160,7 @@ impl NexusView {
             .child(div().mt_3().text_base().text_color(rgb(MUTED))
                 .line_height(relative(1.6)).child(description))
             .when(!history && model.selected_project.is_none(), |element| element.child(
-                Button::new("welcome-open-project").primary().mt_8().h(px(44.))
+                Button::new("welcome-open-project").primary().small().mt_8().h(px(CONTROL_HEIGHT))
                     .icon(IconName::FolderOpen).label("选择项目目录")
                     .on_click(cx.listener(Self::choose_project))))
             .when(!history && model.selected_project.is_some() && model.active_run.is_none(), |element| {
@@ -169,10 +170,10 @@ impl NexusView {
                         ("review", IconName::SquareTerminal, "检查代码", "发现值得优先解决的问题", "检查当前项目的代码，找出最值得优先修复的问题，先说明原因和修复方案。"),
                         ("test", IconName::CircleCheck, "制定验证计划", "让每一次修改更有把握", "分析当前项目的测试与构建配置，给出验证主要功能的具体步骤。"),
                     ].into_iter().map(|(id, icon, title, subtitle, prompt)| {
-                        Button::new(id).outline().flex_1().min_w(px(180.)).h(px(if compact { 104. } else { 126. }))
-                            .rounded(px(12.)).justify_start().p_4()
-                            .child(div().w_full().flex().flex_col().items_start().gap_3()
-                                .child(Icon::new(icon).size(px(22.)).text_color(rgb(ACCENT)))
+                        Button::new(id).outline().flex_1().min_w(px(180.)).h(px(if compact { 96. } else { 112. }))
+                            .rounded(px(12.)).justify_start().p_3()
+                            .child(div().w_full().flex().flex_col().items_start().gap_2()
+                                .child(Icon::new(icon).size(px(20.)).text_color(rgb(ACCENT)))
                                 .child(div().text_sm().font_weight(gpui::FontWeight::MEDIUM).child(title))
                                 .child(div().text_xs().text_color(rgb(MUTED)).child(subtitle)))
                             .tooltip(prompt)

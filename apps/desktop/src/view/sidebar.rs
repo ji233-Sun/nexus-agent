@@ -14,51 +14,53 @@ impl NexusView {
         } else {
             "等待检测 Codex CLI".to_owned()
         };
-        let projects = SidebarMenu::new().children(model.projects.iter().map(|project| {
-            let selected = selected_project_id == Some(project.id);
-            let project = project.clone();
-            SidebarMenuItem::new(project.display_name.clone())
-                .icon(IconName::Folder)
-                .active(selected && model.selected_codex_thread.is_none())
-                .default_open(true)
-                .click_to_open(true)
-                .on_click(cx.listener(move |app, _, _, cx| {
-                    app.select_project(project.clone());
-                    cx.notify();
-                }))
-                .when(selected, |item| {
-                    let tasks: Vec<_> = model
-                        .tasks
-                        .iter()
-                        .filter(|task| matches_search(&task.title, &query))
-                        .map(|task| {
-                            let id = task.id;
-                            let color = run_status_color(task.status);
-                            SidebarMenuItem::new(task.title.clone())
-                                .active(
-                                    model.selected_task == Some(id)
-                                        && model.selected_codex_thread.is_none(),
-                                )
-                                .suffix(move |_, _| status_dot(color))
-                                .on_click(cx.listener(move |app, _, window, cx| {
-                                    app.select_task(id, window, cx);
-                                }))
-                        })
-                        .collect();
-                    item.children(if tasks.is_empty() {
-                        vec![
-                            SidebarMenuItem::new(if query.trim().is_empty() {
-                                "开始任务后，记录会出现在这里"
-                            } else {
-                                "没有匹配的任务"
+        let projects = SidebarMenu::new()
+            .gap_1()
+            .children(model.projects.iter().map(|project| {
+                let selected = selected_project_id == Some(project.id);
+                let project = project.clone();
+                SidebarMenuItem::new(project.display_name.clone())
+                    .icon(IconName::Folder)
+                    .active(selected && model.selected_codex_thread.is_none())
+                    .default_open(true)
+                    .click_to_open(true)
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.select_project(project.clone());
+                        cx.notify();
+                    }))
+                    .when(selected, |item| {
+                        let tasks: Vec<_> = model
+                            .tasks
+                            .iter()
+                            .filter(|task| matches_search(&task.title, &query))
+                            .map(|task| {
+                                let id = task.id;
+                                let color = run_status_color(task.status);
+                                SidebarMenuItem::new(task.title.clone())
+                                    .active(
+                                        model.selected_task == Some(id)
+                                            && model.selected_codex_thread.is_none(),
+                                    )
+                                    .suffix(move |_, _| status_dot(color))
+                                    .on_click(cx.listener(move |app, _, window, cx| {
+                                        app.select_task(id, window, cx);
+                                    }))
                             })
-                            .disable(true),
-                        ]
-                    } else {
-                        tasks
+                            .collect();
+                        item.children(if tasks.is_empty() {
+                            vec![
+                                SidebarMenuItem::new(if query.trim().is_empty() {
+                                    "开始任务后，记录会出现在这里"
+                                } else {
+                                    "没有匹配的任务"
+                                })
+                                .disable(true),
+                            ]
+                        } else {
+                            tasks
+                        })
                     })
-                })
-        }));
+            }));
         let mut history: Vec<_> = model
             .codex_threads
             .iter()
@@ -93,23 +95,23 @@ impl NexusView {
             .bg(rgb(SURFACE))
             .child(
                 Sidebar::new("workspace-sidebar")
-                    .w(px(280.))
+                    .w(px(260.))
                     .collapsible(false)
                     .header(
                         div()
                             .w_full()
                             .flex()
                             .flex_col()
-                            .gap_4()
-                            .pb_4()
+                            .gap_2()
+                            .pb_1()
                             .child(
                                 div()
                                     .flex()
                                     .items_center()
-                                    .gap_3()
+                                    .gap_2()
                                     .px_2()
-                                    .py_3()
-                                    .child(brand_mark(38.))
+                                    .py_2()
+                                    .child(brand_mark(32.))
                                     .child(
                                         div()
                                             .flex()
@@ -117,7 +119,7 @@ impl NexusView {
                                             .gap_1()
                                             .child(
                                                 div()
-                                                    .text_lg()
+                                                    .text_base()
                                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                                     .child("Nexus Agent"),
                                             )
@@ -132,8 +134,9 @@ impl NexusView {
                             .child(
                                 Button::new("new-task")
                                     .primary()
+                                    .small()
                                     .w_full()
-                                    .h(px(44.))
+                                    .h(px(CONTROL_HEIGHT))
                                     .accessibility_label("新建任务")
                                     .child(
                                         div()
@@ -168,23 +171,29 @@ impl NexusView {
                             )
                             .child(
                                 Input::new(&self.search_input)
-                                    .h(px(40.))
+                                    .small()
+                                    .min_h(px(CONTROL_HEIGHT))
+                                    .text_sm()
                                     .prefix(Icon::new(IconName::Search).small())
                                     .cleanable(true),
-                            ),
+                            )
+                            .child(div().px_2().pt_3().child(section_label("项目空间"))),
                     )
                     .child(
-                        SidebarGroup::new("项目空间").child(projects).child(
-                            SidebarMenu::new().child(
-                                SidebarMenuItem::new("添加本地项目")
-                                    .icon(IconName::Plus)
-                                    .on_click(cx.listener(Self::choose_project)),
-                            ),
+                        projects.child(
+                            SidebarMenuItem::new("添加本地项目")
+                                .icon(IconName::Plus)
+                                .on_click(cx.listener(Self::choose_project)),
                         ),
                     )
                     .child(
-                        SidebarGroup::new("最近会话 · Codex")
-                            .child(SidebarMenu::new().children(history)),
+                        SidebarMenu::new().child(
+                            SidebarMenuItem::new("Codex 最近会话")
+                                .icon(IconName::FileText)
+                                .default_open(false)
+                                .click_to_toggle(true)
+                                .children(history),
+                        ),
                     )
                     .footer(
                         div()
@@ -194,7 +203,7 @@ impl NexusView {
                             .border_color(rgb(BORDER))
                             .flex()
                             .flex_col()
-                            .gap_3()
+                            .gap_2()
                             .child(
                                 div()
                                     .flex()
@@ -213,6 +222,7 @@ impl NexusView {
                                         Button::new("refresh-codex-history")
                                             .ghost()
                                             .small()
+                                            .size(px(COMPACT_CONTROL_HEIGHT))
                                             .icon(IconName::RotateCw)
                                             .tooltip("刷新本机 Codex 历史")
                                             .disabled(
@@ -225,8 +235,9 @@ impl NexusView {
                             .child(
                                 Button::new("sidebar-environment")
                                     .ghost()
+                                    .small()
                                     .w_full()
-                                    .h(px(40.))
+                                    .h(px(CONTROL_HEIGHT))
                                     .accessibility_label("环境与偏好")
                                     .child(
                                         div()

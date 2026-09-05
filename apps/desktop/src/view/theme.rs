@@ -1,22 +1,26 @@
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::{App, px, rgb, rgba};
 
-pub(super) const CANVAS: u32 = 0x111216;
-pub(super) const SURFACE: u32 = 0x191b21;
-pub(super) const RECESSED: u32 = 0x20232b;
-pub(super) const HOVER: u32 = 0x292d38;
-pub(super) const SELECTED: u32 = 0x303246;
-pub(super) const BORDER: u32 = 0x30343f;
-pub(super) const TEXT: u32 = 0xf2f3f7;
-pub(super) const TEXT_SECONDARY: u32 = 0xb8becc;
-pub(super) const MUTED: u32 = 0x858da0;
-pub(super) const ACCENT: u32 = 0xa99bff;
-pub(super) const ACCENT_HOVER: u32 = 0xbeb3ff;
-pub(super) const LINK: u32 = 0x7aa9ff;
-pub(super) const SUCCESS: u32 = 0x51d88a;
+pub(super) const CANVAS: u32 = 0x0d171e;
+pub(super) const SURFACE: u32 = 0x14232c;
+pub(super) const RECESSED: u32 = 0x1a2c36;
+pub(super) const HOVER: u32 = 0x213b46;
+pub(super) const SELECTED: u32 = 0x204750;
+pub(super) const BORDER: u32 = 0x2b424d;
+pub(super) const TEXT: u32 = 0xeef7f8;
+pub(super) const TEXT_SECONDARY: u32 = 0xb2c9d1;
+pub(super) const MUTED: u32 = 0x819fae;
+pub(super) const ACCENT: u32 = 0x4bd5bd;
+pub(super) const ACCENT_HOVER: u32 = 0x75e3cf;
+pub(super) const LINK: u32 = 0x65b9ec;
+pub(super) const SUCCESS: u32 = 0x4bd5bd;
 pub(super) const WARNING: u32 = 0xffbd66;
 pub(super) const DANGER: u32 = 0xff6b70;
 pub(super) const TOOL: u32 = 0xe5a65f;
+
+pub(super) const CONTROL_HEIGHT: f32 = 32.;
+pub(super) const COMPACT_CONTROL_HEIGHT: f32 = 28.;
+pub(super) const HEADER_HEIGHT: f32 = 56.;
 
 pub(super) const MONO_FONT: &str = if cfg!(target_os = "macos") {
     "SF Mono"
@@ -33,7 +37,7 @@ pub(crate) fn configure_theme(cx: &mut App) {
     theme.font_size = px(14.);
     theme.mono_font_family = MONO_FONT.into();
     theme.mono_font_size = px(13.);
-    theme.radius = px(8.);
+    theme.radius = px(6.);
     theme.radius_lg = px(12.);
     theme.shadow = true;
 
@@ -43,22 +47,22 @@ pub(crate) fn configure_theme(cx: &mut App) {
     theme.input = rgba(0xffffff1c).into();
     theme.caret = rgb(TEXT).into();
     theme.ring = rgb(ACCENT).into();
-    theme.selection = rgba(0x9b7cff4a).into();
+    theme.selection = rgba(0x4bd5bd40).into();
     theme.muted = rgb(RECESSED).into();
     theme.muted_foreground = rgb(MUTED).into();
     theme.accent = rgb(HOVER).into();
     theme.accent_foreground = rgb(TEXT).into();
     theme.primary = rgb(ACCENT).into();
     theme.primary_hover = rgb(ACCENT_HOVER).into();
-    theme.primary_active = rgb(0x8968f2).into();
+    theme.primary_active = rgb(0x2cbba3).into();
     theme.primary_foreground = rgb(CANVAS).into();
     theme.secondary = rgb(RECESSED).into();
     theme.secondary_hover = rgb(HOVER).into();
     theme.secondary_active = rgb(SELECTED).into();
     theme.secondary_foreground = rgb(TEXT_SECONDARY).into();
     theme.link = rgb(LINK).into();
-    theme.link_hover = rgb(0x245aa6).into();
-    theme.link_active = rgb(0x1e4c8e).into();
+    theme.link_hover = rgb(0x91d0f4).into();
+    theme.link_active = rgb(0x3da0d9).into();
     theme.danger = rgb(DANGER).into();
     theme.warning = rgb(WARNING).into();
     theme.success = rgb(SUCCESS).into();

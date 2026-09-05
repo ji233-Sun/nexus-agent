@@ -22,10 +22,10 @@ impl NexusView {
             .border_l_1()
             .border_color(rgb(BORDER))
             .shadow(glass_shadow())
-            .p_6()
+            .p_4()
             .flex()
             .flex_col()
-            .gap_6()
+            .gap_4()
             .child(
                 div()
                     .flex()
@@ -53,6 +53,7 @@ impl NexusView {
                         Button::new("close-environment")
                             .ghost()
                             .small()
+                            .size(px(COMPACT_CONTROL_HEIGHT))
                             .icon(IconName::Close)
                             .tooltip("关闭环境面板")
                             .on_click(
@@ -75,12 +76,17 @@ impl NexusView {
                             .child(section_label("可执行文件"))
                             .child(
                                 Input::new(&self.executable_input)
+                                    .small()
+                                    .min_h(px(CONTROL_HEIGHT))
+                                    .text_sm()
                                     .prefix(Icon::new(IconName::SquareTerminal).small()),
                             ),
                     )
                     .child(
                         Button::new("probe")
                             .outline()
+                            .small()
+                            .h(px(CONTROL_HEIGHT))
                             .w_full()
                             .icon(IconName::RotateCw)
                             .label("重新探测环境")
@@ -149,6 +155,7 @@ impl NexusView {
                     .child(section_label("PREFERENCES · 交互偏好"))
                     .child(
                         Switch::new("reduce-motion")
+                            .small()
                             .label("减少动效")
                             .checked(self.reduced_motion)
                             .on_click(cx.listener(|app, checked, _, cx| {
