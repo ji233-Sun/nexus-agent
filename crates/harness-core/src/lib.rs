@@ -99,12 +99,12 @@ fn executable_candidates(path: PathBuf, extensions: Option<&str>) -> Vec<PathBuf
     candidates
 }
 
-pub fn summarize_json(value: &Value) -> String {
-    let raw = value
+// Keep tool payloads intact; previews are a presentation concern.
+pub fn tool_content(value: &Value) -> String {
+    value
         .as_str()
         .map(str::to_owned)
-        .unwrap_or_else(|| value.to_string());
-    summarize_text(&raw)
+        .unwrap_or_else(|| value.to_string())
 }
 
 pub fn summarize_text(text: &str) -> String {

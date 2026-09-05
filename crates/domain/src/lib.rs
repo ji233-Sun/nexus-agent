@@ -312,7 +312,15 @@ pub struct Message {
     pub role: MessageRole,
     pub kind: MessageKind,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<ToolMetadata>,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolMetadata {
+    pub id: String,
+    pub is_error: bool,
 }
 
 #[cfg(test)]
