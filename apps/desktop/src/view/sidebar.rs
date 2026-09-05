@@ -503,6 +503,58 @@ mod tests {
         (view, cx)
     }
 
+    // Measures CPU input/layout/paint work; the test platform does not present GPU frames.
+    #[gpui::test]
+    #[ignore]
+    fn scroll_frame_cost(cx: &mut TestAppContext) {
+        let (view, cx) = scroll_test_view(cx);
+        for (name, handle, pane) in view.read_with(cx, |view, _| {
+            [
+                (
+                    "sidebar",
+                    view.sidebar_scroll.clone(),
+                    view.sidebar_pane.clone(),
+                ),
+                (
+                    "timeline",
+                    view.timeline_scroll.clone(),
+                    view.timeline_pane.clone(),
+                ),
+            ]
+        }) {
+            assert!(handle.max_offset().y > px(60.));
+            handle.set_offset(point(px(0.), px(0.)));
+            pane.update(cx, |_, cx| cx.notify());
+            cx.run_until_parked();
+            let mut samples = Vec::new();
+            let before = pane.read_with(cx, |pane, _| pane.render_count);
+            for frame in 0..140 {
+                let delta = px(if frame % 40 < 20 { -3. } else { 3. });
+                let previous = handle.offset().y;
+                let started = Instant::now();
+                cx.simulate_event(ScrollWheelEvent {
+                    position: handle.bounds().center(),
+                    delta: ScrollDelta::Pixels(point(px(0.), delta)),
+                    touch_phase: gpui::TouchPhase::Moved,
+                    ..Default::default()
+                });
+                if frame >= 20 {
+                    samples.push(started.elapsed().as_secs_f64() * 1000.);
+                }
+                assert_eq!(handle.offset().y, previous + delta);
+            }
+            let renders = pane.read_with(cx, |pane, _| pane.render_count) - before;
+            assert!(renders >= 140);
+            samples.sort_by(f64::total_cmp);
+            eprintln!(
+                "{name}: CPU ms/event median={:.2}, p95={:.2}; pane renders={}",
+                samples[samples.len() / 2],
+                samples[samples.len() * 95 / 100],
+                renders,
+            );
+        }
+    }
+
     #[gpui::test]
     fn scroll_regions_keep_offsets_and_rendering_independent(cx: &mut TestAppContext) {
         let (view, cx) = scroll_test_view(cx);

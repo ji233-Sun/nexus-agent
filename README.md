@@ -52,6 +52,16 @@ Linux 运行界面需要可用的 Vulkan 驱动和桌面会话，目录选择需
 cargo run -p nexus-desktop
 ```
 
+默认开发构建已开启编译优化，保留调试信息和运行时检查，避免未优化的布局与文本渲染拖慢滚动。首次构建依赖会更久，后续仍可增量编译。评估最终发布性能请使用 `cargo run -p nexus-desktop --release --locked`。
+
+可用现有长消息场景对比滚动的 CPU 处理耗时：
+
+```bash
+cargo test -p nexus-desktop --locked scroll_frame_cost -- --ignored --nocapture
+```
+
+该测试模拟触控板输入，报告侧栏和消息区的耗时中位数与 P95；测试平台不执行 GPU 呈现，结果不代表屏幕实际帧率。
+
 Desktop 默认以独立子进程运行内置 Runner，确保两者始终使用相同协议版本。若需要改用外部 Runner，可通过 `NEXUS_RUNNER_PATH` 指定其完整路径。应用数据保存在：
 
 | 系统 | 数据库路径 |

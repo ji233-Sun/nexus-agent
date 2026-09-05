@@ -31,6 +31,11 @@ thiserror = "2.0"
 tokio = { version = "1.48", features = ["io-std", "io-util", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
 uuid = { version = "1.18", features = ["serde", "v4"] }
 
+# GPUI builds the element tree and computes layout on every scrolling frame.
+# Keep development builds responsive while retaining debug information/checks.
+[profile.dev]
+opt-level = 2
+
 [profile.release]
 lto = "thin"
 strip = "symbols"
