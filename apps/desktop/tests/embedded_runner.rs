@@ -1,5 +1,3 @@
-#![cfg(unix)]
-
 use std::{
     io::Write as _,
     process::{Command as ProcessCommand, Stdio},

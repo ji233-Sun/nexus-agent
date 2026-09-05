@@ -1,6 +1,6 @@
 # Nexus Agent ADE
 
-Nexus Agent 是一个 macOS 本地桌面应用，用统一时间线驱动本机已安装的 Claude Code 或 Codex CLI。当前版本是 `0.1.0-alpha.1`。
+Nexus Agent 是一个面向 Linux、macOS 和 Windows 的本地桌面应用，用统一时间线驱动本机已安装的 Claude Code 或 Codex CLI。当前版本是 `0.1.0-alpha.1`。
 
 ## 当前能力
 
@@ -10,7 +10,7 @@ Nexus Agent 是一个 macOS 本地桌面应用，用统一时间线驱动本机�
 - 为 Claude Code 选择 `默认 / Sonnet / Opus / Haiku` 模型；Codex 使用 CLI 当前默认模型。
 - 配置 `Low / Medium / High / XHigh / Max` 思考层级。
 - 通过 JSON Lines Runner 启动 Harness，显示文本、工具调用、状态和错误。
-- 温和中断，超时后终止 Harness 进程组。
+- 取消和关闭时清理 Harness 进程树：Unix 先中断再超时终止，Windows 使用系统 `taskkill /T /F`。
 - SQLite 持久化 Nexus 发起的项目、任务、Run 和最终消息；启动时将遗留运行标为 `Interrupted`。
 - 提示项目中的未提交修改，但不创建 Worktree，也不执行 Git 写操作。
 
@@ -22,7 +22,7 @@ Codex 原有历史通过 CLI 自带的实验性 `codex app-server` 协议读取�
 
 ## 环境要求
 
-- macOS（Apple Silicon 为当前验证架构）
+- Linux（X11 或 Wayland）、macOS 或 Windows（MSVC 工具链）
 - Rust 1.88 或更高版本
 - 已安装并登录至少一种 Harness
 
@@ -34,6 +34,16 @@ codex --version
 codex login status
 ```
 
+macOS 构建需要 Xcode 与命令行工具。Windows 构建需要 Visual Studio 的 C++ 桌面开发组件、Windows SDK 和 CMake。Linux 构建依赖可参照 [GPUI/Zed Linux 构建说明](https://zed.dev/docs/development/linux)；Ubuntu/Debian 安装命令为：
+
+```bash
+sudo apt-get install -y clang cmake pkg-config \
+  libfontconfig1-dev libfreetype6-dev libwayland-dev libx11-xcb-dev \
+  libxkbcommon-x11-dev libssl-dev libvulkan1 libglib2.0-dev
+```
+
+Linux 运行界面需要可用的 Vulkan 驱动和桌面会话，目录选择需要 XDG Desktop Portal 及对应桌面后端。单元测试与内置 Runner 测试不需要显示服务或真实 Harness 登录。
+
 ## 启动指南
 
 ```bash
@@ -42,19 +52,31 @@ cargo run -p nexus-desktop
 
 Desktop 默认以独立子进程运行内置 Runner，确保两者始终使用相同协议版本。若需要改用外部 Runner，可通过 `NEXUS_RUNNER_PATH` 指定其完整路径。应用数据保存在：
 
-```text
-~/Library/Application Support/Nexus Agent/nexus.db
-```
+| 系统 | 数据库路径 |
+| --- | --- |
+| macOS | `~/Library/Application Support/Nexus Agent/nexus.db` |
+| Linux | `$XDG_DATA_HOME/nexus-agent/nexus.db`，默认 `~/.local/share/nexus-agent/nexus.db` |
+| Windows | `%LOCALAPPDATA%/Nexus Agent/nexus.db`，缺省时使用 `%USERPROFILE%/AppData/Local/Nexus Agent/nexus.db` |
+
+Windows 的程序探测支持 `PATHEXT` 中的 `.exe`、`.com`、`.bat` 和 `.cmd`，包括 npm 安装生成的命令入口。
 
 应用内可切换 Harness 并修改各自的可执行文件路径。Claude 模型与通用思考层级会持久化：Claude 分别转换为 `--model` 与 `--effort` 参数，Codex 使用 CLI 默认模型并通过 `model_reasoning_effort` 配置覆盖思考层级。两种 Harness 的 Prompt 都通过子进程 stdin 传递，不会出现在进程参数中。
 
 ## 架构
 
+桌面 UI 使用 MVP（Model–View–Presenter），Runner 使用分层架构。两个进程的入口只负责启动装配，业务逻辑放在独立模块中。
+
 ```text
-nexus-desktop (GPUI + SQLite)
+nexus-desktop
+  View (GPUI) ──用户操作──▶ Presenter ──更新──▶ Model
+       └────────────读取 Model 渲染──────────────┘
+                            │
+                     基础设施（SQLite / RunnerClient / Codex 历史）
        │ versioned JSONL over stdio
        ▼
-nexus-runner (lifecycle + process group)
+nexus-runner
+  Transport ──▶ Application ──▶ Infrastructure
+  JSONL         调度、独占、取消   Harness / 进程组
        │
        ├── stream-json ──▶ Claude Code
        └── exec --json ──▶ Codex CLI
@@ -65,19 +87,32 @@ nexus-runner (lifecycle + process group)
 - `crates/harness-core`：Harness 共用的启动规格、事件和可执行文件解析。
 - `crates/harness-claude`：Claude Code 探测、启动参数和事件解码。
 - `crates/harness-codex`：Codex CLI 探测、非交互启动参数和 JSONL 事件解码。
-- `apps/runner`：运行独占、流式转发、取消和进程清理。
-- `apps/desktop`：GPUI 界面与 SQLite 历史。
+- `apps/runner/src/transport.rs`：JSONL 命令读取、协议版本校验和事件写出。
+- `apps/runner/src/application`：命令调度、运行独占、取消和统一事件转换。
+- `apps/runner/src/infrastructure`：Harness 适配器选择、子进程执行和平台相关的进程树清理。
+- `apps/desktop/src/bootstrap.rs`：窗口、主题、存储和 Runner 的启动装配。
+- `apps/desktop/src/model`：界面状态、历史消息数据和提交可用性，不依赖 GPUI。
+- `apps/desktop/src/presenter`：项目选择、配置、提交、事件处理和持久化协调，不依赖 GPUI；通过 `RunnerPort` 注入真实或测试 Runner。
+- `apps/desktop/src/view`：GPUI 渲染、控件状态和事件转交，按侧栏、时间线、设置、组件和主题拆分。
+- `apps/desktop/src/infrastructure`：平台数据目录、SQLite、Runner 进程通信、Codex 历史和 Git 状态读取。
+
+View 只能通过 Presenter 的只读 `model()` 获取业务状态，通过 Presenter 方法发起操作。SQLite 格式和 Desktop–Runner JSONL 协议保持兼容；已有领域与 Harness crate 继续复用，不额外引入框架或空 crate。
 
 ## 验证
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo build --workspace --release
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+cargo build --workspace --locked
 ```
 
 测试中的 Fake Claude / Fake Codex 只验证进程和协议闭环，不发起真实模型请求。
+Presenter 单元测试使用内存 SQLite 与 Fake Runner，不打开 GPUI 窗口；Runner 单元测试覆盖任务独占、取消、事件转换和协议传输。
+
+[GitHub Actions CI](.github/workflows/ci.yml) 在 push、pull request 和手动触发时，分别使用 Ubuntu、macOS、Windows runner 执行以上检查。工具链固定为已验证的 Rust 1.92.0，依赖使用 `Cargo.lock`；缓存按平台和工具链区分。原生 Rust Fake Harness 的启动、流式输出、取消和关闭测试在三个系统上运行；Codex 历史的 shell fixture 测试目前在 Unix 系统上运行。
+
+CI 验证构建和自动化行为；窗口显示、输入法、目录选择、真实 CLI 登录以及发布包仍需在各系统上人工验收。生成发布构建可运行 `cargo build --workspace --release --locked`；Windows Release 的 GPUI shader 编译还需要 Windows SDK 的 `fxc.exe`（可通过 `GPUI_FXC_PATH` 指定）。
 
 ## 致谢
 
