@@ -467,8 +467,9 @@ mod tests {
     use gpui::{ScrollDelta, ScrollWheelEvent, TestAppContext, point};
     use std::path::Path;
 
-    #[gpui::test]
-    fn scroll_regions_keep_offsets_and_rendering_independent(cx: &mut TestAppContext) {
+    fn scroll_test_view(
+        cx: &mut TestAppContext,
+    ) -> (Entity<NexusView>, &mut gpui::VisualTestContext) {
         cx.update(gpui_kit::init);
         let directory = tempfile::tempdir().unwrap();
         let mut storage = Storage::open(Path::new(":memory:")).unwrap();
@@ -499,6 +500,12 @@ mod tests {
         cx.update(|window, cx| {
             let _ = window.draw(cx);
         });
+        (view, cx)
+    }
+
+    #[gpui::test]
+    fn scroll_regions_keep_offsets_and_rendering_independent(cx: &mut TestAppContext) {
+        let (view, cx) = scroll_test_view(cx);
         let scroll = view.read_with(cx, |view, _| view.timeline_scroll.clone());
         assert!(scroll.max_offset().y > px(100.));
         scroll.set_offset(point(px(0.), px(-100.)));
@@ -550,9 +557,15 @@ mod tests {
             let _ = window.draw(cx);
         });
         let settings_scroll = view.read_with(cx, |view, _| view.settings_scroll.clone());
+        let overlap = point(
+            settings_scroll.bounds().left() + px(30.),
+            scroll.bounds().top() + px(40.),
+        );
+        assert!(settings_scroll.bounds().contains(&overlap));
+        assert!(scroll.bounds().contains(&overlap));
         let before = scroll.offset();
         cx.simulate_event(ScrollWheelEvent {
-            position: settings_scroll.bounds().center(),
+            position: overlap,
             delta: ScrollDelta::Pixels(point(px(0.), px(-40.))),
             ..Default::default()
         });
@@ -561,6 +574,10 @@ mod tests {
         });
         assert_eq!(scroll.offset(), before);
         assert_eq!(sidebar_scroll.offset().y, px(-80.));
+        assert_eq!(
+            settings_scroll.offset().y,
+            (-settings_scroll.max_offset().y).max(px(-40.))
+        );
 
         view.update(cx, |view, cx| {
             view.settings_open = false;
@@ -581,6 +598,89 @@ mod tests {
             let _ = window.draw(cx);
         });
         assert_eq!(scroll.offset(), before);
+    }
+
+    #[gpui::test]
+    fn wheel_smoothing_preserves_native_trackpad_input(cx: &mut TestAppContext) {
+        let (view, cx) = scroll_test_view(cx);
+        let scroll = view.read_with(cx, |view, _| view.sidebar_scroll.clone());
+        let event = ScrollWheelEvent {
+            position: scroll.bounds().center(),
+            delta: ScrollDelta::Lines(point(0., -3.)),
+            ..Default::default()
+        };
+        cx.simulate_event(event.clone());
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let native_target = scroll.offset().y;
+        assert!(native_target < px(0.));
+        scroll.set_offset(point(px(0.), px(0.)));
+        view.update(cx, |view, cx| {
+            view.reduced_motion = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.simulate_event(event.clone());
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(scroll.offset().y > native_target);
+        assert!(scroll.offset().y <= px(0.));
+        std::thread::sleep(Duration::from_millis(160));
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            let _ = window.draw(cx);
+        });
+        assert_eq!(scroll.offset().y, native_target);
+
+        cx.simulate_event(event.clone());
+        let before = scroll.offset().y;
+        cx.simulate_event(ScrollWheelEvent {
+            position: scroll.bounds().center(),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-7.5))),
+            touch_phase: gpui::TouchPhase::Started,
+            ..Default::default()
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(scroll.offset().y, before - px(7.5));
+        let after = scroll.offset();
+        std::thread::sleep(Duration::from_millis(160));
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            let _ = window.draw(cx);
+        });
+        assert_eq!(scroll.offset(), after);
+
+        cx.simulate_event(event.clone());
+        let reversal_from = scroll.offset().y;
+        cx.simulate_event(ScrollWheelEvent {
+            delta: ScrollDelta::Lines(point(0., 1.)),
+            ..event.clone()
+        });
+        std::thread::sleep(Duration::from_millis(160));
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            let _ = window.draw(cx);
+        });
+        assert_eq!(
+            scroll.offset().y,
+            (reversal_from - native_target / 3.).min(px(0.))
+        );
+
+        cx.simulate_event(event);
+        let manual_offset = point(px(0.), -scroll.max_offset().y / 2.);
+        scroll.set_offset(manual_offset);
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            let _ = window.draw(cx);
+        });
+        assert_eq!(scroll.offset(), manual_offset);
     }
 
     fn threads(count: usize) -> Vec<ThreadSummary> {
