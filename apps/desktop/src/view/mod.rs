@@ -8,28 +8,42 @@ use crate::{model::history::HistoryMessage, presenter::Presenter};
 use components::*;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, AppContext as _, Context, Corner, ElementId, Entity,
-    Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Timer, Window, div, ease_out_quint,
-    prelude::FluentBuilder as _, pulsating_between, px, relative, rgb, rgba,
+    FocusHandle, Focusable as _, Hsla, InteractiveElement as _, IntoElement, KeyBinding,
+    ParentElement as _, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Timer, Window, div, ease_out_quint, prelude::FluentBuilder as _,
+    pulsating_between, px, relative, rgb, rgba,
 };
 use gpui_component::{
     Disableable as _, Sizable as _, box_shadow,
     button::{Button, ButtonVariants as _},
-    input::{Input, InputState},
+    input::{Enter, Input, InputEvent, InputState},
     menu::{DropdownMenu as _, PopupMenuItem},
     text::TextView,
 };
 use nexus_domain::{
     ClaudeModel, HarnessKind, Message, MessageKind, MessageRole, Project, RunStatus, ThinkingEffort,
 };
-use std::time::Duration;
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant},
+};
 use theme::*;
 use uuid::Uuid;
+
+gpui::actions!(nexus_view, [SearchSessions, NewTask, ToggleEnvironment]);
 
 pub(crate) struct NexusView {
     presenter: Presenter,
     prompt_input: Entity<InputState>,
     executable_input: Entity<InputState>,
+    search_input: Entity<InputState>,
+    focus_handle: FocusHandle,
+    timeline_scroll: ScrollHandle,
+    expanded_messages: HashSet<ElementId>,
+    settings_open: bool,
+    settings_from: f32,
+    settings_changed: Instant,
+    reduced_motion: bool,
 }
 
 impl NexusView {
@@ -44,11 +58,38 @@ impl NexusView {
                 .default_value(presenter.model().executable.clone())
                 .placeholder("命令名或完整路径")
         });
+        let search_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("搜索当前项目任务 / Codex 历史"));
+        cx.subscribe(&prompt_input, |_, _, event: &InputEvent, cx| {
+            if matches!(
+                event,
+                InputEvent::Change | InputEvent::Focus | InputEvent::Blur
+            ) {
+                cx.notify();
+            }
+        })
+        .detach();
+        cx.subscribe(&search_input, |_, _, _: &InputEvent, cx| cx.notify())
+            .detach();
+        cx.bind_keys([
+            KeyBinding::new("secondary-k", SearchSessions, Some("Nexus")),
+            KeyBinding::new("secondary-n", NewTask, Some("Nexus")),
+            KeyBinding::new("secondary-,", ToggleEnvironment, Some("Nexus")),
+        ]);
         let view = Self {
             presenter,
             prompt_input,
             executable_input,
+            search_input,
+            focus_handle: cx.focus_handle(),
+            timeline_scroll: ScrollHandle::new(),
+            expanded_messages: HashSet::new(),
+            settings_open: false,
+            settings_from: 0.,
+            settings_changed: Instant::now(),
+            reduced_motion: false,
         };
+        view.focus_handle.focus(window);
         view.start_event_pump(cx);
         view
     }
@@ -60,7 +101,13 @@ impl NexusView {
                 let Some(this) = this.upgrade() else { break };
                 if this
                     .update(cx, |app, cx| {
+                        let follow_latest = app.timeline_scroll.max_offset().height
+                            + app.timeline_scroll.offset().y
+                            <= px(48.);
                         if app.presenter.drain_events() {
+                            if follow_latest {
+                                app.timeline_scroll.scroll_to_bottom();
+                            }
                             cx.notify();
                         }
                     })
@@ -86,23 +133,36 @@ impl NexusView {
         .detach();
     }
 
-    fn new_task(&mut self, _: &gpui::ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn new_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.presenter.model().active_run.is_some()
+            || self.presenter.model().selected_project.is_none()
+        {
+            return;
+        }
         self.presenter.new_task();
+        self.expanded_messages.clear();
+        self.focus_prompt(window, cx);
         cx.notify();
     }
 
     fn select_project(&mut self, project: Project) {
         self.presenter.select_project(project);
+        self.expanded_messages.clear();
+        self.timeline_scroll.scroll_to_bottom();
     }
 
     fn select_task(&mut self, task_id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
         self.presenter.select_task(task_id);
+        self.expanded_messages.clear();
+        self.timeline_scroll.scroll_to_bottom();
         self.sync_executable(window, cx);
         cx.notify();
     }
 
     fn select_codex_thread(&mut self, thread_id: String, cx: &mut Context<Self>) {
         self.presenter.select_codex_thread(thread_id);
+        self.expanded_messages.clear();
+        self.timeline_scroll.scroll_to_bottom();
         cx.notify();
     }
 
@@ -117,11 +177,48 @@ impl NexusView {
     }
 
     fn submit(&mut self, _: &gpui::ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.submit_prompt(window, cx);
+    }
+
+    fn submit_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let prompt = self.prompt_input.read(cx).value().to_string();
+        if !can_send_prompt(self.presenter.model(), &prompt) {
+            return;
+        }
         let executable = self.executable_input.read(cx).value().to_string();
         if self.presenter.submit(&prompt, &executable) {
             self.prompt_input
                 .update(cx, |input, cx| input.set_value("", window, cx));
+            self.expanded_messages.clear();
+            self.timeline_scroll.scroll_to_bottom();
+        }
+        cx.notify();
+    }
+
+    fn focus_prompt(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.presenter.model().selected_codex_thread.is_some() {
+            self.focus_handle.focus(window);
+            return;
+        }
+        self.prompt_input
+            .update(cx, |input, cx| input.focus(window, cx));
+    }
+
+    fn settings_progress(&self) -> f32 {
+        let target = if self.settings_open { 1. } else { 0. };
+        if self.reduced_motion {
+            return target;
+        }
+        let elapsed = (self.settings_changed.elapsed().as_secs_f32() / 0.24).min(1.);
+        self.settings_from + (target - self.settings_from) * (1. - (1. - elapsed).powi(5))
+    }
+
+    fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_from = self.settings_progress();
+        self.settings_changed = Instant::now();
+        self.settings_open = !self.settings_open;
+        if !self.settings_open {
+            self.focus_prompt(window, cx);
         }
         cx.notify();
     }
@@ -257,9 +354,35 @@ impl NexusView {
 
 impl Render for NexusView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let settings_progress = self.settings_progress();
+        if !self.reduced_motion
+            && self.settings_changed.elapsed() < Duration::from_millis(240)
+            && (settings_progress - if self.settings_open { 1. } else { 0. }).abs() > f32::EPSILON
+        {
+            window.request_animation_frame();
+        }
         let model = self.presenter.model();
         let probe = model.selected_probe();
-        let can_submit = model.can_submit();
+        let history = model.selected_codex_thread.is_some();
+        let can_submit = can_send_prompt(model, &self.prompt_input.read(cx).value());
+        let prompt_focused = self
+            .prompt_input
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window);
+        let composer_hint = if history {
+            "这是只读历史。选择项目并新建任务后即可开始。"
+        } else if model.selected_project.is_none() {
+            "先选择本地项目，再描述你希望完成的工作。"
+        } else if model.active_run.is_some() {
+            "Agent 正在执行 · 可以提前起草下一项任务"
+        } else if !model.can_submit() {
+            "Agent 尚未就绪 · 打开环境面板检查探测和登录状态"
+        } else if cfg!(target_os = "macos") {
+            "⌘ Enter 发送新任务 · Enter 换行"
+        } else {
+            "Ctrl Enter 发送新任务 · Enter 换行"
+        };
         let header_status_color = if model.active_run.is_some() {
             rgb(ACCENT).into()
         } else {
@@ -298,6 +421,30 @@ impl Render for NexusView {
             None
         };
         div()
+            .key_context("Nexus")
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(|app, _: &SearchSessions, window, cx| {
+                app.search_input
+                    .update(cx, |input, cx| input.focus(window, cx));
+            }))
+            .on_action(cx.listener(|app, _: &NewTask, window, cx| {
+                app.new_task(window, cx);
+            }))
+            .on_action(cx.listener(|app, _: &ToggleEnvironment, window, cx| {
+                app.toggle_settings(window, cx);
+            }))
+            .capture_action(cx.listener(|app, action: &Enter, window, cx| {
+                if action.secondary
+                    && app
+                        .prompt_input
+                        .read(cx)
+                        .focus_handle(cx)
+                        .is_focused(window)
+                {
+                    app.submit_prompt(window, cx);
+                    cx.stop_propagation();
+                }
+            }))
             .size_full()
             .bg(rgba(0x101211ec))
             .text_color(rgb(TEXT))
@@ -361,13 +508,31 @@ impl Render for NexusView {
                                     .text_color(rgb(MUTED))
                                     .child(live_status_dot(
                                         header_status_color,
-                                        model.active_run.is_some(),
+                                        model.active_run.is_some() && !self.reduced_motion,
                                     ))
                                     .child(
                                         div()
                                             .max_w(px(260.))
                                             .truncate()
                                             .child(model.status.clone()),
+                                    )
+                                    .child(
+                                        Button::new("toggle-environment")
+                                            .ghost()
+                                            .small()
+                                            .label(if self.settings_open {
+                                                "环境 ›"
+                                            } else {
+                                                "环境 ‹"
+                                            })
+                                            .tooltip(if cfg!(target_os = "macos") {
+                                                "显示 / 隐藏环境 · ⌘ ,"
+                                            } else {
+                                                "显示 / 隐藏环境 · Ctrl ,"
+                                            })
+                                            .on_click(cx.listener(|app, _, window, cx| {
+                                                app.toggle_settings(window, cx)
+                                            })),
                                     ),
                             ),
                     )
@@ -389,13 +554,16 @@ impl Render for NexusView {
                                     .bg(rgba(0x292c2add))
                                     .border_1()
                                     .border_color(rgba(0xffffff14))
+                                    .when(prompt_focused, |element| {
+                                        element.border_color(rgba(0x9b7cff99))
+                                    })
                                     .shadow(glass_shadow())
                                     .p_2()
                                     .flex()
                                     .flex_col()
                                     .child(
                                         Input::new(&self.prompt_input)
-                                            .h(px(72.))
+                                            .disabled(history)
                                             .appearance(false)
                                             .focus_bordered(false),
                                     )
@@ -419,38 +587,81 @@ impl Render for NexusView {
                                                     .child(self.model_selector(cx))
                                                     .child(self.effort_selector(cx)),
                                             )
-                                            .child(
-                                                Button::new("submit")
-                                                    .primary()
-                                                    .rounded(px(18.))
-                                                    .size(px(36.))
-                                                    .p_0()
-                                                    .child(button_label(
-                                                        if model.active_run.is_some() {
-                                                            "…"
-                                                        } else {
-                                                            "↑"
-                                                        },
-                                                        SURFACE,
-                                                    ))
-                                                    .when(!can_submit, |button| {
-                                                        button.opacity(0.42)
-                                                    })
-                                                    .disabled(!can_submit)
-                                                    .on_click(cx.listener(Self::submit)),
-                                            ),
+                                            .when(model.active_run.is_some(), |element| {
+                                                element.child(
+                                                    Button::new("composer-cancel")
+                                                        .danger()
+                                                        .outline()
+                                                        .small()
+                                                        .label("■ 停止")
+                                                        .tooltip("停止当前运行，保留已有输出")
+                                                        .on_click(cx.listener(Self::cancel)),
+                                                )
+                                            })
+                                            .when(model.active_run.is_none(), |element| {
+                                                element.child(
+                                                    Button::new("submit")
+                                                        .primary()
+                                                        .rounded(px(18.))
+                                                        .size(px(36.))
+                                                        .p_0()
+                                                        .child(button_label("↑", SURFACE))
+                                                        .tooltip(composer_hint)
+                                                        .when(!can_submit, |button| {
+                                                            button.opacity(0.42)
+                                                        })
+                                                        .disabled(!can_submit)
+                                                        .on_click(cx.listener(Self::submit)),
+                                                )
+                                            }),
                                     )
-                                    .with_animation(
-                                        "composer-enter",
-                                        Animation::new(Duration::from_millis(280))
-                                            .with_easing(ease_out_quint()),
-                                        |element, delta| {
-                                            element.opacity(delta).top(px(10.) - delta * px(10.))
+                                    .map(|element| {
+                                        entrance(element, "composer-enter", !self.reduced_motion)
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .max_w(px(720.))
+                                    .mx_auto()
+                                    .mt_2()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div().text_xs().text_color(rgb(MUTED)).child(composer_hint),
+                                    )
+                                    .when(
+                                        !history
+                                            && model.selected_project.is_some()
+                                            && !model.can_submit()
+                                            && model.active_run.is_none(),
+                                        |element| {
+                                            element.child(
+                                                Button::new("setup-agent")
+                                                    .ghost()
+                                                    .small()
+                                                    .label("检查环境")
+                                                    .on_click(cx.listener(|app, _, window, cx| {
+                                                        if !app.settings_open {
+                                                            app.toggle_settings(window, cx);
+                                                        }
+                                                    })),
+                                            )
                                         },
                                     ),
                             ),
                     ),
             )
-            .child(self.render_settings(cx))
+            .when(settings_progress > 0., |element| {
+                element.child(
+                    div()
+                        .w(px(292. * settings_progress))
+                        .h_full()
+                        .flex_none()
+                        .overflow_hidden()
+                        .opacity(settings_progress)
+                        .child(self.render_settings(cx)),
+                )
+            })
     }
 }

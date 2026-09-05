@@ -3,6 +3,7 @@ use super::*;
 impl NexusView {
     pub(super) fn render_task_tree(&self, cx: &mut Context<Self>) -> gpui::Div {
         let model = self.presenter.model();
+        let query = self.search_input.read(cx).value();
         div()
             .ml(px(17.))
             .pl_2()
@@ -21,47 +22,76 @@ impl NexusView {
                         .child("发送 Prompt 后，任务会显示在这里"),
                 )
             })
-            .children(model.tasks.iter().map(|task| {
-                let task_id = task.id;
-                let selected = model.selected_task == Some(task_id);
-                div()
-                    .id(SharedString::from(format!("task-{task_id}")))
-                    .relative()
-                    .h(px(34.))
-                    .px_2()
-                    .rounded(px(9.))
-                    .cursor_pointer()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_color(rgb(TEXT_SECONDARY))
-                    .when(selected, |element| {
-                        element
-                            .bg(rgba(0xffffff14))
-                            .text_color(rgb(TEXT))
-                            .shadow(selection_shadow())
-                            .child(selection_indicator(SharedString::from(format!(
-                                "task-selection-{task_id}"
-                            ))))
-                    })
-                    .hover(|style| style.bg(rgba(0xffffff0d)).text_color(rgb(TEXT)))
-                    .on_click(
-                        cx.listener(move |app, _, window, cx| app.select_task(task_id, window, cx)),
-                    )
-                    .child(
+            .when(
+                !model.tasks.is_empty()
+                    && !model
+                        .tasks
+                        .iter()
+                        .any(|task| matches_search(&task.title, &query)),
+                |element| {
+                    element.child(
                         div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_sm()
-                            .child(task.title.clone()),
+                            .px_2()
+                            .py_2()
+                            .text_xs()
+                            .text_color(rgb(MUTED))
+                            .child("没有匹配的任务"),
                     )
-                    .child(status_dot(run_status_color(task.status)))
-            }))
+                },
+            )
+            .children(
+                model
+                    .tasks
+                    .iter()
+                    .filter(|task| matches_search(&task.title, &query))
+                    .map(|task| {
+                        let task_id = task.id;
+                        let selected = model.selected_task == Some(task_id);
+                        div()
+                            .id(SharedString::from(format!("task-{task_id}")))
+                            .focusable()
+                            .tab_stop(true)
+                            .focus(|style| style.bg(rgb(SELECTED)))
+                            .active(|style| style.bg(rgb(SELECTED)))
+                            .relative()
+                            .h(px(34.))
+                            .px_2()
+                            .rounded(px(9.))
+                            .cursor_pointer()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_color(rgb(TEXT_SECONDARY))
+                            .when(selected, |element| {
+                                element
+                                    .bg(rgba(0xffffff14))
+                                    .text_color(rgb(TEXT))
+                                    .shadow(selection_shadow())
+                                    .child(selection_indicator(
+                                        SharedString::from(format!("task-selection-{task_id}")),
+                                        !self.reduced_motion,
+                                    ))
+                            })
+                            .hover(|style| style.bg(rgba(0xffffff0d)).text_color(rgb(TEXT)))
+                            .on_click(cx.listener(move |app, _, window, cx| {
+                                app.select_task(task_id, window, cx)
+                            }))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_sm()
+                                    .child(task.title.clone()),
+                            )
+                            .child(status_dot(run_status_color(task.status)))
+                    }),
+            )
     }
 
     pub(super) fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let model = self.presenter.model();
+        let query = self.search_input.read(cx).value();
         let selected_project_id = model.selected_project.as_ref().map(|project| project.id);
         let selected_codex_thread = model.selected_codex_thread.as_deref();
         let history_status = if model.codex_history_loading {
@@ -134,9 +164,15 @@ impl NexusView {
                     .justify_start()
                     .rounded(px(10.))
                     .child(button_label("＋   新任务", TEXT))
+                    .tooltip(if cfg!(target_os = "macos") {
+                        "新任务 · ⌘ N"
+                    } else {
+                        "新任务 · Ctrl N"
+                    })
                     .disabled(model.selected_project.is_none() || model.active_run.is_some())
-                    .on_click(cx.listener(Self::new_task)),
+                    .on_click(cx.listener(|app, _, window, cx| app.new_task(window, cx))),
             )
+            .child(Input::new(&self.search_input).small().cleanable(true))
             .child(
                 div()
                     .id("project-tree")
@@ -160,6 +196,7 @@ impl NexusView {
                                     .small()
                                     .rounded(px(9.))
                                     .child(button_label("＋", TEXT_SECONDARY))
+                                    .tooltip("选择本地项目目录")
                                     .on_click(cx.listener(Self::choose_project)),
                             ),
                     )
@@ -194,6 +231,10 @@ impl NexusView {
                                     .child(
                                         div()
                                             .id(SharedString::from(format!("project-{id}")))
+                                            .focusable()
+                                            .tab_stop(true)
+                                            .focus(|style| style.bg(rgb(SELECTED)))
+                                            .active(|style| style.bg(rgb(SELECTED)))
                                             .relative()
                                             .h(px(36.))
                                             .px_2()
@@ -209,9 +250,12 @@ impl NexusView {
                                                     .bg(rgba(0xffffff12))
                                                     .text_color(rgb(TEXT))
                                                     .shadow(selection_shadow())
-                                                    .child(selection_indicator(SharedString::from(
-                                                        format!("project-selection-{id}"),
-                                                    )))
+                                                    .child(selection_indicator(
+                                                        SharedString::from(format!(
+                                                            "project-selection-{id}"
+                                                        )),
+                                                        !self.reduced_motion,
+                                                    ))
                                             })
                                             .hover(|style| {
                                                 style.bg(rgba(0xffffff0d)).text_color(rgb(TEXT))
@@ -267,6 +311,7 @@ impl NexusView {
                                         .small()
                                         .rounded(px(9.))
                                         .child(button_label("↻", TEXT_SECONDARY))
+                                        .tooltip("刷新本机 Codex 历史")
                                         .disabled(
                                             !self.presenter.history_available()
                                                 || model.codex_history_loading,
@@ -283,40 +328,85 @@ impl NexusView {
                                 .line_clamp(3)
                                 .child(history_status),
                         )
-                        .children(model.codex_threads.iter().map(|thread| {
-                            let thread_id = thread.id.clone();
-                            let selected = selected_codex_thread == Some(thread.id.as_str());
-                            div()
-                                .id(SharedString::from(format!("codex-thread-{}", thread.id)))
-                                .relative()
-                                .p_2()
-                                .rounded(px(9.))
-                                .cursor_pointer()
-                                .text_color(rgb(TEXT_SECONDARY))
-                                .when(selected, |element| {
-                                    element
-                                        .bg(rgba(0xffffff14))
-                                        .text_color(rgb(TEXT))
-                                        .shadow(selection_shadow())
-                                        .child(selection_indicator(SharedString::from(format!(
-                                            "codex-selection-{}",
-                                            thread.id
-                                        ))))
-                                })
-                                .hover(|style| style.bg(rgba(0xffffff0d)).text_color(rgb(TEXT)))
-                                .on_click(cx.listener(move |app, _, _, cx| {
-                                    app.select_codex_thread(thread_id.clone(), cx)
-                                }))
-                                .child(div().text_sm().truncate().child(thread.title.clone()))
-                                .child(
+                        .when(
+                            !query.trim().is_empty()
+                                && !model.codex_threads.iter().any(|thread| {
+                                    matches_search(
+                                        &format!("{} {}", thread.title, thread.detail()),
+                                        &query,
+                                    )
+                                }),
+                            |element| {
+                                element.child(
                                     div()
-                                        .mt(px(3.))
+                                        .px_2()
+                                        .py_3()
                                         .text_xs()
                                         .text_color(rgb(MUTED))
-                                        .truncate()
-                                        .child(thread.detail()),
+                                        .child("没有匹配的 Codex 会话 · 试试其他关键词"),
                                 )
-                        })),
+                            },
+                        )
+                        .children(
+                            model
+                                .codex_threads
+                                .iter()
+                                .filter(|thread| {
+                                    matches_search(
+                                        &format!("{} {}", thread.title, thread.detail()),
+                                        &query,
+                                    )
+                                })
+                                .map(|thread| {
+                                    let thread_id = thread.id.clone();
+                                    let selected =
+                                        selected_codex_thread == Some(thread.id.as_str());
+                                    div()
+                                        .id(SharedString::from(format!(
+                                            "codex-thread-{}",
+                                            thread.id
+                                        )))
+                                        .focusable()
+                                        .tab_stop(true)
+                                        .focus(|style| style.bg(rgb(SELECTED)))
+                                        .active(|style| style.bg(rgb(SELECTED)))
+                                        .relative()
+                                        .p_2()
+                                        .rounded(px(9.))
+                                        .cursor_pointer()
+                                        .text_color(rgb(TEXT_SECONDARY))
+                                        .when(selected, |element| {
+                                            element
+                                                .bg(rgba(0xffffff14))
+                                                .text_color(rgb(TEXT))
+                                                .shadow(selection_shadow())
+                                                .child(selection_indicator(
+                                                    SharedString::from(format!(
+                                                        "codex-selection-{}",
+                                                        thread.id
+                                                    )),
+                                                    !self.reduced_motion,
+                                                ))
+                                        })
+                                        .hover(|style| {
+                                            style.bg(rgba(0xffffff0d)).text_color(rgb(TEXT))
+                                        })
+                                        .on_click(cx.listener(move |app, _, _, cx| {
+                                            app.select_codex_thread(thread_id.clone(), cx)
+                                        }))
+                                        .child(
+                                            div().text_sm().truncate().child(thread.title.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .mt(px(3.))
+                                                .text_xs()
+                                                .text_color(rgb(MUTED))
+                                                .truncate()
+                                                .child(thread.detail()),
+                                        )
+                                }),
+                        ),
                 ),
             )
             .child(
@@ -330,19 +420,30 @@ impl NexusView {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(status_dot(rgb(SUCCESS).into()))
+                    .child(status_dot(
+                        model
+                            .selected_probe()
+                            .map(|probe| {
+                                if probe.available && probe.authenticated {
+                                    rgb(SUCCESS).into()
+                                } else {
+                                    rgb(WARNING).into()
+                                }
+                            })
+                            .unwrap_or_else(|| rgb(MUTED).into()),
+                    ))
                     .child(
                         div()
                             .flex_1()
                             .text_xs()
                             .text_color(rgb(TEXT_SECONDARY))
-                            .child("本地运行环境"),
+                            .child("本地工作空间"),
                     )
                     .child(div().text_xs().text_color(rgb(MUTED)).child(
                         if cfg!(target_os = "macos") {
-                            "⌘"
+                            "⌘ K 搜索"
                         } else {
-                            "Ctrl"
+                            "Ctrl K 搜索"
                         },
                     )),
             )

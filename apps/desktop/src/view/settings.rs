@@ -21,7 +21,7 @@ impl NexusView {
             .flex_none()
             .overflow_y_scroll()
             .bg(rgba(0x101211f2))
-            .pt(px(66.))
+            .pt_3()
             .px_3()
             .pb_3()
             .flex()
@@ -42,7 +42,7 @@ impl NexusView {
                         div()
                             .text_base()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("Environment"),
+                            .child("环境与偏好"),
                     )
                     .child(
                         div()
@@ -130,20 +130,39 @@ impl NexusView {
                     })
             })
             .child(div().flex_1())
-            .when(model.active_run.is_some(), |element| {
-                element.child(
-                    Button::new("cancel")
-                        .danger()
-                        .outline()
-                        .w_full()
-                        .child(button_label("取消运行", DANGER))
-                        .on_click(cx.listener(Self::cancel)),
-                )
-            })
-            .with_animation(
-                "settings-panel-enter",
-                Animation::new(Duration::from_millis(320)).with_easing(ease_out_quint()),
-                |element, delta| element.opacity(delta).right(px(10.) - delta * px(10.)),
+            .child(
+                div()
+                    .p_3()
+                    .rounded(px(12.))
+                    .bg(rgba(0xffffff07))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(section_label("交互偏好"))
+                    .child(
+                        Button::new("reduce-motion")
+                            .outline()
+                            .small()
+                            .w_full()
+                            .label(if self.reduced_motion {
+                                "减少动效：已开启"
+                            } else {
+                                "减少动效：已关闭"
+                            })
+                            .tooltip("关闭位移动画和循环呼吸效果，本次窗口内生效")
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.reduced_motion = !app.reduced_motion;
+                                app.settings_from = if app.settings_open { 1. } else { 0. };
+                                app.settings_changed = Instant::now();
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MUTED))
+                            .child("本次窗口内生效"),
+                    ),
             )
     }
 }
