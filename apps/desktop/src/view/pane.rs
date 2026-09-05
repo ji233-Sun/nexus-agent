@@ -136,11 +136,27 @@ impl Render for WorkspacePane {
                 let line_height = window.line_height();
                 let hit_handle = handle.clone();
                 let listener = cx.listener(move |pane, event: &ScrollWheelEvent, _, cx| {
-                    if event.delta.precise() || reduced_motion {
+                    let delta = event.delta.pixel_delta(line_height).y;
+                    if event.delta.precise() {
+                        // Precise input already includes the OS trackpad momentum.
+                        // Keep every vertical pixel instead of applying a second axis lock.
+                        pane.wheel_motion = None;
+                        if delta != px(0.) {
+                            let mut offset = handle.offset();
+                            let next_y = (offset.y + delta).clamp(-handle.max_offset().y, px(0.));
+                            if next_y != offset.y {
+                                offset.y = next_y;
+                                handle.set_offset(offset);
+                                cx.notify();
+                            }
+                            cx.stop_propagation();
+                        }
+                        return;
+                    }
+                    if reduced_motion {
                         pane.wheel_motion = None;
                         return;
                     }
-                    let delta = event.delta.pixel_delta(line_height).y;
                     if delta != px(0.) {
                         pane.queue_wheel(&handle, delta, Instant::now());
                         cx.notify();
@@ -151,8 +167,8 @@ impl Render for WorkspacePane {
                     canvas(
                         |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
                         move |_, hitbox, window, _| {
-                            // Handle discrete wheels before the native scroll container jumps.
-                            // Precise trackpad deltas and their OS momentum use the native path.
+                            // Child scroll masks run first, preserving horizontal code scrolling.
+                            // Then handle pane input before native axis filtering or wheel jumps.
                             window.on_mouse_event(
                                 move |event: &ScrollWheelEvent, phase, window, cx| {
                                     if phase.capture()

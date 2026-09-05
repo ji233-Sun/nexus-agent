@@ -601,6 +601,47 @@ mod tests {
     }
 
     #[gpui::test]
+    fn trackpad_preserves_small_diagonal_deltas_and_momentum(cx: &mut TestAppContext) {
+        let (view, cx) = scroll_test_view(cx);
+        let handles = view.read_with(cx, |view, _| {
+            [view.sidebar_scroll.clone(), view.timeline_scroll.clone()]
+        });
+        for reduced_motion in [true, false] {
+            for scroll in &handles {
+                scroll.set_offset(point(px(0.), px(-100.)));
+                view.update(cx, |view, cx| {
+                    view.reduced_motion = reduced_motion;
+                    cx.notify();
+                });
+                cx.run_until_parked();
+                cx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                });
+                for (dx, dy, phase) in [
+                    (0.9, -0.5, gpui::TouchPhase::Started),
+                    (0.1, -0.25, gpui::TouchPhase::Moved),
+                    (0.1, 0.125, gpui::TouchPhase::Moved),
+                    (0., -0.0625, gpui::TouchPhase::Ended),
+                    (0., -0.03125, gpui::TouchPhase::Moved),
+                    (3., 0., gpui::TouchPhase::Moved),
+                ] {
+                    let before = scroll.offset();
+                    cx.simulate_event(ScrollWheelEvent {
+                        position: scroll.bounds().center(),
+                        delta: ScrollDelta::Pixels(point(px(dx), px(dy))),
+                        touch_phase: phase,
+                        ..Default::default()
+                    });
+                    cx.update(|window, cx| {
+                        let _ = window.draw(cx);
+                    });
+                    assert_eq!(scroll.offset(), point(before.x, before.y + px(dy)));
+                }
+            }
+        }
+    }
+
+    #[gpui::test]
     fn wheel_smoothing_preserves_native_trackpad_input(cx: &mut TestAppContext) {
         let (view, cx) = scroll_test_view(cx);
         let scroll = view.read_with(cx, |view, _| view.sidebar_scroll.clone());
