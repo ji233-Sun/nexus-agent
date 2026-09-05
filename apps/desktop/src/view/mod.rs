@@ -33,6 +33,7 @@ use nexus_domain::{
     RunStatus, ThinkingEffort,
 };
 use pane::{PaneKind, WorkspacePane};
+use settings::SettingsSection;
 use std::{
     collections::HashSet,
     time::{Duration, Instant},
@@ -65,6 +66,7 @@ pub(crate) struct NexusView {
     codex_history_open: bool,
     codex_history_visible_count: usize,
     settings_open: bool,
+    settings_section: SettingsSection,
     reduced_motion: bool,
     editing_provider_profile: Option<Uuid>,
 }
@@ -172,6 +174,7 @@ impl NexusView {
             codex_history_open: false,
             codex_history_visible_count: sidebar::HISTORY_PAGE_SIZE,
             settings_open: false,
+            settings_section: SettingsSection::General,
             reduced_motion: false,
             editing_provider_profile,
         };

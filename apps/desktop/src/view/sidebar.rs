@@ -804,15 +804,18 @@ mod tests {
         assert!(view.read_with(cx, |view, _| view.settings_open));
         view.update(cx, |_, cx| cx.notify());
         cx.run_until_parked();
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
+        let providers_tab = cx.debug_bounds("settings-nav-providers").unwrap().center();
+        cx.simulate_click(providers_tab, Default::default());
+        cx.run_until_parked();
         let settings_scroll = view.read_with(cx, |view, _| view.settings_scroll.clone());
         assert_eq!(cx.debug_bounds("settings-page").unwrap(), workspace_bounds);
         assert!(cx.debug_bounds("workspace-page").is_none());
         assert!(cx.debug_bounds("sidebar-settings").is_none());
         assert!(settings_scroll.max_offset().y > px(40.));
         let back_button = cx.debug_bounds("back-to-workspace").unwrap();
+        let navigation = cx.debug_bounds("settings-navigation").unwrap();
+        let breadcrumb = cx.debug_bounds("settings-breadcrumb").unwrap();
+        assert!(navigation.right() <= settings_scroll.bounds().left());
         let timeline_renders = timeline_pane.read_with(cx, |pane, _| pane.render_count);
         let sidebar_renders = sidebar_pane.read_with(cx, |pane, _| pane.render_count);
         let before = scroll.offset();
@@ -828,6 +831,8 @@ mod tests {
         assert_eq!(sidebar_scroll.offset().y, px(-80.));
         assert_eq!(settings_scroll.offset().y, px(-40.));
         assert_eq!(cx.debug_bounds("back-to-workspace").unwrap(), back_button);
+        assert_eq!(cx.debug_bounds("settings-navigation").unwrap(), navigation);
+        assert_eq!(cx.debug_bounds("settings-breadcrumb").unwrap(), breadcrumb);
         assert_eq!(
             timeline_pane.read_with(cx, |pane, _| pane.render_count),
             timeline_renders
@@ -836,6 +841,24 @@ mod tests {
             sidebar_pane.read_with(cx, |pane, _| pane.render_count),
             sidebar_renders
         );
+
+        cx.simulate_event(ScrollWheelEvent {
+            position: navigation.center(),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-40.))),
+            ..Default::default()
+        });
+        cx.simulate_click(providers_tab, Default::default());
+        cx.run_until_parked();
+        assert_eq!(settings_scroll.offset().y, px(-40.));
+        let general_tab = cx.debug_bounds("settings-nav-general").unwrap().center();
+        cx.simulate_click(general_tab, Default::default());
+        cx.run_until_parked();
+        assert_eq!(settings_scroll.offset().y, px(0.));
+        assert!(cx.debug_bounds("settings-content-general").is_some());
+        assert!(cx.debug_bounds("settings-content-providers").is_none());
+        cx.simulate_click(providers_tab, Default::default());
+        cx.run_until_parked();
+        assert_eq!(settings_scroll.offset().y, px(0.));
 
         cx.simulate_click(back_button.center(), Default::default());
         cx.run_until_parked();
@@ -862,6 +885,8 @@ mod tests {
     #[gpui::test]
     fn settings_navigation_preserves_drafts_and_restores_visible_focus(cx: &mut TestAppContext) {
         let (view, cx) = scroll_test_view(cx);
+        cx.simulate_resize(gpui::size(px(1040.), px(680.)));
+        cx.run_until_parked();
         let selected_task = view.read_with(cx, |view, _| view.presenter.model().selected_task);
         view.update_in(cx, |view, window, cx| {
             view.prompt_input.update(cx, |input, cx| {
@@ -872,8 +897,13 @@ mod tests {
         cx.run_until_parked();
         let settings_button = cx.debug_bounds("open-settings").unwrap().center();
         cx.simulate_click(settings_button, Default::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("settings-content-general").is_some());
+        let agent_tab = cx.debug_bounds("settings-nav-agent").unwrap().center();
+        cx.simulate_click(agent_tab, Default::default());
         view.update_in(cx, |view, window, cx| {
             assert!(view.settings_open);
+            assert_eq!(view.settings_section, SettingsSection::Agent);
             assert!(view.focus_handle.is_focused(window));
             assert!(
                 !view
@@ -889,7 +919,37 @@ mod tests {
             view.provider_name_input.update(cx, |input, cx| {
                 input.set_value("Keep this provider draft", window, cx);
             });
+            view.provider_api_key_input.update(cx, |input, cx| {
+                input.set_value("unsaved-test-key", window, cx);
+            });
         });
+        for (selector, section) in [
+            ("settings-nav-providers", SettingsSection::Providers),
+            ("settings-nav-remote", SettingsSection::Remote),
+            ("settings-nav-general", SettingsSection::General),
+            ("settings-nav-providers", SettingsSection::Providers),
+        ] {
+            cx.run_until_parked();
+            let tab = cx.debug_bounds(selector).unwrap().center();
+            cx.simulate_click(tab, Default::default());
+            view.update_in(cx, |view, window, cx| {
+                assert_eq!(view.settings_section, section);
+                assert!(view.focus_handle.is_focused(window));
+                assert_eq!(view.executable_input.read(cx).value(), "custom-agent");
+                assert_eq!(
+                    view.provider_name_input.read(cx).value(),
+                    "Keep this provider draft"
+                );
+                assert_eq!(
+                    view.provider_api_key_input.read(cx).value(),
+                    "unsaved-test-key"
+                );
+                if section == SettingsSection::Providers {
+                    view.provider_name_input
+                        .update(cx, |input, cx| input.focus(window, cx));
+                }
+            });
+        }
         cx.run_until_parked();
         let settings_shortcut = if cfg!(target_os = "macos") {
             "cmd-,"
@@ -912,6 +972,7 @@ mod tests {
         cx.simulate_keystrokes(settings_shortcut);
         view.read_with(cx, |view, cx| {
             assert!(view.settings_open);
+            assert_eq!(view.settings_section, SettingsSection::Providers);
             assert_eq!(
                 view.provider_name_input.read(cx).value(),
                 "Keep this provider draft"
