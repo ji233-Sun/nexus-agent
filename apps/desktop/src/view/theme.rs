@@ -79,6 +79,9 @@ pub(crate) fn configure_theme(cx: &mut App) {
     theme.sidebar_accent = rgb(SELECTED).into();
     theme.sidebar_accent_foreground = rgb(TEXT).into();
     theme.sidebar_border = rgb(BORDER).into();
+    theme.list_active = rgb(HOVER).into();
+    theme.list_active_border = rgba(0xffffff00).into();
+    theme.list_hover = rgb(RECESSED).into();
     theme.button = rgb(RECESSED).into();
     theme.button_hover = rgb(HOVER).into();
     theme.button_active = rgb(SELECTED).into();
