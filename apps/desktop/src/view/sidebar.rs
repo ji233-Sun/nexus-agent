@@ -278,8 +278,12 @@ impl NexusView {
             .child(
                 div()
                     .id("sidebar-navigation")
+                    .relative()
                     .flex_1()
                     .min_h_0()
+                    .overflow_y_scroll()
+                    .lock_scroll_axis()
+                    .track_scroll(&self.sidebar_scroll)
                     .child(
                         div()
                             .px(px(12.))
@@ -371,7 +375,7 @@ impl NexusView {
                                     }),
                             ),
                     )
-                    .overflow_y_scrollbar(),
+                    .vertical_scrollbar(&self.sidebar_scroll),
             )
             .child(
                 div().flex_none().px(px(16.)).pb(px(12.)).child(
@@ -459,6 +463,125 @@ impl NexusView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infrastructure::storage::{NewTaskRun, Storage};
+    use gpui::{ScrollDelta, ScrollWheelEvent, TestAppContext, point};
+    use std::path::Path;
+
+    #[gpui::test]
+    fn scroll_regions_keep_offsets_and_rendering_independent(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let directory = tempfile::tempdir().unwrap();
+        let mut storage = Storage::open(Path::new(":memory:")).unwrap();
+        let project = storage.open_project(directory.path()).unwrap();
+        for _ in 0..30 {
+            storage
+                .create_task_run(NewTaskRun {
+                    project_id: project.id,
+                    title: "Scroll regression",
+                    prompt: &"A long message for scrolling.\n\n".repeat(100),
+                    harness: HarnessKind::Claude,
+                    executable: "claude",
+                    model: None,
+                    effort: ThinkingEffort::Low,
+                    harness_version: None,
+                })
+                .unwrap();
+        }
+        let mut presenter = Presenter::new(storage, Err(anyhow::anyhow!("test")), None);
+        presenter.select_project(project);
+        presenter.select_task(presenter.model().tasks[0].id);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut view = NexusView::new(presenter, window, cx);
+            view.reduced_motion = true;
+            view
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let scroll = view.read_with(cx, |view, _| view.timeline_scroll.clone());
+        assert!(scroll.max_offset().y > px(100.));
+        scroll.set_offset(point(px(0.), px(-100.)));
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let (sidebar_scroll, timeline_pane, sidebar_pane) = view.read_with(cx, |view, _| {
+            (
+                view.sidebar_scroll.clone(),
+                view.timeline_pane.clone(),
+                view.sidebar_pane.clone(),
+            )
+        });
+        let timeline_renders = timeline_pane.read_with(cx, |pane, _| pane.render_count);
+        let sidebar_renders = sidebar_pane.read_with(cx, |pane, _| pane.render_count);
+        let before = scroll.offset();
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(100.), px(350.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-80.))),
+            ..Default::default()
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(scroll.offset(), before);
+        assert_eq!(sidebar_scroll.offset().y, px(-80.));
+        assert_eq!(
+            timeline_pane.read_with(cx, |pane, _| pane.render_count),
+            timeline_renders
+        );
+        assert!(sidebar_pane.read_with(cx, |pane, _| pane.render_count) > sidebar_renders);
+
+        cx.simulate_event(ScrollWheelEvent {
+            position: scroll.bounds().center(),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-40.))),
+            ..Default::default()
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(scroll.offset().y, before.y - px(40.));
+        assert_eq!(sidebar_scroll.offset().y, px(-80.));
+        view.update(cx, |view, cx| {
+            view.settings_open = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let settings_scroll = view.read_with(cx, |view, _| view.settings_scroll.clone());
+        let before = scroll.offset();
+        cx.simulate_event(ScrollWheelEvent {
+            position: settings_scroll.bounds().center(),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-40.))),
+            ..Default::default()
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(scroll.offset(), before);
+        assert_eq!(sidebar_scroll.offset().y, px(-80.));
+
+        view.update(cx, |view, cx| {
+            view.settings_open = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let before = scroll.offset();
+        cx.simulate_event(ScrollWheelEvent {
+            position: scroll.bounds().center(),
+            delta: ScrollDelta::Pixels(point(px(-80.), px(0.))),
+            touch_phase: gpui::TouchPhase::Started,
+            ..Default::default()
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(scroll.offset(), before);
+    }
 
     fn threads(count: usize) -> Vec<ThreadSummary> {
         (0..count)

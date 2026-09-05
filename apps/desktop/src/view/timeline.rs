@@ -26,8 +26,8 @@ impl NexusView {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    .lock_scroll_axis()
                     .track_scroll(&self.timeline_scroll)
-                    .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
                     .child(
                         div()
                             .w_full()

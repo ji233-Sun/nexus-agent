@@ -18,6 +18,8 @@ impl NexusView {
             .w_full()
             .h_full()
             .overflow_y_scroll()
+            .lock_scroll_axis()
+            .track_scroll(&self.settings_scroll)
             .bg(rgb(SURFACE))
             .border_l_1()
             .border_color(rgb(BORDER))

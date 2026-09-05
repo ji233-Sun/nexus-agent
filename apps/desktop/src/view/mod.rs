@@ -1,4 +1,5 @@
 mod components;
+mod pane;
 mod settings;
 mod sidebar;
 pub(crate) mod theme;
@@ -15,7 +16,7 @@ use gpui::{
 };
 use gpui_kit as gpui;
 use gpui_kit::component::{
-    Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
+    Disableable as _, Icon, IconName, InteractiveElementExt as _, Selectable as _, Sizable as _,
     alert::Alert,
     box_shadow,
     button::{Button, ButtonVariants as _},
@@ -27,6 +28,7 @@ use gpui_kit::component::{
 use nexus_domain::{
     ClaudeModel, HarnessKind, Message, MessageKind, MessageRole, Project, RunStatus, ThinkingEffort,
 };
+use pane::{PaneKind, WorkspacePane};
 use std::{
     collections::HashSet,
     time::{Duration, Instant},
@@ -43,6 +45,11 @@ pub(crate) struct NexusView {
     search_input: Entity<InputState>,
     focus_handle: FocusHandle,
     timeline_scroll: ScrollHandle,
+    sidebar_scroll: ScrollHandle,
+    settings_scroll: ScrollHandle,
+    sidebar_pane: Entity<WorkspacePane>,
+    timeline_pane: Entity<WorkspacePane>,
+    settings_pane: Entity<WorkspacePane>,
     expanded_messages: HashSet<ElementId>,
     collapsed_projects: HashSet<Uuid>,
     codex_history_open: bool,
@@ -87,6 +94,10 @@ impl NexusView {
             KeyBinding::new("secondary-n", NewTask, Some("Nexus")),
             KeyBinding::new("secondary-,", ToggleEnvironment, Some("Nexus")),
         ]);
+        let owner = cx.weak_entity();
+        let sidebar_pane = cx.new(|cx| WorkspacePane::new(owner.clone(), PaneKind::Sidebar, cx));
+        let timeline_pane = cx.new(|cx| WorkspacePane::new(owner.clone(), PaneKind::Timeline, cx));
+        let settings_pane = cx.new(|cx| WorkspacePane::new(owner, PaneKind::Settings, cx));
         let view = Self {
             presenter,
             prompt_input,
@@ -94,6 +105,11 @@ impl NexusView {
             search_input,
             focus_handle: cx.focus_handle(),
             timeline_scroll: ScrollHandle::new(),
+            sidebar_scroll: ScrollHandle::new(),
+            settings_scroll: ScrollHandle::new(),
+            sidebar_pane,
+            timeline_pane,
+            settings_pane,
             expanded_messages: HashSet::new(),
             collapsed_projects: HashSet::new(),
             codex_history_open: false,
@@ -111,7 +127,9 @@ impl NexusView {
     fn start_event_pump(&self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             loop {
-                smol::Timer::after(Duration::from_millis(33)).await;
+                cx.background_executor()
+                    .timer(Duration::from_millis(33))
+                    .await;
                 let Some(this) = this.upgrade() else { break };
                 this.update(cx, |app, cx| {
                     let follow_latest = app.timeline_scroll.max_offset().y
@@ -472,7 +490,14 @@ impl Render for NexusView {
             .text_color(rgb(TEXT))
             .text_sm()
             .flex()
-            .child(self.render_sidebar(cx))
+            .child(
+                self.sidebar_pane.clone().cached(
+                    gpui::StyleRefinement::default()
+                        .w(px(300.))
+                        .h_full()
+                        .flex_none(),
+                ),
+            )
             .child(
                 div()
                     .flex_1()
@@ -564,7 +589,11 @@ impl Render for NexusView {
                                     ),
                             ),
                     )
-                    .child(self.render_timeline(window, cx))
+                    .child(
+                        self.timeline_pane
+                            .clone()
+                            .cached(gpui::StyleRefinement::default().flex_1().min_h_0()),
+                    )
                     .child(
                         div()
                             .flex_none()
@@ -702,7 +731,11 @@ impl Render for NexusView {
                         .flex_none()
                         .overflow_hidden()
                         .opacity(settings_progress)
-                        .child(self.render_settings(cx)),
+                        .child(
+                            self.settings_pane
+                                .clone()
+                                .cached(gpui::StyleRefinement::default().size_full()),
+                        ),
                 )
             })
     }
