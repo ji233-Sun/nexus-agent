@@ -38,7 +38,7 @@ impl NexusView {
                             .py(px(if compact { 16. } else { 32. }))
                             .flex()
                             .flex_col()
-                            .gap(px(24.))
+                            .gap(px(20.))
                             .when(empty, |element| element.child(self.render_welcome(compact)))
                             .when(!history, |element| {
                                 element.children(
@@ -107,7 +107,7 @@ impl NexusView {
                                     .outline()
                                     .small()
                                     .h(px(COMPACT_CONTROL_HEIGHT))
-                                    .rounded_full()
+                                    .rounded(px(CONTROL_RADIUS))
                                     .icon(IconName::ArrowDown)
                                     .label("回到最新消息")
                                     .on_click(cx.listener(|app, _, _, cx| {
@@ -144,15 +144,15 @@ impl NexusView {
                 .child(
                     gpui::svg()
                         .data(icon)
-                        .size(px(if compact { 48. } else { 64. }))
+                        .size(px(if compact { 40. } else { 48. }))
                         .flex_none()
                         .text_color(color),
                 )
                 .child(
                     div()
                         .mt_3()
-                        .text_size(px(if compact { 28. } else { 34. }))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_size(px(if compact { 24. } else { 28. }))
+                        .font_weight(gpui::FontWeight::MEDIUM)
                         .line_height(relative(1.25))
                         .child(model.selected_harness.to_string()),
                 )
@@ -180,22 +180,22 @@ impl NexusView {
             .justify_center()
             .py(px(if compact { 8. } else { 32. }))
             .text_center()
-            .child(brand_mark(if compact { 48. } else { 64. }))
+            .child(brand_mark(if compact { 40. } else { 48. }))
             .when(!compact, |element| {
                 element.child(
                     div()
                         .mt_6()
                         .text_xs()
                         .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(rgb(ACCENT))
+                        .text_color(rgb(MUTED))
                         .child(eyebrow),
                 )
             })
             .child(
                 div()
                     .mt_3()
-                    .text_size(px(if compact { 28. } else { 34. }))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_size(px(if compact { 24. } else { 28. }))
+                    .font_weight(gpui::FontWeight::MEDIUM)
                     .line_height(relative(1.25))
                     .child(title),
             )

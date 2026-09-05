@@ -183,17 +183,17 @@ pub(super) fn brand_mark(size: f32) -> impl IntoElement {
     div()
         .size(px(size))
         .flex_none()
-        .rounded(px(size * 0.3))
-        .bg(rgb(SELECTED))
+        .rounded(px(CARD_RADIUS))
+        .bg(rgb(RECESSED))
         .border_1()
-        .border_color(rgba(0x619cff40))
+        .border_color(rgb(BORDER))
         .flex()
         .items_center()
         .justify_center()
         .child(
             Icon::new(IconName::Asterisk)
                 .size(px(size * 0.55))
-                .text_color(rgb(ACCENT)),
+                .text_color(rgb(TEXT_SECONDARY)),
         )
 }
 
@@ -296,22 +296,21 @@ impl NexusView {
                     .when(is_user, |element| {
                         element
                             .max_w(px(600.))
-                            .rounded(px(18.))
+                            .rounded(px(CARD_RADIUS))
                             .bg(rgb(RECESSED))
                             .border_1()
-                            .border_color(rgba(0xffffff10))
+                            .border_color(rgb(BORDER))
                             .px_4()
                             .py_3()
                     })
                     .when(!is_user, |element| element.w_full())
                     .when(!is_user && is_panel, |element| {
                         element
-                            .rounded(px(14.))
+                            .rounded(px(CONTROL_RADIUS))
                             .bg(rgb(SURFACE))
                             .border_1()
-                            .border_color(rgba(0xffffff0d))
-                            .shadow(surface_border_shadow())
-                            .p_4()
+                            .border_color(rgb(BORDER))
+                            .p_3()
                     })
                     .when(!is_user && !is_panel, |element| element.px_1().py_1())
                     .when(show_label, |element| {
@@ -353,12 +352,12 @@ impl NexusView {
                     })
                     .child(if kind == MessageKind::Text {
                         TextView::markdown(id.clone(), content.to_owned())
-                            .text_size(px(16.))
+                            .text_size(px(15.))
                             .font_weight(gpui::FontWeight::NORMAL)
-                            .line_height(relative(1.7))
+                            .line_height(relative(1.65))
                             .style(
                                 TextViewStyle::default()
-                                    .paragraph_gap(gpui::rems(16. / 14.))
+                                    .paragraph_gap(gpui::rems(1.))
                                     .heading_font_size(|level, _| {
                                         px(match level {
                                             1 => 22.,
@@ -371,13 +370,13 @@ impl NexusView {
                                     .code_block(
                                         gpui::StyleRefinement::default()
                                             .font_family(MONO_FONT)
-                                            .text_size(px(14.))
+                                            .text_size(px(13.))
                                             .line_height(relative(1.6))
-                                            .p(px(16.))
+                                            .p(px(12.))
                                             .bg(rgb(SURFACE))
                                             .border_1()
                                             .border_color(rgb(BORDER))
-                                            .rounded(px(8.)),
+                                            .rounded(px(CONTROL_RADIUS)),
                                     )
                                     .table_head(
                                         gpui::StyleRefinement::default()
@@ -485,15 +484,10 @@ pub(super) fn run_status_color(status: RunStatus) -> Option<Hsla> {
     }
 }
 
-pub(super) fn surface_border_shadow() -> Vec<gpui::BoxShadow> {
-    vec![box_shadow(0., 0., 0., 1., rgba(0xffffff0d).into())]
-}
-
 pub(super) fn glass_shadow() -> Vec<gpui::BoxShadow> {
     vec![
-        box_shadow(0., 0., 0., 1., rgba(0xffffff0a).into()),
-        box_shadow(0., 2., 8., -3., rgba(0x00000080).into()),
-        box_shadow(0., 18., 42., -18., rgba(0x000000c0).into()),
+        box_shadow(0., 2., 8., -4., rgba(0x00000060).into()),
+        box_shadow(0., 12., 28., -16., rgba(0x00000080).into()),
     ]
 }
 
@@ -542,6 +536,7 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) -> (Entity<DropdownHarness>, &mut gpui::VisualTestContext) {
         cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
         let (view, cx) = cx.add_window_view(|window, cx| {
             let focus = cx.focus_handle();
             focus.focus(window, cx);

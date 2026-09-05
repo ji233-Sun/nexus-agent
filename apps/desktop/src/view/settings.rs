@@ -45,7 +45,7 @@ impl NexusView {
                             .gap_2()
                             .child(
                                 div()
-                                    .text_lg()
+                                    .text_base()
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .child("环境与偏好"),
                             )
@@ -102,7 +102,7 @@ impl NexusView {
                     )
                     .child(
                         div()
-                            .rounded(px(10.))
+                            .rounded(px(CONTROL_RADIUS))
                             .bg(rgb(RECESSED))
                             .p_3()
                             .flex()
