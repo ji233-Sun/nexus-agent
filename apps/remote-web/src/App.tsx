@@ -139,21 +139,34 @@ function RemoteWorkspace({
 
   selectedTaskRef.current = selectedTaskId;
 
+  const refreshMessages = useCallback(async (taskId: string) => {
+    try {
+      const nextMessages = await api.getMessages(taskId);
+      if (selectedTaskRef.current === taskId) {
+        setMessages(nextMessages);
+      }
+    } catch (reason) {
+      if (selectedTaskRef.current === taskId) {
+        setError(errorMessage(reason));
+      }
+    }
+  }, [api]);
+
   const refresh = useCallback(async () => {
     try {
       const nextState = await api.getState();
       setState(nextState);
+      setError("");
       const taskId = selectedTaskRef.current;
       if (taskId) {
-        setMessages(await api.getMessages(taskId));
+        await refreshMessages(taskId);
       }
-      setError("");
     } catch (reason) {
       setError(errorMessage(reason));
     } finally {
       setLoading(false);
     }
-  }, [api]);
+  }, [api, refreshMessages]);
 
   const scheduleRefresh = useCallback(() => {
     if (refreshTimer.current !== null) {
@@ -239,14 +252,12 @@ function RemoteWorkspace({
   }, [projectTasks, state?.active_task_id, state?.selected_task_id]);
 
   useEffect(() => {
+    setMessages([]);
     if (!selectedTaskId) {
-      setMessages([]);
       return;
     }
-    api.getMessages(selectedTaskId).then(setMessages).catch((reason) => {
-      setError(errorMessage(reason));
-    });
-  }, [api, selectedTaskId]);
+    void refreshMessages(selectedTaskId);
+  }, [refreshMessages, selectedTaskId]);
 
   const run = async (event: FormEvent) => {
     event.preventDefault();
