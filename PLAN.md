@@ -170,7 +170,7 @@
 ```text
 ┌──────────────────────────────────────────┐
 │ nexus-desktop                            │
-│ GPUI Views / View Models / Local Storage │
+│ GPUI View / Presenter / Model + SQLite   │
 └───────────────────┬──────────────────────┘
                     │ versioned JSONL over stdio
 ┌───────────────────▼──────────────────────┐
@@ -219,26 +219,31 @@ Desktop 不负责：
 
 MVP 不实现后台常驻 Runner。Desktop 启动时创建 Runner，退出时结束 Runner。
 
-## 7. 建议的仓库结构
+## 7. 当前仓库结构
 
 ```text
 apps/
-  desktop/             # GPUI 桌面入口
-  runner/              # 本地 Headless Runner 入口
+  desktop/src/
+    main.rs            # 调用启动入口
+    bootstrap.rs       # 窗口和依赖装配
+    model/             # MVP 状态与数据
+    presenter/         # 用户操作、事件处理和持久化协调
+    view/              # GPUI 渲染与控件
+    infrastructure/    # SQLite、RunnerClient、Codex 历史、Git 状态
+  desktop/tests/       # 内置 Runner 协议集成测试
+  runner/src/
+    main.rs            # 调用库入口
+    lib.rs             # Tokio 运行时与传输装配
+    transport.rs       # JSONL 传输及版本校验
+    application/       # 命令调度、运行独占、取消、事件转换
+    infrastructure/    # Harness 选择、进程执行和清理
+  runner/tests/        # Fake Harness 协议集成测试
 crates/
   domain/              # Task、Run、Message、状态和错误
   protocol/            # Desktop ↔ Runner 协议
-  orchestrator/        # Run 生命周期和命令排序
-  harness-core/        # HarnessAdapter、Capability、Registry
+  harness-core/        # 启动规格、事件解码接口和可执行文件解析
   harness-codex/       # Codex 适配器
   harness-claude/      # Claude Code 适配器
-  process-supervisor/  # 子进程和进程树管理
-  persistence/         # SQLite repository
-  ui-components/       # GPUI 通用组件，仅在真实复用后抽取
-docs/
-  adr/                 # 架构决策记录
-tests/
-  fixtures/            # Fake Harness 和协议样例
 ```
 
 约束：

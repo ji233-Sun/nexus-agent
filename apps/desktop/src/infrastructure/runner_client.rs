@@ -7,6 +7,7 @@ use std::{
     time::Duration,
 };
 
+use crate::presenter::RunnerPort as _;
 use anyhow::{Context as _, Result, anyhow};
 use nexus_protocol::Command as RunnerCommand;
 use nexus_protocol::{CommandEnvelope, EventEnvelope};
@@ -51,8 +52,10 @@ impl RunnerClient {
             events,
         })
     }
+}
 
-    pub fn send(&self, command: CommandEnvelope) -> Result<()> {
+impl crate::presenter::RunnerPort for RunnerClient {
+    fn send(&self, command: CommandEnvelope) -> Result<()> {
         let mut stdin = self
             .stdin
             .lock()
@@ -63,7 +66,7 @@ impl RunnerClient {
         Ok(())
     }
 
-    pub fn drain_events(&self) -> Vec<EventEnvelope> {
+    fn drain_events(&self) -> Vec<EventEnvelope> {
         let mut events = Vec::new();
         while let Ok(event) = self.events.try_recv() {
             events.push(event);
@@ -100,6 +103,6 @@ fn runner_command() -> Result<Command> {
 
     let current = env::current_exe().context("定位 Desktop 可执行文件")?;
     let mut command = Command::new(current);
-    command.arg(crate::RUNNER_MODE_ARG);
+    command.arg(crate::bootstrap::RUNNER_MODE_ARG);
     Ok(command)
 }

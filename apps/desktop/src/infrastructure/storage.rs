@@ -23,6 +23,17 @@ pub struct ConversationConfig {
     pub effort: ThinkingEffort,
 }
 
+pub struct NewTaskRun<'a> {
+    pub project_id: Uuid,
+    pub title: &'a str,
+    pub prompt: &'a str,
+    pub harness: HarnessKind,
+    pub executable: &'a str,
+    pub model: Option<&'a str>,
+    pub effort: ThinkingEffort,
+    pub harness_version: Option<&'a str>,
+}
+
 impl Storage {
     pub fn open_default() -> Result<Self> {
         let base = env::var_os("HOME")
@@ -200,17 +211,17 @@ impl Storage {
             .map_err(Into::into)
     }
 
-    pub fn create_task_run(
-        &mut self,
-        project_id: Uuid,
-        title: &str,
-        prompt: &str,
-        harness: HarnessKind,
-        executable: &str,
-        model: Option<&str>,
-        effort: ThinkingEffort,
-        harness_version: Option<&str>,
-    ) -> Result<(Uuid, Uuid)> {
+    pub fn create_task_run(&mut self, request: NewTaskRun<'_>) -> Result<(Uuid, Uuid)> {
+        let NewTaskRun {
+            project_id,
+            title,
+            prompt,
+            harness,
+            executable,
+            model,
+            effort,
+            harness_version,
+        } = request;
         let task_id = Uuid::new_v4();
         let run_id = Uuid::new_v4();
         let message_id = Uuid::new_v4();
@@ -486,16 +497,16 @@ mod tests {
         let mut storage = Storage::open(&database).unwrap();
         let project = storage.open_project(&project_dir).unwrap();
         let (task_id, run_id) = storage
-            .create_task_run(
-                project.id,
-                "Test task",
-                "hello",
-                HarnessKind::Claude,
-                "claude-custom",
-                Some("sonnet"),
-                ThinkingEffort::High,
-                Some("1.2.3"),
-            )
+            .create_task_run(NewTaskRun {
+                project_id: project.id,
+                title: "Test task",
+                prompt: "hello",
+                harness: HarnessKind::Claude,
+                executable: "claude-custom",
+                model: Some("sonnet"),
+                effort: ThinkingEffort::High,
+                harness_version: Some("1.2.3"),
+            })
             .unwrap();
         storage
             .update_run_status(run_id, RunStatus::Running)
@@ -533,16 +544,16 @@ mod tests {
         let mut storage = Storage::open(&database).unwrap();
         let project = storage.open_project(&project_dir).unwrap();
         let (task_id, run_id) = storage
-            .create_task_run(
-                project.id,
-                "Codex task",
-                "describe this project",
-                HarnessKind::Codex,
-                "codex",
-                None,
-                ThinkingEffort::Medium,
-                Some("4.5.6"),
-            )
+            .create_task_run(NewTaskRun {
+                project_id: project.id,
+                title: "Codex task",
+                prompt: "describe this project",
+                harness: HarnessKind::Codex,
+                executable: "codex",
+                model: None,
+                effort: ThinkingEffort::Medium,
+                harness_version: Some("4.5.6"),
+            })
             .unwrap();
         storage
             .append_message(

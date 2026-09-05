@@ -50,11 +50,19 @@ Desktop 默认以独立子进程运行内置 Runner，确保两者始终使用�
 
 ## 架构
 
+桌面 UI 使用 MVP（Model–View–Presenter），Runner 使用分层架构。两个进程的入口只负责启动装配，业务逻辑放在独立模块中。
+
 ```text
-nexus-desktop (GPUI + SQLite)
+nexus-desktop
+  View (GPUI) ──用户操作──▶ Presenter ──更新──▶ Model
+       └────────────读取 Model 渲染──────────────┘
+                            │
+                     基础设施（SQLite / RunnerClient / Codex 历史）
        │ versioned JSONL over stdio
        ▼
-nexus-runner (lifecycle + process group)
+nexus-runner
+  Transport ──▶ Application ──▶ Infrastructure
+  JSONL         调度、独占、取消   Harness / 进程组
        │
        ├── stream-json ──▶ Claude Code
        └── exec --json ──▶ Codex CLI
@@ -68,7 +76,13 @@ nexus-runner (lifecycle + process group)
 - `apps/runner/src/transport.rs`：JSONL 命令读取、协议版本校验和事件写出。
 - `apps/runner/src/application`：命令调度、运行独占、取消和统一事件转换。
 - `apps/runner/src/infrastructure`：Harness 适配器选择、子进程执行和进程组清理。
-- `apps/desktop`：GPUI 界面与 SQLite 历史。
+- `apps/desktop/src/bootstrap.rs`：窗口、主题、存储和 Runner 的启动装配。
+- `apps/desktop/src/model`：界面状态、历史消息数据和提交可用性，不依赖 GPUI。
+- `apps/desktop/src/presenter`：项目选择、配置、提交、事件处理和持久化协调，不依赖 GPUI；通过 `RunnerPort` 注入真实或测试 Runner。
+- `apps/desktop/src/view`：GPUI 渲染、控件状态和事件转交，按侧栏、时间线、设置、组件和主题拆分。
+- `apps/desktop/src/infrastructure`：SQLite、Runner 进程通信、Codex 历史和 Git 状态读取。
+
+View 只能通过 Presenter 的只读 `model()` 获取业务状态，通过 Presenter 方法发起操作。SQLite 格式和 Desktop–Runner JSONL 协议保持兼容；已有领域与 Harness crate 继续复用，不额外引入框架或空 crate。
 
 ## 验证
 
@@ -80,6 +94,7 @@ cargo build --workspace --release
 ```
 
 测试中的 Fake Claude / Fake Codex 只验证进程和协议闭环，不发起真实模型请求。
+Presenter 单元测试使用内存 SQLite 与 Fake Runner，不打开 GPUI 窗口；Runner 单元测试覆盖任务独占、取消、事件转换和协议传输。
 
 ## 致谢
 
