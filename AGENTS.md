@@ -64,3 +64,7 @@ and confirm the new scope.
 - Every touched file is necessary and the diff contains nothing unrelated
 - No debug code, backup copies, dead paths, or scratch files remain
 - Assumptions, limitations, and unverified runtime behavior are stated plainly
+
+# 项目规则
+
+- 任何变更都应当优先在当前工作区完成，而不是新建worktree，或在target内新建一个全新的工作区
