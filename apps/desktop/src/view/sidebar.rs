@@ -46,7 +46,11 @@ fn navigation_row(
 }
 
 impl NexusView {
-    pub(super) fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_sidebar(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let model = self.presenter.model();
         let query = self.search_input.read(cx).value();
         let selected_project_id = model.selected_project.as_ref().map(|project| project.id);
@@ -66,9 +70,17 @@ impl NexusView {
             .children(model.projects.iter().map(|project| {
                 let selected = selected_project_id == Some(project.id);
                 let open = selected && !self.collapsed_projects.contains(&project.id);
+                let progress = disclosure_progress(
+                    (ElementId::from(project.id), "project-reveal"),
+                    open,
+                    self.reduced_motion || !selected,
+                    window,
+                    cx,
+                );
                 let project_id = project.id;
                 let project = project.clone();
-                let disclosure_project = project.clone();
+                let new_task_project = project.clone();
+                let can_create_task = model.active_run.is_none();
                 let tasks: Vec<_> = model
                     .tasks
                     .iter()
@@ -77,6 +89,7 @@ impl NexusView {
                         let id = task.id;
                         let color = run_status_color(task.status);
                         navigation_row(id, task.title.clone(), None)
+                            .debug_selector(move || format!("sidebar-task-{id}"))
                             .selected(
                                 model.selected_task == Some(id)
                                     && model.selected_codex_thread.is_none(),
@@ -97,82 +110,105 @@ impl NexusView {
                             }))
                     })
                     .collect();
-                div()
+                gpui_kit::base::Collapsible::new()
+                    .open(open)
+                    .reveal((ElementId::from(project_id), "project-content"), progress)
                     .flex()
                     .flex_col()
-                    .gap(px(4.))
                     .child(
                         navigation_row(
                             project_id,
                             project.display_name.clone(),
                             Some(IconName::Folder),
                         )
+                        .group("sidebar-project")
+                        .debug_selector(move || format!("sidebar-project-{project_id}"))
                         .on_click(cx.listener(move |app, _, _, cx| {
-                            app.select_project(project.clone());
-                            app.collapsed_projects.remove(&project_id);
+                            if !selected {
+                                app.select_project(project.clone());
+                                app.collapsed_projects.remove(&project_id);
+                            } else if !app.collapsed_projects.remove(&project_id) {
+                                app.collapsed_projects.insert(project_id);
+                            }
                             cx.notify();
                         }))
                         .suffix({
                             let app = cx.entity();
                             move |_, _| {
                                 let app = app.clone();
-                                let project = disclosure_project.clone();
-                                Button::new((ElementId::from(project_id), "project-disclosure"))
+                                let project = new_task_project.clone();
+                                div()
                                     .absolute()
-                                    .right(px(6.))
-                                    .top(px(6.))
-                                    .ghost()
-                                    .small()
-                                    .size(px(24.))
-                                    .icon(if open {
-                                        IconName::ChevronDown
-                                    } else {
-                                        IconName::ChevronRight
-                                    })
-                                    .accessibility_label(if open {
-                                        "收起项目任务"
-                                    } else {
-                                        "展开项目任务"
-                                    })
-                                    .on_click(move |_, _, cx| {
-                                        cx.stop_propagation();
-                                        app.update(cx, |app, cx| {
-                                            if !selected {
-                                                app.select_project(project.clone());
-                                                app.collapsed_projects.remove(&project_id);
-                                            } else if !app.collapsed_projects.remove(&project_id) {
-                                                app.collapsed_projects.insert(project_id);
-                                            }
-                                            cx.notify();
-                                        });
-                                    })
+                                    .right(px(3.))
+                                    .top(px(3.))
+                                    .invisible()
+                                    .group_hover("sidebar-project", |style| style.visible())
+                                    .child(
+                                        Button::new((ElementId::from(project_id), "new-task"))
+                                            .debug_selector(move || {
+                                                format!("project-new-task-{project_id}")
+                                            })
+                                            .ghost()
+                                            .small()
+                                            .size(px(30.))
+                                            .p_0()
+                                            .child(
+                                                gpui::svg()
+                                                    .data(
+                                                        include_bytes!(
+                                                            "../../assets/icons/new-chat.svg"
+                                                        )
+                                                        .as_slice(),
+                                                    )
+                                                    .size(px(18.))
+                                                    .flex_none()
+                                                    .text_color(rgb(TEXT)),
+                                            )
+                                            .accessibility_label("在此项目中新建对话")
+                                            .tooltip("新建对话")
+                                            .disabled(!can_create_task)
+                                            .on_click(move |_, window, cx| {
+                                                cx.stop_propagation();
+                                                app.update(cx, |app, cx| {
+                                                    if app.presenter.model().active_run.is_some() {
+                                                        return;
+                                                    }
+                                                    if !selected {
+                                                        app.select_project(project.clone());
+                                                    }
+                                                    app.collapsed_projects.remove(&project_id);
+                                                    app.new_task(window, cx);
+                                                });
+                                            }),
+                                    )
                             }
                         }),
                     )
-                    .when(open, |group| {
-                        group.child(
-                            div()
-                                .ml(px(24.))
-                                .flex()
-                                .flex_col()
-                                .gap(px(2.))
-                                .when(tasks.is_empty(), |list| {
-                                    list.child(
-                                        navigation_row(
-                                            (ElementId::from(project_id), "empty"),
-                                            if query.trim().is_empty() {
-                                                "开始任务后，记录会出现在这里"
-                                            } else {
-                                                "没有匹配的任务"
-                                            },
-                                            None,
-                                        )
-                                        .disabled(true),
+                    .content(
+                        div()
+                            .pt(px(4.))
+                            .opacity(progress)
+                            .w_full()
+                            .pl(px(24.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .when(tasks.is_empty(), |list| {
+                                list.child(
+                                    navigation_row(
+                                        (ElementId::from(project_id), "empty"),
+                                        if query.trim().is_empty() {
+                                            "开始任务后，记录会出现在这里"
+                                        } else {
+                                            "没有匹配的任务"
+                                        },
+                                        None,
                                     )
-                                })
-                                .children(tasks),
-                        )
-                    })
+                                    .disabled(true),
+                                )
+                            })
+                            .children(tasks),
+                    )
             }));
         let (visible_threads, has_more_history) = visible_history(
             &model.codex_threads,
@@ -193,6 +229,13 @@ impl NexusView {
             })
             .collect();
         let history_open = self.codex_history_open;
+        let history_progress = disclosure_progress(
+            "history-reveal",
+            history_open,
+            self.reduced_motion,
+            window,
+            cx,
+        );
         div()
             .id("workspace-sidebar")
             .w(px(300.))
@@ -301,15 +344,17 @@ impl NexusView {
                             .child(projects)
                             .child(
                                 navigation_row("add-project", "添加本地项目", Some(IconName::Plus))
+                                    .debug_selector(|| "add-project".into())
                                     .mt(px(8.))
                                     .on_click(cx.listener(Self::choose_project)),
                             )
                             .child(
-                                div()
+                                gpui_kit::base::Collapsible::new()
+                                    .open(history_open)
+                                    .reveal("history-content", history_progress)
                                     .mt(px(24.))
                                     .flex()
                                     .flex_col()
-                                    .gap(px(4.))
                                     .child(
                                         navigation_row(
                                             "codex-history-disclosure",
@@ -317,15 +362,14 @@ impl NexusView {
                                             Some(IconName::FileText),
                                         )
                                         .suffix(move |_, _| {
-                                            Icon::new(if history_open {
-                                                IconName::ChevronDown
-                                            } else {
-                                                IconName::ChevronRight
-                                            })
-                                            .size(px(14.))
-                                            .absolute()
-                                            .right(px(12.))
-                                            .top(px(11.))
+                                            Icon::new(IconName::ChevronRight)
+                                                .rotate(gpui::radians(
+                                                    std::f32::consts::FRAC_PI_2 * history_progress,
+                                                ))
+                                                .size(px(14.))
+                                                .absolute()
+                                                .right(px(12.))
+                                                .top(px(11.))
                                         })
                                         .on_click(
                                             cx.listener(|app, _, _, cx| {
@@ -334,45 +378,46 @@ impl NexusView {
                                             }),
                                         ),
                                     )
-                                    .when(history_open, |group| {
-                                        group.child(
-                                            div()
-                                                .ml(px(24.))
-                                                .flex()
-                                                .flex_col()
-                                                .gap(px(2.))
-                                                .when(history.is_empty(), |list| {
-                                                    list.child(
-                                                        navigation_row(
-                                                            "history-empty",
-                                                            if query.trim().is_empty() {
-                                                                "暂无可显示的会话"
-                                                            } else {
-                                                                "没有匹配的历史会话"
-                                                            },
-                                                            None,
-                                                        )
-                                                        .disabled(true),
+                                    .content(
+                                        div()
+                                            .pt(px(4.))
+                                            .opacity(history_progress)
+                                            .w_full()
+                                            .pl(px(24.))
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(2.))
+                                            .when(history.is_empty(), |list| {
+                                                list.child(
+                                                    navigation_row(
+                                                        "history-empty",
+                                                        if query.trim().is_empty() {
+                                                            "暂无可显示的会话"
+                                                        } else {
+                                                            "没有匹配的历史会话"
+                                                        },
+                                                        None,
                                                     )
-                                                })
-                                                .children(history)
-                                                .when(has_more_history, |list| {
-                                                    list.child(
-                                                        navigation_row(
-                                                            "codex-history-read-more",
-                                                            "Read More",
-                                                            Some(IconName::ChevronDown),
-                                                        )
-                                                        .text_color(rgb(MUTED))
-                                                        .on_click(cx.listener(|app, _, _, cx| {
-                                                            app.codex_history_visible_count +=
-                                                                HISTORY_PAGE_SIZE;
-                                                            cx.notify();
-                                                        })),
+                                                    .disabled(true),
+                                                )
+                                            })
+                                            .children(history)
+                                            .when(has_more_history, |list| {
+                                                list.child(
+                                                    navigation_row(
+                                                        "codex-history-read-more",
+                                                        "Read More",
+                                                        Some(IconName::ChevronDown),
                                                     )
-                                                }),
-                                        )
-                                    }),
+                                                    .text_color(rgb(MUTED))
+                                                    .on_click(cx.listener(|app, _, _, cx| {
+                                                        app.codex_history_visible_count +=
+                                                            HISTORY_PAGE_SIZE;
+                                                        cx.notify();
+                                                    })),
+                                                )
+                                            }),
+                                    ),
                             ),
                     )
                     .vertical_scrollbar(&self.sidebar_scroll),
@@ -474,11 +519,15 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mut storage = Storage::open(Path::new(":memory:")).unwrap();
         let project = storage.open_project(directory.path()).unwrap();
-        for _ in 0..30 {
+        for index in 0..30 {
             storage
                 .create_task_run(NewTaskRun {
                     project_id: project.id,
-                    title: "Scroll regression",
+                    title: if index % 2 == 0 {
+                        "Hi"
+                    } else {
+                        "Scroll regression"
+                    },
                     prompt: &"A long message for scrolling.\n\n".repeat(100),
                     harness: HarnessKind::Claude,
                     executable: "claude",
@@ -501,6 +550,158 @@ mod tests {
             let _ = window.draw(cx);
         });
         (view, cx)
+    }
+
+    #[gpui::test]
+    fn task_rows_fill_the_same_width_and_accept_clicks_past_short_titles(cx: &mut TestAppContext) {
+        let (view, cx) = scroll_test_view(cx);
+        let tasks = view.read_with(cx, |view, _| view.presenter.model().tasks[..2].to_vec());
+        let bounds = tasks
+            .iter()
+            .map(|task| {
+                let selector = format!("sidebar-task-{}", task.id).leak();
+                cx.debug_bounds(selector).unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_ne!(tasks[0].title.len(), tasks[1].title.len());
+        assert_eq!(bounds[0].left(), bounds[1].left());
+        assert_eq!(bounds[0].size.width, bounds[1].size.width);
+        assert_eq!(
+            bounds[0].right(),
+            cx.debug_bounds("add-project").unwrap().right()
+        );
+        let short_index = tasks.iter().position(|task| task.title == "Hi").unwrap();
+        view.update(cx, |view, cx| {
+            view.presenter.select_task(tasks[1 - short_index].id);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.simulate_click(
+            point(
+                bounds[short_index].right() - px(8.),
+                bounds[short_index].center().y,
+            ),
+            Default::default(),
+        );
+        assert_eq!(
+            view.read_with(cx, |view, _| view.presenter.model().selected_task),
+            Some(tasks[short_index].id),
+        );
+    }
+
+    #[gpui::test]
+    fn project_disclosure_animates_layout_reversibly_and_can_skip_motion(cx: &mut TestAppContext) {
+        let (view, cx) = scroll_test_view(cx);
+        let project_id = view.read_with(cx, |view, _| {
+            view.presenter.model().selected_project.as_ref().unwrap().id
+        });
+        let project_selector = format!("sidebar-project-{project_id}").leak();
+        let project_bounds = cx.debug_bounds(project_selector).unwrap();
+        let trigger = point(project_bounds.left() + px(60.), project_bounds.center().y);
+        let selected_task = view.read_with(cx, |view, _| view.presenter.model().selected_task);
+        view.update(cx, |view, cx| {
+            view.reduced_motion = false;
+            cx.notify();
+        });
+        let frame = |cx: &mut gpui::VisualTestContext, millis| {
+            cx.executor().advance_clock(Duration::from_millis(millis));
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                let _ = window.draw(cx);
+            });
+        };
+        frame(cx, 0);
+        let expanded_y = cx.debug_bounds("add-project").unwrap().origin.y;
+        cx.simulate_click(trigger, Default::default());
+        assert!(view.read_with(cx, |view, _| view.collapsed_projects.contains(&project_id)));
+        frame(cx, 0);
+        assert_eq!(cx.debug_bounds("add-project").unwrap().origin.y, expanded_y);
+        frame(cx, 20);
+        let closing_y = cx.debug_bounds("add-project").unwrap().origin.y;
+        assert!(closing_y < expanded_y);
+        cx.simulate_click(trigger, Default::default());
+        frame(cx, 0);
+        assert_eq!(cx.debug_bounds("add-project").unwrap().origin.y, closing_y);
+        frame(cx, 200);
+        assert_eq!(cx.debug_bounds("add-project").unwrap().origin.y, expanded_y);
+        cx.simulate_click(trigger, Default::default());
+        frame(cx, 0);
+        frame(cx, 200);
+        assert!(cx.debug_bounds("add-project").unwrap().origin.y < closing_y);
+        view.update(cx, |view, cx| {
+            view.reduced_motion = true;
+            cx.notify();
+        });
+        cx.simulate_click(trigger, Default::default());
+        frame(cx, 0);
+        assert_eq!(cx.debug_bounds("add-project").unwrap().origin.y, expanded_y);
+        assert_eq!(
+            view.read_with(cx, |view, _| view.presenter.model().selected_task),
+            selected_task,
+        );
+    }
+
+    #[gpui::test]
+    fn project_new_chat_opens_its_project_without_toggling_the_row(cx: &mut TestAppContext) {
+        let (view, cx) = scroll_test_view(cx);
+        let project_id = view.read_with(cx, |view, _| {
+            assert!(view.presenter.model().selected_task.is_some());
+            view.presenter.model().selected_project.as_ref().unwrap().id
+        });
+        let button_selector = format!("project-new-task-{project_id}").leak();
+        let project_selector = format!("sidebar-project-{project_id}").leak();
+        assert!(cx.debug_bounds(button_selector).is_none());
+        let project_bounds = cx.debug_bounds(project_selector).unwrap();
+        cx.simulate_mouse_move(project_bounds.center(), None, Default::default());
+        assert!(cx.debug_bounds(button_selector).is_some());
+        cx.simulate_mouse_move(point(px(400.), px(100.)), None, Default::default());
+        assert!(cx.debug_bounds(button_selector).is_none());
+        view.update(cx, |view, cx| {
+            view.collapsed_projects.insert(project_id);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.simulate_mouse_move(project_bounds.center(), None, Default::default());
+        let button = cx.debug_bounds(button_selector).unwrap().center();
+        cx.simulate_click(button, Default::default());
+        view.read_with(cx, |view, _| {
+            assert_eq!(
+                view.presenter.model().selected_project.as_ref().unwrap().id,
+                project_id
+            );
+            assert!(view.presenter.model().selected_task.is_none());
+            assert!(view.presenter.model().messages.is_empty());
+            assert!(!view.collapsed_projects.contains(&project_id));
+        });
+
+        let other_project = tempfile::tempdir().unwrap();
+        view.update(cx, |view, cx| {
+            view.presenter.open_project(other_project.path());
+            assert_ne!(
+                view.presenter.model().selected_project.as_ref().unwrap().id,
+                project_id
+            );
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let project_bounds = cx.debug_bounds(project_selector).unwrap();
+        cx.simulate_mouse_move(project_bounds.center(), None, Default::default());
+        let button = cx.debug_bounds(button_selector).unwrap().center();
+        cx.simulate_click(button, Default::default());
+        view.read_with(cx, |view, _| {
+            assert_eq!(
+                view.presenter.model().selected_project.as_ref().unwrap().id,
+                project_id
+            );
+            assert!(view.presenter.model().selected_task.is_none());
+            assert!(!view.collapsed_projects.contains(&project_id));
+        });
     }
 
     // Measures CPU input/layout/paint work; the test platform does not present GPU frames.

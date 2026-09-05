@@ -117,7 +117,7 @@ impl Render for WorkspacePane {
         let content = self
             .owner
             .update(cx, |owner, cx| match self.kind {
-                PaneKind::Sidebar => owner.render_sidebar(cx).into_any_element(),
+                PaneKind::Sidebar => owner.render_sidebar(window, cx).into_any_element(),
                 PaneKind::Timeline => owner.render_timeline(window, cx).into_any_element(),
                 PaneKind::Settings => owner.render_settings(cx).into_any_element(),
             })
