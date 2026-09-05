@@ -111,6 +111,16 @@ fn tool_events_preserve_ids_and_full_payloads_after_reloading_a_task() {
     assert!(!messages[4].tool.as_ref().unwrap().is_error);
     assert_eq!(messages[1].content, format!("Bash\n{long_text}"));
     assert_eq!(messages[4].content, long_text);
+    let items = crate::model::tools::timeline_items(messages);
+    let crate::model::tools::TimelineItem::Tools(batch) = &items[1] else {
+        panic!("expected one tool batch")
+    };
+    assert_eq!(items.len(), 2);
+    assert_eq!(batch.len(), 2);
+    assert_eq!(batch[0].result.unwrap().id, messages[4].id);
+    assert_eq!(batch[1].result.unwrap().id, messages[3].id);
+    assert!(!batch[0].is_error());
+    assert!(batch[1].is_error());
 }
 
 fn ready_probe(harness: HarnessKind) -> HarnessProbe {

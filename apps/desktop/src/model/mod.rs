@@ -1,4 +1,5 @@
 pub(crate) mod history;
+pub(crate) mod tools;
 
 use history::{HistoryMessage, ThreadSummary};
 use nexus_domain::{

@@ -4400,6 +4400,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smol",
+ "syntect",
  "tempfile",
  "tokio",
  "tokio-tungstenite",
