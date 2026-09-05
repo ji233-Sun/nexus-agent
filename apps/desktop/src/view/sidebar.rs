@@ -1,5 +1,7 @@
 use super::*;
-use gpui_kit::component::{list::ListItem, scroll::ScrollableElement as _};
+use gpui_kit::component::{
+    button::ButtonCustomVariant, list::ListItem, scroll::ScrollableElement as _,
+};
 
 const SIDEBAR_ROW_HEIGHT: f32 = 36.;
 
@@ -64,14 +66,16 @@ impl NexusView {
                                 model.selected_task == Some(id)
                                     && model.selected_codex_thread.is_none(),
                             )
-                            .suffix(move |_, _| {
-                                div()
-                                    .absolute()
-                                    .right(px(12.))
-                                    .top(px(15.))
-                                    .size(px(6.))
-                                    .rounded_full()
-                                    .bg(color)
+                            .when_some(color, |row, color| {
+                                row.suffix(move |_, _| {
+                                    div()
+                                        .absolute()
+                                        .right(px(12.))
+                                        .top(px(15.))
+                                        .size(px(6.))
+                                        .rounded_full()
+                                        .bg(color)
+                                })
                             })
                             .on_click(cx.listener(move |app, _, window, cx| {
                                 app.select_task(id, window, cx)
@@ -194,34 +198,21 @@ impl NexusView {
                         .pb_4()
                         .child(
                             div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
                                 .px_2()
                                 .py_2()
-                                .child(brand_mark(36.))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_1()
-                                        .child(
-                                            div()
-                                                .text_size(px(20.))
-                                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                                .child("Nexus Agent"),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(rgb(MUTED))
-                                                .child("你的本地开发工作空间"),
-                                        ),
-                                ),
+                                .text_size(px(20.))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child("Nexus Agent"),
                         )
                         .child(
                             Button::new("new-task")
-                                .primary()
+                                .custom(
+                                    ButtonCustomVariant::new(cx)
+                                        .color(rgb(0x101010).into())
+                                        .foreground(rgb(0xf0f0f0).into())
+                                        .hover(rgb(0x252525).into())
+                                        .active(rgb(0x303030).into()),
+                                )
                                 .small()
                                 .w_full()
                                 .h(px(SIDEBAR_ROW_HEIGHT))

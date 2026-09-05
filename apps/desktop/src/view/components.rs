@@ -295,12 +295,14 @@ pub(super) fn live_status_dot(color: Hsla, animated: bool) -> gpui::AnyElement {
     }
 }
 
-pub(super) fn run_status_color(status: RunStatus) -> Hsla {
+pub(super) fn run_status_color(status: RunStatus) -> Option<Hsla> {
     match status {
-        RunStatus::Completed => rgb(SUCCESS).into(),
-        RunStatus::Failed => rgb(DANGER).into(),
-        RunStatus::Running | RunStatus::Starting | RunStatus::Cancelling => rgb(ACCENT).into(),
-        _ => rgb(MUTED).into(),
+        RunStatus::Completed => None,
+        RunStatus::Failed => Some(rgb(DANGER).into()),
+        RunStatus::Running | RunStatus::Starting | RunStatus::Cancelling => {
+            Some(rgb(ACCENT).into())
+        }
+        RunStatus::Cancelled | RunStatus::Interrupted => Some(rgb(MUTED).into()),
     }
 }
 
@@ -322,6 +324,22 @@ mod tests {
     use crate::{infrastructure::storage::Storage, model::AppModel};
     use nexus_protocol::HarnessProbe;
     use std::path::Path;
+
+    #[test]
+    fn completed_tasks_do_not_show_a_dot_that_looks_like_an_unread_badge() {
+        assert!(run_status_color(RunStatus::Completed).is_none());
+        for status in [
+            RunStatus::Starting,
+            RunStatus::Running,
+            RunStatus::Cancelling,
+        ] {
+            assert_eq!(run_status_color(status), Some(rgb(ACCENT).into()));
+        }
+        assert_eq!(
+            run_status_color(RunStatus::Failed),
+            Some(rgb(DANGER).into())
+        );
+    }
 
     #[test]
     fn search_accepts_case_insensitive_titles_chinese_and_surrounding_spaces() {
