@@ -1,9 +1,24 @@
 use super::*;
+use crate::model::history::ThreadSummary;
 use gpui_kit::component::{
     button::ButtonCustomVariant, list::ListItem, scroll::ScrollableElement as _,
 };
 
 const SIDEBAR_ROW_HEIGHT: f32 = 36.;
+pub(super) const HISTORY_PAGE_SIZE: usize = 10;
+
+fn visible_history<'a>(
+    threads: &'a [ThreadSummary],
+    query: &str,
+    limit: usize,
+) -> (Vec<&'a ThreadSummary>, bool) {
+    let mut matching = threads
+        .iter()
+        .filter(|thread| matches_search(&format!("{} {}", thread.title, thread.detail()), query));
+    let visible = matching.by_ref().take(limit).collect();
+    let has_more = matching.next().is_some();
+    (visible, has_more)
+}
 
 fn navigation_row(
     id: impl Into<ElementId>,
@@ -159,12 +174,13 @@ impl NexusView {
                         )
                     })
             }));
-        let history: Vec<_> = model
-            .codex_threads
-            .iter()
-            .filter(|thread| {
-                matches_search(&format!("{} {}", thread.title, thread.detail()), &query)
-            })
+        let (visible_threads, has_more_history) = visible_history(
+            &model.codex_threads,
+            &query,
+            self.codex_history_visible_count,
+        );
+        let history: Vec<_> = visible_threads
+            .into_iter()
             .map(|thread| {
                 let id = thread.id.clone();
                 navigation_row(
@@ -335,7 +351,22 @@ impl NexusView {
                                                         .disabled(true),
                                                     )
                                                 })
-                                                .children(history),
+                                                .children(history)
+                                                .when(has_more_history, |list| {
+                                                    list.child(
+                                                        navigation_row(
+                                                            "codex-history-read-more",
+                                                            "Read More",
+                                                            Some(IconName::ChevronDown),
+                                                        )
+                                                        .text_color(rgb(MUTED))
+                                                        .on_click(cx.listener(|app, _, _, cx| {
+                                                            app.codex_history_visible_count +=
+                                                                HISTORY_PAGE_SIZE;
+                                                            cx.notify();
+                                                        })),
+                                                    )
+                                                }),
                                         )
                                     }),
                             ),
@@ -422,5 +453,65 @@ impl NexusView {
                         ),
                 ),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn threads(count: usize) -> Vec<ThreadSummary> {
+        (0..count)
+            .map(|index| ThreadSummary {
+                id: index.to_string(),
+                title: format!("Session {index}"),
+                cwd: "/workspace/project".into(),
+                source: "cli".into(),
+                updated_at: 0,
+                archived: false,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn history_expands_in_tens_until_all_sessions_are_visible() {
+        let threads = threads(58);
+        let mut limit = HISTORY_PAGE_SIZE;
+        for expected_count in [10, 20, 30, 40, 50, 58] {
+            let (visible, has_more) = visible_history(&threads, "", limit);
+            assert_eq!(
+                visible,
+                threads[..expected_count].iter().collect::<Vec<_>>()
+            );
+            assert_eq!(has_more, expected_count < threads.len());
+            limit += HISTORY_PAGE_SIZE;
+        }
+    }
+
+    #[test]
+    fn history_hides_read_more_when_results_fit_on_one_page() {
+        for count in [0, 1, 9, 10] {
+            let threads = threads(count);
+            let (visible, has_more) = visible_history(&threads, "", HISTORY_PAGE_SIZE);
+            assert_eq!(visible.len(), count);
+            assert!(!has_more);
+        }
+    }
+
+    #[test]
+    fn history_search_filters_all_sessions_before_pagination() {
+        let threads = threads(58);
+        let (visible, has_more) = visible_history(&threads, "Session 4", HISTORY_PAGE_SIZE);
+        assert_eq!(visible.len(), 10);
+        assert_eq!(visible[0].id, "4");
+        assert_eq!(visible[9].id, "48");
+        assert!(has_more);
+        let (visible, has_more) = visible_history(&threads, "Session 4", HISTORY_PAGE_SIZE * 2);
+        assert_eq!(visible.len(), 11);
+        assert_eq!(visible[10].id, "49");
+        assert!(!has_more);
+        let (visible, has_more) = visible_history(&threads, "missing", HISTORY_PAGE_SIZE);
+        assert!(visible.is_empty());
+        assert!(!has_more);
     }
 }

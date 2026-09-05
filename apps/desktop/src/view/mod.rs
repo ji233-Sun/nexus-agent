@@ -46,6 +46,7 @@ pub(crate) struct NexusView {
     expanded_messages: HashSet<ElementId>,
     collapsed_projects: HashSet<Uuid>,
     codex_history_open: bool,
+    codex_history_visible_count: usize,
     settings_open: bool,
     settings_from: f32,
     settings_changed: Instant,
@@ -74,8 +75,13 @@ impl NexusView {
             }
         })
         .detach();
-        cx.subscribe(&search_input, |_, _, _: &InputEvent, cx| cx.notify())
-            .detach();
+        cx.subscribe(&search_input, |app, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                app.codex_history_visible_count = sidebar::HISTORY_PAGE_SIZE;
+            }
+            cx.notify();
+        })
+        .detach();
         cx.bind_keys([
             KeyBinding::new("secondary-k", SearchSessions, Some("Nexus")),
             KeyBinding::new("secondary-n", NewTask, Some("Nexus")),
@@ -91,6 +97,7 @@ impl NexusView {
             expanded_messages: HashSet::new(),
             collapsed_projects: HashSet::new(),
             codex_history_open: false,
+            codex_history_visible_count: sidebar::HISTORY_PAGE_SIZE,
             settings_open: false,
             settings_from: 0.,
             settings_changed: Instant::now(),
