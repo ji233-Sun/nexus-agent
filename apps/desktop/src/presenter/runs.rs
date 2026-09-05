@@ -225,19 +225,28 @@ impl Presenter {
     }
 
     pub(crate) fn cancel(&mut self) {
+        let _ = self.request_cancel();
+    }
+
+    pub(super) fn request_cancel(&mut self) -> Result<(), String> {
         let Some(run_id) = self.model.active_run else {
-            return;
+            return Err("没有运行中的任务".into());
         };
-        if let Some(runner) = &self.runner {
-            let _ = runner.send(CommandEnvelope::new(Command::RunCancel { run_id }));
-            let _ = self
-                .storage
-                .update_run_status(run_id, RunStatus::Cancelling);
-            let harness = self
-                .model
-                .active_harness
-                .unwrap_or(self.model.selected_harness);
-            self.model.status = format!("正在停止 {harness}…");
-        }
+        let runner = self
+            .runner
+            .as_ref()
+            .ok_or_else(|| "Runner 不可用".to_owned())?;
+        runner
+            .send(CommandEnvelope::new(Command::RunCancel { run_id }))
+            .map_err(|error| error.to_string())?;
+        let _ = self
+            .storage
+            .update_run_status(run_id, RunStatus::Cancelling);
+        let harness = self
+            .model
+            .active_harness
+            .unwrap_or(self.model.selected_harness);
+        self.model.status = format!("正在停止 {harness}…");
+        Ok(())
     }
 }

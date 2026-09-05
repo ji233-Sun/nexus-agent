@@ -1,4 +1,5 @@
 mod history;
+mod remote;
 mod runs;
 
 #[cfg(test)]
@@ -9,6 +10,7 @@ use crate::{
         codex_history::Client as CodexHistoryClient, git::is_git_dirty, storage::Storage,
     },
     model::AppModel,
+    remote_control::{RemoteCommand, RemoteControl, TOKEN_SETTING_KEY},
 };
 use anyhow::Result;
 use nexus_domain::{ClaudeModel, HarnessKind, Project, ThinkingEffort};
@@ -27,6 +29,8 @@ pub(crate) struct Presenter {
     runner: Option<Box<dyn RunnerPort>>,
     codex_history_client: Option<CodexHistoryClient>,
     codex_history_executable: Option<String>,
+    remote_control: Option<RemoteControl>,
+    remote_control_error: Option<String>,
 }
 
 impl Presenter {
@@ -59,6 +63,17 @@ impl Presenter {
             .ok()
             .flatten()
             .unwrap_or_else(|| selected_harness.default_executable().into());
+        let remote_token = storage
+            .setting(TOKEN_SETTING_KEY)
+            .ok()
+            .flatten()
+            .filter(|token| !token.is_empty())
+            .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
+        let _ = storage.set_setting(TOKEN_SETTING_KEY, &remote_token);
+        let (remote_control, remote_control_error) = match RemoteControl::start(remote_token) {
+            Ok(remote_control) => (Some(remote_control), None),
+            Err(error) => (None, Some(error.to_string())),
+        };
 
         let has_storage_error = storage_error.is_some();
         let (runner, runner_error) = match runner {
@@ -79,6 +94,8 @@ impl Presenter {
             },
             codex_history_client: None,
             codex_history_executable: None,
+            remote_control,
+            remote_control_error,
         };
         if let Some(runner) = &presenter.runner {
             let _ = runner.send(CommandEnvelope::new(Command::RunnerHello));
@@ -115,12 +132,23 @@ impl Presenter {
             .as_ref()
             .map(CodexHistoryClient::drain_events)
             .unwrap_or_default();
-        let changed = !runner_events.is_empty() || !history_events.is_empty();
+        let remote_commands = self
+            .remote_control
+            .as_ref()
+            .map(RemoteControl::drain_commands)
+            .unwrap_or_default();
+        let mut changed = !runner_events.is_empty() || !history_events.is_empty();
         for envelope in runner_events {
             self.handle_event(envelope.event);
         }
         for event in history_events {
             self.handle_codex_history_event(event);
+        }
+        for command in remote_commands {
+            changed |= self.handle_remote_command(command);
+        }
+        if changed {
+            self.notify_remote_changed();
         }
         changed
     }

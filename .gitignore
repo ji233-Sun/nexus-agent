@@ -1,4 +1,4 @@
 /target/
+/apps/remote-web/node_modules/
 .DS_Store
 *.log
-

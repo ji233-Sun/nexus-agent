@@ -13,6 +13,11 @@ impl NexusView {
                 }
             })
             .unwrap_or_else(|| rgb(MUTED).into());
+        let remote_endpoint = self.presenter.remote_endpoint();
+        let remote_available = remote_endpoint.is_some();
+        let remote_token = self.presenter.remote_token().map(masked_token);
+        let remote_error = self.presenter.remote_control_error().map(str::to_owned);
+
         div()
             .id("settings-panel")
             .w_full()
@@ -125,6 +130,66 @@ impl NexusView {
                             ),
                     ),
             )
+            .child(
+                div()
+                    .pt_5()
+                    .border_t_1()
+                    .border_color(rgb(BORDER))
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .child(section_label("REMOTE CONTROL · 远程访问"))
+                    .when_some(remote_endpoint, |element, endpoint| {
+                        element.child(label_value("本地服务", endpoint))
+                    })
+                    .when_some(remote_token, |element, token| {
+                        element.child(label_value("访问令牌", token))
+                    })
+                    .when(remote_available, |element| {
+                        element
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_2()
+                                    .child(
+                                        Button::new("copy-remote-link")
+                                            .outline()
+                                            .small()
+                                            .h(px(CONTROL_HEIGHT))
+                                            .flex_1()
+                                            .icon(IconName::ExternalLink)
+                                            .label("复制链接")
+                                            .on_click(cx.listener(Self::copy_remote_link)),
+                                    )
+                                    .child(
+                                        Button::new("copy-remote-token")
+                                            .outline()
+                                            .small()
+                                            .h(px(CONTROL_HEIGHT))
+                                            .flex_1()
+                                            .icon(IconName::Copy)
+                                            .label("复制令牌")
+                                            .on_click(cx.listener(Self::copy_remote_token)),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(MUTED))
+                                    .line_height(relative(1.6))
+                                    .child("监听范围 · 本机回环地址 · FRP TCP"),
+                            )
+                    })
+                    .when_some(remote_error, |element, error| {
+                        element.child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(DANGER))
+                                .line_height(relative(1.6))
+                                .child(format!("远程服务启动失败：{error}")),
+                        )
+                    }),
+            )
             .when_some(model.selected_project.as_ref(), |element, project| {
                 element.child(
                     div()
@@ -176,4 +241,13 @@ impl NexusView {
                     ),
             )
     }
+}
+
+fn masked_token(token: &str) -> String {
+    if token.chars().count() <= 10 {
+        return "••••••••".into();
+    }
+    let prefix = token.chars().take(6).collect::<String>();
+    let suffix = token.chars().rev().take(4).collect::<String>();
+    format!("{prefix}••••{}", suffix.chars().rev().collect::<String>())
 }
