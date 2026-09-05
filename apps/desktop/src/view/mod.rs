@@ -5,7 +5,10 @@ mod sidebar;
 pub(crate) mod theme;
 mod timeline;
 
-use crate::{model::history::HistoryMessage, presenter::Presenter};
+use crate::{
+    model::history::HistoryMessage,
+    presenter::{Presenter, ProviderProfileDraft},
+};
 use components::*;
 use gpui::{
     Anchor, Animation, AnimationExt as _, AnyElement, AppContext as _, ClipboardItem, Context,
@@ -42,6 +45,12 @@ pub(crate) struct NexusView {
     presenter: Presenter,
     prompt_input: Entity<TextareaState>,
     executable_input: Entity<InputState>,
+    provider_name_input: Entity<InputState>,
+    provider_api_key_env_input: Entity<InputState>,
+    provider_api_key_input: Entity<InputState>,
+    provider_base_url_env_input: Entity<InputState>,
+    provider_base_url_input: Entity<InputState>,
+    provider_model_input: Entity<InputState>,
     search_input: Entity<InputState>,
     focus_handle: FocusHandle,
     timeline_scroll: ScrollHandle,
@@ -56,6 +65,7 @@ pub(crate) struct NexusView {
     codex_history_visible_count: usize,
     settings_open: bool,
     reduced_motion: bool,
+    editing_provider_profile: Option<Uuid>,
 }
 
 impl NexusView {
@@ -69,6 +79,31 @@ impl NexusView {
             InputState::new(window, cx)
                 .default_value(presenter.model().executable.clone())
                 .placeholder("命令名或完整路径")
+        });
+        let (api_key_env, base_url_env) =
+            provider_environment_defaults(presenter.model().selected_harness);
+        let provider_name_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("例如 DeepSeek Production"));
+        let provider_api_key_env_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(api_key_env)
+                .placeholder("例如 DEEPSEEK_API_KEY")
+        });
+        let provider_api_key_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .masked(true)
+                .placeholder("新建时必填；编辑时留空保留")
+        });
+        let provider_base_url_env_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(base_url_env)
+                .placeholder("可选，例如 OPENAI_BASE_URL")
+        });
+        let provider_base_url_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("可选，例如 https://api.example.com/v1")
+        });
+        let provider_model_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("可选，例如 deepseek/deepseek-v4-pro")
         });
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("搜索任务与历史…"));
         cx.subscribe(&prompt_input, |_, _, event: &InputEvent, cx| {
@@ -100,6 +135,12 @@ impl NexusView {
             presenter,
             prompt_input,
             executable_input,
+            provider_name_input,
+            provider_api_key_env_input,
+            provider_api_key_input,
+            provider_base_url_env_input,
+            provider_base_url_input,
+            provider_model_input,
             search_input,
             focus_handle: cx.focus_handle(),
             timeline_scroll: ScrollHandle::new(),
@@ -114,6 +155,7 @@ impl NexusView {
             codex_history_visible_count: sidebar::HISTORY_PAGE_SIZE,
             settings_open: false,
             reduced_motion: false,
+            editing_provider_profile: None,
         };
         view.focus_handle.focus(window, cx);
         view.start_event_pump(cx);
@@ -183,6 +225,14 @@ impl NexusView {
         self.expanded_messages.clear();
         self.timeline_scroll.scroll_to_bottom();
         self.sync_executable(window, cx);
+        self.sync_provider_profile_form(
+            self.presenter
+                .model()
+                .selected_provider_profile()
+                .map(|profile| profile.id),
+            window,
+            cx,
+        );
         self.presenter.notify_remote_changed();
         cx.notify();
     }
@@ -237,6 +287,14 @@ impl NexusView {
     fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_open = !self.settings_open;
         if self.settings_open {
+            self.sync_provider_profile_form(
+                self.presenter
+                    .model()
+                    .selected_provider_profile()
+                    .map(|profile| profile.id),
+                window,
+                cx,
+            );
             self.focus_handle.focus(window, cx);
         } else {
             self.focus_prompt(window, cx);
@@ -280,6 +338,14 @@ impl NexusView {
         let executable = self.executable_input.read(cx).value().to_string();
         if self.presenter.select_harness(harness, &executable) {
             self.sync_executable(window, cx);
+            self.sync_provider_profile_form(
+                self.presenter
+                    .model()
+                    .selected_provider_profile()
+                    .map(|profile| profile.id),
+                window,
+                cx,
+            );
         }
         self.presenter.notify_remote_changed();
         cx.notify();
@@ -295,6 +361,124 @@ impl NexusView {
         self.presenter.select_effort(effort);
         self.presenter.notify_remote_changed();
         cx.notify();
+    }
+
+    fn select_provider_profile(
+        &mut self,
+        profile_id: Option<Uuid>,
+        edit: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.presenter.select_provider_profile(profile_id) {
+            if edit {
+                self.sync_provider_profile_form(profile_id, window, cx);
+            }
+            self.presenter.notify_remote_changed();
+        }
+        cx.notify();
+    }
+
+    fn new_provider_profile(
+        &mut self,
+        _: &gpui::ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sync_provider_profile_form(None, window, cx);
+        self.provider_name_input
+            .update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
+    }
+
+    fn save_provider_profile(
+        &mut self,
+        _: &gpui::ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let draft = ProviderProfileDraft {
+            id: self.editing_provider_profile,
+            name: self.provider_name_input.read(cx).value().to_string(),
+            api_key_env: self.provider_api_key_env_input.read(cx).value().to_string(),
+            api_key: self.provider_api_key_input.read(cx).value().to_string(),
+            base_url_env: self
+                .provider_base_url_env_input
+                .read(cx)
+                .value()
+                .to_string(),
+            base_url: self.provider_base_url_input.read(cx).value().to_string(),
+            model: self.provider_model_input.read(cx).value().to_string(),
+        };
+        if let Some(profile_id) = self.presenter.save_provider_profile(draft) {
+            self.sync_provider_profile_form(Some(profile_id), window, cx);
+            self.presenter.notify_remote_changed();
+        }
+        cx.notify();
+    }
+
+    fn delete_provider_profile(
+        &mut self,
+        _: &gpui::ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(profile_id) = self.editing_provider_profile else {
+            return;
+        };
+        if self.presenter.delete_provider_profile(profile_id) {
+            self.sync_provider_profile_form(None, window, cx);
+            self.presenter.notify_remote_changed();
+        }
+        cx.notify();
+    }
+
+    fn sync_provider_profile_form(
+        &mut self,
+        profile_id: Option<Uuid>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let profile = profile_id.and_then(|profile_id| {
+            self.presenter
+                .model()
+                .provider_profiles
+                .iter()
+                .find(|profile| profile.id == profile_id)
+                .cloned()
+        });
+        self.editing_provider_profile = profile.as_ref().map(|profile| profile.id);
+        let (default_api_key_env, default_base_url_env) =
+            provider_environment_defaults(self.presenter.model().selected_harness);
+        let values = profile
+            .map(|profile| {
+                (
+                    profile.name,
+                    profile.api_key_env,
+                    profile.base_url_env.unwrap_or_default(),
+                    profile.base_url.unwrap_or_default(),
+                    profile.model.unwrap_or_default(),
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    String::new(),
+                    default_api_key_env.into(),
+                    default_base_url_env.into(),
+                    String::new(),
+                    String::new(),
+                )
+            });
+        for (input, value) in [
+            (&self.provider_name_input, values.0),
+            (&self.provider_api_key_env_input, values.1),
+            (&self.provider_base_url_env_input, values.2),
+            (&self.provider_base_url_input, values.3),
+            (&self.provider_model_input, values.4),
+            (&self.provider_api_key_input, String::new()),
+        ] {
+            input.update(cx, |input, cx| input.set_value(&value, window, cx));
+        }
     }
 
     fn sync_executable(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -319,7 +503,7 @@ impl NexusView {
             .disabled(model.active_run.is_some())
             .small()
             .when(compact, |button| {
-                button.ghost().h(px(COMPACT_CONTROL_HEIGHT))
+                button.ghost().h(px(COMPACT_CONTROL_HEIGHT)).max_w(px(180.))
             })
             .when(!compact, |button| {
                 button.outline().w_full().h(px(CONTROL_HEIGHT))
@@ -345,22 +529,105 @@ impl NexusView {
             })
     }
 
+    fn provider_profile_selector(
+        &self,
+        id: &'static str,
+        compact: bool,
+        edit_on_select: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let model = self.presenter.model();
+        let selected = model.selected_provider_profile().map(|profile| profile.id);
+        let selected_name = model
+            .selected_provider_profile()
+            .map(|profile| profile.name.clone())
+            .unwrap_or_else(|| "CLI 凭据".into());
+        let profiles = model
+            .provider_profiles
+            .iter()
+            .filter(|profile| profile.harness == model.selected_harness)
+            .cloned()
+            .collect::<Vec<_>>();
+        let app = cx.entity().clone();
+        let button_id = id;
+        Button::new(button_id)
+            .icon(IconName::Globe)
+            .label(selected_name)
+            .disabled(model.active_run.is_some())
+            .small()
+            .when(compact, |button| {
+                button.ghost().h(px(COMPACT_CONTROL_HEIGHT)).max_w(px(180.))
+            })
+            .when(!compact, |button| {
+                button.outline().w_full().h(px(CONTROL_HEIGHT))
+            })
+            .map(|button| {
+                AnimatedDropdown::new(button_id, button, self.reduced_motion, move |menu, _, _| {
+                    let app_for_default = app.clone();
+                    profiles.iter().cloned().fold(
+                        menu.min_w(if compact { px(180.) } else { px(220.) }).item(
+                            PopupMenuItem::new("使用 CLI 当前凭据")
+                                .checked(selected.is_none())
+                                .on_click(move |_, window, cx| {
+                                    app_for_default.update(cx, |app, cx| {
+                                        app.select_provider_profile(
+                                            None,
+                                            edit_on_select,
+                                            window,
+                                            cx,
+                                        )
+                                    });
+                                }),
+                        ),
+                        |menu, profile| {
+                            let app = app.clone();
+                            let profile_id = profile.id;
+                            menu.item(
+                                PopupMenuItem::new(profile.name)
+                                    .checked(selected == Some(profile_id))
+                                    .on_click(move |_, window, cx| {
+                                        app.update(cx, |app, cx| {
+                                            app.select_provider_profile(
+                                                Some(profile_id),
+                                                edit_on_select,
+                                                window,
+                                                cx,
+                                            )
+                                        });
+                                    }),
+                            )
+                        },
+                    )
+                })
+            })
+    }
+
     fn model_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let model = self.presenter.model();
         let selected = model.claude_model;
         let app = cx.entity().clone();
-        let label = if model.selected_harness == HarnessKind::Claude {
-            selected.to_string()
-        } else {
-            "CLI 默认模型".into()
-        };
+        let profile_model = model
+            .selected_provider_profile()
+            .and_then(|profile| profile.model.clone());
+        let label = profile_model.clone().unwrap_or_else(|| {
+            if model.selected_harness == HarnessKind::Claude {
+                selected.to_string()
+            } else {
+                "CLI 默认模型".into()
+            }
+        });
         let button_id = "composer-model";
         Button::new(button_id)
             .ghost()
             .small()
             .h(px(COMPACT_CONTROL_HEIGHT))
+            .max_w(px(200.))
             .label(label)
-            .disabled(model.selected_harness != HarnessKind::Claude || model.active_run.is_some())
+            .disabled(
+                model.selected_harness != HarnessKind::Claude
+                    || profile_model.is_some()
+                    || model.active_run.is_some(),
+            )
             .map(|button| {
                 AnimatedDropdown::new(button_id, button, self.reduced_motion, move |menu, _, _| {
                     ClaudeModel::ALL
@@ -629,6 +896,12 @@ impl NexusView {
                                                         true,
                                                         cx,
                                                     ))
+                                                    .child(self.provider_profile_selector(
+                                                        "composer-provider-profile",
+                                                        true,
+                                                        false,
+                                                        cx,
+                                                    ))
                                                     .child(self.model_selector(cx))
                                                     .child(self.effort_selector(cx)),
                                             )
@@ -753,5 +1026,13 @@ impl Render for NexusView {
                         .cached(gpui::StyleRefinement::default().size_full()),
                 )
             })
+    }
+}
+
+fn provider_environment_defaults(harness: HarnessKind) -> (&'static str, &'static str) {
+    match harness {
+        HarnessKind::Claude => ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"),
+        HarnessKind::Codex => ("CODEX_API_KEY", "OPENAI_BASE_URL"),
+        HarnessKind::Omp => ("DEEPSEEK_API_KEY", ""),
     }
 }

@@ -24,6 +24,7 @@ axum = { version = "0.8", features = ["ws"] }
 chrono = { version = "0.4", features = ["serde"] }
 futures-util = "0.3"
 gpui-kit = { path = "vendor/gpui-kit", version = "0.6.0" }
+keyring = "4.2.0"
 nix = { version = "0.30", features = ["signal"] }
 rfd = "0.17.2"
 rusqlite = { version = "0.38", features = ["bundled"] }

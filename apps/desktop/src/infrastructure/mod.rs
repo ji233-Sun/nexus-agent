@@ -1,4 +1,5 @@
 pub(crate) mod codex_history;
+pub(crate) mod credentials;
 pub(crate) mod git;
 mod paths;
 pub(crate) mod runner_client;

@@ -11,6 +11,7 @@ axum.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
 gpui-kit.workspace = true
+keyring.workspace = true
 nexus-domain = { path = "../../crates/domain" }
 nexus-protocol = { path = "../../crates/protocol" }
 nexus-runner = { path = "../runner" }

@@ -6,7 +6,9 @@ use std::{
 };
 
 use nexus_domain::{HarnessKind, RunStatus, ThinkingEffort};
-use nexus_protocol::{Command, CommandEnvelope, Event, EventEnvelope, StartRun};
+use nexus_protocol::{
+    Command, CommandEnvelope, EnvironmentVariable, Event, EventEnvelope, StartRun,
+};
 use tokio::{
     io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader, Lines},
     process::{Child, ChildStdin, ChildStdout},
@@ -115,6 +117,7 @@ fn request(directory: &Path, executable: PathBuf, harness: HarnessKind, prompt: 
         executable: executable.to_string_lossy().into_owned(),
         model: None,
         effort: ThinkingEffort::High,
+        environment: Vec::new(),
     }
 }
 
@@ -211,6 +214,10 @@ async fn runner_streams_fake_omp_and_uses_guarded_json_mode() {
         "test prompt",
     );
     request.model = Some("deepseek/deepseek-v4-pro".into());
+    request.environment.push(EnvironmentVariable {
+        name: "TEST_PROVIDER_API_KEY".into(),
+        value: "test-secret".into(),
+    });
     let run_id = request.run_id;
     let mut runner = TestRunner::spawn();
     runner.send(Command::RunStart(request)).await;
@@ -244,6 +251,10 @@ async fn runner_streams_fake_omp_and_uses_guarded_json_mode() {
             .any(|pair| pair == ["--model", "deepseek/deepseek-v4-pro"])
     );
     assert!(!args.contains(&"test prompt"));
+    assert_eq!(
+        fs::read_to_string(directory.path().join("provider-env.txt")).unwrap(),
+        "test-secret"
+    );
 }
 
 #[tokio::test]

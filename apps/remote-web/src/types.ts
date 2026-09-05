@@ -49,7 +49,7 @@ export interface RemoteState {
   active_task_id: string | null;
   streaming_text: string;
   status: string;
-  harness: "claude" | "codex";
+  harness: "claude" | "codex" | "omp";
   model: string | null;
   effort: "low" | "medium" | "high" | "xhigh" | "max";
   harness_ready: boolean;

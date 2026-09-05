@@ -64,6 +64,19 @@ impl FromStr for HarnessKind {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderProfile {
+    pub id: Uuid,
+    pub name: String,
+    pub harness: HarnessKind,
+    pub api_key_env: String,
+    pub base_url_env: Option<String>,
+    pub base_url: Option<String>,
+    pub model: Option<String>,
+    #[serde(skip)]
+    pub credential_configured: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunStatus {

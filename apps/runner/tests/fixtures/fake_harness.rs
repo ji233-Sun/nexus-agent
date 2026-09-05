@@ -28,6 +28,9 @@ fn main() {
         args.join("\n"),
     )
     .unwrap();
+    if let Ok(value) = env::var("TEST_PROVIDER_API_KEY") {
+        fs::write("provider-env.txt", value).unwrap();
+    }
     let mut prompt = String::new();
     io::stdin().read_to_string(&mut prompt).unwrap();
     if prompt == "wait-for-cancel" {
