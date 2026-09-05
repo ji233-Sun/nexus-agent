@@ -451,12 +451,30 @@ impl NexusApp {
             .unwrap_or_default();
     }
 
-    fn select_task(&mut self, task_id: Uuid, cx: &mut Context<Self>) {
+    fn select_task(&mut self, task_id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
         self.selected_task = Some(task_id);
         self.selected_codex_thread = None;
         self.codex_history_messages.clear();
         self.codex_thread_loading = false;
         self.messages = self.storage.messages(task_id).unwrap_or_default();
+        if let Ok(Some(config)) = self.storage.conversation_config(task_id) {
+            self.selected_harness = config.harness;
+            self.effort = config.effort;
+            if config.harness == HarnessKind::Claude {
+                self.model = ClaudeModel::from_str(&config.model).unwrap_or_default();
+            }
+            let executable = if config.executable.is_empty() {
+                self.storage
+                    .setting(executable_setting_key(config.harness))
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| config.harness.default_executable().into())
+            } else {
+                config.executable
+            };
+            self.executable_input
+                .update(cx, |input, cx| input.set_value(&executable, window, cx));
+        }
         cx.notify();
     }
 
@@ -523,6 +541,7 @@ impl NexusApp {
             return;
         };
         let executable = probe.executable.clone();
+        let harness_version = probe.version.clone();
         let harness = self.selected_harness;
         let model = match harness {
             HarnessKind::Claude => self.model.cli_value().map(str::to_owned),
@@ -534,8 +553,10 @@ impl NexusApp {
             &title,
             &prompt,
             harness,
+            &executable,
             model.as_deref(),
             self.effort,
+            harness_version.as_deref(),
         );
         let Ok((task_id, run_id)) = created else {
             self.status = "无法保存新任务。".into();
@@ -901,8 +922,8 @@ impl NexusApp {
                                         element.bg(rgb(SELECTED)).text_color(rgb(TEXT))
                                     })
                                     .hover(|style| style.bg(rgb(HOVER)).text_color(rgb(TEXT)))
-                                    .on_click(cx.listener(move |app, _, _, cx| {
-                                        app.select_task(task_id, cx)
+                                    .on_click(cx.listener(move |app, _, window, cx| {
+                                        app.select_task(task_id, window, cx)
                                     }))
                                     .child(div().text_sm().line_clamp(2).child(task.title.clone()))
                                     .child(

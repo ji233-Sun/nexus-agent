@@ -16,6 +16,13 @@ pub struct Storage {
     connection: Connection,
 }
 
+pub struct ConversationConfig {
+    pub harness: HarnessKind,
+    pub executable: String,
+    pub model: String,
+    pub effort: ThinkingEffort,
+}
+
 impl Storage {
     pub fn open_default() -> Result<Self> {
         let base = env::var_os("HOME")
@@ -51,6 +58,7 @@ impl Storage {
                  task_id TEXT NOT NULL REFERENCES tasks(id),
                  status TEXT NOT NULL,
                  harness_kind TEXT NOT NULL DEFAULT 'claude',
+                 executable TEXT NOT NULL DEFAULT '',
                  model TEXT NOT NULL,
                  effort TEXT NOT NULL,
                  harness_version TEXT,
@@ -84,7 +92,13 @@ impl Storage {
                 [],
             )?;
         }
-        connection.execute_batch("PRAGMA user_version = 2;")?;
+        if !table_has_column(&connection, "runs", "executable")? {
+            connection.execute(
+                "ALTER TABLE runs ADD COLUMN executable TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
+        connection.execute_batch("PRAGMA user_version = 3;")?;
         let storage = Self { connection };
         storage.recover_interrupted()?;
         Ok(storage)
@@ -192,8 +206,10 @@ impl Storage {
         title: &str,
         prompt: &str,
         harness: HarnessKind,
+        executable: &str,
         model: Option<&str>,
         effort: ThinkingEffort,
+        harness_version: Option<&str>,
     ) -> Result<(Uuid, Uuid)> {
         let task_id = Uuid::new_v4();
         let run_id = Uuid::new_v4();
@@ -206,14 +222,18 @@ impl Storage {
             params![task_id.to_string(), project_id.to_string(), title, now],
         )?;
         transaction.execute(
-            "INSERT INTO runs(id, task_id, status, harness_kind, model, effort, started_at)
-             VALUES(?1, ?2, 'starting', ?3, ?4, ?5, ?6)",
+            "INSERT INTO runs(
+                 id, task_id, status, harness_kind, executable, model, effort,
+                 harness_version, started_at
+             ) VALUES(?1, ?2, 'starting', ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 run_id.to_string(),
                 task_id.to_string(),
                 harness.as_str(),
+                executable,
                 model.unwrap_or("default"),
                 effort.as_str(),
+                harness_version,
                 now
             ],
         )?;
@@ -230,6 +250,27 @@ impl Storage {
         )?;
         transaction.commit()?;
         Ok((task_id, run_id))
+    }
+
+    pub fn conversation_config(&self, task_id: Uuid) -> Result<Option<ConversationConfig>> {
+        self.connection
+            .query_row(
+                "SELECT harness_kind, executable, model, effort
+                 FROM runs WHERE task_id = ?1 ORDER BY started_at DESC LIMIT 1",
+                [task_id.to_string()],
+                |row| {
+                    Ok(ConversationConfig {
+                        harness: HarnessKind::from_str(&row.get::<_, String>(0)?)
+                            .map_err(to_sql_data_error)?,
+                        executable: row.get(1)?,
+                        model: row.get(2)?,
+                        effort: ThinkingEffort::from_str(&row.get::<_, String>(3)?)
+                            .map_err(to_sql_data_error)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     pub fn update_run_status(&self, run_id: Uuid, status: RunStatus) -> Result<()> {
@@ -450,8 +491,10 @@ mod tests {
                 "Test task",
                 "hello",
                 HarnessKind::Claude,
+                "claude-custom",
                 Some("sonnet"),
                 ThinkingEffort::High,
+                Some("1.2.3"),
             )
             .unwrap();
         storage
@@ -464,6 +507,20 @@ mod tests {
         assert_eq!(tasks[0].status, RunStatus::Interrupted);
         let messages = storage.messages(task_id).unwrap();
         assert_eq!(messages[0].content, "hello");
+        let config = storage.conversation_config(task_id).unwrap().unwrap();
+        assert_eq!(config.harness, HarnessKind::Claude);
+        assert_eq!(config.executable, "claude-custom");
+        assert_eq!(config.model, "sonnet");
+        assert_eq!(config.effort, ThinkingEffort::High);
+        let harness_version: String = storage
+            .connection
+            .query_row(
+                "SELECT harness_version FROM runs WHERE id = ?1",
+                [run_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(harness_version, "1.2.3");
     }
 
     #[test]
@@ -481,8 +538,10 @@ mod tests {
                 "Codex task",
                 "describe this project",
                 HarnessKind::Codex,
+                "codex",
                 None,
                 ThinkingEffort::Medium,
+                Some("4.5.6"),
             )
             .unwrap();
         storage
