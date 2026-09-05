@@ -182,10 +182,10 @@ impl NexusView {
                                     .paragraph_gap(gpui::rems(16. / 14.))
                                     .heading_font_size(|level, _| {
                                         px(match level {
-                                            1 => 30.,
-                                            2 => 24.,
-                                            3 => 20.,
-                                            4 => 18.,
+                                            1 => 22.,
+                                            2 => 20.,
+                                            3 => 18.,
+                                            4 => 17.,
                                             _ => 16.,
                                         })
                                     })
