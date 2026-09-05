@@ -15,143 +15,144 @@ impl NexusView {
             .unwrap_or_else(|| rgb(MUTED).into());
         div()
             .id("settings-panel")
-            .relative()
-            .w(px(292.))
+            .w_full()
             .h_full()
-            .flex_none()
             .overflow_y_scroll()
-            .bg(rgba(0x101211f2))
-            .pt_3()
-            .px_3()
-            .pb_3()
+            .bg(rgb(SURFACE))
+            .border_l_1()
+            .border_color(rgb(BORDER))
+            .shadow(glass_shadow())
+            .p_6()
             .flex()
             .flex_col()
-            .gap_3()
+            .gap_6()
             .child(
                 div()
                     .flex()
-                    .flex_col()
-                    .gap_1()
-                    .rounded(px(18.))
-                    .bg(rgba(0x2a2d2be3))
-                    .border_1()
-                    .border_color(rgba(0xffffff12))
-                    .shadow(glass_shadow())
-                    .p_4()
+                    .items_center()
+                    .justify_between()
                     .child(
                         div()
-                            .text_base()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("环境与偏好"),
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_lg()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child("环境与偏好"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(MUTED))
+                                    .child("管理当前工作空间的执行环境"),
+                            ),
                     )
                     .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(MUTED))
-                            .child("当前项目的本地执行环境与 Agent"),
+                        Button::new("close-environment")
+                            .ghost()
+                            .small()
+                            .icon(IconName::Close)
+                            .tooltip("关闭环境面板")
+                            .on_click(
+                                cx.listener(|app, _, window, cx| app.toggle_settings(window, cx)),
+                            ),
                     ),
             )
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap_3()
-                    .rounded(px(18.))
-                    .bg(rgba(0x252826dc))
-                    .border_1()
-                    .border_color(rgba(0xffffff10))
-                    .shadow(glass_shadow())
-                    .p_4()
-                    .child(section_label("AGENT"))
+                    .gap_4()
+                    .child(section_label("AGENT · 执行引擎"))
+                    .child(self.harness_selector("settings-harness", false, cx))
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(rgb(MUTED))
-                            .child("类型 · 点击选择"),
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(section_label("可执行文件"))
+                            .child(
+                                Input::new(&self.executable_input)
+                                    .prefix(Icon::new(IconName::SquareTerminal).small()),
+                            ),
                     )
-                    .child(self.harness_selector("settings-harness", false, cx))
-                    .child(div().text_xs().text_color(rgb(MUTED)).child("可执行文件"))
-                    .child(Input::new(&self.executable_input))
                     .child(
                         Button::new("probe")
                             .outline()
-                            .small()
                             .w_full()
-                            .child(button_label("重新探测", TEXT))
+                            .icon(IconName::RotateCw)
+                            .label("重新探测环境")
                             .disabled(model.active_run.is_some())
                             .on_click(cx.listener(Self::probe)),
                     )
                     .child(
                         div()
-                            .flex()
-                            .items_start()
-                            .gap_2()
-                            .text_xs()
-                            .text_color(rgb(TEXT_SECONDARY))
-                            .child(status_dot(harness_color))
-                            .child(
-                                probe
-                                    .map(|probe| probe.message.clone())
-                                    .unwrap_or_else(|| "尚未探测".into()),
-                            ),
-                    )
-                    .when_some(
-                        probe.and_then(|probe| probe.version.clone()),
-                        |element, version| element.child(label_value("版本", version)),
-                    ),
-            )
-            .when_some(model.selected_project.as_ref(), |element, project| {
-                element
-                    .child(
-                        div()
+                            .rounded(px(10.))
+                            .bg(rgb(RECESSED))
+                            .p_3()
                             .flex()
                             .flex_col()
                             .gap_3()
-                            .rounded(px(18.))
-                            .bg(rgba(0x252826dc))
-                            .border_1()
-                            .border_color(rgba(0xffffff10))
-                            .shadow(glass_shadow())
-                            .p_4()
-                            .child(section_label("WORKSPACE"))
-                            .child(label_value("工作目录", project.canonical_path.clone())),
-                    )
-                    .when(model.project_dirty, |element| {
-                        element.child(
-                            div()
-                                .flex()
-                                .items_start()
-                                .gap_2()
-                                .text_xs()
-                                .text_color(rgb(TEXT_SECONDARY))
-                                .child(status_dot(rgb(WARNING).into()))
-                                .child("目录存在未提交修改；Nexus 不会自动还原或提交。"),
-                        )
-                    })
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_start()
+                                    .gap_2()
+                                    .text_xs()
+                                    .text_color(rgb(TEXT_SECONDARY))
+                                    .child(status_dot(harness_color))
+                                    .child(
+                                        div().flex_1().min_w_0().whitespace_normal().child(
+                                            probe
+                                                .map(|probe| probe.message.clone())
+                                                .unwrap_or_else(|| "尚未探测".into()),
+                                        ),
+                                    ),
+                            )
+                            .when_some(
+                                probe.and_then(|probe| probe.version.clone()),
+                                |element, version| element.child(label_value("版本", version)),
+                            ),
+                    ),
+            )
+            .when_some(model.selected_project.as_ref(), |element, project| {
+                element.child(
+                    div()
+                        .pt_5()
+                        .border_t_1()
+                        .border_color(rgb(BORDER))
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        .child(section_label("WORKSPACE · 项目空间"))
+                        .child(label_value("项目", project.display_name.clone()))
+                        .child(label_value("工作目录", project.canonical_path.clone()))
+                        .when(model.project_dirty, |element| {
+                            element.child(
+                                Alert::warning("workspace-dirty", "Nexus 不会自动还原或提交。")
+                                    .title("目录存在未提交修改")
+                                    .small(),
+                            )
+                        }),
+                )
             })
-            .child(div().flex_1())
             .child(
                 div()
-                    .p_3()
-                    .rounded(px(12.))
-                    .bg(rgba(0xffffff07))
+                    .pt_5()
+                    .border_t_1()
+                    .border_color(rgb(BORDER))
                     .flex()
                     .flex_col()
-                    .gap_2()
-                    .child(section_label("交互偏好"))
+                    .gap_4()
+                    .child(section_label("PREFERENCES · 交互偏好"))
                     .child(
-                        Button::new("reduce-motion")
-                            .outline()
-                            .small()
-                            .w_full()
-                            .label(if self.reduced_motion {
-                                "减少动效：已开启"
-                            } else {
-                                "减少动效：已关闭"
-                            })
-                            .tooltip("关闭位移动画和循环呼吸效果，本次窗口内生效")
-                            .on_click(cx.listener(|app, _, _, cx| {
-                                app.reduced_motion = !app.reduced_motion;
+                        Switch::new("reduce-motion")
+                            .label("减少动效")
+                            .checked(self.reduced_motion)
+                            .on_click(cx.listener(|app, checked, _, cx| {
+                                app.reduced_motion = *checked;
                                 app.settings_from = if app.settings_open { 1. } else { 0. };
                                 app.settings_changed = Instant::now();
                                 cx.notify();
@@ -161,7 +162,8 @@ impl NexusView {
                         div()
                             .text_xs()
                             .text_color(rgb(MUTED))
-                            .child("本次窗口内生效"),
+                            .line_height(relative(1.6))
+                            .child("关闭入场位移和状态呼吸效果。本次窗口内生效。"),
                     ),
             )
     }

@@ -14,13 +14,12 @@ resolver = "2"
 version = "0.1.0-alpha.1"
 edition = "2024"
 license = "MIT"
-rust-version = "1.88"
+rust-version = "1.98"
 
 [workspace.dependencies]
 anyhow = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
-gpui = { version = "0.2.2", features = ["runtime_shaders"] }
-gpui-component = "0.5.1"
+gpui-kit = "0.6.0"
 nix = { version = "0.30", features = ["signal"] }
 rfd = "0.17.2"
 rusqlite = { version = "0.38", features = ["bundled"] }

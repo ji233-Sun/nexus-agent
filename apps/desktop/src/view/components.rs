@@ -1,5 +1,23 @@
 use super::*;
 
+pub(super) fn brand_mark(size: f32) -> impl IntoElement {
+    div()
+        .size(px(size))
+        .flex_none()
+        .rounded(px(size * 0.3))
+        .bg(rgb(SELECTED))
+        .border_1()
+        .border_color(rgba(0xa99bff40))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            Icon::new(IconName::Asterisk)
+                .size(px(size * 0.55))
+                .text_color(rgb(ACCENT)),
+        )
+}
+
 pub(super) fn entrance(element: gpui::Div, id: impl Into<ElementId>, animated: bool) -> AnyElement {
     if !animated {
         return element.into_any_element();
@@ -69,7 +87,7 @@ impl NexusView {
         role: MessageRole,
         content: &str,
         kind: MessageKind,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<NexusView>,
     ) -> AnyElement {
         let id = id.into();
@@ -100,7 +118,7 @@ impl NexusView {
                         element
                             .max_w(px(600.))
                             .rounded(px(18.))
-                            .bg(rgba(0xffffff11))
+                            .bg(rgb(RECESSED))
                             .border_1()
                             .border_color(rgba(0xffffff10))
                             .px_4()
@@ -110,7 +128,7 @@ impl NexusView {
                     .when(!is_user && is_panel, |element| {
                         element
                             .rounded(px(14.))
-                            .bg(rgba(0x252826b8))
+                            .bg(rgb(SURFACE))
                             .border_1()
                             .border_color(rgba(0xffffff0d))
                             .shadow(surface_border_shadow())
@@ -136,10 +154,15 @@ impl NexusView {
                             Button::new((id.clone(), "disclosure"))
                                 .ghost()
                                 .small()
-                                .label(if expanded {
-                                    "⌄ 收起工具输出"
+                                .icon(if expanded {
+                                    IconName::ChevronDown
                                 } else {
-                                    "› 展开完整工具输出"
+                                    IconName::ChevronRight
+                                })
+                                .label(if expanded {
+                                    "收起工具输出"
+                                } else {
+                                    "展开完整工具输出"
                                 })
                                 .on_click(cx.listener(move |app, _, _, cx| {
                                     if !app.expanded_messages.remove(&toggle_id) {
@@ -150,7 +173,7 @@ impl NexusView {
                         )
                     })
                     .child(if kind == MessageKind::Text {
-                        TextView::markdown(id.clone(), content.to_owned(), window, cx)
+                        TextView::markdown(id.clone(), content.to_owned())
                             .selectable(true)
                             .into_any_element()
                     } else {
@@ -212,10 +235,6 @@ pub(super) fn section_label(label: impl Into<SharedString>) -> impl IntoElement 
         .child(label.into())
 }
 
-pub(super) fn button_label(label: impl Into<SharedString>, color: u32) -> impl IntoElement {
-    div().text_color(rgb(color)).child(label.into())
-}
-
 pub(super) fn status_dot(color: Hsla) -> gpui::Div {
     div()
         .size(px(8.))
@@ -241,29 +260,6 @@ pub(super) fn live_status_dot(color: Hsla, animated: bool) -> gpui::AnyElement {
     }
 }
 
-pub(super) fn selection_indicator(id: SharedString, animated: bool) -> impl IntoElement {
-    let indicator = div()
-        .absolute()
-        .left(px(3.))
-        .top(px(9.))
-        .bottom(px(9.))
-        .w(px(2.))
-        .rounded_full()
-        .bg(rgb(ACCENT))
-        .shadow(vec![box_shadow(0., 0., 8., 0., rgba(0x9b7cff80).into())]);
-    if animated {
-        indicator
-            .with_animation(
-                id,
-                Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()),
-                |element, delta| element.opacity(delta).left(px(1. + delta * 2.)),
-            )
-            .into_any_element()
-    } else {
-        indicator.into_any_element()
-    }
-}
-
 pub(super) fn run_status_color(status: RunStatus) -> Hsla {
     match status {
         RunStatus::Completed => rgb(SUCCESS).into(),
@@ -275,13 +271,6 @@ pub(super) fn run_status_color(status: RunStatus) -> Hsla {
 
 pub(super) fn surface_border_shadow() -> Vec<gpui::BoxShadow> {
     vec![box_shadow(0., 0., 0., 1., rgba(0xffffff0d).into())]
-}
-
-pub(super) fn selection_shadow() -> Vec<gpui::BoxShadow> {
-    vec![
-        box_shadow(0., 0., 0., 1., rgba(0xffffff09).into()),
-        box_shadow(0., 5., 14., -10., rgba(0x000000a0).into()),
-    ]
 }
 
 pub(super) fn glass_shadow() -> Vec<gpui::BoxShadow> {

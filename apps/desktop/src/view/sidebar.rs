@@ -1,451 +1,265 @@
 use super::*;
 
 impl NexusView {
-    pub(super) fn render_task_tree(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let model = self.presenter.model();
-        let query = self.search_input.read(cx).value();
-        div()
-            .ml(px(17.))
-            .pl_2()
-            .border_l_1()
-            .border_color(rgba(0xffffff0d))
-            .flex()
-            .flex_col()
-            .gap_1()
-            .when(model.tasks.is_empty(), |element| {
-                element.child(
-                    div()
-                        .px_2()
-                        .py_2()
-                        .text_xs()
-                        .text_color(rgb(MUTED))
-                        .child("发送 Prompt 后，任务会显示在这里"),
-                )
-            })
-            .when(
-                !model.tasks.is_empty()
-                    && !model
-                        .tasks
-                        .iter()
-                        .any(|task| matches_search(&task.title, &query)),
-                |element| {
-                    element.child(
-                        div()
-                            .px_2()
-                            .py_2()
-                            .text_xs()
-                            .text_color(rgb(MUTED))
-                            .child("没有匹配的任务"),
-                    )
-                },
-            )
-            .children(
-                model
-                    .tasks
-                    .iter()
-                    .filter(|task| matches_search(&task.title, &query))
-                    .map(|task| {
-                        let task_id = task.id;
-                        let selected = model.selected_task == Some(task_id);
-                        div()
-                            .id(SharedString::from(format!("task-{task_id}")))
-                            .focusable()
-                            .tab_stop(true)
-                            .focus(|style| style.bg(rgb(SELECTED)))
-                            .active(|style| style.bg(rgb(SELECTED)))
-                            .relative()
-                            .h(px(34.))
-                            .px_2()
-                            .rounded(px(9.))
-                            .cursor_pointer()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .text_color(rgb(TEXT_SECONDARY))
-                            .when(selected, |element| {
-                                element
-                                    .bg(rgba(0xffffff14))
-                                    .text_color(rgb(TEXT))
-                                    .shadow(selection_shadow())
-                                    .child(selection_indicator(
-                                        SharedString::from(format!("task-selection-{task_id}")),
-                                        !self.reduced_motion,
-                                    ))
-                            })
-                            .hover(|style| style.bg(rgba(0xffffff0d)).text_color(rgb(TEXT)))
-                            .on_click(cx.listener(move |app, _, window, cx| {
-                                app.select_task(task_id, window, cx)
-                            }))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_sm()
-                                    .child(task.title.clone()),
-                            )
-                            .child(status_dot(run_status_color(task.status)))
-                    }),
-            )
-    }
-
     pub(super) fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let model = self.presenter.model();
         let query = self.search_input.read(cx).value();
         let selected_project_id = model.selected_project.as_ref().map(|project| project.id);
-        let selected_codex_thread = model.selected_codex_thread.as_deref();
         let history_status = if model.codex_history_loading {
-            "正在读取…".to_owned()
+            "正在读取本机会话…".to_owned()
         } else if let Some(error) = &model.codex_history_error {
-            format!("不可用：{error}")
+            format!("历史不可用：{error}")
         } else if self.presenter.history_available() {
-            format!("{} 条本机会话", model.codex_threads.len())
+            format!("{} 条本机会话 · 只读浏览", model.codex_threads.len())
         } else {
             "等待检测 Codex CLI".to_owned()
         };
+        let projects = SidebarMenu::new().children(model.projects.iter().map(|project| {
+            let selected = selected_project_id == Some(project.id);
+            let project = project.clone();
+            SidebarMenuItem::new(project.display_name.clone())
+                .icon(IconName::Folder)
+                .active(selected && model.selected_codex_thread.is_none())
+                .default_open(true)
+                .click_to_open(true)
+                .on_click(cx.listener(move |app, _, _, cx| {
+                    app.select_project(project.clone());
+                    cx.notify();
+                }))
+                .when(selected, |item| {
+                    let tasks: Vec<_> = model
+                        .tasks
+                        .iter()
+                        .filter(|task| matches_search(&task.title, &query))
+                        .map(|task| {
+                            let id = task.id;
+                            let color = run_status_color(task.status);
+                            SidebarMenuItem::new(task.title.clone())
+                                .active(
+                                    model.selected_task == Some(id)
+                                        && model.selected_codex_thread.is_none(),
+                                )
+                                .suffix(move |_, _| status_dot(color))
+                                .on_click(cx.listener(move |app, _, window, cx| {
+                                    app.select_task(id, window, cx);
+                                }))
+                        })
+                        .collect();
+                    item.children(if tasks.is_empty() {
+                        vec![
+                            SidebarMenuItem::new(if query.trim().is_empty() {
+                                "开始任务后，记录会出现在这里"
+                            } else {
+                                "没有匹配的任务"
+                            })
+                            .disable(true),
+                        ]
+                    } else {
+                        tasks
+                    })
+                })
+        }));
+        let mut history: Vec<_> = model
+            .codex_threads
+            .iter()
+            .filter(|thread| {
+                matches_search(&format!("{} {}", thread.title, thread.detail()), &query)
+            })
+            .map(|thread| {
+                let id = thread.id.clone();
+                SidebarMenuItem::new(thread.title.clone())
+                    .icon(IconName::FileText)
+                    .active(model.selected_codex_thread.as_deref() == Some(thread.id.as_str()))
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.select_codex_thread(id.clone(), cx);
+                    }))
+            })
+            .collect();
+        if history.is_empty() {
+            history.push(
+                SidebarMenuItem::new(if query.trim().is_empty() {
+                    "暂无可显示的会话"
+                } else {
+                    "没有匹配的历史会话"
+                })
+                .disable(true),
+            );
+        }
+
         div()
-            .w(px(268.))
             .h_full()
             .flex_none()
-            .bg(rgba(0x1c1e1dde))
-            .border_r_1()
-            .border_color(rgba(0xffffff12))
-            .pt(px(if cfg!(target_os = "macos") { 40. } else { 8. }))
-            .px_3()
-            .pb_3()
-            .flex()
-            .flex_col()
-            .gap_2()
+            .pt(px(if cfg!(target_os = "macos") { 36. } else { 0. }))
+            .bg(rgb(SURFACE))
             .child(
-                div().h(px(44.)).px_2().flex().items_center().child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .child(
-                            div()
-                                .size(px(27.))
-                                .rounded(px(9.))
-                                .bg(rgba(0x9b7cff2b))
-                                .border_1()
-                                .border_color(rgba(0xb8a6ff38))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_xs()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(rgb(ACCENT))
-                                .child("N"),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(1.))
-                                .child(
-                                    div()
-                                        .text_base()
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .child("Nexus Agent"),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(MUTED))
-                                        .child("Local workspace"),
-                                ),
-                        ),
-                ),
-            )
-            .child(
-                Button::new("new-task")
-                    .ghost()
-                    .w_full()
-                    .justify_start()
-                    .rounded(px(10.))
-                    .child(button_label("＋   新任务", TEXT))
-                    .tooltip(if cfg!(target_os = "macos") {
-                        "新任务 · ⌘ N"
-                    } else {
-                        "新任务 · Ctrl N"
-                    })
-                    .disabled(model.selected_project.is_none() || model.active_run.is_some())
-                    .on_click(cx.listener(|app, _, window, cx| app.new_task(window, cx))),
-            )
-            .child(Input::new(&self.search_input).small().cleanable(true))
-            .child(
-                div()
-                    .id("project-tree")
-                    .max_h(px(420.))
-                    .overflow_y_scroll()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
+                Sidebar::new("workspace-sidebar")
+                    .w(px(280.))
+                    .collapsible(false)
+                    .header(
                         div()
-                            .mt_2()
-                            .px_2()
-                            .py_1()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(section_label("PROJECTS"))
-                            .child(
-                                Button::new("open-project")
-                                    .ghost()
-                                    .small()
-                                    .rounded(px(9.))
-                                    .child(button_label("＋", TEXT_SECONDARY))
-                                    .tooltip("选择本地项目目录")
-                                    .on_click(cx.listener(Self::choose_project)),
-                            ),
-                    )
-                    .child(
-                        div()
+                            .w_full()
                             .flex()
                             .flex_col()
-                            .gap_1()
-                            .when(model.projects.is_empty(), |element| {
-                                element.child(
-                                    div()
-                                        .rounded(px(12.))
-                                        .border_1()
-                                        .border_color(rgba(0xffffff0d))
-                                        .bg(rgba(0xffffff06))
-                                        .px_3()
-                                        .py_4()
-                                        .text_xs()
-                                        .text_color(rgb(MUTED))
-                                        .child("还没有项目，点击右上角 ＋ 添加。"),
-                                )
-                            })
-                            .children(model.projects.iter().map(|project| {
-                                let id = project.id;
-                                let selected = selected_project_id == Some(id);
-                                let display_name = project.display_name.clone();
-                                let project = project.clone();
+                            .gap_4()
+                            .pb_4()
+                            .child(
                                 div()
                                     .flex()
-                                    .flex_col()
-                                    .gap_1()
+                                    .items_center()
+                                    .gap_3()
+                                    .px_2()
+                                    .py_3()
+                                    .child(brand_mark(38.))
                                     .child(
                                         div()
-                                            .id(SharedString::from(format!("project-{id}")))
-                                            .focusable()
-                                            .tab_stop(true)
-                                            .focus(|style| style.bg(rgb(SELECTED)))
-                                            .active(|style| style.bg(rgb(SELECTED)))
-                                            .relative()
-                                            .h(px(36.))
-                                            .px_2()
-                                            .rounded(px(10.))
-                                            .cursor_pointer()
                                             .flex()
-                                            .items_center()
-                                            .gap_2()
-                                            .text_sm()
-                                            .text_color(rgb(TEXT_SECONDARY))
-                                            .when(selected, |element| {
-                                                element
-                                                    .bg(rgba(0xffffff12))
-                                                    .text_color(rgb(TEXT))
-                                                    .shadow(selection_shadow())
-                                                    .child(selection_indicator(
-                                                        SharedString::from(format!(
-                                                            "project-selection-{id}"
-                                                        )),
-                                                        !self.reduced_motion,
-                                                    ))
-                                            })
-                                            .hover(|style| {
-                                                style.bg(rgba(0xffffff0d)).text_color(rgb(TEXT))
-                                            })
-                                            .on_click(cx.listener(move |app, _, _, cx| {
-                                                app.select_project(project.clone());
-                                                cx.notify();
-                                            }))
+                                            .flex_col()
+                                            .gap_1()
                                             .child(
                                                 div()
-                                                    .w(px(18.))
-                                                    .text_color(if selected {
-                                                        rgb(ACCENT)
-                                                    } else {
-                                                        rgb(MUTED)
-                                                    })
-                                                    .child("▱"),
+                                                    .text_lg()
+                                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                    .child("Nexus Agent"),
                                             )
-                                            .child(div().flex_1().truncate().child(display_name))
                                             .child(
                                                 div()
                                                     .text_xs()
                                                     .text_color(rgb(MUTED))
-                                                    .child(if selected { "⌄" } else { "›" }),
+                                                    .child("你的本地开发工作空间"),
                                             ),
+                                    ),
+                            )
+                            .child(
+                                Button::new("new-task")
+                                    .primary()
+                                    .w_full()
+                                    .h(px(44.))
+                                    .accessibility_label("新建任务")
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_2()
+                                                    .child(Icon::new(IconName::Plus))
+                                                    .child("新建任务"),
+                                            )
+                                            .child(div().text_xs().opacity(0.65).child(
+                                                if cfg!(target_os = "macos") {
+                                                    "⌘ N"
+                                                } else {
+                                                    "Ctrl N"
+                                                },
+                                            )),
                                     )
-                                    .when(selected, |element| {
-                                        element.child(self.render_task_tree(cx))
-                                    })
-                            })),
-                    ),
-            )
-            .child(
-                div().flex_1().min_h_0().flex().flex_col().gap_1().child(
-                    div()
-                        .id("history-list")
-                        .flex_1()
-                        .overflow_y_scroll()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .px_2()
-                                .py_1()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .child(section_label("CODEX RECENTS"))
-                                .child(
-                                    Button::new("refresh-codex-history")
-                                        .ghost()
-                                        .small()
-                                        .rounded(px(9.))
-                                        .child(button_label("↻", TEXT_SECONDARY))
-                                        .tooltip("刷新本机 Codex 历史")
-                                        .disabled(
-                                            !self.presenter.history_available()
-                                                || model.codex_history_loading,
-                                        )
-                                        .on_click(cx.listener(Self::refresh_codex_history)),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .px_2()
-                                .py_1()
-                                .text_xs()
-                                .text_color(rgb(MUTED))
-                                .line_clamp(3)
-                                .child(history_status),
-                        )
-                        .when(
-                            !query.trim().is_empty()
-                                && !model.codex_threads.iter().any(|thread| {
-                                    matches_search(
-                                        &format!("{} {}", thread.title, thread.detail()),
-                                        &query,
+                                    .tooltip("在当前项目中开始新任务")
+                                    .disabled(
+                                        model.selected_project.is_none()
+                                            || model.active_run.is_some(),
                                     )
-                                }),
-                            |element| {
-                                element.child(
-                                    div()
-                                        .px_2()
-                                        .py_3()
-                                        .text_xs()
-                                        .text_color(rgb(MUTED))
-                                        .child("没有匹配的 Codex 会话 · 试试其他关键词"),
-                                )
-                            },
-                        )
-                        .children(
-                            model
-                                .codex_threads
-                                .iter()
-                                .filter(|thread| {
-                                    matches_search(
-                                        &format!("{} {}", thread.title, thread.detail()),
-                                        &query,
-                                    )
-                                })
-                                .map(|thread| {
-                                    let thread_id = thread.id.clone();
-                                    let selected =
-                                        selected_codex_thread == Some(thread.id.as_str());
-                                    div()
-                                        .id(SharedString::from(format!(
-                                            "codex-thread-{}",
-                                            thread.id
-                                        )))
-                                        .focusable()
-                                        .tab_stop(true)
-                                        .focus(|style| style.bg(rgb(SELECTED)))
-                                        .active(|style| style.bg(rgb(SELECTED)))
-                                        .relative()
-                                        .p_2()
-                                        .rounded(px(9.))
-                                        .cursor_pointer()
-                                        .text_color(rgb(TEXT_SECONDARY))
-                                        .when(selected, |element| {
-                                            element
-                                                .bg(rgba(0xffffff14))
-                                                .text_color(rgb(TEXT))
-                                                .shadow(selection_shadow())
-                                                .child(selection_indicator(
-                                                    SharedString::from(format!(
-                                                        "codex-selection-{}",
-                                                        thread.id
-                                                    )),
-                                                    !self.reduced_motion,
-                                                ))
-                                        })
-                                        .hover(|style| {
-                                            style.bg(rgba(0xffffff0d)).text_color(rgb(TEXT))
-                                        })
-                                        .on_click(cx.listener(move |app, _, _, cx| {
-                                            app.select_codex_thread(thread_id.clone(), cx)
-                                        }))
-                                        .child(
-                                            div().text_sm().truncate().child(thread.title.clone()),
-                                        )
-                                        .child(
-                                            div()
-                                                .mt(px(3.))
-                                                .text_xs()
-                                                .text_color(rgb(MUTED))
-                                                .truncate()
-                                                .child(thread.detail()),
-                                        )
-                                }),
-                        ),
-                ),
-            )
-            .child(
-                div()
-                    .h(px(36.))
-                    .px_2()
-                    .rounded(px(10.))
-                    .bg(rgba(0xffffff07))
-                    .border_1()
-                    .border_color(rgba(0xffffff0a))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(status_dot(
-                        model
-                            .selected_probe()
-                            .map(|probe| {
-                                if probe.available && probe.authenticated {
-                                    rgb(SUCCESS).into()
-                                } else {
-                                    rgb(WARNING).into()
-                                }
-                            })
-                            .unwrap_or_else(|| rgb(MUTED).into()),
-                    ))
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_xs()
-                            .text_color(rgb(TEXT_SECONDARY))
-                            .child("本地工作空间"),
+                                    .on_click(
+                                        cx.listener(|app, _, window, cx| app.new_task(window, cx)),
+                                    ),
+                            )
+                            .child(
+                                Input::new(&self.search_input)
+                                    .h(px(40.))
+                                    .prefix(Icon::new(IconName::Search).small())
+                                    .cleanable(true),
+                            ),
                     )
-                    .child(div().text_xs().text_color(rgb(MUTED)).child(
-                        if cfg!(target_os = "macos") {
-                            "⌘ K 搜索"
-                        } else {
-                            "Ctrl K 搜索"
-                        },
-                    )),
+                    .child(
+                        SidebarGroup::new("项目空间").child(projects).child(
+                            SidebarMenu::new().child(
+                                SidebarMenuItem::new("添加本地项目")
+                                    .icon(IconName::Plus)
+                                    .on_click(cx.listener(Self::choose_project)),
+                            ),
+                        ),
+                    )
+                    .child(
+                        SidebarGroup::new("最近会话 · Codex")
+                            .child(SidebarMenu::new().children(history)),
+                    )
+                    .footer(
+                        div()
+                            .w_full()
+                            .pt_3()
+                            .border_t_1()
+                            .border_color(rgb(BORDER))
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_xs()
+                                            .text_color(rgb(MUTED))
+                                            .line_clamp(2)
+                                            .child(history_status),
+                                    )
+                                    .child(
+                                        Button::new("refresh-codex-history")
+                                            .ghost()
+                                            .small()
+                                            .icon(IconName::RotateCw)
+                                            .tooltip("刷新本机 Codex 历史")
+                                            .disabled(
+                                                !self.presenter.history_available()
+                                                    || model.codex_history_loading,
+                                            )
+                                            .on_click(cx.listener(Self::refresh_codex_history)),
+                                    ),
+                            )
+                            .child(
+                                Button::new("sidebar-environment")
+                                    .ghost()
+                                    .w_full()
+                                    .h(px(40.))
+                                    .accessibility_label("环境与偏好")
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_2()
+                                                    .child(Icon::new(IconName::Settings2))
+                                                    .child("环境与偏好"),
+                                            )
+                                            .child(status_dot(
+                                                model
+                                                    .selected_probe()
+                                                    .map(|probe| {
+                                                        if probe.available && probe.authenticated {
+                                                            rgb(SUCCESS).into()
+                                                        } else {
+                                                            rgb(WARNING).into()
+                                                        }
+                                                    })
+                                                    .unwrap_or_else(|| rgb(MUTED).into()),
+                                            )),
+                                    )
+                                    .on_click(cx.listener(|app, _, window, cx| {
+                                        app.toggle_settings(window, cx)
+                                    })),
+                            ),
+                    ),
             )
     }
 }

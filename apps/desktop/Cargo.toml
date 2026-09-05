@@ -8,8 +8,7 @@ rust-version.workspace = true
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
-gpui.workspace = true
-gpui-component.workspace = true
+gpui-kit.workspace = true
 nexus-domain = { path = "../../crates/domain" }
 nexus-protocol = { path = "../../crates/protocol" }
 nexus-runner = { path = "../runner" }
