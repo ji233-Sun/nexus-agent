@@ -455,13 +455,14 @@ impl NexusView {
                                 ),
                         )
                         .child(
-                            Button::new("sidebar-environment")
+                            Button::new("sidebar-settings")
+                                .debug_selector(|| "sidebar-settings".into())
                                 .ghost()
                                 .small()
                                 .w_full()
                                 .h(px(SIDEBAR_ROW_HEIGHT))
                                 .text_size(px(13.))
-                                .accessibility_label("环境与偏好")
+                                .accessibility_label("设置")
                                 .child(
                                     div()
                                         .text_size(px(13.))
@@ -475,7 +476,7 @@ impl NexusView {
                                                 .items_center()
                                                 .gap_2()
                                                 .child(Icon::new(IconName::Settings2))
-                                                .child("环境与偏好"),
+                                                .child("设置"),
                                         )
                                         .child(status_dot(
                                             model
@@ -796,24 +797,27 @@ mod tests {
         });
         assert_eq!(scroll.offset().y, before.y - px(40.));
         assert_eq!(sidebar_scroll.offset().y, px(-80.));
-        view.update(cx, |view, cx| {
-            view.settings_open = true;
-            cx.notify();
-        });
+        let workspace_bounds = cx.debug_bounds("workspace-page").unwrap();
+        let settings_button = cx.debug_bounds("sidebar-settings").unwrap().center();
+        assert!(workspace_bounds.contains(&settings_button));
+        cx.simulate_click(settings_button, Default::default());
+        assert!(view.read_with(cx, |view, _| view.settings_open));
+        view.update(cx, |_, cx| cx.notify());
         cx.run_until_parked();
         cx.update(|window, cx| {
             let _ = window.draw(cx);
         });
         let settings_scroll = view.read_with(cx, |view, _| view.settings_scroll.clone());
-        let overlap = point(
-            settings_scroll.bounds().left() + px(30.),
-            scroll.bounds().top() + px(40.),
-        );
-        assert!(settings_scroll.bounds().contains(&overlap));
-        assert!(scroll.bounds().contains(&overlap));
+        assert_eq!(cx.debug_bounds("settings-page").unwrap(), workspace_bounds);
+        assert!(cx.debug_bounds("workspace-page").is_none());
+        assert!(cx.debug_bounds("sidebar-settings").is_none());
+        assert!(settings_scroll.max_offset().y > px(40.));
+        let back_button = cx.debug_bounds("back-to-workspace").unwrap();
+        let timeline_renders = timeline_pane.read_with(cx, |pane, _| pane.render_count);
+        let sidebar_renders = sidebar_pane.read_with(cx, |pane, _| pane.render_count);
         let before = scroll.offset();
         cx.simulate_event(ScrollWheelEvent {
-            position: overlap,
+            position: settings_scroll.bounds().center(),
             delta: ScrollDelta::Pixels(point(px(0.), px(-40.))),
             ..Default::default()
         });
@@ -822,19 +826,26 @@ mod tests {
         });
         assert_eq!(scroll.offset(), before);
         assert_eq!(sidebar_scroll.offset().y, px(-80.));
+        assert_eq!(settings_scroll.offset().y, px(-40.));
+        assert_eq!(cx.debug_bounds("back-to-workspace").unwrap(), back_button);
         assert_eq!(
-            settings_scroll.offset().y,
-            (-settings_scroll.max_offset().y).max(px(-40.))
+            timeline_pane.read_with(cx, |pane, _| pane.render_count),
+            timeline_renders
+        );
+        assert_eq!(
+            sidebar_pane.read_with(cx, |pane, _| pane.render_count),
+            sidebar_renders
         );
 
-        view.update(cx, |view, cx| {
-            view.settings_open = false;
-            cx.notify();
-        });
+        cx.simulate_click(back_button.center(), Default::default());
         cx.run_until_parked();
         cx.update(|window, cx| {
             let _ = window.draw(cx);
         });
+        assert!(cx.debug_bounds("settings-page").is_none());
+        assert_eq!(cx.debug_bounds("workspace-page").unwrap(), workspace_bounds);
+        assert_eq!(scroll.offset(), before);
+        assert_eq!(sidebar_scroll.offset().y, px(-80.));
         let before = scroll.offset();
         cx.simulate_event(ScrollWheelEvent {
             position: scroll.bounds().center(),
@@ -846,6 +857,90 @@ mod tests {
             let _ = window.draw(cx);
         });
         assert_eq!(scroll.offset(), before);
+    }
+
+    #[gpui::test]
+    fn settings_navigation_preserves_drafts_and_restores_visible_focus(cx: &mut TestAppContext) {
+        let (view, cx) = scroll_test_view(cx);
+        let selected_task = view.read_with(cx, |view, _| view.presenter.model().selected_task);
+        view.update_in(cx, |view, window, cx| {
+            view.prompt_input.update(cx, |input, cx| {
+                input.set_value("Keep this draft", window, cx);
+                input.focus(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        let settings_button = cx.debug_bounds("open-settings").unwrap().center();
+        cx.simulate_click(settings_button, Default::default());
+        view.update_in(cx, |view, window, cx| {
+            assert!(view.settings_open);
+            assert!(view.focus_handle.is_focused(window));
+            assert!(
+                !view
+                    .prompt_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+            );
+            view.executable_input.update(cx, |input, cx| {
+                input.set_value("custom-agent", window, cx);
+                input.focus(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        let settings_shortcut = if cfg!(target_os = "macos") {
+            "cmd-,"
+        } else {
+            "ctrl-,"
+        };
+        cx.simulate_keystrokes(settings_shortcut);
+        view.update_in(cx, |view, window, cx| {
+            assert!(!view.settings_open);
+            assert!(
+                view.prompt_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+            );
+            assert_eq!(view.prompt_input.read(cx).value(), "Keep this draft");
+            assert_eq!(view.executable_input.read(cx).value(), "custom-agent");
+            assert_eq!(view.presenter.model().selected_task, selected_task);
+        });
+        cx.simulate_keystrokes(settings_shortcut);
+        assert!(view.read_with(cx, |view, _| view.settings_open));
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-k"
+        } else {
+            "ctrl-k"
+        });
+        view.update_in(cx, |view, window, cx| {
+            assert!(!view.settings_open);
+            assert!(
+                view.search_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+            );
+            assert_eq!(view.presenter.model().selected_task, selected_task);
+        });
+        cx.simulate_keystrokes(settings_shortcut);
+        assert!(view.read_with(cx, |view, _| view.settings_open));
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-n"
+        } else {
+            "ctrl-n"
+        });
+        view.update_in(cx, |view, window, cx| {
+            assert!(!view.settings_open);
+            assert!(view.presenter.model().selected_task.is_none());
+            assert!(
+                view.prompt_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+            );
+            assert_eq!(view.prompt_input.read(cx).value(), "Keep this draft");
+        });
     }
 
     #[gpui::test]

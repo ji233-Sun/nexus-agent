@@ -1,4 +1,5 @@
 use super::*;
+use gpui_kit::component::scroll::ScrollableElement as _;
 
 impl NexusView {
     pub(super) fn render_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -18,54 +19,34 @@ impl NexusView {
         let remote_token = self.presenter.remote_token().map(masked_token);
         let remote_error = self.presenter.remote_control_error().map(str::to_owned);
 
-        div()
-            .id("settings-panel")
+        let content = div()
             .w_full()
-            .h_full()
-            .overflow_y_scroll()
-            .lock_scroll_axis()
-            .track_scroll(&self.settings_scroll)
+            .max_w(px(880.))
+            .mx_auto()
             .bg(rgb(SURFACE))
-            .border_l_1()
+            .border_1()
             .border_color(rgb(BORDER))
-            .shadow(glass_shadow())
-            .p_4()
+            .rounded(px(CARD_RADIUS))
+            .p_6()
             .flex()
             .flex_col()
-            .gap_4()
+            .gap_6()
             .child(
                 div()
                     .flex()
-                    .items_center()
-                    .justify_between()
+                    .flex_col()
+                    .gap_2()
                     .child(
                         div()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_base()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child("环境与偏好"),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(MUTED))
-                                    .child("管理当前工作空间的执行环境"),
-                            ),
+                            .text_base()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("环境与偏好"),
                     )
                     .child(
-                        Button::new("close-environment")
-                            .ghost()
-                            .small()
-                            .size(px(COMPACT_CONTROL_HEIGHT))
-                            .icon(IconName::Close)
-                            .tooltip("关闭环境面板")
-                            .on_click(
-                                cx.listener(|app, _, window, cx| app.toggle_settings(window, cx)),
-                            ),
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MUTED))
+                            .child("管理当前工作空间的执行环境"),
                     ),
             )
             .child(
@@ -227,8 +208,6 @@ impl NexusView {
                             .checked(self.reduced_motion)
                             .on_click(cx.listener(|app, checked, _, cx| {
                                 app.reduced_motion = *checked;
-                                app.settings_from = if app.settings_open { 1. } else { 0. };
-                                app.settings_changed = Instant::now();
                                 cx.notify();
                             })),
                     )
@@ -239,6 +218,54 @@ impl NexusView {
                             .line_height(relative(1.6))
                             .child("关闭入场位移和状态呼吸效果。本次窗口内生效。"),
                     ),
+            );
+
+        div()
+            .debug_selector(|| "settings-page".into())
+            .size_full()
+            .pt(px(if cfg!(target_os = "macos") { 36. } else { 0. }))
+            .bg(rgb(CANVAS))
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(HEADER_HEIGHT))
+                    .flex_none()
+                    .px_8()
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .flex()
+                    .items_center()
+                    .gap_4()
+                    .child(
+                        Button::new("back-to-workspace")
+                            .debug_selector(|| "back-to-workspace".into())
+                            .ghost()
+                            .small()
+                            .icon(IconName::ArrowLeft)
+                            .label("返回工作区")
+                            .on_click(
+                                cx.listener(|app, _, window, cx| app.toggle_settings(window, cx)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_base()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("设置"),
+                    ),
+            )
+            .child(
+                div()
+                    .id("settings-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .lock_scroll_axis()
+                    .track_scroll(&self.settings_scroll)
+                    .p_8()
+                    .child(content)
+                    .vertical_scrollbar(&self.settings_scroll),
             )
     }
 }

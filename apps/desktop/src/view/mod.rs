@@ -36,7 +36,7 @@ use std::{
 use theme::*;
 use uuid::Uuid;
 
-gpui::actions!(nexus_view, [SearchSessions, NewTask, ToggleEnvironment]);
+gpui::actions!(nexus_view, [SearchSessions, NewTask, ToggleSettings]);
 
 pub(crate) struct NexusView {
     presenter: Presenter,
@@ -55,8 +55,6 @@ pub(crate) struct NexusView {
     codex_history_open: bool,
     codex_history_visible_count: usize,
     settings_open: bool,
-    settings_from: f32,
-    settings_changed: Instant,
     reduced_motion: bool,
 }
 
@@ -92,7 +90,7 @@ impl NexusView {
         cx.bind_keys([
             KeyBinding::new("secondary-k", SearchSessions, Some("Nexus")),
             KeyBinding::new("secondary-n", NewTask, Some("Nexus")),
-            KeyBinding::new("secondary-,", ToggleEnvironment, Some("Nexus")),
+            KeyBinding::new("secondary-,", ToggleSettings, Some("Nexus")),
         ]);
         let owner = cx.weak_entity();
         let sidebar_pane = cx.new(|cx| WorkspacePane::new(owner.clone(), PaneKind::Sidebar, cx));
@@ -115,8 +113,6 @@ impl NexusView {
             codex_history_open: false,
             codex_history_visible_count: sidebar::HISTORY_PAGE_SIZE,
             settings_open: false,
-            settings_from: 0.,
-            settings_changed: Instant::now(),
             reduced_motion: false,
         };
         view.focus_handle.focus(window, cx);
@@ -168,6 +164,7 @@ impl NexusView {
             return;
         }
         self.presenter.new_task();
+        self.settings_open = false;
         self.expanded_messages.clear();
         self.focus_prompt(window, cx);
         self.presenter.notify_remote_changed();
@@ -237,20 +234,11 @@ impl NexusView {
             .update(cx, |input, cx| input.focus(window, cx));
     }
 
-    fn settings_progress(&self) -> f32 {
-        let target = if self.settings_open { 1. } else { 0. };
-        if self.reduced_motion {
-            return target;
-        }
-        let elapsed = (self.settings_changed.elapsed().as_secs_f32() / 0.24).min(1.);
-        self.settings_from + (target - self.settings_from) * (1. - (1. - elapsed).powi(5))
-    }
-
     fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.settings_from = self.settings_progress();
-        self.settings_changed = Instant::now();
         self.settings_open = !self.settings_open;
-        if !self.settings_open {
+        if self.settings_open {
+            self.focus_handle.focus(window, cx);
+        } else {
             self.focus_prompt(window, cx);
         }
         cx.notify();
@@ -422,15 +410,8 @@ impl NexusView {
     }
 }
 
-impl Render for NexusView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let settings_progress = self.settings_progress();
-        if !self.reduced_motion
-            && self.settings_changed.elapsed() < Duration::from_millis(240)
-            && (settings_progress - if self.settings_open { 1. } else { 0. }).abs() > f32::EPSILON
-        {
-            window.request_animation_frame();
-        }
+impl NexusView {
+    fn render_workspace(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let model = self.presenter.model();
         let probe = model.selected_probe();
         let history = model.selected_codex_thread.is_some();
@@ -447,7 +428,7 @@ impl Render for NexusView {
         } else if model.active_run.is_some() {
             "Agent 正在执行 · 可以提前起草下一项任务"
         } else if !model.can_submit() {
-            "Agent 尚未就绪 · 打开环境面板检查探测和登录状态"
+            "Agent 尚未就绪 · 打开设置检查探测和登录状态"
         } else if cfg!(target_os = "macos") {
             "⌘ Enter 发送新任务 · Enter 换行"
         } else {
@@ -491,35 +472,8 @@ impl Render for NexusView {
             None
         };
         div()
-            .key_context("Nexus")
-            .track_focus(&self.focus_handle)
-            .on_action(cx.listener(|app, _: &SearchSessions, window, cx| {
-                app.search_input
-                    .update(cx, |input, cx| input.focus(window, cx));
-            }))
-            .on_action(cx.listener(|app, _: &NewTask, window, cx| {
-                app.new_task(window, cx);
-            }))
-            .on_action(cx.listener(|app, _: &ToggleEnvironment, window, cx| {
-                app.toggle_settings(window, cx);
-            }))
-            .capture_action(cx.listener(|app, action: &Enter, window, cx| {
-                if action.secondary
-                    && app
-                        .prompt_input
-                        .read(cx)
-                        .focus_handle(cx)
-                        .is_focused(window)
-                {
-                    app.submit_prompt(window, cx);
-                    cx.stop_propagation();
-                }
-            }))
+            .debug_selector(|| "workspace-page".into())
             .size_full()
-            .relative()
-            .bg(rgb(CANVAS))
-            .text_color(rgb(TEXT))
-            .text_sm()
             .flex()
             .child(
                 self.sidebar_pane.clone().cached(
@@ -602,17 +556,17 @@ impl Render for NexusView {
                                             .child(model.status.clone()),
                                     )
                                     .child(
-                                        Button::new("toggle-environment")
+                                        Button::new("open-settings")
+                                            .debug_selector(|| "open-settings".into())
                                             .ghost()
                                             .small()
                                             .h(px(COMPACT_CONTROL_HEIGHT))
-                                            .icon(IconName::PanelRight)
-                                            .selected(self.settings_open)
-                                            .label("环境")
+                                            .icon(IconName::Settings2)
+                                            .label("设置")
                                             .tooltip(if cfg!(target_os = "macos") {
-                                                "显示 / 隐藏环境 · ⌘ ,"
+                                                "打开设置 · ⌘ ,"
                                             } else {
-                                                "显示 / 隐藏环境 · Ctrl ,"
+                                                "打开设置 · Ctrl ,"
                                             })
                                             .on_click(cx.listener(|app, _, window, cx| {
                                                 app.toggle_settings(window, cx)
@@ -737,9 +691,7 @@ impl Render for NexusView {
                                                     .h(px(COMPACT_CONTROL_HEIGHT))
                                                     .label("检查环境")
                                                     .on_click(cx.listener(|app, _, window, cx| {
-                                                        if !app.settings_open {
-                                                            app.toggle_settings(window, cx);
-                                                        }
+                                                        app.toggle_settings(window, cx);
                                                     })),
                                             )
                                         },
@@ -747,22 +699,58 @@ impl Render for NexusView {
                             ),
                     ),
             )
-            .when(settings_progress > 0., |element| {
+    }
+}
+
+impl Render for NexusView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .key_context("Nexus")
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(|app, _: &SearchSessions, window, cx| {
+                app.settings_open = false;
+                app.search_input
+                    .update(cx, |input, cx| input.focus(window, cx));
+                cx.notify();
+            }))
+            .on_action(cx.listener(|app, _: &NewTask, window, cx| {
+                app.new_task(window, cx);
+            }))
+            .on_action(cx.listener(|app, _: &ToggleSettings, window, cx| {
+                app.toggle_settings(window, cx);
+            }))
+            .capture_action(cx.listener(|app, action: &Enter, window, cx| {
+                if !app.settings_open
+                    && action.secondary
+                    && app
+                        .prompt_input
+                        .read(cx)
+                        .focus_handle(cx)
+                        .is_focused(window)
+                {
+                    app.submit_prompt(window, cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .size_full()
+            .relative()
+            .bg(rgb(CANVAS))
+            .text_color(rgb(TEXT))
+            .text_sm()
+            .flex()
+            // Keep workspace layout state while settings is visible so measured
+            // disclosures do not collapse and clamp scroll offsets on return.
+            .child(
+                div()
+                    .size_full()
+                    .when(self.settings_open, |page| page.invisible().absolute())
+                    .child(self.render_workspace(window, cx)),
+            )
+            .when(self.settings_open, |element| {
                 element.child(
-                    div()
-                        .absolute()
-                        .top(px(HEADER_HEIGHT))
-                        .bottom_0()
-                        .right(px(-320. * (1. - settings_progress)))
-                        .w(px(320.))
-                        .flex_none()
-                        .overflow_hidden()
-                        .opacity(settings_progress)
-                        .child(
-                            self.settings_pane
-                                .clone()
-                                .cached(gpui::StyleRefinement::default().size_full()),
-                        ),
+                    self.settings_pane
+                        .clone()
+                        .cached(gpui::StyleRefinement::default().size_full()),
                 )
             })
     }
