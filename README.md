@@ -174,6 +174,8 @@ CI 验证构建和自动化行为；窗口显示、输入法、目录选择、�
 
 [Synara](https://github.com/Emanuele-web04/synara)
 
+[t3code](https://github.com/pingdotgg/t3code)
+
 ## 当前边界
 
 这个 Alpha 的 Remote Control 仅包含单机 TCP、令牌鉴权和静态 Web Client，不包含 UDP、内置 TLS、FRP 自动配置、云端 Control Plane 或多设备账户。它同样不包含 Worktree 管理、Git 提交、附件、多 Agent、交互式审批、从 Nexus 续聊 Codex 原有会话、签名或公证。Codex 历史浏览依赖当前 CLI 的实验性 `app-server` 协议。Codex CLI 的 `--json` 模式会实时提供生命周期和工具事件，但 Assistant 文本按完成消息输出，不提供 token 级文本增量。模型与思考层级是否可用取决于本机 CLI 版本和账户权限。
