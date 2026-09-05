@@ -21,7 +21,7 @@ use gpui_kit::component::{
     box_shadow,
     button::{Button, ButtonVariants as _},
     input::{Enter, Input, InputEvent, InputState, Textarea, TextareaState},
-    menu::{DropdownMenu as _, PopupMenuItem},
+    menu::PopupMenuItem,
     switch::Switch,
     text::{TextView, TextViewStyle},
 };
@@ -324,10 +324,10 @@ impl NexusView {
         let model = self.presenter.model();
         let selected = model.selected_harness;
         let app = cx.entity().clone();
+        let button_id = id;
         Button::new(id)
             .icon(IconName::Bot)
             .label(selected.to_string())
-            .dropdown_caret(true)
             .disabled(model.active_run.is_some())
             .small()
             .when(compact, |button| {
@@ -336,22 +336,24 @@ impl NexusView {
             .when(!compact, |button| {
                 button.outline().w_full().h(px(CONTROL_HEIGHT))
             })
-            .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
-                HarnessKind::ALL.into_iter().fold(
-                    menu.min_w(if compact { px(160.) } else { px(220.) }),
-                    |menu, harness| {
-                        let app = app.clone();
-                        menu.item(
-                            PopupMenuItem::new(harness.to_string())
-                                .checked(harness == selected)
-                                .on_click(move |_, window, cx| {
-                                    app.update(cx, |app, cx| {
-                                        app.select_harness(harness, window, cx)
-                                    });
-                                }),
-                        )
-                    },
-                )
+            .map(|button| {
+                AnimatedDropdown::new(button_id, button, self.reduced_motion, move |menu, _, _| {
+                    HarnessKind::ALL.into_iter().fold(
+                        menu.min_w(if compact { px(160.) } else { px(220.) }),
+                        |menu, harness| {
+                            let app = app.clone();
+                            menu.item(
+                                PopupMenuItem::new(harness.to_string())
+                                    .checked(harness == selected)
+                                    .on_click(move |_, window, cx| {
+                                        app.update(cx, |app, cx| {
+                                            app.select_harness(harness, window, cx)
+                                        });
+                                    }),
+                            )
+                        },
+                    )
+                })
             })
     }
 
@@ -364,26 +366,28 @@ impl NexusView {
         } else {
             "CLI 默认模型".into()
         };
-        Button::new("composer-model")
+        let button_id = "composer-model";
+        Button::new(button_id)
             .ghost()
             .small()
             .h(px(COMPACT_CONTROL_HEIGHT))
             .label(label)
-            .dropdown_caret(true)
             .disabled(model.selected_harness == HarnessKind::Codex || model.active_run.is_some())
-            .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
-                ClaudeModel::ALL
-                    .into_iter()
-                    .fold(menu.min_w(px(160.)), |menu, model| {
-                        let app = app.clone();
-                        menu.item(
-                            PopupMenuItem::new(model.to_string())
-                                .checked(model == selected)
-                                .on_click(move |_, _, cx| {
-                                    app.update(cx, |app, cx| app.select_model(model, cx));
-                                }),
-                        )
-                    })
+            .map(|button| {
+                AnimatedDropdown::new(button_id, button, self.reduced_motion, move |menu, _, _| {
+                    ClaudeModel::ALL
+                        .into_iter()
+                        .fold(menu.min_w(px(160.)), |menu, model| {
+                            let app = app.clone();
+                            menu.item(
+                                PopupMenuItem::new(model.to_string())
+                                    .checked(model == selected)
+                                    .on_click(move |_, _, cx| {
+                                        app.update(cx, |app, cx| app.select_model(model, cx));
+                                    }),
+                            )
+                        })
+                })
             })
     }
 
@@ -391,27 +395,29 @@ impl NexusView {
         let model = self.presenter.model();
         let selected = model.effort;
         let app = cx.entity().clone();
-        Button::new("composer-effort")
+        let button_id = "composer-effort";
+        Button::new(button_id)
             .ghost()
             .small()
             .h(px(COMPACT_CONTROL_HEIGHT))
             .icon(IconName::Cpu)
             .label(selected.to_string())
-            .dropdown_caret(true)
             .disabled(model.active_run.is_some())
-            .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
-                ThinkingEffort::ALL
-                    .into_iter()
-                    .fold(menu.min_w(px(140.)), |menu, effort| {
-                        let app = app.clone();
-                        menu.item(
-                            PopupMenuItem::new(effort.to_string())
-                                .checked(effort == selected)
-                                .on_click(move |_, _, cx| {
-                                    app.update(cx, |app, cx| app.select_effort(effort, cx));
-                                }),
-                        )
-                    })
+            .map(|button| {
+                AnimatedDropdown::new(button_id, button, self.reduced_motion, move |menu, _, _| {
+                    ThinkingEffort::ALL
+                        .into_iter()
+                        .fold(menu.min_w(px(140.)), |menu, effort| {
+                            let app = app.clone();
+                            menu.item(
+                                PopupMenuItem::new(effort.to_string())
+                                    .checked(effort == selected)
+                                    .on_click(move |_, _, cx| {
+                                        app.update(cx, |app, cx| app.select_effort(effort, cx));
+                                    }),
+                            )
+                        })
+                })
             })
     }
 }

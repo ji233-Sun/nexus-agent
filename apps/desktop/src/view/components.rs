@@ -1,6 +1,9 @@
 use super::*;
-use gpui::App;
-use gpui_kit::base::{Transition, transition};
+use gpui::{App, DismissEvent, RenderOnce};
+use gpui_kit::{
+    base::{PopoverState, Popup, Presence, Transition, transition},
+    component::menu::PopupMenu,
+};
 
 fn control_transition(reduced_motion: bool) -> Transition {
     Transition::new(if reduced_motion {
@@ -25,6 +28,155 @@ pub(super) fn disclosure_progress(
         window,
         cx,
     )
+}
+
+type MenuBuilder =
+    std::rc::Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>;
+
+#[derive(IntoElement)]
+pub(super) struct AnimatedDropdown {
+    id: ElementId,
+    trigger: Button,
+    reduced_motion: bool,
+    builder: MenuBuilder,
+}
+
+struct DropdownState {
+    popover: Entity<PopoverState>,
+    menu: Option<Entity<PopupMenu>>,
+    subscription: Option<gpui::Subscription>,
+}
+
+impl AnimatedDropdown {
+    pub(super) fn new(
+        id: impl Into<ElementId>,
+        trigger: Button,
+        reduced_motion: bool,
+        builder: impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            trigger,
+            reduced_motion,
+            builder: std::rc::Rc::new(builder),
+        }
+    }
+}
+
+impl RenderOnce for AnimatedDropdown {
+    fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let state = window.use_keyed_state((self.id.clone(), "state"), cx, |_, cx| DropdownState {
+            popover: cx.new(|cx| PopoverState::new(false, cx)),
+            menu: None,
+            subscription: None,
+        });
+        let popover = state.read(cx).popover.clone();
+        let open = popover.read(cx).is_open();
+        let presence = Presence::new((self.id.clone(), "presence"), open)
+            .transition(control_transition(self.reduced_motion))
+            .sample(window, cx);
+        let progress = disclosure_progress(
+            (self.id.clone(), "caret"),
+            open,
+            self.reduced_motion,
+            window,
+            cx,
+        );
+        let trigger_size = self.trigger.style().size.clone();
+        let toggle = std::rc::Rc::new({
+            let state = state.clone();
+            move |window: &mut Window, cx: &mut App| {
+                let popover = state.read(cx).popover.clone();
+                if popover.read(cx).is_open() {
+                    popover.update(cx, |popover, cx| popover.dismiss(window, cx));
+                } else {
+                    popover.update(cx, |popover, cx| popover.show(window, cx));
+                    // Rebuild on each open so checkmarks reflect the latest selection.
+                    let menu = PopupMenu::build(window, cx, |menu, window, cx| {
+                        (self.builder)(menu, window, cx)
+                    });
+                    menu.focus_handle(cx).focus(window, cx);
+                    let subscription =
+                        window.subscribe(&menu, cx, move |_, _: &DismissEvent, window, cx| {
+                            popover.update(cx, |popover, cx| popover.dismiss(window, cx));
+                            window.refresh();
+                        });
+                    state.update(cx, |state, _| {
+                        state.menu = Some(menu);
+                        state.subscription = Some(subscription);
+                    });
+                }
+                window.refresh();
+            }
+        });
+        let trigger = self
+            .trigger
+            .selected(open)
+            .dropdown_caret(false)
+            .child(
+                Icon::new(IconName::ChevronDown)
+                    .size(px(14.))
+                    .rotate(gpui::radians(-std::f32::consts::PI * progress)),
+            )
+            .on_click({
+                let toggle = toggle.clone();
+                move |event, window, cx| {
+                    if event.is_keyboard() {
+                        toggle(window, cx);
+                    }
+                }
+            });
+        let mut popup = Popup::new(self.id, trigger)
+            .anchor(Anchor::TopLeft)
+            .on_mouse_down(gpui::MouseButton::Left, {
+                let popover = popover.clone();
+                move |_, window, cx| {
+                    cx.stop_propagation();
+                    // Outside-dismiss runs in capture before this trigger's bubble handler.
+                    if popover.read(cx).is_open() == open {
+                        toggle(window, cx);
+                    }
+                }
+            });
+        popup.style().size = trigger_size;
+        if presence.should_render() {
+            let menu = state.read(cx).menu.clone();
+            let focus_handle = popover.focus_handle(cx);
+            popup = popup.content(
+                div()
+                    .id("animated-menu-surface")
+                    .debug_selector(|| "animated-menu-surface".into())
+                    .track_focus(&focus_handle)
+                    .tab_group()
+                    .relative()
+                    .top(px(4. - 6. * (1. - presence.progress)))
+                    .opacity(presence.progress)
+                    .children(menu)
+                    // Keep the exit frame visible, but prevent a second selection.
+                    .when(!open, |surface| {
+                        surface.child(
+                            div()
+                                .id("closing-menu-shield")
+                                .absolute()
+                                .inset_0()
+                                .occlude()
+                                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation()
+                                })
+                                .on_mouse_up(gpui::MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation()
+                                }),
+                        )
+                    }),
+            );
+        } else {
+            state.update(cx, |state, _| {
+                state.menu = None;
+                state.subscription = None;
+            });
+        }
+        popup
+    }
 }
 
 pub(super) fn brand_mark(size: f32) -> impl IntoElement {
@@ -351,6 +503,145 @@ mod tests {
     use crate::{infrastructure::storage::Storage, model::AppModel};
     use nexus_protocol::HarnessProbe;
     use std::path::Path;
+
+    struct DropdownHarness {
+        reduced_motion: bool,
+        disabled: bool,
+        selections: usize,
+        focus: FocusHandle,
+    }
+
+    impl Render for DropdownHarness {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let app = cx.entity();
+            div()
+                .id("dropdown-harness")
+                .tab_group()
+                .p_4()
+                .child(AnimatedDropdown::new(
+                    "test-dropdown",
+                    Button::new("test-trigger")
+                        .debug_selector(|| "test-trigger".into())
+                        .label("Select")
+                        .disabled(self.disabled),
+                    self.reduced_motion,
+                    move |menu, _, _| {
+                        let app = app.clone();
+                        menu.item(PopupMenuItem::new("Option").on_click(move |_, _, cx| {
+                            app.update(cx, |app, cx| {
+                                app.selections += 1;
+                                cx.notify();
+                            });
+                        }))
+                    },
+                ))
+        }
+    }
+
+    fn dropdown_fixture(
+        cx: &mut gpui::TestAppContext,
+    ) -> (Entity<DropdownHarness>, &mut gpui::VisualTestContext) {
+        cx.update(gpui_kit::init);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let focus = cx.focus_handle();
+            focus.focus(window, cx);
+            DropdownHarness {
+                reduced_motion: false,
+                disabled: false,
+                selections: 0,
+                focus,
+            }
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        (view, cx)
+    }
+
+    fn dropdown_frame(cx: &mut gpui::VisualTestContext, millis: u64) {
+        cx.executor().advance_clock(Duration::from_millis(millis));
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            let _ = window.draw(cx);
+        });
+    }
+
+    #[gpui::test]
+    fn dropdown_animates_each_open_and_exit_and_preserves_selection_and_focus(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, cx) = dropdown_fixture(cx);
+        let trigger = cx.debug_bounds("test-trigger").unwrap().center();
+        for expected in 1..=2 {
+            cx.simulate_click(trigger, Default::default());
+            dropdown_frame(cx, 0);
+            let opening = cx.debug_bounds("animated-menu-surface").unwrap();
+            dropdown_frame(cx, 60);
+            let moving = cx.debug_bounds("animated-menu-surface").unwrap();
+            assert!(moving.origin.y > opening.origin.y);
+            dropdown_frame(cx, 180);
+            let settled = cx.debug_bounds("animated-menu-surface").unwrap();
+            assert!(settled.origin.y > moving.origin.y);
+            cx.simulate_keystrokes("down enter");
+            dropdown_frame(cx, 0);
+            assert_eq!(view.read_with(cx, |view, _| view.selections), expected);
+            assert!(cx.debug_bounds("animated-menu-surface").is_some());
+            dropdown_frame(cx, 60);
+            assert!(cx.debug_bounds("animated-menu-surface").unwrap().origin.y < settled.origin.y);
+            dropdown_frame(cx, 180);
+            assert!(cx.debug_bounds("animated-menu-surface").is_none());
+            cx.update(|window, cx| assert!(view.read(cx).focus.is_focused(window)));
+        }
+    }
+
+    #[gpui::test]
+    fn dropdown_reverses_on_repeated_click_and_respects_reduced_motion_and_disabled(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, cx) = dropdown_fixture(cx);
+        let trigger = cx.debug_bounds("test-trigger").unwrap().center();
+        cx.simulate_click(trigger, Default::default());
+        dropdown_frame(cx, 0);
+        dropdown_frame(cx, 40);
+        cx.simulate_click(trigger, Default::default());
+        dropdown_frame(cx, 0);
+        dropdown_frame(cx, 200);
+        assert!(cx.debug_bounds("animated-menu-surface").is_none());
+
+        view.update(cx, |view, cx| {
+            view.reduced_motion = true;
+            cx.notify();
+        });
+        dropdown_frame(cx, 0);
+        cx.simulate_click(trigger, Default::default());
+        dropdown_frame(cx, 0);
+        assert!(cx.debug_bounds("animated-menu-surface").is_some());
+        cx.simulate_keystrokes("escape");
+        dropdown_frame(cx, 0);
+        assert!(cx.debug_bounds("animated-menu-surface").is_none());
+        cx.update(|window, cx| window.focus_next(cx));
+        dropdown_frame(cx, 0);
+        let keystroke = gpui::Keystroke::parse("enter").unwrap();
+        cx.simulate_event(gpui::KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        cx.simulate_event(gpui::KeyUpEvent { keystroke });
+        dropdown_frame(cx, 0);
+        assert!(cx.debug_bounds("animated-menu-surface").is_some());
+        cx.simulate_click(gpui::point(px(400.), px(400.)), Default::default());
+        dropdown_frame(cx, 0);
+        assert!(cx.debug_bounds("animated-menu-surface").is_none());
+        view.update(cx, |view, cx| {
+            view.disabled = true;
+            cx.notify();
+        });
+        dropdown_frame(cx, 0);
+        cx.simulate_click(trigger, Default::default());
+        dropdown_frame(cx, 0);
+        assert!(cx.debug_bounds("animated-menu-surface").is_none());
+    }
 
     #[test]
     fn completed_tasks_do_not_show_a_dot_that_looks_like_an_unread_badge() {
