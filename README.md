@@ -23,7 +23,7 @@ Codex 原有历史通过 CLI 自带的实验性 `codex app-server` 协议读取�
 ## 环境要求
 
 - Linux（X11 或 Wayland）、macOS 或 Windows（MSVC 工具链）
-- Rust 1.88 或更高版本
+- Rust 1.98 或更高版本（GPUI Kit 0.6 使用新版 GPUI）
 - 已安装并登录至少一种 Harness
 
 ```bash
@@ -46,9 +46,21 @@ Linux 运行界面需要可用的 Vulkan 驱动和桌面会话，目录选择需
 
 ## 启动指南
 
+使用 rustup 管理 Rust。仓库的 `rust-toolchain.toml` 固定使用 Rust 1.98.1；在项目目录执行 Cargo 命令时会自动选择该版本，首次运行需要联网下载工具链。此配置不修改其他项目使用的全局默认版本。
+
 ```bash
 cargo run -p nexus-desktop
 ```
+
+默认开发构建已开启编译优化，保留调试信息和运行时检查，避免未优化的布局与文本渲染拖慢滚动。首次构建依赖会更久，后续仍可增量编译。评估最终发布性能请使用 `cargo run -p nexus-desktop --release --locked`。
+
+可用现有长消息场景对比滚动的 CPU 处理耗时：
+
+```bash
+cargo test -p nexus-desktop --locked scroll_frame_cost -- --ignored --nocapture
+```
+
+该测试模拟触控板输入，报告侧栏和消息区的耗时中位数与 P95；测试平台不执行 GPU 呈现，结果不代表屏幕实际帧率。
 
 Desktop 默认以独立子进程运行内置 Runner，确保两者始终使用相同协议版本。若需要改用外部 Runner，可通过 `NEXUS_RUNNER_PATH` 指定其完整路径。应用数据保存在：
 
@@ -63,6 +75,8 @@ Windows 的程序探测支持 `PATHEXT` 中的 `.exe`、`.com`、`.bat` 和 `.cm
 应用内可切换 Harness 并修改各自的可执行文件路径。Claude 模型与通用思考层级会持久化：Claude 分别转换为 `--model` 与 `--effort` 参数，Codex 使用 CLI 默认模型并通过 `model_reasoning_effort` 配置覆盖思考层级。两种 Harness 的 Prompt 都通过子进程 stdin 传递，不会出现在进程参数中。
 
 ## 架构
+
+桌面 UI 基于 [GPUI Kit 0.6](https://github.com/longbridge/gpui-kit)，使用其 Sidebar 导航、图标资源、Button、Input / Textarea、下拉菜单、Switch 和 Markdown 组件，统一石墨灰主题与控件交互。环境面板覆盖在主内容右侧，打开时不会压缩任务输入区。界面保留 `⌘/Ctrl K` 搜索、`⌘/Ctrl N` 新任务、`⌘/Ctrl ,` 环境和 `⌘/Ctrl Enter` 发送快捷键。
 
 桌面 UI 使用 MVP（Model–View–Presenter），Runner 使用分层架构。两个进程的入口只负责启动装配，业务逻辑放在独立模块中。
 
@@ -110,13 +124,15 @@ cargo build --workspace --locked
 测试中的 Fake Claude / Fake Codex 只验证进程和协议闭环，不发起真实模型请求。
 Presenter 单元测试使用内存 SQLite 与 Fake Runner，不打开 GPUI 窗口；Runner 单元测试覆盖任务独占、取消、事件转换和协议传输。
 
-[GitHub Actions CI](.github/workflows/ci.yml) 在 push、pull request 和手动触发时，分别使用 Ubuntu、macOS、Windows runner 执行以上检查。工具链固定为已验证的 Rust 1.92.0，依赖使用 `Cargo.lock`；缓存按平台和工具链区分。原生 Rust Fake Harness 的启动、流式输出、取消和关闭测试在三个系统上运行；Codex 历史的 shell fixture 测试目前在 Unix 系统上运行。
+[GitHub Actions CI](.github/workflows/ci.yml) 在 push、pull request 和手动触发时，分别使用 Ubuntu、macOS、Windows runner 执行以上检查。工具链固定为 Rust 1.98.1，依赖使用 `Cargo.lock`；缓存按平台和工具链区分。原生 Rust Fake Harness 的启动、流式输出、取消和关闭测试在三个系统上运行；Codex 历史的 shell fixture 测试目前在 Unix 系统上运行。
 
 CI 验证构建和自动化行为；窗口显示、输入法、目录选择、真实 CLI 登录以及发布包仍需在各系统上人工验收。生成发布构建可运行 `cargo build --workspace --release --locked`；Windows Release 的 GPUI shader 编译还需要 Windows SDK 的 `fxc.exe`（可通过 `GPUI_FXC_PATH` 指定）。
 
 ## 致谢
 
-界面视觉语言参考了 [Vercel Design MD](https://github.com/educlopez/design-bites/blob/main/design-mds/vercel.com/DESIGN.md)。感谢 design-bites 项目对 Vercel 设计体系的整理与分享。
+[Vercel Design MD](https://github.com/educlopez/design-bites/blob/main/design-mds/vercel.com/DESIGN.md)
+
+[Synara](https://github.com/Emanuele-web04/synara)
 
 ## 当前边界
 

@@ -3,11 +3,11 @@ use crate::{
     presenter::{Presenter, RunnerPort},
     view::{NexusView, theme},
 };
-use gpui::{
-    App, AppContext as _, Application, Bounds, TitlebarOptions, WindowBackgroundAppearance,
-    WindowBounds, WindowOptions, point, px, size,
+use gpui_kit::component::Root;
+use gpui_kit::{
+    App, AppContext as _, Bounds, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
+    WindowOptions, point, px, size,
 };
-use gpui_component::Root;
 use std::path::Path;
 
 pub(crate) const RUNNER_MODE_ARG: &str = "--nexus-runner";
@@ -35,35 +35,37 @@ pub(crate) fn run() -> anyhow::Result<()> {
         return nexus_runner::run();
     }
 
-    Application::new().run(|cx: &mut App| {
-        gpui_component::init(cx);
-        theme::configure_theme(cx);
-        let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
-        cx.spawn(async move |cx| {
-            let options = WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions {
-                    title: (!cfg!(target_os = "macos")).then(|| "Nexus Agent".into()),
-                    appears_transparent: cfg!(target_os = "macos"),
-                    traffic_light_position: cfg!(target_os = "macos")
-                        .then(|| point(px(18.), px(18.))),
-                }),
-                window_background: if cfg!(target_os = "macos") {
-                    WindowBackgroundAppearance::Blurred
-                } else {
-                    WindowBackgroundAppearance::Opaque
-                },
-                window_min_size: Some(size(px(1_040.), px(680.))),
-                ..Default::default()
-            };
-            cx.open_window(options, |window, cx| {
-                let presenter = create_presenter();
-                let view = cx.new(|cx| NexusView::new(presenter, window, cx));
-                cx.new(|cx| Root::new(view, window, cx))
-            })?;
-            Ok::<_, anyhow::Error>(())
-        })
-        .detach();
-    });
+    gpui_kit::application()
+        .with_assets(gpui_kit::assets::Assets)
+        .run(|cx: &mut App| {
+            gpui_kit::init(cx);
+            theme::configure_theme(cx);
+            let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
+            cx.spawn(async move |cx| {
+                let options = WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    titlebar: Some(TitlebarOptions {
+                        title: (!cfg!(target_os = "macos")).then(|| "Nexus Agent".into()),
+                        appears_transparent: cfg!(target_os = "macos"),
+                        traffic_light_position: cfg!(target_os = "macos")
+                            .then(|| point(px(18.), px(18.))),
+                    }),
+                    window_background: if cfg!(target_os = "macos") {
+                        WindowBackgroundAppearance::Blurred
+                    } else {
+                        WindowBackgroundAppearance::Opaque
+                    },
+                    window_min_size: Some(size(px(1_040.), px(680.))),
+                    ..Default::default()
+                };
+                cx.open_window(options, |window, cx| {
+                    let presenter = create_presenter();
+                    let view = cx.new(|cx| NexusView::new(presenter, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .detach();
+        });
     Ok(())
 }

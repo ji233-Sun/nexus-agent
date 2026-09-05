@@ -7,107 +7,218 @@ impl NexusView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let model = self.presenter.model();
-        let showing_codex_history = model.selected_codex_thread.is_some();
-        let empty = if showing_codex_history {
+        let compact = window.viewport_size().height < px(740.);
+        let history = model.selected_codex_thread.is_some();
+        let empty = if history {
             model.codex_history_messages.is_empty()
         } else {
             model.messages.is_empty() && model.streaming_text.is_empty()
         };
         div()
-            .id("timeline")
+            .relative()
             .flex_1()
-            .h_full()
-            .overflow_y_scroll()
-            .bg(rgba(0x101211f2))
+            .min_h_0()
+            .flex()
+            .flex_col()
             .child(
                 div()
-                    .w_full()
-                    .max_w(px(720.))
-                    .min_h_full()
-                    .mx_auto()
-                    .px_8()
-                    .pt_8()
-                    .pb_12()
-                    .flex()
-                    .flex_col()
-                    .gap_6()
-                    .when(empty, |element| {
-                        let (title, description) = if model.codex_thread_loading {
-                            ("正在读取 Codex 历史", "正在从本机 Codex 会话中加载消息。")
-                        } else if showing_codex_history {
-                            ("此会话没有消息", "没有可显示的用户或助手消息。")
-                        } else if model.selected_project.is_some() {
-                            (
-                                "准备开始新任务",
-                                "在下方描述目标，Agent 的执行过程会显示在这里。",
-                            )
-                        } else {
-                            (
-                                "选择一个本地项目",
-                                "选择项目开始任务，或从左侧浏览 Codex 历史。",
-                            )
-                        };
-                        element.child(
-                            div()
-                                .relative()
-                                .flex_1()
-                                .flex()
-                                .flex_col()
-                                .items_center()
-                                .justify_center()
-                                .gap_2()
-                                .text_center()
-                                .child(
-                                    div()
-                                        .text_xl()
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .child(title),
+                    .id("timeline")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .lock_scroll_axis()
+                    .track_scroll(&self.timeline_scroll)
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(if empty { 880. } else { 784. }))
+                            .min_h_full()
+                            .mx_auto()
+                            .px_8()
+                            .py(px(if compact { 16. } else { 32. }))
+                            .flex()
+                            .flex_col()
+                            .gap(px(24.))
+                            .when(empty, |element| element.child(self.render_welcome(compact)))
+                            .when(!history, |element| {
+                                element.children(
+                                    model
+                                        .messages
+                                        .iter()
+                                        .map(|message| self.render_message(message, window, cx)),
                                 )
-                                .child(
-                                    div()
-                                        .max_w(px(420.))
-                                        .text_sm()
-                                        .text_color(rgb(MUTED))
-                                        .line_height(relative(1.5))
-                                        .child(description),
+                            })
+                            .when(history, |element| {
+                                element.children(
+                                    model.codex_history_messages.iter().enumerate().map(
+                                        |(index, message)| {
+                                            self.render_history_message(index, message, window, cx)
+                                        },
+                                    ),
                                 )
-                                .with_animation(
-                                    "empty-state-enter",
-                                    Animation::new(Duration::from_millis(260))
-                                        .with_easing(ease_out_quint()),
-                                    |element, delta| {
-                                        element.opacity(delta).top(px(8.) - delta * px(8.))
-                                    },
-                                ),
-                        )
-                    })
-                    .when(!showing_codex_history, |element| {
-                        element.children(
-                            model
-                                .messages
-                                .iter()
-                                .map(|message| render_message(message, window, cx)),
-                        )
-                    })
-                    .when(showing_codex_history, |element| {
-                        element.children(model.codex_history_messages.iter().enumerate().map(
-                            |(index, message)| render_history_message(index, message, window, cx),
-                        ))
-                    })
-                    .when(
-                        !showing_codex_history && !model.streaming_text.is_empty(),
-                        |element| {
-                            element.child(message_card(
-                                "streaming-message",
-                                MessageRole::Assistant,
-                                "Agent · 正在生成",
-                                &model.streaming_text,
-                                MessageKind::Text,
-                                window,
-                                cx,
-                            ))
-                        },
+                            })
+                            .when(!history && !model.streaming_text.is_empty(), |element| {
+                                element.child(self.message_card(
+                                    "streaming-message",
+                                    MessageRole::Assistant,
+                                    &model.streaming_text,
+                                    MessageKind::Text,
+                                    window,
+                                    cx,
+                                ))
+                            })
+                            .when(
+                                !history
+                                    && model.active_run.is_some()
+                                    && model.selected_task == model.active_task,
+                                |element| {
+                                    element.child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_3()
+                                            .text_sm()
+                                            .text_color(rgb(TEXT_SECONDARY))
+                                            .child(live_status_dot(
+                                                rgb(ACCENT).into(),
+                                                !self.reduced_motion,
+                                            ))
+                                            .child(model.status.clone()),
+                                    )
+                                },
+                            ),
                     ),
             )
+            .when(
+                !empty
+                    && self.timeline_scroll.max_offset().y + self.timeline_scroll.offset().y
+                        > px(48.),
+                |element| {
+                    element.child(
+                        div()
+                            .absolute()
+                            .bottom(px(12.))
+                            .left_0()
+                            .right_0()
+                            .flex()
+                            .justify_center()
+                            .child(
+                                Button::new("latest-message")
+                                    .outline()
+                                    .small()
+                                    .h(px(COMPACT_CONTROL_HEIGHT))
+                                    .rounded_full()
+                                    .icon(IconName::ArrowDown)
+                                    .label("回到最新消息")
+                                    .on_click(cx.listener(|app, _, _, cx| {
+                                        app.timeline_scroll.scroll_to_bottom();
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                },
+            )
+    }
+
+    fn render_welcome(&self, compact: bool) -> impl IntoElement {
+        let model = self.presenter.model();
+        let history = model.selected_codex_thread.is_some();
+        if !history {
+            // Brand SVGs from LobeHub Icons; see assets/harness/LICENSE.
+            let (icon, color): (&[u8], _) = match model.selected_harness {
+                HarnessKind::Claude => (
+                    include_bytes!("../../assets/harness/claude.svg"),
+                    rgb(0xd97757),
+                ),
+                HarnessKind::Codex => (include_bytes!("../../assets/harness/codex.svg"), rgb(TEXT)),
+            };
+            return div()
+                .flex_1()
+                .w_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .py(px(if compact { 8. } else { 32. }))
+                .text_center()
+                .child(
+                    gpui::svg()
+                        .data(icon)
+                        .size(px(if compact { 48. } else { 64. }))
+                        .flex_none()
+                        .text_color(color),
+                )
+                .child(
+                    div()
+                        .mt_3()
+                        .text_size(px(if compact { 28. } else { 34. }))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .line_height(relative(1.25))
+                        .child(model.selected_harness.to_string()),
+                )
+                .map(|element| entrance(element, "empty-state-enter", !self.reduced_motion));
+        }
+        let (eyebrow, title, description) = if model.codex_thread_loading {
+            (
+                "CODEX HISTORY",
+                "正在读取会话",
+                "正在从本机加载消息，稍等片刻。",
+            )
+        } else {
+            (
+                "CODEX HISTORY",
+                "此会话没有消息",
+                "这条历史记录中没有可显示的用户或助手消息。",
+            )
+        };
+        div()
+            .flex_1()
+            .w_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .py(px(if compact { 8. } else { 32. }))
+            .text_center()
+            .child(brand_mark(if compact { 48. } else { 64. }))
+            .when(!compact, |element| {
+                element.child(
+                    div()
+                        .mt_6()
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(rgb(ACCENT))
+                        .child(eyebrow),
+                )
+            })
+            .child(
+                div()
+                    .mt_3()
+                    .text_size(px(if compact { 28. } else { 34. }))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .line_height(relative(1.25))
+                    .child(title),
+            )
+            .child(
+                div()
+                    .mt_3()
+                    .text_base()
+                    .text_color(rgb(MUTED))
+                    .line_height(relative(1.6))
+                    .child(description),
+            )
+            .when(model.codex_thread_loading, |element| {
+                element.child(
+                    div()
+                        .mt_8()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_color(rgb(MUTED))
+                        .child(live_status_dot(rgb(ACCENT).into(), !self.reduced_motion))
+                        .child("正在加载…"),
+                )
+            })
+            .map(|element| entrance(element, "empty-state-enter", !self.reduced_motion))
     }
 }

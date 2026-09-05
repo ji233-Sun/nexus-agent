@@ -1,48 +1,237 @@
 use super::*;
 
-pub(super) fn render_message(
-    message: &Message,
-    window: &mut Window,
-    cx: &mut Context<NexusView>,
-) -> AnyElement {
-    let label = match message.role {
-        MessageRole::User => "You",
-        MessageRole::Assistant => "Agent",
-        MessageRole::Tool => "Tool",
-        MessageRole::System => "System",
-    };
-    message_card(
-        message.id,
-        message.role,
-        label,
-        &message.content,
-        message.kind,
-        window,
-        cx,
-    )
+pub(super) fn brand_mark(size: f32) -> impl IntoElement {
+    div()
+        .size(px(size))
+        .flex_none()
+        .rounded(px(size * 0.3))
+        .bg(rgb(SELECTED))
+        .border_1()
+        .border_color(rgba(0x619cff40))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            Icon::new(IconName::Asterisk)
+                .size(px(size * 0.55))
+                .text_color(rgb(ACCENT)),
+        )
 }
 
-pub(super) fn render_history_message(
-    index: usize,
-    message: &HistoryMessage,
-    window: &mut Window,
-    cx: &mut Context<NexusView>,
-) -> AnyElement {
-    let label = match message.role {
-        MessageRole::User => "You · Codex 历史",
-        MessageRole::Assistant => "Codex · 历史",
-        MessageRole::Tool => "Tool · Codex 历史",
-        MessageRole::System => "System · Codex 历史",
-    };
-    message_card(
-        ("history-message", index),
-        message.role,
-        label,
-        &message.content,
-        message.kind,
-        window,
-        cx,
-    )
+pub(super) fn entrance(element: gpui::Div, id: impl Into<ElementId>, animated: bool) -> AnyElement {
+    if !animated {
+        return element.into_any_element();
+    }
+    element
+        .relative()
+        .with_animation(
+            id,
+            Animation::new(Duration::from_millis(240)).with_easing(ease_out_quint()),
+            |element, delta| element.opacity(delta).top(px(8. * (1. - delta))),
+        )
+        .into_any_element()
+}
+
+pub(super) fn matches_search(text: &str, query: &str) -> bool {
+    text.to_lowercase().contains(&query.trim().to_lowercase())
+}
+
+pub(super) fn can_send_prompt(model: &crate::model::AppModel, prompt: &str) -> bool {
+    model.can_submit() && model.selected_codex_thread.is_none() && !prompt.trim().is_empty()
+}
+
+impl NexusView {
+    pub(super) fn render_message(
+        &self,
+        message: &Message,
+        window: &mut Window,
+        cx: &mut Context<NexusView>,
+    ) -> AnyElement {
+        self.message_card(
+            message.id,
+            message.role,
+            &message.content,
+            message.kind,
+            window,
+            cx,
+        )
+    }
+
+    pub(super) fn render_history_message(
+        &self,
+        index: usize,
+        message: &HistoryMessage,
+        window: &mut Window,
+        cx: &mut Context<NexusView>,
+    ) -> AnyElement {
+        self.message_card(
+            SharedString::from(format!(
+                "history-{}-{index}",
+                self.presenter
+                    .model()
+                    .selected_codex_thread
+                    .as_deref()
+                    .unwrap_or_default()
+            )),
+            message.role,
+            &message.content,
+            message.kind,
+            window,
+            cx,
+        )
+    }
+
+    pub(super) fn message_card(
+        &self,
+        id: impl Into<ElementId>,
+        role: MessageRole,
+        content: &str,
+        kind: MessageKind,
+        _window: &mut Window,
+        cx: &mut Context<NexusView>,
+    ) -> AnyElement {
+        let id = id.into();
+        let expanded = self.expanded_messages.contains(&id);
+        let animated = !self.reduced_motion;
+        let collapsible = matches!(kind, MessageKind::ToolCall | MessageKind::ToolResult)
+            && (content.lines().count() > 6 || content.chars().count() > 400);
+        let toggle_id = id.clone();
+        let label = match role {
+            MessageRole::User => "You",
+            MessageRole::Assistant => "Agent",
+            MessageRole::Tool => "Tool",
+            MessageRole::System => "System",
+        };
+        let is_user = role == MessageRole::User;
+        let is_panel = matches!(
+            kind,
+            MessageKind::ToolCall | MessageKind::ToolResult | MessageKind::Error
+        );
+        let show_label = !is_user && (role != MessageRole::Assistant || is_panel);
+        div()
+            .w_full()
+            .flex()
+            .when(is_user, |element| element.justify_end())
+            .child(
+                div()
+                    .when(is_user, |element| {
+                        element
+                            .max_w(px(600.))
+                            .rounded(px(18.))
+                            .bg(rgb(RECESSED))
+                            .border_1()
+                            .border_color(rgba(0xffffff10))
+                            .px_4()
+                            .py_3()
+                    })
+                    .when(!is_user, |element| element.w_full())
+                    .when(!is_user && is_panel, |element| {
+                        element
+                            .rounded(px(14.))
+                            .bg(rgb(SURFACE))
+                            .border_1()
+                            .border_color(rgba(0xffffff0d))
+                            .shadow(surface_border_shadow())
+                            .p_4()
+                    })
+                    .when(!is_user && !is_panel, |element| element.px_1().py_1())
+                    .when(show_label, |element| {
+                        element.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .text_xs()
+                                .text_color(rgb(MUTED))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .mb_2()
+                                .child(status_dot(message_indicator(kind)))
+                                .child(label.to_owned()),
+                        )
+                    })
+                    .when(collapsible, |element| {
+                        element.child(
+                            Button::new((id.clone(), "disclosure"))
+                                .ghost()
+                                .small()
+                                .icon(if expanded {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                })
+                                .label(if expanded {
+                                    "收起工具输出"
+                                } else {
+                                    "展开完整工具输出"
+                                })
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    if !app.expanded_messages.remove(&toggle_id) {
+                                        app.expanded_messages.insert(toggle_id.clone());
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                    })
+                    .child(if kind == MessageKind::Text {
+                        TextView::markdown(id.clone(), content.to_owned())
+                            .text_size(px(16.))
+                            .font_weight(gpui::FontWeight::NORMAL)
+                            .line_height(relative(1.7))
+                            .style(
+                                TextViewStyle::default()
+                                    .paragraph_gap(gpui::rems(16. / 14.))
+                                    .heading_font_size(|level, _| {
+                                        px(match level {
+                                            1 => 22.,
+                                            2 => 20.,
+                                            3 => 18.,
+                                            4 => 17.,
+                                            _ => 16.,
+                                        })
+                                    })
+                                    .code_block(
+                                        gpui::StyleRefinement::default()
+                                            .font_family(MONO_FONT)
+                                            .text_size(px(14.))
+                                            .line_height(relative(1.6))
+                                            .p(px(16.))
+                                            .bg(rgb(SURFACE))
+                                            .border_1()
+                                            .border_color(rgb(BORDER))
+                                            .rounded(px(8.)),
+                                    )
+                                    .table_head(
+                                        gpui::StyleRefinement::default()
+                                            .bg(rgb(SURFACE))
+                                            .text_color(rgb(TEXT_SECONDARY)),
+                                    )
+                                    .table_cell(
+                                        gpui::StyleRefinement::default().px(px(12.)).py(px(8.)),
+                                    ),
+                            )
+                            .selectable(true)
+                            .into_any_element()
+                    } else {
+                        div()
+                            .text_sm()
+                            .text_color(if kind == MessageKind::Status {
+                                rgb(TEXT_SECONDARY)
+                            } else {
+                                rgb(TEXT)
+                            })
+                            .whitespace_normal()
+                            .line_height(relative(1.55))
+                            .when(collapsible && !expanded, |element| element.line_clamp(3))
+                            .when(
+                                matches!(kind, MessageKind::ToolCall | MessageKind::ToolResult),
+                                |element| element.font_family(MONO_FONT),
+                            )
+                            .child(content.to_owned())
+                            .into_any_element()
+                    }),
+            )
+            .map(|element| entrance(element, id, animated))
+    }
 }
 
 pub(super) fn message_indicator(kind: MessageKind) -> Hsla {
@@ -51,87 +240,6 @@ pub(super) fn message_indicator(kind: MessageKind) -> Hsla {
         MessageKind::ToolCall | MessageKind::ToolResult => rgb(TOOL).into(),
         _ => rgb(MUTED).into(),
     }
-}
-
-pub(super) fn message_card(
-    id: impl Into<ElementId>,
-    role: MessageRole,
-    label: &str,
-    content: &str,
-    kind: MessageKind,
-    window: &mut Window,
-    cx: &mut Context<NexusView>,
-) -> AnyElement {
-    let is_user = role == MessageRole::User;
-    let is_panel = matches!(
-        kind,
-        MessageKind::ToolCall | MessageKind::ToolResult | MessageKind::Error
-    );
-    let show_label = !is_user && (role != MessageRole::Assistant || is_panel);
-    div()
-        .w_full()
-        .flex()
-        .when(is_user, |element| element.justify_end())
-        .child(
-            div()
-                .when(is_user, |element| {
-                    element
-                        .max_w(px(600.))
-                        .rounded(px(18.))
-                        .bg(rgba(0xffffff11))
-                        .border_1()
-                        .border_color(rgba(0xffffff10))
-                        .px_4()
-                        .py_3()
-                })
-                .when(!is_user, |element| element.w_full())
-                .when(!is_user && is_panel, |element| {
-                    element
-                        .rounded(px(14.))
-                        .bg(rgba(0x252826b8))
-                        .border_1()
-                        .border_color(rgba(0xffffff0d))
-                        .shadow(surface_border_shadow())
-                        .p_4()
-                })
-                .when(!is_user && !is_panel, |element| element.px_1().py_2())
-                .when(show_label, |element| {
-                    element.child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .text_xs()
-                            .text_color(rgb(MUTED))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .mb_2()
-                            .child(status_dot(message_indicator(kind)))
-                            .child(label.to_owned()),
-                    )
-                })
-                .child(if kind == MessageKind::Text {
-                    TextView::markdown(id, content.to_owned(), window, cx)
-                        .selectable(true)
-                        .into_any_element()
-                } else {
-                    div()
-                        .text_sm()
-                        .text_color(if kind == MessageKind::Status {
-                            rgb(TEXT_SECONDARY)
-                        } else {
-                            rgb(TEXT)
-                        })
-                        .whitespace_normal()
-                        .line_height(relative(1.55))
-                        .when(
-                            matches!(kind, MessageKind::ToolCall | MessageKind::ToolResult),
-                            |element| element.font_family(MONO_FONT),
-                        )
-                        .child(content.to_owned())
-                        .into_any_element()
-                }),
-        )
-        .into_any_element()
 }
 
 pub(super) fn label_value(
@@ -162,10 +270,6 @@ pub(super) fn section_label(label: impl Into<SharedString>) -> impl IntoElement 
         .child(label.into())
 }
 
-pub(super) fn button_label(label: impl Into<SharedString>, color: u32) -> impl IntoElement {
-    div().text_color(rgb(color)).child(label.into())
-}
-
 pub(super) fn status_dot(color: Hsla) -> gpui::Div {
     div()
         .size(px(8.))
@@ -191,41 +295,19 @@ pub(super) fn live_status_dot(color: Hsla, animated: bool) -> gpui::AnyElement {
     }
 }
 
-pub(super) fn selection_indicator(id: SharedString) -> impl IntoElement {
-    div()
-        .absolute()
-        .left(px(3.))
-        .top(px(9.))
-        .bottom(px(9.))
-        .w(px(2.))
-        .rounded_full()
-        .bg(rgb(ACCENT))
-        .shadow(vec![box_shadow(0., 0., 8., 0., rgba(0x9b7cff80).into())])
-        .with_animation(
-            id,
-            Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()),
-            |element, delta| element.opacity(delta).left(px(1.) + delta * px(2.)),
-        )
-}
-
-pub(super) fn run_status_color(status: RunStatus) -> Hsla {
+pub(super) fn run_status_color(status: RunStatus) -> Option<Hsla> {
     match status {
-        RunStatus::Completed => rgb(SUCCESS).into(),
-        RunStatus::Failed => rgb(DANGER).into(),
-        RunStatus::Running | RunStatus::Starting | RunStatus::Cancelling => rgb(ACCENT).into(),
-        _ => rgb(MUTED).into(),
+        RunStatus::Completed => None,
+        RunStatus::Failed => Some(rgb(DANGER).into()),
+        RunStatus::Running | RunStatus::Starting | RunStatus::Cancelling => {
+            Some(rgb(ACCENT).into())
+        }
+        RunStatus::Cancelled | RunStatus::Interrupted => Some(rgb(MUTED).into()),
     }
 }
 
 pub(super) fn surface_border_shadow() -> Vec<gpui::BoxShadow> {
     vec![box_shadow(0., 0., 0., 1., rgba(0xffffff0d).into())]
-}
-
-pub(super) fn selection_shadow() -> Vec<gpui::BoxShadow> {
-    vec![
-        box_shadow(0., 0., 0., 1., rgba(0xffffff09).into()),
-        box_shadow(0., 5., 14., -10., rgba(0x000000a0).into()),
-    ]
 }
 
 pub(super) fn glass_shadow() -> Vec<gpui::BoxShadow> {
@@ -234,4 +316,69 @@ pub(super) fn glass_shadow() -> Vec<gpui::BoxShadow> {
         box_shadow(0., 2., 8., -3., rgba(0x00000080).into()),
         box_shadow(0., 18., 42., -18., rgba(0x000000c0).into()),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{infrastructure::storage::Storage, model::AppModel};
+    use nexus_protocol::HarnessProbe;
+    use std::path::Path;
+
+    #[test]
+    fn completed_tasks_do_not_show_a_dot_that_looks_like_an_unread_badge() {
+        assert!(run_status_color(RunStatus::Completed).is_none());
+        for status in [
+            RunStatus::Starting,
+            RunStatus::Running,
+            RunStatus::Cancelling,
+        ] {
+            assert_eq!(run_status_color(status), Some(rgb(ACCENT).into()));
+        }
+        assert_eq!(
+            run_status_color(RunStatus::Failed),
+            Some(rgb(DANGER).into())
+        );
+    }
+
+    #[test]
+    fn search_accepts_case_insensitive_titles_chinese_and_surrounding_spaces() {
+        assert!(matches_search("Fix Runner output", " RUNNER "));
+        assert!(matches_search("优化会话交互", "会话"));
+        assert!(matches_search("any session", "  "));
+        assert!(!matches_search("Fix Runner output", "storage"));
+    }
+
+    #[test]
+    fn composer_rejects_blank_prompts_read_only_history_and_busy_or_unready_agents() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Storage::open(Path::new(":memory:")).unwrap();
+        let mut model = AppModel {
+            selected_project: Some(storage.open_project(directory.path()).unwrap()),
+            ..AppModel::default()
+        };
+        model.harnesses.insert(
+            model.selected_harness,
+            HarnessProbe {
+                harness: model.selected_harness,
+                available: true,
+                authenticated: true,
+                executable: "fake-agent".into(),
+                version: None,
+                message: "ready".into(),
+            },
+        );
+        assert!(can_send_prompt(&model, "检查当前项目"));
+        for prompt in ["", "  ", "\n\t", "\u{3000}"] {
+            assert!(!can_send_prompt(&model, prompt));
+        }
+        model.selected_codex_thread = Some("read-only-thread".into());
+        assert!(!can_send_prompt(&model, "检查当前项目"));
+        model.selected_codex_thread = None;
+        model.active_run = Some(Uuid::new_v4());
+        assert!(!can_send_prompt(&model, "检查当前项目"));
+        model.active_run = None;
+        model.harnesses.clear();
+        assert!(!can_send_prompt(&model, "检查当前项目"));
+    }
 }
