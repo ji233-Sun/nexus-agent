@@ -15,10 +15,11 @@ use codex_history::{
     ThreadSummary as CodexThreadSummary,
 };
 use gpui::{
-    AnyElement, App, AppContext as _, Application, Bounds, Context, Corner, ElementId, Entity,
-    Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Timer, Window, WindowBounds, WindowOptions, div,
-    prelude::FluentBuilder as _, px, relative, rgb, rgba, size,
+    Animation, AnimationExt as _, AnyElement, App, AppContext as _, Application, Bounds, Context,
+    Corner, ElementId, Entity, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
+    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Timer, TitlebarOptions,
+    Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, div, ease_out_quint, point,
+    prelude::FluentBuilder as _, pulsating_between, px, relative, rgb, rgba, size,
 };
 use gpui_component::{
     Disableable as _, Root, Sizable as _, Theme, ThemeMode, box_shadow,
@@ -36,23 +37,21 @@ use runner_client::RunnerClient;
 use storage::Storage;
 use uuid::Uuid;
 
-const BG: u32 = 0xffffff;
-const SURFACE: u32 = 0xffffff;
-const SIDEBAR: u32 = 0xf7f7f5;
-const RECESSED: u32 = 0xf3f3f1;
-const HOVER: u32 = 0xededeb;
-const SELECTED: u32 = 0xe7e7e4;
-const BORDER: u32 = 0xe5e5e2;
-const TEXT: u32 = 0x242424;
-const TEXT_SECONDARY: u32 = 0x555555;
-const MUTED: u32 = 0x858585;
-const ACCENT: u32 = 0x202124;
-const ACCENT_HOVER: u32 = 0x0f1011;
-const LINK: u32 = 0x2f6fca;
-const SUCCESS: u32 = 0x398e4a;
-const WARNING: u32 = 0xff990a;
-const DANGER: u32 = 0xe5484d;
-const TOOL: u32 = 0xa35c16;
+const SURFACE: u32 = 0x151716;
+const RECESSED: u32 = 0x272928;
+const HOVER: u32 = 0x2c2f2d;
+const SELECTED: u32 = 0x363936;
+const BORDER: u32 = 0x343735;
+const TEXT: u32 = 0xf3f5f3;
+const TEXT_SECONDARY: u32 = 0xc2c6c3;
+const MUTED: u32 = 0x858b87;
+const ACCENT: u32 = 0x9b7cff;
+const ACCENT_HOVER: u32 = 0xad93ff;
+const LINK: u32 = 0x7aa9ff;
+const SUCCESS: u32 = 0x51d88a;
+const WARNING: u32 = 0xffbd66;
+const DANGER: u32 = 0xff6b70;
+const TOOL: u32 = 0xe5a65f;
 const RUNNER_MODE_ARG: &str = "--nexus-runner";
 
 struct NexusApp {
@@ -432,6 +431,20 @@ impl NexusApp {
         .detach();
     }
 
+    fn new_task(&mut self, _: &gpui::ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.active_run.is_some() || self.selected_project.is_none() {
+            return;
+        }
+        self.selected_task = None;
+        self.selected_codex_thread = None;
+        self.messages.clear();
+        self.codex_history_messages.clear();
+        self.codex_thread_loading = false;
+        self.streaming_text.clear();
+        self.status = "已准备好新任务。".into();
+        cx.notify();
+    }
+
     fn select_project(&mut self, project: Project) {
         self.project_dirty = is_git_dirty(Path::new(&project.canonical_path));
         self.selected_project = Some(project);
@@ -779,6 +792,64 @@ impl NexusApp {
             })
     }
 
+    fn render_task_tree(&self, cx: &mut Context<Self>) -> gpui::Div {
+        div()
+            .ml(px(17.))
+            .pl_2()
+            .border_l_1()
+            .border_color(rgba(0xffffff0d))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .when(self.tasks.is_empty(), |element| {
+                element.child(
+                    div()
+                        .px_2()
+                        .py_2()
+                        .text_xs()
+                        .text_color(rgb(MUTED))
+                        .child("发送 Prompt 后，任务会显示在这里"),
+                )
+            })
+            .children(self.tasks.iter().map(|task| {
+                let task_id = task.id;
+                let selected = self.selected_task == Some(task_id);
+                div()
+                    .id(SharedString::from(format!("task-{task_id}")))
+                    .relative()
+                    .h(px(34.))
+                    .px_2()
+                    .rounded(px(9.))
+                    .cursor_pointer()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_color(rgb(TEXT_SECONDARY))
+                    .when(selected, |element| {
+                        element
+                            .bg(rgba(0xffffff14))
+                            .text_color(rgb(TEXT))
+                            .shadow(selection_shadow())
+                            .child(selection_indicator(SharedString::from(format!(
+                                "task-selection-{task_id}"
+                            ))))
+                    })
+                    .hover(|style| style.bg(rgba(0xffffff0d)).text_color(rgb(TEXT)))
+                    .on_click(
+                        cx.listener(move |app, _, window, cx| app.select_task(task_id, window, cx)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .child(task.title.clone()),
+                    )
+                    .child(status_dot(run_status_color(task.status)))
+            }))
+    }
+
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let selected_project_id = self.selected_project.as_ref().map(|project| project.id);
         let selected_codex_thread = self.selected_codex_thread.as_deref();
@@ -792,51 +863,95 @@ impl NexusApp {
             "等待检测 Codex CLI".to_owned()
         };
         div()
-            .w(px(248.))
+            .w(px(268.))
             .h_full()
             .flex_none()
-            .bg(rgb(SIDEBAR))
+            .bg(rgba(0x1c1e1dde))
             .border_r_1()
-            .border_color(rgb(BORDER))
-            .p_3()
+            .border_color(rgba(0xffffff12))
+            .pt(px(40.))
+            .px_3()
+            .pb_3()
             .flex()
             .flex_col()
-            .gap_3()
+            .gap_2()
             .child(
-                div()
-                    .h(px(40.))
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_base()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child("Nexus"),
-                            )
-                            .child(div().text_xs().text_color(rgb(MUTED)).child("⌄")),
-                    ),
+                div().h(px(44.)).px_2().flex().items_center().child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(
+                            div()
+                                .size(px(27.))
+                                .rounded(px(9.))
+                                .bg(rgba(0x9b7cff2b))
+                                .border_1()
+                                .border_color(rgba(0xb8a6ff38))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_xs()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(rgb(ACCENT))
+                                .child("N"),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(1.))
+                                .child(
+                                    div()
+                                        .text_base()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .child("Nexus Agent"),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(MUTED))
+                                        .child("Local workspace"),
+                                ),
+                        ),
+                ),
             )
             .child(
-                Button::new("open-project")
+                Button::new("new-task")
                     .ghost()
                     .w_full()
                     .justify_start()
-                    .child(button_label("＋  打开项目", TEXT))
-                    .on_click(cx.listener(Self::choose_project)),
+                    .rounded(px(10.))
+                    .child(button_label("＋   新任务", TEXT))
+                    .disabled(self.selected_project.is_none() || self.active_run.is_some())
+                    .on_click(cx.listener(Self::new_task)),
             )
             .child(
                 div()
+                    .id("project-tree")
+                    .max_h(px(420.))
+                    .overflow_y_scroll()
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(div().px_2().py_1().child(section_label("项目")))
+                    .child(
+                        div()
+                            .mt_2()
+                            .px_2()
+                            .py_1()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(section_label("PROJECTS"))
+                            .child(
+                                Button::new("open-project")
+                                    .ghost()
+                                    .small()
+                                    .rounded(px(9.))
+                                    .child(button_label("＋", TEXT_SECONDARY))
+                                    .on_click(cx.listener(Self::choose_project)),
+                            ),
+                    )
                     .child(
                         div()
                             .flex()
@@ -845,11 +960,15 @@ impl NexusApp {
                             .when(self.projects.is_empty(), |element| {
                                 element.child(
                                     div()
-                                        .px_2()
-                                        .py_3()
+                                        .rounded(px(12.))
+                                        .border_1()
+                                        .border_color(rgba(0xffffff0d))
+                                        .bg(rgba(0xffffff06))
+                                        .px_3()
+                                        .py_4()
                                         .text_xs()
                                         .text_color(rgb(MUTED))
-                                        .child("尚未打开项目"),
+                                        .child("还没有项目，点击右上角 ＋ 添加。"),
                                 )
                             })
                             .children(self.projects.iter().map(|project| {
@@ -858,145 +977,157 @@ impl NexusApp {
                                 let display_name = project.display_name.clone();
                                 let project = project.clone();
                                 div()
-                                    .id(SharedString::from(format!("project-{id}")))
-                                    .h(px(34.))
-                                    .px_2()
-                                    .rounded(px(8.))
-                                    .cursor_pointer()
                                     .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .text_sm()
-                                    .text_color(rgb(TEXT_SECONDARY))
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!("project-{id}")))
+                                            .relative()
+                                            .h(px(36.))
+                                            .px_2()
+                                            .rounded(px(10.))
+                                            .cursor_pointer()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .text_sm()
+                                            .text_color(rgb(TEXT_SECONDARY))
+                                            .when(selected, |element| {
+                                                element
+                                                    .bg(rgba(0xffffff12))
+                                                    .text_color(rgb(TEXT))
+                                                    .shadow(selection_shadow())
+                                                    .child(selection_indicator(SharedString::from(
+                                                        format!("project-selection-{id}"),
+                                                    )))
+                                            })
+                                            .hover(|style| {
+                                                style.bg(rgba(0xffffff0d)).text_color(rgb(TEXT))
+                                            })
+                                            .on_click(cx.listener(move |app, _, _, cx| {
+                                                app.select_project(project.clone());
+                                                cx.notify();
+                                            }))
+                                            .child(
+                                                div()
+                                                    .w(px(18.))
+                                                    .text_color(if selected {
+                                                        rgb(ACCENT)
+                                                    } else {
+                                                        rgb(MUTED)
+                                                    })
+                                                    .child("▱"),
+                                            )
+                                            .child(div().flex_1().truncate().child(display_name))
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgb(MUTED))
+                                                    .child(if selected { "⌄" } else { "›" }),
+                                            ),
+                                    )
                                     .when(selected, |element| {
-                                        element.bg(rgb(SELECTED)).text_color(rgb(TEXT))
+                                        element.child(self.render_task_tree(cx))
                                     })
-                                    .hover(|style| style.bg(rgb(HOVER)).text_color(rgb(TEXT)))
-                                    .on_click(cx.listener(move |app, _, _, cx| {
-                                        app.select_project(project.clone());
-                                        cx.notify();
-                                    }))
-                                    .child(div().text_color(rgb(MUTED)).child("▱"))
-                                    .child(display_name)
                             })),
                     ),
             )
             .child(
+                div().flex_1().min_h_0().flex().flex_col().gap_1().child(
+                    div()
+                        .id("history-list")
+                        .flex_1()
+                        .overflow_y_scroll()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .px_2()
+                                .py_1()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(section_label("CODEX RECENTS"))
+                                .child(
+                                    Button::new("refresh-codex-history")
+                                        .ghost()
+                                        .small()
+                                        .rounded(px(9.))
+                                        .child(button_label("↻", TEXT_SECONDARY))
+                                        .disabled(
+                                            self.codex_history_client.is_none()
+                                                || self.codex_history_loading,
+                                        )
+                                        .on_click(cx.listener(Self::refresh_codex_history)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .px_2()
+                                .py_1()
+                                .text_xs()
+                                .text_color(rgb(MUTED))
+                                .line_clamp(3)
+                                .child(history_status),
+                        )
+                        .children(self.codex_threads.iter().map(|thread| {
+                            let thread_id = thread.id.clone();
+                            let selected = selected_codex_thread == Some(thread.id.as_str());
+                            div()
+                                .id(SharedString::from(format!("codex-thread-{}", thread.id)))
+                                .relative()
+                                .p_2()
+                                .rounded(px(9.))
+                                .cursor_pointer()
+                                .text_color(rgb(TEXT_SECONDARY))
+                                .when(selected, |element| {
+                                    element
+                                        .bg(rgba(0xffffff14))
+                                        .text_color(rgb(TEXT))
+                                        .shadow(selection_shadow())
+                                        .child(selection_indicator(SharedString::from(format!(
+                                            "codex-selection-{}",
+                                            thread.id
+                                        ))))
+                                })
+                                .hover(|style| style.bg(rgba(0xffffff0d)).text_color(rgb(TEXT)))
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.select_codex_thread(thread_id.clone(), cx)
+                                }))
+                                .child(div().text_sm().truncate().child(thread.title.clone()))
+                                .child(
+                                    div()
+                                        .mt(px(3.))
+                                        .text_xs()
+                                        .text_color(rgb(MUTED))
+                                        .truncate()
+                                        .child(thread.detail()),
+                                )
+                        })),
+                ),
+            )
+            .child(
                 div()
-                    .flex_1()
-                    .min_h_0()
+                    .h(px(36.))
+                    .px_2()
+                    .rounded(px(10.))
+                    .bg(rgba(0xffffff07))
+                    .border_1()
+                    .border_color(rgba(0xffffff0a))
                     .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(div().px_2().py_1().child(section_label("Nexus 记录")))
+                    .items_center()
+                    .gap_2()
+                    .child(status_dot(rgb(SUCCESS).into()))
                     .child(
                         div()
-                            .id("task-list")
                             .flex_1()
-                            .overflow_y_scroll()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .when(
-                                self.selected_project.is_some() && self.tasks.is_empty(),
-                                |element| {
-                                    element.child(
-                                        div()
-                                            .px_2()
-                                            .py_3()
-                                            .text_xs()
-                                            .text_color(rgb(MUTED))
-                                            .child("发送 Prompt 后，任务会显示在这里"),
-                                    )
-                                },
-                            )
-                            .children(self.tasks.iter().map(|task| {
-                                let task_id = task.id;
-                                let selected = self.selected_task == Some(task_id);
-                                div()
-                                    .id(SharedString::from(format!("task-{task_id}")))
-                                    .p_2()
-                                    .rounded(px(8.))
-                                    .cursor_pointer()
-                                    .text_color(rgb(TEXT_SECONDARY))
-                                    .when(selected, |element| {
-                                        element.bg(rgb(SELECTED)).text_color(rgb(TEXT))
-                                    })
-                                    .hover(|style| style.bg(rgb(HOVER)).text_color(rgb(TEXT)))
-                                    .on_click(cx.listener(move |app, _, window, cx| {
-                                        app.select_task(task_id, window, cx)
-                                    }))
-                                    .child(div().text_sm().line_clamp(2).child(task.title.clone()))
-                                    .child(
-                                        div()
-                                            .mt_1()
-                                            .flex()
-                                            .items_center()
-                                            .gap_2()
-                                            .text_xs()
-                                            .text_color(rgb(MUTED))
-                                            .child(status_dot(run_status_color(task.status)))
-                                            .child(task.status.to_string()),
-                                    )
-                            }))
-                            .child(
-                                div()
-                                    .mt_3()
-                                    .px_2()
-                                    .py_1()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .child(section_label("Codex 历史"))
-                                    .child(
-                                        Button::new("refresh-codex-history")
-                                            .ghost()
-                                            .small()
-                                            .child(button_label("刷新", TEXT))
-                                            .disabled(
-                                                self.codex_history_client.is_none()
-                                                    || self.codex_history_loading,
-                                            )
-                                            .on_click(cx.listener(Self::refresh_codex_history)),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .px_2()
-                                    .py_1()
-                                    .text_xs()
-                                    .text_color(rgb(MUTED))
-                                    .line_clamp(3)
-                                    .child(history_status),
-                            )
-                            .children(self.codex_threads.iter().map(|thread| {
-                                let thread_id = thread.id.clone();
-                                let selected = selected_codex_thread == Some(thread.id.as_str());
-                                div()
-                                    .id(SharedString::from(format!("codex-thread-{}", thread.id)))
-                                    .p_2()
-                                    .rounded(px(8.))
-                                    .cursor_pointer()
-                                    .text_color(rgb(TEXT_SECONDARY))
-                                    .when(selected, |element| {
-                                        element.bg(rgb(SELECTED)).text_color(rgb(TEXT))
-                                    })
-                                    .hover(|style| style.bg(rgb(HOVER)).text_color(rgb(TEXT)))
-                                    .on_click(cx.listener(move |app, _, _, cx| {
-                                        app.select_codex_thread(thread_id.clone(), cx)
-                                    }))
-                                    .child(
-                                        div().text_sm().line_clamp(2).child(thread.title.clone()),
-                                    )
-                                    .child(
-                                        div()
-                                            .mt_1()
-                                            .text_xs()
-                                            .text_color(rgb(MUTED))
-                                            .child(thread.detail()),
-                                    )
-                            })),
-                    ),
+                            .text_xs()
+                            .text_color(rgb(TEXT_SECONDARY))
+                            .child("本地运行环境"),
+                    )
+                    .child(div().text_xs().text_color(rgb(MUTED)).child("⌘")),
             )
     }
 
@@ -1012,7 +1143,7 @@ impl NexusApp {
             .flex_1()
             .h_full()
             .overflow_y_scroll()
-            .bg(rgb(SURFACE))
+            .bg(rgba(0x101211f2))
             .child(
                 div()
                     .w_full()
@@ -1043,6 +1174,7 @@ impl NexusApp {
                         };
                         element.child(
                             div()
+                                .relative()
                                 .flex_1()
                                 .flex()
                                 .flex_col()
@@ -1063,6 +1195,14 @@ impl NexusApp {
                                         .text_color(rgb(MUTED))
                                         .line_height(relative(1.5))
                                         .child(description),
+                                )
+                                .with_animation(
+                                    "empty-state-enter",
+                                    Animation::new(Duration::from_millis(260))
+                                        .with_easing(ease_out_quint()),
+                                    |element, delta| {
+                                        element.opacity(delta).top(px(8.) - delta * px(8.))
+                                    },
                                 ),
                         )
                     })
@@ -1108,33 +1248,40 @@ impl NexusApp {
             .unwrap_or_else(|| rgb(MUTED).into());
         div()
             .id("settings-panel")
-            .w(px(264.))
+            .relative()
+            .w(px(292.))
             .h_full()
             .flex_none()
             .overflow_y_scroll()
-            .bg(rgb(SIDEBAR))
-            .border_l_1()
-            .border_color(rgb(BORDER))
-            .p_4()
+            .bg(rgba(0x101211f2))
+            .pt(px(66.))
+            .px_3()
+            .pb_3()
             .flex()
             .flex_col()
-            .gap_5()
+            .gap_3()
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .gap_1()
+                    .rounded(px(18.))
+                    .bg(rgba(0x2a2d2be3))
+                    .border_1()
+                    .border_color(rgba(0xffffff12))
+                    .shadow(glass_shadow())
+                    .p_4()
                     .child(
                         div()
                             .text_base()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("运行设置"),
+                            .child("Environment"),
                     )
                     .child(
                         div()
                             .text_xs()
                             .text_color(rgb(MUTED))
-                            .child("当前项目的本地执行环境"),
+                            .child("当前项目的本地执行环境与 Agent"),
                     ),
             )
             .child(
@@ -1142,10 +1289,12 @@ impl NexusApp {
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .rounded(px(10.))
-                    .bg(rgb(SURFACE))
-                    .shadow(surface_border_shadow())
-                    .p_3()
+                    .rounded(px(18.))
+                    .bg(rgba(0x252826dc))
+                    .border_1()
+                    .border_color(rgba(0xffffff10))
+                    .shadow(glass_shadow())
+                    .p_4()
                     .child(section_label("AGENT"))
                     .child(
                         div()
@@ -1191,10 +1340,12 @@ impl NexusApp {
                             .flex()
                             .flex_col()
                             .gap_3()
-                            .rounded(px(10.))
-                            .bg(rgb(SURFACE))
-                            .shadow(surface_border_shadow())
-                            .p_3()
+                            .rounded(px(18.))
+                            .bg(rgba(0x252826dc))
+                            .border_1()
+                            .border_color(rgba(0xffffff10))
+                            .shadow(glass_shadow())
+                            .p_4()
                             .child(section_label("WORKSPACE"))
                             .child(label_value("工作目录", project.canonical_path.clone())),
                     )
@@ -1222,6 +1373,11 @@ impl NexusApp {
                         .on_click(cx.listener(Self::cancel)),
                 )
             })
+            .with_animation(
+                "settings-panel-enter",
+                Animation::new(Duration::from_millis(320)).with_easing(ease_out_quint()),
+                |element, delta| element.opacity(delta).right(px(10.) - delta * px(10.)),
+            )
     }
 }
 
@@ -1268,7 +1424,7 @@ impl Render for NexusApp {
         };
         div()
             .size_full()
-            .bg(rgb(BG))
+            .bg(rgba(0x101211ec))
             .text_color(rgb(TEXT))
             .text_sm()
             .flex()
@@ -1278,16 +1434,16 @@ impl Render for NexusApp {
                     .flex_1()
                     .h_full()
                     .min_w_0()
-                    .bg(rgb(SURFACE))
+                    .bg(rgba(0x101211f2))
                     .flex()
                     .flex_col()
                     .child(
                         div()
-                            .h(px(50.))
+                            .h(px(58.))
                             .flex_none()
-                            .bg(rgb(SURFACE))
+                            .bg(rgba(0x151716d9))
                             .border_b_1()
-                            .border_color(rgb(BORDER))
+                            .border_color(rgba(0xffffff10))
                             .px_5()
                             .flex()
                             .items_center()
@@ -1309,9 +1465,15 @@ impl Render for NexusApp {
                                         element.child(
                                             div()
                                                 .flex_none()
+                                                .rounded_full()
+                                                .bg(rgba(0xffffff0a))
+                                                .border_1()
+                                                .border_color(rgba(0xffffff0d))
+                                                .px_2()
+                                                .py(px(3.))
                                                 .text_xs()
                                                 .text_color(rgb(MUTED))
-                                                .child(format!("· {context}")),
+                                                .child(context),
                                         )
                                     }),
                             )
@@ -1322,7 +1484,10 @@ impl Render for NexusApp {
                                     .gap_2()
                                     .text_xs()
                                     .text_color(rgb(MUTED))
-                                    .child(status_dot(header_status_color))
+                                    .child(live_status_dot(
+                                        header_status_color,
+                                        self.active_run.is_some(),
+                                    ))
                                     .child(
                                         div().max_w(px(260.)).truncate().child(self.status.clone()),
                                     ),
@@ -1332,18 +1497,21 @@ impl Render for NexusApp {
                     .child(
                         div()
                             .flex_none()
-                            .bg(rgb(SURFACE))
+                            .bg(rgba(0x10121100))
                             .px_6()
                             .pt_2()
                             .pb_5()
                             .child(
                                 div()
+                                    .relative()
                                     .w_full()
                                     .max_w(px(720.))
                                     .mx_auto()
                                     .rounded(px(18.))
-                                    .bg(rgb(SURFACE))
-                                    .shadow(surface_card_shadow())
+                                    .bg(rgba(0x292c2add))
+                                    .border_1()
+                                    .border_color(rgba(0xffffff14))
+                                    .shadow(glass_shadow())
                                     .p_2()
                                     .flex()
                                     .flex_col()
@@ -1393,6 +1561,14 @@ impl Render for NexusApp {
                                                     .disabled(!can_submit)
                                                     .on_click(cx.listener(Self::submit)),
                                             ),
+                                    )
+                                    .with_animation(
+                                        "composer-enter",
+                                        Animation::new(Duration::from_millis(280))
+                                            .with_easing(ease_out_quint()),
+                                        |element, delta| {
+                                            element.opacity(delta).top(px(10.) - delta * px(10.))
+                                        },
                                     ),
                             ),
                     ),
@@ -1479,15 +1655,19 @@ fn message_card(
                     element
                         .max_w(px(600.))
                         .rounded(px(18.))
-                        .bg(rgb(RECESSED))
+                        .bg(rgba(0xffffff11))
+                        .border_1()
+                        .border_color(rgba(0xffffff10))
                         .px_4()
                         .py_3()
                 })
                 .when(!is_user, |element| element.w_full())
                 .when(!is_user && is_panel, |element| {
                     element
-                        .rounded(px(10.))
-                        .bg(rgb(SIDEBAR))
+                        .rounded(px(14.))
+                        .bg(rgba(0x252826b8))
+                        .border_1()
+                        .border_color(rgba(0xffffff0d))
                         .shadow(surface_border_shadow())
                         .p_4()
                 })
@@ -1567,13 +1747,46 @@ fn button_label(label: impl Into<SharedString>, color: u32) -> impl IntoElement 
     div().text_color(rgb(color)).child(label.into())
 }
 
-fn status_dot(color: Hsla) -> impl IntoElement {
+fn status_dot(color: Hsla) -> gpui::Div {
     div()
         .size(px(8.))
         .mt(px(3.))
         .flex_none()
         .rounded_full()
         .bg(color)
+}
+
+fn live_status_dot(color: Hsla, animated: bool) -> gpui::AnyElement {
+    let dot = status_dot(color);
+    if animated {
+        dot.with_animation(
+            "active-run-pulse",
+            Animation::new(Duration::from_millis(1_800))
+                .repeat()
+                .with_easing(pulsating_between(0.45, 1.)),
+            |element, opacity| element.opacity(opacity),
+        )
+        .into_any_element()
+    } else {
+        dot.into_any_element()
+    }
+}
+
+fn selection_indicator(id: SharedString) -> impl IntoElement {
+    div()
+        .absolute()
+        .left(px(3.))
+        .top(px(9.))
+        .bottom(px(9.))
+        .w(px(2.))
+        .rounded_full()
+        .bg(rgb(ACCENT))
+        .shadow(vec![box_shadow(0., 0., 8., 0., rgba(0x9b7cff80).into())])
+        .with_animation(
+            id,
+            Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()),
+            |element, delta| element.opacity(delta).left(px(1.) + delta * px(2.)),
+        )
 }
 
 fn run_status_color(status: RunStatus) -> Hsla {
@@ -1586,19 +1799,26 @@ fn run_status_color(status: RunStatus) -> Hsla {
 }
 
 fn surface_border_shadow() -> Vec<gpui::BoxShadow> {
-    vec![box_shadow(0., 0., 0., 1., rgba(0x00000012).into())]
+    vec![box_shadow(0., 0., 0., 1., rgba(0xffffff0d).into())]
 }
 
-fn surface_card_shadow() -> Vec<gpui::BoxShadow> {
+fn selection_shadow() -> Vec<gpui::BoxShadow> {
     vec![
-        box_shadow(0., 0., 0., 1., rgba(0x00000018).into()),
-        box_shadow(0., 2., 6., -2., rgba(0x00000014).into()),
-        box_shadow(0., 14., 32., -12., rgba(0x00000024).into()),
+        box_shadow(0., 0., 0., 1., rgba(0xffffff09).into()),
+        box_shadow(0., 5., 14., -10., rgba(0x000000a0).into()),
+    ]
+}
+
+fn glass_shadow() -> Vec<gpui::BoxShadow> {
+    vec![
+        box_shadow(0., 0., 0., 1., rgba(0xffffff0a).into()),
+        box_shadow(0., 2., 8., -3., rgba(0x00000080).into()),
+        box_shadow(0., 18., 42., -18., rgba(0x000000c0).into()),
     ]
 }
 
 fn configure_theme(cx: &mut App) {
-    Theme::change(ThemeMode::Light, None, cx);
+    Theme::change(ThemeMode::Dark, None, cx);
     let theme = Theme::global_mut(cx);
     theme.font_family = ".SystemUIFont".into();
     theme.font_size = px(14.);
@@ -1608,33 +1828,38 @@ fn configure_theme(cx: &mut App) {
     theme.radius_lg = px(12.);
     theme.shadow = false;
 
-    theme.background = rgb(BG).into();
+    theme.background = rgba(0x101211ee).into();
     theme.foreground = rgb(TEXT).into();
     theme.border = rgb(BORDER).into();
-    theme.input = rgba(0x00000024).into();
+    theme.input = rgba(0xffffff1c).into();
     theme.caret = rgb(TEXT).into();
-    theme.ring = rgb(TEXT_SECONDARY).into();
-    theme.selection = rgba(0x20212424).into();
+    theme.ring = rgb(ACCENT).into();
+    theme.selection = rgba(0x9b7cff4a).into();
     theme.muted = rgb(RECESSED).into();
     theme.muted_foreground = rgb(MUTED).into();
     theme.accent = rgb(HOVER).into();
     theme.accent_foreground = rgb(TEXT).into();
     theme.primary = rgb(ACCENT).into();
     theme.primary_hover = rgb(ACCENT_HOVER).into();
-    theme.primary_active = rgb(0x000000).into();
-    theme.primary_foreground = rgb(SURFACE).into();
-    theme.secondary = rgb(SURFACE).into();
+    theme.primary_active = rgb(0x8968f2).into();
+    theme.primary_foreground = rgb(TEXT).into();
+    theme.secondary = rgb(RECESSED).into();
     theme.secondary_hover = rgb(HOVER).into();
-    theme.secondary_active = rgb(RECESSED).into();
+    theme.secondary_active = rgb(SELECTED).into();
     theme.secondary_foreground = rgb(TEXT_SECONDARY).into();
     theme.link = rgb(LINK).into();
     theme.link_hover = rgb(0x245aa6).into();
     theme.link_active = rgb(0x1e4c8e).into();
     theme.danger = rgb(DANGER).into();
-    theme.danger_hover = rgb(0xc93439).into();
-    theme.danger_active = rgb(0xa9272c).into();
-    theme.danger_foreground = rgb(SURFACE).into();
-    theme.sidebar = rgb(SIDEBAR).into();
+    theme.danger_hover = rgb(0xff8286).into();
+    theme.danger_active = rgb(0xe4565c).into();
+    theme.danger_foreground = rgb(TEXT).into();
+    theme.popover = rgba(0x2a2d2bf2).into();
+    theme.popover_foreground = rgb(TEXT).into();
+    theme.overlay = rgba(0x00000066).into();
+    theme.title_bar = rgba(0x15171600).into();
+    theme.title_bar_border = rgba(0xffffff00).into();
+    theme.sidebar = rgba(0x1c1e1dde).into();
     theme.sidebar_foreground = rgb(TEXT).into();
     theme.sidebar_accent = rgb(HOVER).into();
     theme.sidebar_accent_foreground = rgb(TEXT).into();
@@ -1665,6 +1890,13 @@ fn main() -> anyhow::Result<()> {
         cx.spawn(async move |cx| {
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(TitlebarOptions {
+                    title: None,
+                    appears_transparent: true,
+                    traffic_light_position: Some(point(px(18.), px(18.))),
+                }),
+                window_background: WindowBackgroundAppearance::Blurred,
+                window_min_size: Some(size(px(1_040.), px(680.))),
                 ..Default::default()
             };
             cx.open_window(options, |window, cx| {
