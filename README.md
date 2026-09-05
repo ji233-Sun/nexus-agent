@@ -46,6 +46,8 @@ Linux 运行界面需要可用的 Vulkan 驱动和桌面会话，目录选择需
 
 ## 启动指南
 
+使用 rustup 管理 Rust。仓库的 `rust-toolchain.toml` 固定使用 Rust 1.98.1；在项目目录执行 Cargo 命令时会自动选择该版本，首次运行需要联网下载工具链。此配置不修改其他项目使用的全局默认版本。
+
 ```bash
 cargo run -p nexus-desktop
 ```
