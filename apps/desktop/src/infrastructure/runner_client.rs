@@ -4,7 +4,7 @@ use std::{
     process::{Child, ChildStdin, Command, Stdio},
     sync::{Arc, Mutex, mpsc},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::presenter::RunnerPort as _;
@@ -78,7 +78,9 @@ impl crate::presenter::RunnerPort for RunnerClient {
 impl Drop for RunnerClient {
     fn drop(&mut self) {
         let _ = self.send(CommandEnvelope::new(RunnerCommand::RunnerShutdown));
-        for _ in 0..10 {
+        // 等待 Runner 完成三秒取消宽限期和进程清理。
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
             if self.child.try_wait().ok().flatten().is_some() {
                 return;
             }

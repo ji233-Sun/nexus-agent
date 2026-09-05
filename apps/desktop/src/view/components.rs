@@ -125,7 +125,7 @@ pub(super) fn message_card(
                         .line_height(relative(1.55))
                         .when(
                             matches!(kind, MessageKind::ToolCall | MessageKind::ToolResult),
-                            |element| element.font_family("SF Mono"),
+                            |element| element.font_family(MONO_FONT),
                         )
                         .child(content.to_owned())
                         .into_any_element()

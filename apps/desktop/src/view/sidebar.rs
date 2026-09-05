@@ -80,7 +80,7 @@ impl NexusView {
             .bg(rgba(0x1c1e1dde))
             .border_r_1()
             .border_color(rgba(0xffffff12))
-            .pt(px(40.))
+            .pt(px(if cfg!(target_os = "macos") { 40. } else { 8. }))
             .px_3()
             .pb_3()
             .flex()
@@ -338,7 +338,13 @@ impl NexusView {
                             .text_color(rgb(TEXT_SECONDARY))
                             .child("本地运行环境"),
                     )
-                    .child(div().text_xs().text_color(rgb(MUTED)).child("⌘")),
+                    .child(div().text_xs().text_color(rgb(MUTED)).child(
+                        if cfg!(target_os = "macos") {
+                            "⌘"
+                        } else {
+                            "Ctrl"
+                        },
+                    )),
             )
     }
 }

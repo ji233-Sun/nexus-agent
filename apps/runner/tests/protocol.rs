@@ -1,163 +1,191 @@
-#![cfg(unix)]
-
 use std::{
     fs,
-    io::{BufRead as _, BufReader, Write},
-    os::unix::fs::PermissionsExt as _,
+    path::{Path, PathBuf},
     process::{Command as ProcessCommand, Stdio},
+    time::Duration,
 };
 
 use nexus_domain::{HarnessKind, RunStatus, ThinkingEffort};
 use nexus_protocol::{Command, CommandEnvelope, Event, EventEnvelope, StartRun};
+use tokio::{
+    io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader, Lines},
+    process::{Child, ChildStdin, ChildStdout},
+    time::timeout,
+};
 use uuid::Uuid;
 
-#[test]
-fn runner_streams_fake_claude_and_forwards_model_configuration() {
-    let directory = tempfile::tempdir().unwrap();
-    let fake_claude = directory.path().join("claude");
-    fs::write(
-        &fake_claude,
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$PWD/args.txt\"\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}}'\nprintf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}}'\n",
-    )
-    .unwrap();
-    let mut permissions = fs::metadata(&fake_claude).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&fake_claude, permissions).unwrap();
-
-    let mut runner = ProcessCommand::new(env!("CARGO_BIN_EXE_nexus-runner"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+fn fake_harness(directory: &Path) -> PathBuf {
+    let executable = directory.join(format!("fake-harness{}", std::env::consts::EXE_SUFFIX));
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_harness.rs");
+    let output = ProcessCommand::new("rustc")
+        .args(["--edition=2024", "-D", "warnings"])
+        .arg(fixture)
+        .arg("-o")
+        .arg(&executable)
+        .output()
         .unwrap();
-    let mut stdin = runner.stdin.take().unwrap();
-    let stdout = runner.stdout.take().unwrap();
-    let run_id = Uuid::new_v4();
-    send(
-        &mut stdin,
-        Command::RunStart(StartRun {
-            run_id,
-            task_id: Uuid::new_v4(),
-            cwd: directory.path().to_string_lossy().into_owned(),
-            prompt: "test prompt".into(),
-            harness: HarnessKind::Claude,
-            executable: fake_claude.to_string_lossy().into_owned(),
-            model: Some("opus".into()),
-            effort: ThinkingEffort::XHigh,
-        }),
-    );
-
-    let mut saw_started = false;
-    let mut saw_delta = false;
-    let mut saw_message = false;
-    for line in BufReader::new(stdout).lines() {
-        let event: EventEnvelope = serde_json::from_str(&line.unwrap()).unwrap();
-        match event.event {
-            Event::RunStarted { run_id: id, .. } if id == run_id => saw_started = true,
-            Event::RunOutputDelta { run_id: id, text } if id == run_id && text == "hello" => {
-                saw_delta = true;
-            }
-            Event::RunMessageCompleted { run_id: id, text } if id == run_id && text == "hello" => {
-                saw_message = true;
-            }
-            Event::RunExited {
-                run_id: id,
-                status: RunStatus::Completed,
-                ..
-            } if id == run_id => break,
-            _ => {}
-        }
-    }
-    send(&mut stdin, Command::RunnerShutdown);
-    drop(stdin);
-    assert!(runner.wait().unwrap().success());
-    assert!(saw_started && saw_delta && saw_message);
-
-    let args = fs::read_to_string(directory.path().join("args.txt")).unwrap();
     assert!(
-        args.lines()
-            .collect::<Vec<_>>()
-            .windows(2)
-            .any(|pair| pair == ["--model", "opus"])
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert!(
-        args.lines()
-            .collect::<Vec<_>>()
-            .windows(2)
-            .any(|pair| pair == ["--effort", "xhigh"])
-    );
-    assert!(!args.contains("test prompt"));
+    executable
 }
 
-#[test]
-fn runner_streams_fake_codex_and_uses_non_interactive_mode() {
-    let directory = tempfile::tempdir().unwrap();
-    let fake_codex = directory.path().join("codex");
-    fs::write(
-        &fake_codex,
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$PWD/codex-args.txt\"\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}'\nprintf '%s\\n' '{\"type\":\"item.started\",\"item\":{\"id\":\"item-1\",\"type\":\"command_execution\",\"command\":\"pwd\",\"aggregated_output\":\"\",\"exit_code\":null,\"status\":\"in_progress\"}}'\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"id\":\"item-1\",\"type\":\"command_execution\",\"command\":\"pwd\",\"aggregated_output\":\"project\",\"exit_code\":0,\"status\":\"completed\"}}'\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"id\":\"item-2\",\"type\":\"agent_message\",\"text\":\"done\"}}'\nprintf '%s\\n' '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"cached_input_tokens\":0,\"output_tokens\":1,\"reasoning_output_tokens\":0}}'\n",
-    )
-    .unwrap();
-    let mut permissions = fs::metadata(&fake_codex).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&fake_codex, permissions).unwrap();
+struct TestRunner {
+    child: Child,
+    stdin: ChildStdin,
+    events: Lines<BufReader<ChildStdout>>,
+}
 
-    let mut runner = ProcessCommand::new(env!("CARGO_BIN_EXE_nexus-runner"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut stdin = runner.stdin.take().unwrap();
-    let stdout = runner.stdout.take().unwrap();
-    let run_id = Uuid::new_v4();
-    send(
-        &mut stdin,
-        Command::RunStart(StartRun {
-            run_id,
-            task_id: Uuid::new_v4(),
-            cwd: directory.path().to_string_lossy().into_owned(),
-            prompt: "test prompt".into(),
-            harness: HarnessKind::Codex,
-            executable: fake_codex.to_string_lossy().into_owned(),
-            model: None,
-            effort: ThinkingEffort::High,
-        }),
-    );
-
-    let mut saw_started = false;
-    let mut saw_tool_started = false;
-    let mut saw_tool_completed = false;
-    let mut saw_message = false;
-    for line in BufReader::new(stdout).lines() {
-        let event: EventEnvelope = serde_json::from_str(&line.unwrap()).unwrap();
-        match event.event {
-            Event::RunStarted { run_id: id, .. } if id == run_id => saw_started = true,
-            Event::RunToolStarted {
-                run_id: id, name, ..
-            } if id == run_id && name == "Command" => saw_tool_started = true,
-            Event::RunToolCompleted {
-                run_id: id,
-                output,
-                is_error: false,
-                ..
-            } if id == run_id && output == "project" => saw_tool_completed = true,
-            Event::RunMessageCompleted { run_id: id, text } if id == run_id && text == "done" => {
-                saw_message = true;
-            }
-            Event::RunExited {
-                run_id: id,
-                status: RunStatus::Completed,
-                ..
-            } if id == run_id => break,
-            _ => {}
+impl TestRunner {
+    fn spawn() -> Self {
+        let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_nexus-runner"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let events = BufReader::new(child.stdout.take().unwrap()).lines();
+        Self {
+            child,
+            stdin,
+            events,
         }
     }
-    send(&mut stdin, Command::RunnerShutdown);
-    drop(stdin);
-    assert!(runner.wait().unwrap().success());
-    assert!(saw_started && saw_tool_started && saw_tool_completed && saw_message);
 
+    async fn send(&mut self, command: Command) {
+        let mut frame = serde_json::to_vec(&CommandEnvelope::new(command)).unwrap();
+        frame.push(b'\n');
+        self.stdin.write_all(&frame).await.unwrap();
+        self.stdin.flush().await.unwrap();
+    }
+
+    async fn next(&mut self) -> Event {
+        let line = timeout(Duration::from_secs(15), self.events.next_line())
+            .await
+            .expect("runner event timeout")
+            .unwrap()
+            .expect("runner closed its event stream");
+        serde_json::from_str::<EventEnvelope>(&line).unwrap().event
+    }
+
+    async fn collect_run(&mut self, run_id: Uuid, expected: RunStatus) -> Vec<Event> {
+        let mut events = Vec::new();
+        loop {
+            let event = self.next().await;
+            if let Event::RunExited {
+                run_id: id, status, ..
+            } = &event
+            {
+                assert_eq!(*id, run_id);
+                assert_eq!(*status, expected);
+                return events;
+            }
+            events.push(event);
+        }
+    }
+
+    async fn shutdown(mut self) {
+        self.send(Command::RunnerShutdown).await;
+        self.wait_for_exit().await;
+    }
+
+    async fn wait_for_exit(mut self) {
+        drop(self.stdin);
+        assert!(
+            timeout(Duration::from_secs(10), self.child.wait())
+                .await
+                .unwrap()
+                .unwrap()
+                .success()
+        );
+    }
+}
+
+fn request(directory: &Path, executable: PathBuf, harness: HarnessKind, prompt: &str) -> StartRun {
+    StartRun {
+        run_id: Uuid::new_v4(),
+        task_id: Uuid::new_v4(),
+        cwd: directory.to_string_lossy().into_owned(),
+        prompt: prompt.into(),
+        harness,
+        executable: executable.to_string_lossy().into_owned(),
+        model: None,
+        effort: ThinkingEffort::High,
+    }
+}
+
+#[tokio::test]
+async fn runner_streams_fake_claude_and_forwards_model_configuration() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut request = request(
+        directory.path(),
+        fake_harness(directory.path()),
+        HarnessKind::Claude,
+        "test prompt",
+    );
+    request.model = Some("opus".into());
+    request.effort = ThinkingEffort::XHigh;
+    let run_id = request.run_id;
+    let mut runner = TestRunner::spawn();
+    runner.send(Command::RunStart(request)).await;
+    let events = runner.collect_run(run_id, RunStatus::Completed).await;
+    runner.shutdown().await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::RunStarted { run_id: id, .. } if *id == run_id))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::RunOutputDelta { text, .. } if text == "hello"))
+    );
+    assert!(
+        events.iter().any(
+            |event| matches!(event, Event::RunMessageCompleted { text, .. } if text == "hello")
+        )
+    );
+    let args = fs::read_to_string(directory.path().join("args.txt")).unwrap();
+    let args = args.lines().collect::<Vec<_>>();
+    assert!(args.windows(2).any(|pair| pair == ["--model", "opus"]));
+    assert!(args.windows(2).any(|pair| pair == ["--effort", "xhigh"]));
+    assert!(!args.contains(&"test prompt"));
+}
+
+#[tokio::test]
+async fn runner_streams_fake_codex_and_uses_non_interactive_mode() {
+    let directory = tempfile::tempdir().unwrap();
+    let request = request(
+        directory.path(),
+        fake_harness(directory.path()),
+        HarnessKind::Codex,
+        "test prompt",
+    );
+    let run_id = request.run_id;
+    let mut runner = TestRunner::spawn();
+    runner.send(Command::RunStart(request)).await;
+    let events = runner.collect_run(run_id, RunStatus::Completed).await;
+    runner.shutdown().await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::RunStarted { run_id: id, .. } if *id == run_id))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::RunToolStarted { name, .. } if name == "Command"))
+    );
+    assert!(events.iter().any(|event| matches!(event, Event::RunToolCompleted { output, is_error: false, .. } if output == "project")));
+    assert!(
+        events.iter().any(
+            |event| matches!(event, Event::RunMessageCompleted { text, .. } if text == "done")
+        )
+    );
     let args = fs::read_to_string(directory.path().join("codex-args.txt")).unwrap();
     let args = args.lines().collect::<Vec<_>>();
     assert_eq!(args.first().copied(), Some("exec"));
@@ -170,11 +198,42 @@ fn runner_streams_fake_codex_and_uses_non_interactive_mode() {
             .any(|pair| pair == ["--config", "model_reasoning_effort=\"high\""])
     );
     assert_eq!(args.last().copied(), Some("-"));
-    assert!(!args.iter().any(|arg| arg.contains("test prompt")));
+    assert!(!args.contains(&"test prompt"));
 }
 
-fn send(stdin: &mut impl Write, command: Command) {
-    serde_json::to_writer(&mut *stdin, &CommandEnvelope::new(command)).unwrap();
-    stdin.write_all(b"\n").unwrap();
-    stdin.flush().unwrap();
+#[tokio::test]
+async fn cancellation_and_shutdown_reap_the_harness_process_tree() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = fake_harness(directory.path());
+    for shutdown in [false, true] {
+        let request = request(
+            directory.path(),
+            executable.clone(),
+            HarnessKind::Codex,
+            "wait-for-cancel",
+        );
+        let run_id = request.run_id;
+        let mut runner = TestRunner::spawn();
+        runner.send(Command::RunStart(request)).await;
+        loop {
+            if matches!(runner.next().await, Event::RunMessageCompleted { text, .. } if text == "ready")
+            {
+                break;
+            }
+        }
+        runner
+            .send(if shutdown {
+                Command::RunnerShutdown
+            } else {
+                Command::RunCancel { run_id }
+            })
+            .await;
+        // 子进程继承 stdout；进程树未清理时，Runner 无法读到 EOF 并发出终态。
+        runner.collect_run(run_id, RunStatus::Cancelled).await;
+        if shutdown {
+            runner.wait_for_exit().await;
+        } else {
+            runner.shutdown().await;
+        }
+    }
 }

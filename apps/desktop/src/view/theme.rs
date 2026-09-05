@@ -17,12 +17,20 @@ pub(super) const WARNING: u32 = 0xffbd66;
 pub(super) const DANGER: u32 = 0xff6b70;
 pub(super) const TOOL: u32 = 0xe5a65f;
 
+pub(super) const MONO_FONT: &str = if cfg!(target_os = "macos") {
+    "SF Mono"
+} else if cfg!(target_os = "windows") {
+    "Consolas"
+} else {
+    "DejaVu Sans Mono"
+};
+
 pub(crate) fn configure_theme(cx: &mut App) {
     Theme::change(ThemeMode::Dark, None, cx);
     let theme = Theme::global_mut(cx);
     theme.font_family = ".SystemUIFont".into();
     theme.font_size = px(14.);
-    theme.mono_font_family = "SF Mono".into();
+    theme.mono_font_family = MONO_FONT.into();
     theme.mono_font_size = px(13.);
     theme.radius = px(6.);
     theme.radius_lg = px(12.);

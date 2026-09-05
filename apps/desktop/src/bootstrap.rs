@@ -43,11 +43,16 @@ pub(crate) fn run() -> anyhow::Result<()> {
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
-                    title: None,
-                    appears_transparent: true,
-                    traffic_light_position: Some(point(px(18.), px(18.))),
+                    title: (!cfg!(target_os = "macos")).then(|| "Nexus Agent".into()),
+                    appears_transparent: cfg!(target_os = "macos"),
+                    traffic_light_position: cfg!(target_os = "macos")
+                        .then(|| point(px(18.), px(18.))),
                 }),
-                window_background: WindowBackgroundAppearance::Blurred,
+                window_background: if cfg!(target_os = "macos") {
+                    WindowBackgroundAppearance::Blurred
+                } else {
+                    WindowBackgroundAppearance::Opaque
+                },
                 window_min_size: Some(size(px(1_040.), px(680.))),
                 ..Default::default()
             };

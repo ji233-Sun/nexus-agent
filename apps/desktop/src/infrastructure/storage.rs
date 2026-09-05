@@ -1,8 +1,4 @@
-use std::{
-    env, fs,
-    path::{Path, PathBuf},
-    str::FromStr as _,
-};
+use std::{fs, path::Path, str::FromStr as _};
 
 use anyhow::{Context as _, Result, anyhow};
 use chrono::{DateTime, Utc};
@@ -36,10 +32,7 @@ pub struct NewTaskRun<'a> {
 
 impl Storage {
     pub fn open_default() -> Result<Self> {
-        let base = env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or_else(|| anyhow!("无法确定用户目录"))?
-            .join("Library/Application Support/Nexus Agent");
+        let base = super::paths::data_directory()?;
         fs::create_dir_all(&base).context("创建应用数据目录")?;
         Self::open(&base.join("nexus.db"))
     }

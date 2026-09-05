@@ -3,8 +3,8 @@
 > 文档状态：Draft  
 > 目标版本：v0.1.0  
 > 当前阶段：初版 / 本地 Harness 闭环  
-> 首个验收平台：macOS  
-> 更新时间：2026-09-03
+> 目标平台：Linux / macOS / Windows<br>
+> 更新时间：2026-09-05
 
 ## 1. 文档目的
 
@@ -28,7 +28,7 @@
 | 工作目录 | 用户直接选择的本地目录 | MVP 不创建、不删除 Worktree |
 | 持久化 | 本地 SQLite | 保存项目、任务、Run 和最终消息 |
 | 并发策略 | 每个 Task 最多一个活动 AgentRun | 避免并发写工作目录和交互歧义 |
-| 首个验收平台 | macOS | 与当前开发环境一致，缩短反馈周期 |
+| 目标平台 | Linux / macOS / Windows | 共享 MVP 与应用层，平台差异集中于基础设施，CI 三平台验证 |
 
 ## 3. 产品目标
 
@@ -71,7 +71,7 @@
 - 本地任务历史和最终消息持久化。
 - 基础设置：Harness 可执行文件路径、默认 Harness、日志级别。
 - 基础诊断日志和崩溃后子进程清理。
-- macOS 打包和本地安装验证。
+- Linux、macOS 和 Windows 构建与本地安装验证。
 
 ### 4.2 明确不做
 
@@ -90,7 +90,6 @@
 - 图片、音频、文件附件和富媒体 Prompt。
 - 插件系统、脚本市场和第三方扩展 SDK。
 - 团队账户、组织权限、计费和云同步。
-- Windows、Linux 正式发布。
 
 ### 4.3 MVP 中的 Git 行为
 
@@ -582,7 +581,7 @@ PersistenceFailed
 - 无 P0 输入法、文本选择或崩溃问题。
 - 达到第 16 节核心交互指标，或有明确且低风险的优化路径。
 - 团队可以维护所需的基础组件，不需要复制大规模 GPL UI 代码。
-- macOS 打包流程可重复。
+- Linux、macOS 和 Windows 构建流程可重复，发布包分别验收。
 
 ### 17.3 No-Go 处理
 
@@ -714,7 +713,7 @@ Fake Harness 必须支持：
 - 性能基准和回归数据。
 - 崩溃恢复。
 - 日志脱敏与诊断导出。
-- macOS Release 打包。
+- Linux、macOS 和 Windows Release 打包。
 - 安装、首次运行和故障排查文档。
 
 退出条件：
@@ -740,7 +739,7 @@ Fake Harness 必须支持：
 - Cancel。
 - SQLite 持久化。
 - 崩溃后 Interrupted 修复。
-- macOS 打包。
+- 三平台构建和打包。
 
 ### P1
 
@@ -756,7 +755,6 @@ Fake Harness 必须支持：
 - 快捷键。
 - 搜索历史任务。
 - 多窗口。
-- Windows/Linux 开发构建验证。
 
 P2 不阻塞 v0.1.0 Alpha，除非实际用户测试证明其属于核心闭环。
 
@@ -787,7 +785,7 @@ MVP 只做本地可观测性：
 ## 23. 发布策略
 
 - 版本：`0.1.0-alpha.N`。
-- 仅发布 macOS 开发者预览。
+- 目标覆盖 Linux、macOS 和 Windows；各平台发布包须通过本机验收后发布。
 - 不承诺数据库和协议跨 Alpha 永久兼容，但迁移必须显式。
 - 每个发布包必须包含 Desktop 和完全匹配的 Runner。
 - 发布前运行：format、lint、unit、integration、release build、手工 Harness 矩阵。
@@ -839,7 +837,7 @@ v0.1.0 Alpha 只有在以下条件全部满足时才算完成：
 - [ ] 日志默认脱敏且大小有上限。
 - [ ] 关键状态机、协议和进程生命周期测试通过。
 - [ ] Release 性能基准已记录。
-- [ ] macOS Release 包可以在干净环境安装和运行。
+- [ ] Linux、macOS 和 Windows Release 包可以在各自干净环境安装和运行。
 - [ ] 未实现 Remote、Connector、自动 Worktree 等非 MVP 功能。
 - [ ] 仓库中没有调试代码、备用实现、无用依赖或未说明的生成文件。
 
@@ -849,6 +847,6 @@ v0.1.0 Alpha 只有在以下条件全部满足时才算完成：
 
 1. Codex 参考适配器采用的官方非交互协议模式。
 2. Harness 环境变量继承采用白名单还是当前进程环境过滤策略。
-3. macOS 最低支持版本和 CPU 架构。
-4. SQLite 数据和日志在 macOS Application Support 下的最终目录。
+3. Linux、macOS 和 Windows 的最低支持版本和 CPU 架构。
+4. SQLite 已采用各平台原生数据目录，见 README；日志目录和保留策略仍需确定。
 5. Alpha 是否需要签名、公证和自动崩溃报告。

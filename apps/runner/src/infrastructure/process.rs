@@ -2,21 +2,14 @@ use crate::application::events::{Emitter, emit_decoded};
 use nexus_domain::{HarnessKind, RunStatus};
 use nexus_harness_core::{DecodedEvent, LineDecoder};
 use nexus_protocol::{ErrorCode, Event, StartRun};
-#[cfg(unix)]
-use nix::{
-    sys::signal::{Signal, killpg},
-    unistd::Pid,
-};
-use std::time::Duration;
 use tokio::{
     io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader},
     process::Command as ProcessCommand,
     sync::watch,
-    time::timeout,
 };
 use uuid::Uuid;
 
-const CANCEL_GRACE_PERIOD: Duration = Duration::from_secs(3);
+use super::process_tree;
 
 pub(crate) async fn run_harness(
     request: StartRun,
@@ -34,8 +27,7 @@ pub(crate) async fn run_harness(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    #[cfg(unix)]
-    command.process_group(0);
+    process_tree::configure(&mut command);
 
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -68,7 +60,8 @@ pub(crate) async fn run_harness(
     if let Some(mut stdin) = child.stdin.take()
         && stdin.write_all(spec.stdin.as_bytes()).await.is_err()
     {
-        let _ = child.start_kill();
+        process_tree::terminate(&mut child, pid).await;
+        let _ = child.wait().await;
         emitter
             .send(Event::RunFailed {
                 run_id: request.run_id,
@@ -114,14 +107,7 @@ pub(crate) async fn run_harness(
         changed = cancel.changed() => {
             let cancelled = changed.is_ok() && *cancel.borrow();
             if cancelled {
-                interrupt_process_group(pid);
-                match timeout(CANCEL_GRACE_PERIOD, child.wait()).await {
-                    Ok(status) => (status, true),
-                    Err(_) => {
-                        kill_process_group(pid);
-                        (child.wait().await, true)
-                    }
-                }
+                (process_tree::cancel(&mut child, pid).await, true)
             } else {
                 (child.wait().await, false)
             }
@@ -192,23 +178,3 @@ async fn read_stdout(
     }
     provider_error
 }
-
-#[cfg(unix)]
-fn interrupt_process_group(pid: u32) {
-    if pid > 0 {
-        let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGINT);
-    }
-}
-
-#[cfg(not(unix))]
-fn interrupt_process_group(_pid: u32) {}
-
-#[cfg(unix)]
-fn kill_process_group(pid: u32) {
-    if pid > 0 {
-        let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
-    }
-}
-
-#[cfg(not(unix))]
-fn kill_process_group(_pid: u32) {}
