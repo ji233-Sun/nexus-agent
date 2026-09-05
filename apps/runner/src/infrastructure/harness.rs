@@ -2,6 +2,7 @@ use nexus_domain::HarnessKind;
 use nexus_harness_claude as claude;
 use nexus_harness_codex as codex;
 use nexus_harness_core::{LaunchSpec, LineDecoder};
+use nexus_harness_omp as omp;
 use nexus_protocol::{HarnessProbe, StartRun};
 use std::path::Path;
 
@@ -9,6 +10,7 @@ pub(crate) async fn probe(harness: HarnessKind, executable: &str) -> HarnessProb
     match harness {
         HarnessKind::Claude => claude::probe(executable).await,
         HarnessKind::Codex => codex::probe(executable).await,
+        HarnessKind::Omp => omp::probe(executable).await,
     }
 }
 
@@ -33,6 +35,16 @@ pub(crate) fn prepare(request: &StartRun, cwd: &Path) -> (LaunchSpec, Box<dyn Li
                 request.effort,
             ),
             Box::new(codex::EventDecoder),
+        ),
+        HarnessKind::Omp => (
+            omp::build_launch_spec(
+                &request.executable,
+                cwd,
+                &request.prompt,
+                request.model.as_deref(),
+                request.effort,
+            ),
+            Box::new(omp::EventDecoder),
         ),
     }
 }

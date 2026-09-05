@@ -172,7 +172,7 @@ impl Presenter {
         let harness = self.model.selected_harness;
         let model = match harness {
             HarnessKind::Claude => self.model.claude_model.cli_value().map(str::to_owned),
-            HarnessKind::Codex => None,
+            HarnessKind::Codex | HarnessKind::Omp => None,
         };
         let title: String = prompt.chars().take(48).collect();
         let created = self.storage.create_task_run(NewTaskRun {

@@ -131,6 +131,10 @@ impl NexusView {
                     rgb(0xd97757),
                 ),
                 HarnessKind::Codex => (include_bytes!("../../assets/harness/codex.svg"), rgb(TEXT)),
+                HarnessKind::Omp => (
+                    include_bytes!("../../assets/harness/omp.svg"),
+                    rgb(0xf97316),
+                ),
             };
             return div()
                 .flex_1()

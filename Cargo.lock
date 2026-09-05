@@ -4326,6 +4326,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-harness-omp"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "nexus-domain",
+ "nexus-harness-core",
+ "nexus-protocol",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "nexus-protocol"
 version = "0.1.0-alpha.1"
 dependencies = [
@@ -4344,6 +4355,7 @@ dependencies = [
  "nexus-harness-claude",
  "nexus-harness-codex",
  "nexus-harness-core",
+ "nexus-harness-omp",
  "nexus-protocol",
  "nix",
  "serde_json",

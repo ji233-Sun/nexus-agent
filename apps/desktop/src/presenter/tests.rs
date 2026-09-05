@@ -67,7 +67,7 @@ fn ready_probe(harness: HarnessKind) -> HarnessProbe {
 }
 
 #[test]
-fn startup_restores_preferences_and_probes_both_harnesses() {
+fn startup_restores_preferences_and_probes_all_harnesses() {
     let storage = Storage::open(Path::new(":memory:")).unwrap();
     for (key, value) in [
         ("default_harness", "codex"),
@@ -85,7 +85,7 @@ fn startup_restores_preferences_and_probes_both_harnesses() {
     assert_eq!(presenter.model().effort, ThinkingEffort::High);
     assert_eq!(presenter.model().executable, "/custom/codex");
     let state = runner.0.borrow();
-    assert_eq!(state.commands.len(), 3);
+    assert_eq!(state.commands.len(), 4);
     assert!(matches!(state.commands[0].command, Command::RunnerHello));
     assert!(state.commands.iter().any(|command| matches!(&command.command,
         Command::HarnessProbe { harness: HarnessKind::Codex, executable } if executable == "/custom/codex")));

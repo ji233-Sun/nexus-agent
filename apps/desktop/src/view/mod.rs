@@ -360,7 +360,7 @@ impl NexusView {
             .small()
             .h(px(COMPACT_CONTROL_HEIGHT))
             .label(label)
-            .disabled(model.selected_harness == HarnessKind::Codex || model.active_run.is_some())
+            .disabled(model.selected_harness != HarnessKind::Claude || model.active_run.is_some())
             .map(|button| {
                 AnimatedDropdown::new(button_id, button, self.reduced_motion, move |menu, _, _| {
                     ClaudeModel::ALL

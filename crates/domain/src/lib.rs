@@ -10,22 +10,25 @@ pub enum HarnessKind {
     #[default]
     Claude,
     Codex,
+    Omp,
 }
 
 impl HarnessKind {
-    pub const ALL: [Self; 2] = [Self::Claude, Self::Codex];
+    pub const ALL: [Self; 3] = [Self::Claude, Self::Codex, Self::Omp];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Omp => "omp",
         }
     }
 
     pub fn next(self) -> Self {
         match self {
             Self::Claude => Self::Codex,
-            Self::Codex => Self::Claude,
+            Self::Codex => Self::Omp,
+            Self::Omp => Self::Claude,
         }
     }
 
@@ -33,6 +36,7 @@ impl HarnessKind {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Omp => "omp",
         }
     }
 }
@@ -42,6 +46,7 @@ impl fmt::Display for HarnessKind {
         f.write_str(match self {
             Self::Claude => "Claude Code",
             Self::Codex => "Codex CLI",
+            Self::Omp => "Oh My Pi",
         })
     }
 }
@@ -53,6 +58,7 @@ impl FromStr for HarnessKind {
         match value {
             "claude" => Ok(Self::Claude),
             "codex" => Ok(Self::Codex),
+            "omp" => Ok(Self::Omp),
             _ => Err(format!("unknown harness: {value}")),
         }
     }
@@ -312,6 +318,8 @@ mod tests {
     #[test]
     fn model_and_effort_cycle_through_supported_values() {
         assert_eq!(HarnessKind::Claude.next(), HarnessKind::Codex);
+        assert_eq!(HarnessKind::Codex.next(), HarnessKind::Omp);
+        assert_eq!(HarnessKind::Omp.next(), HarnessKind::Claude);
         assert_eq!(HarnessKind::Codex.default_executable(), "codex");
         assert_eq!(ClaudeModel::Haiku.next(), ClaudeModel::Default);
         assert_eq!(ThinkingEffort::Max.next(), ThinkingEffort::Low);
