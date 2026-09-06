@@ -264,6 +264,10 @@ impl Presenter {
                 status,
                 exit_code,
             } if self.model.active_run == Some(run_id) => {
+                let pending_catalog_request = match self.model.model_catalog {
+                    ModelCatalogState::Loading { request_id, .. } => Some(request_id),
+                    _ => None,
+                };
                 let _ = self.storage.finish_run(run_id, status, exit_code);
                 let task_id = self.model.active_task;
                 let cancelled = self.model.run_cancelling;
@@ -301,7 +305,8 @@ impl Presenter {
                     self.send_queued_message(message.id);
                 }
                 if self.model.active_run.is_none()
-                    && (matches!(self.model.model_catalog, ModelCatalogState::Loading { .. })
+                    && (pending_catalog_request
+                        .is_some_and(|request_id| self.model.model_catalog.accepts(request_id))
                         || self.catalog_project
                             != self
                                 .model
@@ -309,7 +314,7 @@ impl Presenter {
                                 .as_ref()
                                 .map(|project| project.id))
                 {
-                    // A response received during the run cannot change its selection.
+                    // Retry an ignored response only if task restoration has not replaced the request.
                     let status = self.model.status.clone();
                     self.refresh_model_catalog();
                     self.model.status = status;

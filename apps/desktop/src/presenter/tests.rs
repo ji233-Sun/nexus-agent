@@ -2511,6 +2511,22 @@ fn unavailable_models_and_unknown_efforts_cannot_change_the_requested_configurat
         .unwrap()
         .unwrap();
     assert_eq!(recorded.effort, request.effort);
+
+    runner.0.borrow_mut().commands.clear();
+    runner.emit(Event::RunExited {
+        run_id: request.run_id,
+        status: RunStatus::Completed,
+        exit_code: Some(0),
+    });
+    presenter.drain_events();
+    assert_ne!(current_catalog_request_id(&presenter), request_id);
+    assert_eq!(runner.0.borrow().commands.len(), 1);
+    emit_current_catalog(&presenter, &runner, claude_aliases());
+    presenter.drain_events();
+    assert!(matches!(
+        presenter.model().model_catalog,
+        ModelCatalogState::Ready(_)
+    ));
 }
 
 #[test]
@@ -2872,6 +2888,56 @@ fn selecting_a_saved_task_restores_its_configuration_and_messages() {
         ready_probe(HarnessKind::Claude).executable
     );
     assert_eq!(presenter.model().messages[0].content, "hello");
+
+    for catalog_pending in [false, true] {
+        presenter.new_task();
+        let executable = presenter.model().executable.clone();
+        assert!(presenter.select_harness(HarnessKind::Codex, &executable));
+        presenter
+            .model
+            .harnesses
+            .insert(HarnessKind::Codex, ready_probe(HarnessKind::Codex));
+        if !catalog_pending {
+            emit_current_catalog(&presenter, &runner, vec![]);
+            presenter.drain_events();
+        }
+        assert!(presenter.submit("another task", "codex"));
+        let run_id = presenter.model().active_run.unwrap();
+        presenter.select_task(task_id);
+        assert_eq!(presenter.model().selected_harness, HarnessKind::Codex);
+        runner.0.borrow_mut().commands.clear();
+
+        runner.emit(Event::RunExited {
+            run_id,
+            status: RunStatus::Completed,
+            exit_code: Some(0),
+        });
+        presenter.drain_events();
+        let state = runner.0.borrow();
+        let refreshes = state
+            .commands
+            .iter()
+            .map(|envelope| &envelope.command)
+            .filter(|command| matches!(command, Command::ModelCatalogRefresh { .. }))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            refreshes.len(),
+            1,
+            "task restoration must refresh only once"
+        );
+        assert!(matches!(refreshes[0], Command::ModelCatalogRefresh {
+            request_id, harness: HarnessKind::Claude, executable, cwd, ..
+        } if *request_id == current_catalog_request_id(&presenter)
+            && *executable == ready_probe(HarnessKind::Claude).executable
+            && *cwd == presenter.model().selected_project.as_ref().unwrap().canonical_path));
+        drop(state);
+
+        emit_current_catalog(&presenter, &runner, claude_aliases());
+        presenter.drain_events();
+        assert_eq!(presenter.model().model_override.as_deref(), Some("sonnet"));
+        assert_eq!(presenter.model().messages[0].content, "hello");
+        assert!(presenter.model().catalog_selection_is_valid());
+    }
 }
 
 #[test]
