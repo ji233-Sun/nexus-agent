@@ -21,8 +21,19 @@ fn main() {
     let omp = args
         .windows(2)
         .any(|pair| pair == ["--mode", "json"]);
+    let title = if codex {
+        args.windows(2)
+            .any(|pair| pair == ["--sandbox", "read-only"])
+    } else if omp {
+        args.iter().any(|arg| arg == "--no-tools")
+    } else {
+        args.windows(2)
+            .any(|pair| pair[0] == "--tools" && pair[1].is_empty())
+    };
     fs::write(
-        if codex {
+        if title {
+            "title-args.txt"
+        } else if codex {
             "codex-args.txt"
         } else if omp {
             "omp-args.txt"
@@ -33,10 +44,46 @@ fn main() {
     )
     .unwrap();
     if let Ok(value) = env::var("TEST_PROVIDER_API_KEY") {
-        fs::write("provider-env.txt", value).unwrap();
+        fs::write(
+            if title {
+                "title-provider-env.txt"
+            } else {
+                "provider-env.txt"
+            },
+            value,
+        )
+        .unwrap();
     }
     let mut prompt = String::new();
     io::stdin().read_to_string(&mut prompt).unwrap();
+    if title {
+        fs::write("title-prompt.txt", &prompt).unwrap();
+        if env::var_os("TEST_TITLE_BLOCK").is_some() {
+            let _child = Command::new(env::current_exe().unwrap())
+                .arg("--child")
+                .stdin(Stdio::null())
+                .spawn()
+                .unwrap();
+            loop {
+                thread::sleep(Duration::from_secs(1));
+            }
+        }
+        if codex {
+            println!(
+                r#"{{"type":"item.completed","item":{{"id":"title","type":"agent_message","text":"**Fix authentication flow.**"}}}}"#
+            );
+        } else if omp {
+            println!(
+                r#"{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"**Fix authentication flow.**"}}],"stopReason":"stop"}}}}"#
+            );
+        } else {
+            println!(
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"**Fix authentication flow.**"}}]}}}}"#
+            );
+        }
+        io::stdout().flush().unwrap();
+        return;
+    }
     if prompt == "wait-for-cancel" {
         let _child = Command::new(env::current_exe().unwrap())
             .arg("--child")

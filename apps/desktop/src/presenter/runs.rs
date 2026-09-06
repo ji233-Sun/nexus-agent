@@ -1,7 +1,9 @@
 use super::{Presenter, executable_setting_key};
 use crate::infrastructure::storage::NewTaskRun;
 use crate::model::ModelCatalogState;
-use nexus_domain::{HarnessKind, MessageKind, MessageRole, RunStatus, ToolMetadata};
+use nexus_domain::{
+    HarnessKind, MessageKind, MessageRole, RunStatus, ToolMetadata, compact_task_title,
+};
 use nexus_protocol::{Command, CommandEnvelope, Event, StartRun};
 use std::time::Instant;
 use uuid::Uuid;
@@ -82,6 +84,16 @@ impl Presenter {
             } if self.model.codex_model_catalog.accepts(request_id) => {
                 self.model.codex_model_catalog = ModelCatalogState::Failed(message.clone());
                 self.model.status = format!("Codex 模型目录加载失败：{message}");
+            }
+            Event::TaskTitleGenerated { task_id, title } => {
+                if let Some(title) = compact_task_title(&title)
+                    && self
+                        .storage
+                        .update_task_title(task_id, &title)
+                        .unwrap_or(false)
+                {
+                    self.reload_tasks();
+                }
             }
             Event::RunStarted { run_id, .. } if self.model.active_run == Some(run_id) => {
                 let harness = self
@@ -275,7 +287,7 @@ impl Presenter {
         } else {
             self.model.effort
         };
-        let title: String = prompt.chars().take(48).collect();
+        let title = compact_task_title(&prompt).unwrap_or_else(|| "新任务".into());
         let created = self.storage.create_task_run(NewTaskRun {
             project_id: project.id,
             title: &title,

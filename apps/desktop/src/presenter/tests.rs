@@ -506,6 +506,41 @@ fn submit_persists_configuration_and_prevents_duplicate_runs() {
     assert_eq!(config.effort, request.effort);
     assert_eq!(presenter.model().messages[0].content, request.prompt);
     assert_eq!(presenter.model().tasks.len(), 1);
+    assert_eq!(presenter.model().tasks[0].title, "explain this project");
+}
+
+#[test]
+fn generated_title_replaces_fallback_and_is_persisted() {
+    let (mut presenter, runner, _directory) = fixture();
+    assert!(presenter.submit("  **请修复登录流程。**\n并补充回归测试  ", "claude"));
+    let task_id = presenter.model().selected_task.unwrap();
+    assert_eq!(
+        presenter.model().tasks[0].title,
+        "请修复登录流程。 并补充回归测试"
+    );
+
+    runner.emit(Event::TaskTitleGenerated {
+        task_id,
+        title: "```".into(),
+    });
+    assert!(presenter.drain_events());
+    assert_eq!(
+        presenter.model().tasks[0].title,
+        "请修复登录流程。 并补充回归测试"
+    );
+
+    runner.emit(Event::TaskTitleGenerated {
+        task_id,
+        title: "**修复登录流程。**".into(),
+    });
+    assert!(presenter.drain_events());
+
+    assert_eq!(presenter.model().tasks[0].title, "修复登录流程");
+    let project_id = presenter.model().selected_project.as_ref().unwrap().id;
+    assert_eq!(
+        presenter.storage.tasks(project_id).unwrap()[0].title,
+        "修复登录流程"
+    );
 }
 
 #[test]

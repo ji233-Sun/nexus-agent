@@ -11,6 +11,7 @@ Nexus Agent 是一个面向 Linux、macOS 和 Windows 的本地桌面应用，�
 - 为 Claude Code 选择 `默认 / Sonnet / Opus / Haiku` 模型；Codex 与 OMP 可使用 CLI 默认模型或当前 Profile 的模型。
 - 配置 `Low / Medium / High / XHigh / Max` 思考层级。
 - 通过 JSON Lines Runner 启动 Harness，显示文本、工具调用、状态和错误。
+- 用当前 Harness 异步生成简洁任务标题；生成失败时保留首条 Prompt 的本地回退标题。
 - 取消和关闭时清理 Harness 进程树：Unix 先中断再超时终止，Windows 使用系统 `taskkill /T /F`。
 - SQLite 持久化 Nexus 发起的项目、任务、Run 和最终消息；启动时将遗留运行标为 `Interrupted`。
 - 在本机回环地址提供带令牌鉴权的 Remote Control 服务，并内置 React Web Client，可通过 FRP TCP 转发后远程查看会话、发起任务和取消运行。

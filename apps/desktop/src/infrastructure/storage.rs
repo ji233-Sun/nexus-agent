@@ -208,6 +208,17 @@ impl Storage {
             .map_err(Into::into)
     }
 
+    pub fn update_task_title(&self, task_id: Uuid, title: &str) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        self.connection
+            .execute(
+                "UPDATE tasks SET title = ?2, updated_at = ?3 WHERE id = ?1 AND title <> ?2",
+                params![task_id.to_string(), title, now],
+            )
+            .map(|changed| changed > 0)
+            .map_err(Into::into)
+    }
+
     pub fn create_task_run(&mut self, request: NewTaskRun<'_>) -> Result<(Uuid, Uuid)> {
         let NewTaskRun {
             project_id,
@@ -527,11 +538,22 @@ mod tests {
         storage
             .update_run_status(run_id, RunStatus::Running)
             .unwrap();
+        assert!(
+            storage
+                .update_task_title(task_id, "Generated title")
+                .unwrap()
+        );
+        assert!(
+            !storage
+                .update_task_title(task_id, "Generated title")
+                .unwrap()
+        );
         drop(storage);
 
         let storage = Storage::open(&database).unwrap();
         let tasks = storage.tasks(project.id).unwrap();
         assert_eq!(tasks[0].status, RunStatus::Interrupted);
+        assert_eq!(tasks[0].title, "Generated title");
         let messages = storage.messages(task_id).unwrap();
         assert_eq!(messages[0].content, "hello");
         let config = storage.conversation_config(task_id).unwrap().unwrap();

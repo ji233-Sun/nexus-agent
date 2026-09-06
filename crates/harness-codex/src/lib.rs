@@ -57,6 +57,21 @@ pub fn build_launch_spec(
     }
 }
 
+pub fn build_title_launch_spec(
+    executable: &str,
+    cwd: &Path,
+    prompt: &str,
+    model: Option<&str>,
+    effort: ThinkingEffort,
+) -> LaunchSpec {
+    let mut spec = build_launch_spec(executable, cwd, prompt, model, effort);
+    if let Some(sandbox) = spec.args.iter_mut().find(|arg| *arg == "workspace-write") {
+        *sandbox = "read-only".into();
+    }
+    spec.args.insert(1, "--ignore-rules".into());
+    spec
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelCatalogError {
     Cancelled,
@@ -637,6 +652,26 @@ mod tests {
         assert_eq!(spec.args.last().map(String::as_str), Some("-"));
         assert!(!spec.args.iter().any(|arg| arg.contains("secret prompt")));
         assert_eq!(spec.stdin, "secret prompt");
+    }
+
+    #[test]
+    fn title_launch_spec_uses_read_only_sandbox() {
+        let spec = build_title_launch_spec(
+            "/usr/local/bin/codex",
+            Path::new("/tmp/project"),
+            "title prompt",
+            Some("gpt-test"),
+            ThinkingEffort::Low,
+        );
+
+        assert!(
+            spec.args
+                .windows(2)
+                .any(|pair| pair == ["--sandbox", "read-only"])
+        );
+        assert!(spec.args.iter().any(|arg| arg == "--ignore-rules"));
+        assert!(!spec.args.iter().any(|arg| arg == "workspace-write"));
+        assert!(!spec.args.iter().any(|arg| arg.contains("title prompt")));
     }
 
     #[test]

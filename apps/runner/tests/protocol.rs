@@ -90,6 +90,35 @@ impl TestRunner {
         }
     }
 
+    async fn collect_run_and_title(
+        &mut self,
+        run_id: Uuid,
+        task_id: Uuid,
+        expected: RunStatus,
+    ) -> (Vec<Event>, String) {
+        let mut events = Vec::new();
+        let mut run_finished = false;
+        let mut title = None;
+        while !run_finished || title.is_none() {
+            let event = self.next().await;
+            match &event {
+                Event::RunExited {
+                    run_id: id, status, ..
+                } if *id == run_id => {
+                    assert_eq!(*status, expected);
+                    run_finished = true;
+                }
+                Event::TaskTitleGenerated {
+                    task_id: id,
+                    title: generated,
+                } if *id == task_id => title = Some(generated.clone()),
+                _ => {}
+            }
+            events.push(event);
+        }
+        (events, title.unwrap())
+    }
+
     async fn shutdown(mut self) {
         self.send(Command::RunnerShutdown).await;
         self.wait_for_exit().await;
@@ -360,6 +389,89 @@ async fn runner_streams_fake_omp_and_uses_guarded_json_mode() {
         fs::read_to_string(directory.path().join("provider-env.txt")).unwrap(),
         "test-secret"
     );
+}
+
+#[tokio::test]
+async fn runner_generates_titles_with_each_harness_in_a_safe_background_process() {
+    for harness in HarnessKind::ALL {
+        let directory = tempfile::tempdir().unwrap();
+        let mut request = request(
+            directory.path(),
+            fake_harness(directory.path()),
+            harness,
+            "Please fix the authentication flow and add regression tests",
+        );
+        request.environment.push(EnvironmentVariable {
+            name: "TEST_PROVIDER_API_KEY".into(),
+            value: "title-secret".into(),
+        });
+        let run_id = request.run_id;
+        let task_id = request.task_id;
+        let mut runner = TestRunner::spawn();
+        runner.send(Command::RunStart(request)).await;
+
+        let (_, title) = runner
+            .collect_run_and_title(run_id, task_id, RunStatus::Completed)
+            .await;
+        runner.shutdown().await;
+
+        assert_eq!(title, "Fix authentication flow");
+        let args = fs::read_to_string(directory.path().join("title-args.txt")).unwrap();
+        assert!(!args.contains("Please fix the authentication flow"));
+        match harness {
+            HarnessKind::Claude => {
+                assert!(args.contains("--permission-mode\ndontAsk"));
+                assert!(args.ends_with("--tools\n"));
+            }
+            HarnessKind::Codex => {
+                assert!(args.contains("--sandbox\nread-only"));
+                assert!(args.contains("--ignore-rules"));
+                assert!(!args.contains("workspace-write"));
+            }
+            HarnessKind::Omp => {
+                assert!(args.contains("--no-tools"));
+                assert!(args.contains("--no-extensions"));
+                assert!(args.contains("--no-rules"));
+            }
+        }
+        assert!(
+            fs::read_to_string(directory.path().join("title-prompt.txt"))
+                .unwrap()
+                .contains("Please fix the authentication flow")
+        );
+        assert_eq!(
+            fs::read_to_string(directory.path().join("title-provider-env.txt")).unwrap(),
+            "title-secret"
+        );
+    }
+}
+
+#[tokio::test]
+async fn shutdown_reaps_a_blocked_title_process_tree() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut request = request(
+        directory.path(),
+        fake_harness(directory.path()),
+        HarnessKind::Codex,
+        "generate a title",
+    );
+    request.environment.push(EnvironmentVariable {
+        name: "TEST_TITLE_BLOCK".into(),
+        value: "1".into(),
+    });
+    let run_id = request.run_id;
+    let mut runner = TestRunner::spawn();
+    runner.send(Command::RunStart(request)).await;
+    runner.collect_run(run_id, RunStatus::Completed).await;
+
+    timeout(Duration::from_secs(5), async {
+        while !directory.path().join("title-prompt.txt").is_file() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    runner.shutdown().await;
 }
 
 #[tokio::test]

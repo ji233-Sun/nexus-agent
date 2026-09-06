@@ -29,11 +29,10 @@ pub(super) async fn cancel(child: &mut Child, pid: u32) -> io::Result<ExitStatus
             return status;
         }
     }
-    terminate(child, pid).await;
-    child.wait().await
+    terminate(child, pid).await
 }
 
-pub(super) async fn terminate(child: &mut Child, pid: u32) {
+pub(super) async fn terminate(child: &mut Child, pid: u32) -> io::Result<ExitStatus> {
     #[cfg(unix)]
     if pid > 0 {
         let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
@@ -54,4 +53,11 @@ pub(super) async fn terminate(child: &mut Child, pid: u32) {
             .await;
     }
     let _ = child.start_kill();
+    let status = child.wait().await;
+    #[cfg(unix)]
+    if pid > 0 {
+        // 根进程可能在首次发送进程组信号后、真正退出前派生子进程。
+        let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
+    }
+    status
 }
