@@ -1,6 +1,7 @@
 pub(crate) mod history;
 pub(crate) mod tools;
 
+use crate::i18n::{Language, LocalizedText};
 use history::{HistoryMessage, ThreadSummary};
 use nexus_domain::{
     ClaudeModel, HarnessKind, Message, ModelDescriptor, Project, ProviderProfile, TaskSummary,
@@ -19,7 +20,7 @@ pub(crate) enum ModelCatalogState {
     },
     Ready(Vec<ModelDescriptor>),
     Empty,
-    Failed(String),
+    Failed(LocalizedText),
 }
 
 impl ModelCatalogState {
@@ -71,6 +72,7 @@ pub(crate) struct QueuedMessage {
 
 #[derive(Default)]
 pub(crate) struct AppModel {
+    pub(crate) language: Language,
     pub(crate) appearance: AppearanceSettings,
     pub(crate) projects: Vec<Project>,
     pub(crate) selected_project: Option<Project>,
@@ -86,14 +88,14 @@ pub(crate) struct AppModel {
     pub(crate) active_task: Option<Uuid>,
     pub(crate) active_harness: Option<HarnessKind>,
     pub(crate) streaming_text: String,
-    pub(crate) status: String,
+    pub(crate) status: LocalizedText,
     pub(crate) harnesses: BTreeMap<HarnessKind, HarnessProbe>,
     pub(crate) codex_threads: Vec<ThreadSummary>,
     pub(crate) selected_codex_thread: Option<String>,
     pub(crate) codex_history_messages: Vec<HistoryMessage>,
     pub(crate) codex_history_loading: bool,
     pub(crate) codex_thread_loading: bool,
-    pub(crate) codex_history_error: Option<String>,
+    pub(crate) codex_history_error: Option<LocalizedText>,
     pub(crate) selected_harness: HarnessKind,
     pub(crate) project_dirty: bool,
     pub(crate) claude_model: ClaudeModel,
@@ -106,6 +108,10 @@ pub(crate) struct AppModel {
 }
 
 impl AppModel {
+    pub(crate) fn status_text(&self) -> &str {
+        self.status.render(self.language)
+    }
+
     pub(crate) fn selected_probe(&self) -> Option<&HarnessProbe> {
         self.harnesses.get(&self.selected_harness)
     }

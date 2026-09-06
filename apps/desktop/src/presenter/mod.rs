@@ -6,6 +6,7 @@ mod runs;
 pub(crate) mod tests;
 
 use crate::{
+    i18n::{Language, LocalizedText},
     infrastructure::{
         codex_history::Client as CodexHistoryClient,
         credentials::{CredentialStore, SystemCredentialStore},
@@ -73,6 +74,12 @@ impl Presenter {
     ) -> Self {
         let projects = storage.projects().unwrap_or_default();
         let archived_tasks = storage.archived_tasks().unwrap_or_default();
+        let language = storage
+            .setting("language")
+            .ok()
+            .flatten()
+            .map(|value| Language::from_setting(&value))
+            .unwrap_or_default();
         let appearance = storage
             .setting("appearance")
             .ok()
@@ -155,6 +162,7 @@ impl Presenter {
             runner,
             active_run_started_at: None,
             model: AppModel {
+                language,
                 appearance,
                 projects,
                 archived_tasks,
@@ -166,8 +174,14 @@ impl Presenter {
                 provider_profiles,
                 active_provider_profiles,
                 status: storage_error
+                    .map(LocalizedText::from)
                     .or_else(|| {
-                        credential_store_error.map(|error| format!("无法读取系统凭据库：{error}"))
+                        credential_store_error.map(|error| {
+                            LocalizedText::new(
+                                "无法读取系统凭据库：{error}",
+                                &[("error", (error).to_string())],
+                            )
+                        })
                     })
                     .unwrap_or_else(|| "正在连接本地 Runner…".into()),
                 ..AppModel::default()
@@ -193,13 +207,29 @@ impl Presenter {
                 }));
             }
         } else if !has_storage_error {
-            presenter.model.status = runner_error.unwrap_or_default();
+            presenter.model.status = runner_error.unwrap_or_default().into();
         }
         presenter
     }
 
     pub(crate) fn model(&self) -> &AppModel {
         &self.model
+    }
+
+    pub(crate) fn set_language(&mut self, language: Language) -> bool {
+        match self.storage.set_setting("language", language.as_str()) {
+            Ok(()) => {
+                self.model.language = language;
+                true
+            }
+            Err(error) => {
+                self.model.status = LocalizedText::new(
+                    "无法保存语言偏好：{error}",
+                    &[("error", error.to_string())],
+                );
+                false
+            }
+        }
     }
 
     pub(crate) fn set_appearance(&mut self, appearance: AppearanceSettings) -> bool {
@@ -212,7 +242,10 @@ impl Presenter {
                 true
             }
             Err(error) => {
-                self.model.status = format!("无法保存外观偏好：{error}");
+                self.model.status = LocalizedText::new(
+                    "无法保存外观偏好：{error}",
+                    &[("error", (error).to_string())],
+                );
                 false
             }
         }
@@ -256,7 +289,10 @@ impl Presenter {
                 self.select_project(project);
                 self.reload_projects();
             }
-            Err(error) => self.model.status = format!("无法打开项目：{error}"),
+            Err(error) => {
+                self.model.status =
+                    LocalizedText::new("无法打开项目：{error}", &[("error", (error).to_string())])
+            }
         }
     }
 
@@ -349,7 +385,7 @@ impl Presenter {
                         }))
                         .is_ok()
                 {
-                    format!("正在探测 {}…", config.harness)
+                    LocalizedText::new("正在探测 {0}…", &[("0", (config.harness).to_string())])
                 } else {
                     "Runner 不可用，无法探测任务使用的可执行文件。".into()
                 };
@@ -363,7 +399,8 @@ impl Presenter {
             return false;
         }
         if let Err(error) = self.storage.archive_task(task_id) {
-            self.model.status = format!("无法归档对话：{error}");
+            self.model.status =
+                LocalizedText::new("无法归档对话：{error}", &[("error", (error).to_string())]);
             return false;
         }
         if self.model.selected_task == Some(task_id) {
@@ -379,7 +416,8 @@ impl Presenter {
             return false;
         }
         if let Err(error) = self.storage.restore_task(task_id) {
-            self.model.status = format!("无法取消归档：{error}");
+            self.model.status =
+                LocalizedText::new("无法取消归档：{error}", &[("error", (error).to_string())]);
             return false;
         }
         self.reload_projects();
@@ -393,7 +431,8 @@ impl Presenter {
             return false;
         }
         if let Err(error) = self.storage.delete_task(task_id) {
-            self.model.status = format!("无法删除对话：{error}");
+            self.model.status =
+                LocalizedText::new("无法删除对话：{error}", &[("error", (error).to_string())]);
             return false;
         }
         self.model
@@ -423,11 +462,17 @@ impl Presenter {
                 });
                 self.reload_projects();
                 self.reload_tasks();
-                self.model.status = format!("已删除 {count} 个归档对话。");
+                self.model.status = LocalizedText::new(
+                    "已删除 {count} 个归档对话。",
+                    &[("count", (count).to_string())],
+                );
                 true
             }
             Err(error) => {
-                self.model.status = format!("无法清空归档对话：{error}");
+                self.model.status = LocalizedText::new(
+                    "无法清空归档对话：{error}",
+                    &[("error", (error).to_string())],
+                );
                 false
             }
         }
@@ -445,7 +490,8 @@ impl Presenter {
             let _ = self
                 .storage
                 .set_setting(executable_setting_key(harness), &executable);
-            self.model.status = format!("正在探测 {harness}…");
+            self.model.status =
+                LocalizedText::new("正在探测 {harness}…", &[("harness", (harness).to_string())]);
         }
         self.refresh_model_catalog();
     }
@@ -494,7 +540,10 @@ impl Presenter {
                 harness: self.model.selected_harness,
                 executable,
             }));
-            self.model.status = format!("正在探测 {}…", self.model.selected_harness);
+            self.model.status = LocalizedText::new(
+                "正在探测 {0}…",
+                &[("0", (self.model.selected_harness).to_string())],
+            );
         }
         self.refresh_model_catalog();
         true
@@ -524,9 +573,9 @@ impl Presenter {
                 .models()
                 .is_some_and(|models| models.iter().any(|model| model.id == id))
         }) {
-            self.model.status = format!(
-                "所选模型不在当前 {} 目录中，请刷新后重试。",
-                self.model.selected_harness
+            self.model.status = LocalizedText::new(
+                "所选模型不在当前 {0} 目录中，请刷新后重试。",
+                &[("0", (self.model.selected_harness).to_string())],
             );
             return;
         }
@@ -547,9 +596,18 @@ impl Presenter {
         self.model.status = if effort_reset {
             "模型已切换；原 effort 不受支持，已恢复为模型默认。".into()
         } else if let Some(model) = &self.model.model_override {
-            format!("本次 {harness} 任务将使用 {model}。")
+            LocalizedText::new(
+                "本次 {harness} 任务将使用 {model}。",
+                &[
+                    ("harness", (harness).to_string()),
+                    ("model", (model).to_string()),
+                ],
+            )
         } else {
-            format!("{harness} 模型已恢复为跟随 Profile / CLI 默认。")
+            LocalizedText::new(
+                "{harness} 模型已恢复为跟随 Profile / CLI 默认。",
+                &[("harness", (harness).to_string())],
+            )
         };
     }
 
@@ -564,9 +622,9 @@ impl Presenter {
                 .selected_catalog_model()
                 .is_some_and(|model| !model.supports_effort(&effort))
         {
-            self.model.status = format!(
-                "当前 {} 模型不支持所选 effort。",
-                self.model.selected_harness
+            self.model.status = LocalizedText::new(
+                "当前 {0} 模型不支持所选 effort。",
+                &[("0", (self.model.selected_harness).to_string())],
             );
             return;
         }
@@ -592,14 +650,23 @@ impl Presenter {
         let (environment, _) = match self.provider_launch_configuration() {
             Ok(configuration) => configuration,
             Err(error) => {
-                self.model.model_catalog = ModelCatalogState::Failed(error.to_string());
-                self.model.status = format!("无法加载 {harness} 模型目录：{error}");
+                self.model.model_catalog = ModelCatalogState::Failed(error.to_string().into());
+                self.model.status = LocalizedText::new(
+                    "无法加载 {harness} 模型目录：{error}",
+                    &[
+                        ("harness", (harness).to_string()),
+                        ("error", (error).to_string()),
+                    ],
+                );
                 return false;
             }
         };
         let Some(runner) = &self.runner else {
             self.model.model_catalog = ModelCatalogState::Failed("Runner 不可用。".into());
-            self.model.status = format!("Runner 不可用，无法加载 {harness} 模型目录。");
+            self.model.status = LocalizedText::new(
+                "Runner 不可用，无法加载 {harness} 模型目录。",
+                &[("harness", (harness).to_string())],
+            );
             return false;
         };
         let request_id = Uuid::new_v4();
@@ -613,10 +680,16 @@ impl Presenter {
         self.model.model_catalog = ModelCatalogState::Loading { request_id };
         if runner.send(command).is_err() {
             self.model.model_catalog = ModelCatalogState::Failed("Runner 不可用。".into());
-            self.model.status = format!("Runner 不可用，无法加载 {harness} 模型目录。");
+            self.model.status = LocalizedText::new(
+                "Runner 不可用，无法加载 {harness} 模型目录。",
+                &[("harness", (harness).to_string())],
+            );
             return false;
         }
-        self.model.status = format!("正在加载 {harness} 模型目录…");
+        self.model.status = LocalizedText::new(
+            "正在加载 {harness} 模型目录…",
+            &[("harness", (harness).to_string())],
+        );
         true
     }
 
@@ -647,18 +720,31 @@ impl Presenter {
                 &profile_id.to_string(),
             );
             self.model.status = match credential_result {
-                Ok(true) => format!("已启用 Provider Profile：{profile_name}"),
-                Ok(false) => {
-                    format!("已选择 {profile_name}，但系统凭据库中没有 API Key。")
-                }
-                Err(error) => format!("已选择 {profile_name}，但无法读取系统凭据库：{error}"),
+                Ok(true) => LocalizedText::new(
+                    "已启用 Provider Profile：{profile_name}",
+                    &[("profile_name", (profile_name).to_string())],
+                ),
+                Ok(false) => LocalizedText::new(
+                    "已选择 {profile_name}，但系统凭据库中没有 API Key。",
+                    &[("profile_name", (profile_name).to_string())],
+                ),
+                Err(error) => LocalizedText::new(
+                    "已选择 {profile_name}，但无法读取系统凭据库：{error}",
+                    &[
+                        ("profile_name", (profile_name).to_string()),
+                        ("error", (error).to_string()),
+                    ],
+                ),
             };
         } else {
             self.model.active_provider_profiles.remove(&harness);
             let _ = self
                 .storage
                 .set_setting(&active_profile_setting_key(harness), "");
-            self.model.status = format!("{harness} 将使用 CLI 当前登录配置。");
+            self.model.status = LocalizedText::new(
+                "{harness} 将使用 CLI 当前登录配置。",
+                &[("harness", (harness).to_string())],
+            );
         }
         if supports_model_catalog(harness) {
             self.restore_catalog_preferences();
@@ -685,15 +771,26 @@ impl Presenter {
             return None;
         }
         if name.chars().count() > PROVIDER_PROFILE_NAME_MAX_CHARS {
-            self.model.status =
-                format!("Provider Profile 名称不能超过 {PROVIDER_PROFILE_NAME_MAX_CHARS} 个字符。");
+            self.model.status = LocalizedText::new(
+                "Provider Profile 名称不能超过 {PROVIDER_PROFILE_NAME_MAX_CHARS} 个字符。",
+                &[(
+                    "PROVIDER_PROFILE_NAME_MAX_CHARS",
+                    (PROVIDER_PROFILE_NAME_MAX_CHARS).to_string(),
+                )],
+            );
             return None;
         }
         if model
             .as_deref()
             .is_some_and(|model| model.chars().count() > PROVIDER_MODEL_MAX_CHARS)
         {
-            self.model.status = format!("默认模型不能超过 {PROVIDER_MODEL_MAX_CHARS} 个字符。");
+            self.model.status = LocalizedText::new(
+                "默认模型不能超过 {PROVIDER_MODEL_MAX_CHARS} 个字符。",
+                &[(
+                    "PROVIDER_MODEL_MAX_CHARS",
+                    (PROVIDER_MODEL_MAX_CHARS).to_string(),
+                )],
+            );
             return None;
         }
         if !is_secret_environment_name(&api_key_env) {
@@ -712,7 +809,10 @@ impl Presenter {
                 && profile.id != draft.id.unwrap_or_default()
                 && profile.name.eq_ignore_ascii_case(&name)
         }) {
-            self.model.status = format!("{harness} 已存在同名 Provider Profile。");
+            self.model.status = LocalizedText::new(
+                "{harness} 已存在同名 Provider Profile。",
+                &[("harness", (harness).to_string())],
+            );
             return None;
         }
 
@@ -740,13 +840,19 @@ impl Presenter {
                     return None;
                 }
                 Err(error) => {
-                    self.model.status = format!("无法读取系统凭据库：{error}");
+                    self.model.status = LocalizedText::new(
+                        "无法读取系统凭据库：{error}",
+                        &[("error", (error).to_string())],
+                    );
                     return None;
                 }
             }
         } else {
             if let Err(error) = self.credentials.set_api_key(profile_id, api_key) {
-                self.model.status = format!("无法安全保存 API Key：{error}");
+                self.model.status = LocalizedText::new(
+                    "无法安全保存 API Key：{error}",
+                    &[("error", (error).to_string())],
+                );
                 return None;
             }
             true
@@ -768,7 +874,10 @@ impl Presenter {
             profiles.push(profile.clone());
         }
         if let Err(error) = self.storage.set_provider_profiles(&profiles) {
-            self.model.status = format!("无法保存 Provider Profile：{error}");
+            self.model.status = LocalizedText::new(
+                "无法保存 Provider Profile：{error}",
+                &[("error", (error).to_string())],
+            );
             return None;
         }
         self.model.provider_profiles = profiles;
@@ -779,7 +888,10 @@ impl Presenter {
             &active_profile_setting_key(harness),
             &profile_id.to_string(),
         );
-        self.model.status = format!("Provider Profile 已保存并启用：{}", profile.name);
+        self.model.status = LocalizedText::new(
+            "Provider Profile 已保存并启用：{0}",
+            &[("0", (profile.name).to_string())],
+        );
         if supports_model_catalog(harness) {
             self.restore_catalog_preferences();
             self.refresh_model_catalog();
@@ -798,13 +910,19 @@ impl Presenter {
             return false;
         }
         if let Err(error) = self.credentials.delete_api_key(profile_id) {
-            self.model.status = format!("无法从系统凭据库删除 API Key：{error}");
+            self.model.status = LocalizedText::new(
+                "无法从系统凭据库删除 API Key：{error}",
+                &[("error", (error).to_string())],
+            );
             return false;
         }
         let mut profiles = self.model.provider_profiles.clone();
         profiles.retain(|profile| profile.id != profile_id);
         if let Err(error) = self.storage.set_provider_profiles(&profiles) {
-            self.model.status = format!("无法删除 Provider Profile：{error}");
+            self.model.status = LocalizedText::new(
+                "无法删除 Provider Profile：{error}",
+                &[("error", (error).to_string())],
+            );
             return false;
         }
         self.model.provider_profiles = profiles;

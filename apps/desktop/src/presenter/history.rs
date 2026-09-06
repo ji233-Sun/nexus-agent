@@ -38,7 +38,7 @@ impl Presenter {
                         self.model.codex_threads = threads;
                         self.model.codex_history_error = None;
                     }
-                    Err(error) => self.model.codex_history_error = Some(error),
+                    Err(error) => self.model.codex_history_error = Some(error.into()),
                 }
             }
             CodexHistoryEvent::ThreadLoaded { thread_id, result }

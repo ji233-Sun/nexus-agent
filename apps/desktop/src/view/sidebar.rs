@@ -52,19 +52,26 @@ impl NexusView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let locale = self.presenter.model().language;
         let colors = palette(cx);
         let material = materials(cx);
         let model = self.presenter.model();
         let query = self.search_input.read(cx).value();
         let selected_project_id = model.selected_project.as_ref().map(|project| project.id);
         let history_status = if model.codex_history_loading {
-            "正在读取本机会话…".to_owned()
+            locale.text("正在读取本机会话…").to_owned()
         } else if let Some(error) = &model.codex_history_error {
-            format!("历史不可用：{error}")
+            locale.format(
+                "历史不可用：{error}",
+                &[("error", error.render(locale).to_owned())],
+            )
         } else if self.presenter.history_available() {
-            format!("{} 条本机会话 · 只读浏览", model.codex_threads.len())
+            locale.format(
+                "{0} 条本机会话 · 只读浏览",
+                &[("0", (model.codex_threads.len()).to_string())],
+            )
         } else {
-            "等待检测 Codex CLI".to_owned()
+            locale.text("等待检测 Codex CLI").to_owned()
         };
         let projects = div()
             .flex()
@@ -140,8 +147,8 @@ impl NexusView {
                                                 .size(px(COMPACT_CONTROL_HEIGHT))
                                                 .p_0()
                                                 .icon(IconName::Ellipsis)
-                                                .accessibility_label("对话操作")
-                                                .tooltip("对话操作")
+                                                .accessibility_label(locale.text("对话操作"))
+                                                .tooltip(locale.text("对话操作"))
                                                 .disabled(!can_manage),
                                             reduced_motion,
                                             move |menu, _, _| {
@@ -149,22 +156,19 @@ impl NexusView {
                                                 let delete_app = delete_app.clone();
                                                 menu.min_w(px(144.))
                                                     .item(
-                                                        PopupMenuItem::new("归档对话")
-                                                            .icon(IconName::Inbox)
-                                                            .on_click(move |_, window, cx| {
-                                                                archive_app.update(
-                                                                    cx,
-                                                                    |app, cx| {
-                                                                        app.archive_task(
-                                                                            id, window, cx,
-                                                                        )
-                                                                    },
-                                                                );
-                                                            }),
+                                                        PopupMenuItem::new(
+                                                            locale.text("归档此对话"),
+                                                        )
+                                                        .icon(IconName::Inbox)
+                                                        .on_click(move |_, window, cx| {
+                                                            archive_app.update(cx, |app, cx| {
+                                                                app.archive_task(id, window, cx)
+                                                            });
+                                                        }),
                                                     )
                                                     .item(PopupMenuItem::separator())
                                                     .item(
-                                                        PopupMenuItem::new("删除对话")
+                                                        PopupMenuItem::new(locale.text("删除对话"))
                                                             .icon(IconName::Delete)
                                                             .on_click(move |_, window, cx| {
                                                                 delete_app.update(cx, |app, cx| {
@@ -239,8 +243,8 @@ impl NexusView {
                                                     .flex_none()
                                                     .text_color(rgb(colors.text)),
                                             )
-                                            .accessibility_label("在此项目中新建对话")
-                                            .tooltip("新建对话")
+                                            .accessibility_label(locale.text("在此项目中新建对话"))
+                                            .tooltip(locale.text("新建对话"))
                                             .disabled(!can_create_task)
                                             .on_click(move |_, window, cx| {
                                                 cx.stop_propagation();
@@ -274,9 +278,9 @@ impl NexusView {
                                         colors,
                                         (ElementId::from(project_id), "empty"),
                                         if query.trim().is_empty() {
-                                            "开始任务后，记录会出现在这里"
+                                            locale.text("开始任务后，记录会出现在这里")
                                         } else {
-                                            "没有匹配的任务"
+                                            locale.text("没有匹配的任务")
                                         },
                                         None,
                                     )
@@ -348,7 +352,7 @@ impl NexusView {
                                 .w_full()
                                 .h(px(SIDEBAR_ROW_HEIGHT))
                                 .text_size(px(13.))
-                                .accessibility_label("新建任务")
+                                .accessibility_label(locale.text("新建任务"))
                                 .child(
                                     div()
                                         .text_size(px(13.))
@@ -362,7 +366,7 @@ impl NexusView {
                                                 .items_center()
                                                 .gap_2()
                                                 .child(Icon::new(IconName::Plus))
-                                                .child("新建任务"),
+                                                .child(locale.text("新建任务")),
                                         )
                                         .child(
                                             div()
@@ -375,7 +379,7 @@ impl NexusView {
                                                 }),
                                         ),
                                 )
-                                .tooltip("在当前项目中开始新任务")
+                                .tooltip(locale.text("在当前项目中开始新任务"))
                                 .disabled(
                                     model.selected_project.is_none() || model.active_run.is_some(),
                                 )
@@ -416,14 +420,14 @@ impl NexusView {
                                     .pb(px(10.))
                                     .text_size(px(12.))
                                     .text_color(rgb(colors.muted))
-                                    .child("项目空间"),
+                                    .child(locale.text("项目空间")),
                             )
                             .child(projects)
                             .child(
                                 navigation_row(
                                     colors,
                                     "add-project",
-                                    "添加本地项目",
+                                    locale.text("添加本地项目"),
                                     Some(IconName::Plus),
                                 )
                                 .debug_selector(|| "add-project".into())
@@ -441,7 +445,7 @@ impl NexusView {
                                         navigation_row(
                                             colors,
                                             "codex-history-disclosure",
-                                            "Codex 最近会话",
+                                            locale.text("Codex 最近会话"),
                                             Some(IconName::FileText),
                                         )
                                         .suffix(move |_, _| {
@@ -476,9 +480,9 @@ impl NexusView {
                                                         colors,
                                                         "history-empty",
                                                         if query.trim().is_empty() {
-                                                            "暂无可显示的会话"
+                                                            locale.text("暂无可显示的会话")
                                                         } else {
-                                                            "没有匹配的历史会话"
+                                                            locale.text("没有匹配的历史会话")
                                                         },
                                                         None,
                                                     )
@@ -491,7 +495,7 @@ impl NexusView {
                                                     navigation_row(
                                                         colors,
                                                         "codex-history-read-more",
-                                                        "Read More",
+                                                        locale.text("查看更多"),
                                                         Some(IconName::ChevronDown),
                                                     )
                                                     .text_color(rgb(colors.muted))
@@ -537,7 +541,7 @@ impl NexusView {
                                         .small()
                                         .size(px(COMPACT_CONTROL_HEIGHT))
                                         .icon(IconName::RotateCw)
-                                        .tooltip("刷新本机 Codex 历史")
+                                        .tooltip(locale.text("刷新本机 Codex 历史"))
                                         .disabled(
                                             !self.presenter.history_available()
                                                 || model.codex_history_loading,
@@ -553,7 +557,7 @@ impl NexusView {
                                 .w_full()
                                 .h(px(SIDEBAR_ROW_HEIGHT))
                                 .text_size(px(13.))
-                                .accessibility_label("设置")
+                                .accessibility_label(locale.text("设置"))
                                 .child(
                                     div()
                                         .text_size(px(13.))
@@ -567,7 +571,7 @@ impl NexusView {
                                                 .items_center()
                                                 .gap_2()
                                                 .child(Icon::new(IconName::Settings2))
-                                                .child("设置"),
+                                                .child(locale.text("设置")),
                                         )
                                         .child(status_dot(
                                             model
@@ -1381,6 +1385,49 @@ mod tests {
                         .update(cx, |input, cx| input.focus(window, cx));
                 }
             });
+            if section == SettingsSection::General {
+                for (selector, language, prompt_placeholder, group_title) in [
+                    (
+                        "language-en",
+                        Language::English,
+                        "Describe a goal for the agent…",
+                        "Default",
+                    ),
+                    (
+                        "language-zh-CN",
+                        Language::Chinese,
+                        "描述一个目标，让 Agent 开始工作…",
+                        "默认",
+                    ),
+                ] {
+                    cx.run_until_parked();
+                    let language_button = cx.debug_bounds(selector).unwrap();
+                    cx.simulate_click(language_button.center(), Default::default());
+                    cx.run_until_parked();
+                    view.read_with(cx, |view, cx| {
+                        assert_eq!(view.presenter.model().language, language);
+                        assert_eq!(
+                            view.prompt_input.read(cx).presentation().placeholder(),
+                            prompt_placeholder
+                        );
+                        assert_eq!(
+                            view.catalog_model_select_content.groups[0].title,
+                            group_title
+                        );
+                        assert_eq!(view.prompt_input.read(cx).value(), "Keep this draft");
+                        assert_eq!(view.executable_input.read(cx).value(), "custom-agent");
+                        assert_eq!(
+                            view.provider_name_input.read(cx).value(),
+                            "Keep this provider draft"
+                        );
+                        assert_eq!(
+                            view.provider_api_key_input.read(cx).value(),
+                            "unsaved-test-key"
+                        );
+                        assert_eq!(view.presenter.model().selected_task, selected_task);
+                    });
+                }
+            }
         }
         cx.run_until_parked();
         let settings_shortcut = if cfg!(target_os = "macos") {

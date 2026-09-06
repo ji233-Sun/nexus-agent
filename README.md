@@ -135,6 +135,8 @@ cargo build --workspace
 
 桌面 UI 基于 [GPUI Kit 0.6](https://github.com/longbridge/gpui-kit)，使用其 Sidebar 导航、图标资源、Button、Input / Textarea、下拉菜单、Switch 和 Markdown 组件，统一石墨灰主题与控件交互。点击侧栏底部或任务顶部的“设置”进入独立设置页面，管理执行环境、远程访问和交互偏好；点击“返回工作区”恢复原任务、输入草稿和滚动位置。界面保留 `⌘/Ctrl K` 搜索、`⌘/Ctrl N` 新任务、`⌘/Ctrl ,` 切换设置和 `⌘/Ctrl Enter` 发送快捷键。
 
+桌面端默认使用简体中文，可在 **设置 → 通用 → 界面语言** 切换为 **English**，立即生效并在重启后保留。切换会更新界面、菜单、占位文字和应用状态提示，保留当前任务与输入草稿；用户内容、Agent 输出、原始诊断和 Remote Web 内容保持原样。
+
 桌面 UI 使用 MVP（Model–View–Presenter），Runner 使用分层架构。两个进程的入口只负责启动装配，业务逻辑放在独立模块中。
 
 ```text

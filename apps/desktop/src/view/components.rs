@@ -284,12 +284,12 @@ impl NexusView {
         let colors = palette(cx);
         let id = id.into();
         let animated = !self.reduced_motion;
-        let label = match role {
-            MessageRole::User => "You",
-            MessageRole::Assistant => "Agent",
-            MessageRole::Tool => "Tool",
-            MessageRole::System => "System",
-        };
+        let label = self.presenter.model().language.text(match role {
+            MessageRole::User => "你",
+            MessageRole::Assistant => "助手",
+            MessageRole::Tool => "工具",
+            MessageRole::System => "系统",
+        });
         let is_user = role == MessageRole::User;
         let is_panel = matches!(
             kind,
