@@ -9,8 +9,36 @@ use nexus_protocol::HarnessProbe;
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ThemePreference {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub(crate) struct AppearanceSettings {
+    pub(crate) theme: ThemePreference,
+    pub(crate) glass: bool,
+    pub(crate) reduced_motion: bool,
+}
+
+impl Default for AppearanceSettings {
+    fn default() -> Self {
+        Self {
+            theme: ThemePreference::System,
+            glass: true,
+            reduced_motion: false,
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct AppModel {
+    pub(crate) appearance: AppearanceSettings,
     pub(crate) projects: Vec<Project>,
     pub(crate) selected_project: Option<Project>,
     pub(crate) tasks: Vec<TaskSummary>,

@@ -7,7 +7,7 @@ mod timeline;
 mod tools;
 
 use crate::{
-    model::history::HistoryMessage,
+    model::{AppearanceSettings, ThemePreference, history::HistoryMessage},
     presenter::{Presenter, ProviderProfileDraft},
 };
 use components::*;
@@ -22,7 +22,6 @@ use gpui_kit as gpui;
 use gpui_kit::component::{
     Disableable as _, Icon, IconName, InteractiveElementExt as _, Selectable as _, Sizable as _,
     alert::Alert,
-    box_shadow,
     button::{Button, ButtonVariants as _},
     input::{Enter, Input, InputEvent, InputState, Textarea, TextareaState},
     menu::PopupMenuItem,
@@ -74,6 +73,15 @@ pub(crate) struct NexusView {
 
 impl NexusView {
     pub(crate) fn new(presenter: Presenter, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        cx.set_window_appearance(match presenter.model().appearance.theme {
+            ThemePreference::System => None,
+            ThemePreference::Light => Some(gpui::WindowAppearance::Light),
+            ThemePreference::Dark => Some(gpui::WindowAppearance::Dark),
+        });
+        cx.observe_window_appearance(window, Self::refresh_appearance)
+            .detach();
+        cx.observe_window_activation(window, Self::refresh_appearance)
+            .detach();
         let prompt_input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(2, 8)
@@ -152,7 +160,7 @@ impl NexusView {
         let sidebar_pane = cx.new(|cx| WorkspacePane::new(owner.clone(), PaneKind::Sidebar, cx));
         let timeline_pane = cx.new(|cx| WorkspacePane::new(owner.clone(), PaneKind::Timeline, cx));
         let settings_pane = cx.new(|cx| WorkspacePane::new(owner, PaneKind::Settings, cx));
-        let view = Self {
+        let mut view = Self {
             presenter,
             prompt_input,
             executable_input,
@@ -179,9 +187,43 @@ impl NexusView {
             reduced_motion: false,
             editing_provider_profile,
         };
+        view.refresh_appearance(window, cx);
         view.focus_handle.focus(window, cx);
         view.start_event_pump(cx);
         view
+    }
+
+    fn refresh_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let appearance = ResolvedAppearance::resolve(
+            self.presenter.model().appearance,
+            window.appearance(),
+            system_accessibility(),
+            window.is_window_active(),
+            cfg!(target_os = "macos"),
+        );
+        self.reduced_motion = appearance.reduced_motion;
+        if apply_theme(appearance, cx) {
+            window.set_background_appearance(appearance.window_background());
+            window.refresh();
+            cx.notify();
+        }
+    }
+
+    fn set_appearance(
+        &mut self,
+        settings: AppearanceSettings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.presenter.set_appearance(settings) {
+            cx.set_window_appearance(match settings.theme {
+                ThemePreference::System => None,
+                ThemePreference::Light => Some(gpui::WindowAppearance::Light),
+                ThemePreference::Dark => Some(gpui::WindowAppearance::Dark),
+            });
+            self.refresh_appearance(window, cx);
+        }
+        cx.notify();
     }
 
     fn start_event_pump(&self, cx: &mut Context<Self>) {
@@ -680,6 +722,8 @@ impl NexusView {
 
 impl NexusView {
     fn render_workspace(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = palette(cx);
+        let material = materials(cx);
         let model = self.presenter.model();
         let probe = model.selected_probe();
         let history = model.selected_codex_thread.is_some();
@@ -703,17 +747,17 @@ impl NexusView {
             "Ctrl Enter 发送新任务 · Enter 换行"
         };
         let header_status_color = if model.active_run.is_some() {
-            rgb(ACCENT).into()
+            rgb(colors.accent).into()
         } else {
             probe
                 .map(|probe| {
                     if probe.available && probe.authenticated {
-                        rgb(SUCCESS).into()
+                        rgb(colors.success).into()
                     } else {
-                        rgb(DANGER).into()
+                        rgb(colors.danger).into()
                     }
                 })
-                .unwrap_or_else(|| rgb(MUTED).into())
+                .unwrap_or_else(|| rgb(colors.muted).into())
         };
         let header_title = model
             .selected_codex_thread
@@ -746,7 +790,7 @@ impl NexusView {
             .child(
                 self.sidebar_pane.clone().cached(
                     gpui::StyleRefinement::default()
-                        .w(px(300.))
+                        .w(px(SIDEBAR_WIDTH))
                         .h_full()
                         .flex_none(),
                 ),
@@ -756,16 +800,16 @@ impl NexusView {
                     .flex_1()
                     .h_full()
                     .min_w_0()
-                    .bg(rgb(CANVAS))
                     .flex()
                     .flex_col()
                     .child(
                         div()
+                            .debug_selector(|| "workspace-header".into())
                             .h(px(HEADER_HEIGHT))
                             .flex_none()
-                            .bg(rgb(CANVAS))
-                            .border_b_1()
-                            .border_color(rgb(BORDER))
+                            .bg(material.chrome)
+                            .border_b(px(0.5))
+                            .border_color(material.edge)
                             .px_4()
                             .flex()
                             .items_center()
@@ -782,7 +826,7 @@ impl NexusView {
                                         } else {
                                             IconName::Folder
                                         })
-                                        .text_color(rgb(MUTED)),
+                                        .text_color(rgb(colors.muted)),
                                     )
                                     .child(
                                         div()
@@ -794,14 +838,8 @@ impl NexusView {
                                         element.child(
                                             div()
                                                 .flex_none()
-                                                .rounded(px(6.))
-                                                .bg(rgb(SURFACE))
-                                                .border_1()
-                                                .border_color(rgb(BORDER))
-                                                .px_2()
-                                                .py(px(3.))
-                                                .text_xs()
-                                                .text_color(rgb(MUTED))
+                                                .text_size(px(12.))
+                                                .text_color(rgb(colors.muted))
                                                 .child(context),
                                         )
                                     }),
@@ -811,8 +849,8 @@ impl NexusView {
                                     .flex()
                                     .items_center()
                                     .gap_2()
-                                    .text_xs()
-                                    .text_color(rgb(MUTED))
+                                    .text_size(px(12.))
+                                    .text_color(rgb(colors.muted))
                                     .child(live_status_dot(
                                         header_status_color,
                                         model.active_run.is_some() && !self.reduced_motion,
@@ -850,23 +888,25 @@ impl NexusView {
                     .child(
                         div()
                             .flex_none()
-                            .px_8()
+                            .bg(rgb(colors.canvas))
+                            .px(px(24.))
                             .pt_3()
                             .pb_4()
                             .child(
                                 div()
+                                    .debug_selector(|| "composer-surface".into())
                                     .relative()
                                     .w_full()
-                                    .max_w(px(816.))
+                                    .max_w(px(CONTENT_WIDTH))
                                     .mx_auto()
-                                    .rounded(px(CARD_RADIUS))
-                                    .bg(rgb(SURFACE))
+                                    .rounded(px(20.))
+                                    .bg(material.floating)
                                     .border_1()
-                                    .border_color(rgb(BORDER))
+                                    .border_color(material.edge)
                                     .when(prompt_focused, |element| {
-                                        element.border_color(rgb(ACCENT))
+                                        element.border_color(rgb(colors.accent))
                                     })
-                                    .shadow(glass_shadow())
+                                    .shadow(material.shadow())
                                     .p_3()
                                     .flex()
                                     .flex_col()
@@ -879,7 +919,7 @@ impl NexusView {
                                     )
                                     .child(
                                         div()
-                                            .min_h(px(CONTROL_HEIGHT))
+                                            .min_h(px(COMPACT_CONTROL_HEIGHT))
                                             .mt_2()
                                             .flex()
                                             .flex_wrap()
@@ -943,14 +983,17 @@ impl NexusView {
                             )
                             .child(
                                 div()
-                                    .max_w(px(816.))
+                                    .max_w(px(CONTENT_WIDTH))
                                     .mx_auto()
                                     .mt_3()
                                     .flex()
                                     .items_center()
                                     .justify_between()
                                     .child(
-                                        div().text_xs().text_color(rgb(MUTED)).child(composer_hint),
+                                        div()
+                                            .text_size(px(12.))
+                                            .text_color(rgb(colors.muted))
+                                            .child(composer_hint),
                                     )
                                     .when(
                                         !history
@@ -978,6 +1021,7 @@ impl NexusView {
 
 impl Render for NexusView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = palette(cx);
         div()
             .key_context("Nexus")
             .track_focus(&self.focus_handle)
@@ -1008,9 +1052,9 @@ impl Render for NexusView {
             }))
             .size_full()
             .relative()
-            .bg(rgb(CANVAS))
-            .text_color(rgb(TEXT))
-            .text_sm()
+            .bg(rgba(0x00000000))
+            .text_color(rgb(colors.text))
+            .text_size(px(14.))
             .flex()
             // Keep workspace layout state while settings is visible so measured
             // disclosures do not collapse and clamp scroll offsets on return.

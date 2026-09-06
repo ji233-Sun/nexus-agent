@@ -5,8 +5,8 @@ use crate::{
 };
 use gpui_kit::component::Root;
 use gpui_kit::{
-    App, AppContext as _, Bounds, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
-    WindowOptions, point, px, size,
+    App, AppContext as _, Bounds, Styled as _, TitlebarOptions, WindowBounds, WindowOptions, point,
+    px, rgba, size,
 };
 use std::path::Path;
 
@@ -40,6 +40,7 @@ pub(crate) fn run() -> anyhow::Result<()> {
         .run(|cx: &mut App| {
             gpui_kit::init(cx);
             theme::configure_theme(cx);
+            let window_background = cx.global::<theme::ResolvedAppearance>().window_background();
             let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
             cx.spawn(async move |cx| {
                 let options = WindowOptions {
@@ -50,18 +51,14 @@ pub(crate) fn run() -> anyhow::Result<()> {
                         traffic_light_position: cfg!(target_os = "macos")
                             .then(|| point(px(18.), px(18.))),
                     }),
-                    window_background: if cfg!(target_os = "macos") {
-                        WindowBackgroundAppearance::Blurred
-                    } else {
-                        WindowBackgroundAppearance::Opaque
-                    },
+                    window_background,
                     window_min_size: Some(size(px(1_040.), px(680.))),
                     ..Default::default()
                 };
                 cx.open_window(options, |window, cx| {
                     let presenter = create_presenter();
                     let view = cx.new(|cx| NexusView::new(presenter, window, cx));
-                    cx.new(|cx| Root::new(view, window, cx))
+                    cx.new(|cx| Root::new(view, window, cx).bg(rgba(0x00000000)))
                 })?;
                 Ok::<_, anyhow::Error>(())
             })
