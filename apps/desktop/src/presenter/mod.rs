@@ -513,6 +513,42 @@ impl Presenter {
         harness: HarnessKind,
         current_executable: &str,
     ) -> bool {
+        if !self.switch_harness(harness, current_executable) {
+            return false;
+        }
+        self.restore_catalog_preferences();
+        self.refresh_model_catalog();
+        true
+    }
+
+    pub(crate) fn select_model_configuration(
+        &mut self,
+        harness: HarnessKind,
+        profile_id: Option<Uuid>,
+        current_executable: &str,
+    ) -> bool {
+        if self.model.active_run.is_some()
+            || (self.model.selected_harness == harness
+                && self
+                    .model
+                    .selected_provider_profile()
+                    .map(|profile| profile.id)
+                    == profile_id)
+            || profile_id.is_some_and(|id| {
+                !self
+                    .model
+                    .provider_profiles
+                    .iter()
+                    .any(|profile| profile.id == id && profile.harness == harness)
+            })
+        {
+            return false;
+        }
+        self.switch_harness(harness, current_executable);
+        self.select_provider_profile(profile_id)
+    }
+
+    fn switch_harness(&mut self, harness: HarnessKind, current_executable: &str) -> bool {
         if self.model.active_run.is_some() || self.model.selected_harness == harness {
             return false;
         }
@@ -525,7 +561,6 @@ impl Presenter {
         }
 
         self.model.selected_harness = harness;
-        self.restore_catalog_preferences();
         let _ = self
             .storage
             .set_setting("default_harness", self.model.selected_harness.as_str());
@@ -546,7 +581,6 @@ impl Presenter {
                 &[("0", (self.model.selected_harness).to_string())],
             );
         }
-        self.refresh_model_catalog();
         true
     }
 

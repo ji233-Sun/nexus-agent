@@ -1793,6 +1793,7 @@ fn active_run_locks_configuration_and_cancels_the_matching_run() {
     presenter.select_catalog_model(Some("opus".into()));
     presenter.select_effort(ThinkingEffort::Max);
     assert!(!presenter.select_harness(HarnessKind::Codex, "claude"));
+    assert!(!presenter.select_model_configuration(HarnessKind::Codex, None, "claude"));
     presenter.new_task();
     presenter.select_codex_thread("history".into());
     assert!(presenter.model().model_override.is_none());
@@ -2220,6 +2221,13 @@ fn catalog_preferences_are_isolated_by_harness_and_profile() {
     presenter.drain_events();
     presenter.select_catalog_model(Some("codex-model".into()));
     presenter.select_effort(ThinkingEffort::High);
+    presenter
+        .save_provider_profile(profile_draft(
+            None,
+            "Other Codex Profile",
+            "other-codex-secret",
+        ))
+        .unwrap();
 
     assert!(presenter.select_harness(HarnessKind::Omp, "codex"));
     let mut omp_draft = profile_draft(None, "OMP Profile", "omp-secret");
@@ -2242,7 +2250,34 @@ fn catalog_preferences_are_isolated_by_harness_and_profile() {
     presenter.select_catalog_model(Some("bigmodel/omp-model".into()));
     presenter.select_effort(ThinkingEffort::XHigh);
 
-    assert!(presenter.select_harness(HarnessKind::Codex, "omp"));
+    runner.0.borrow_mut().commands.clear();
+    assert!(presenter.select_model_configuration(
+        HarnessKind::Codex,
+        Some(codex_profile_id),
+        "omp"
+    ));
+    {
+        let state = runner.0.borrow();
+        let catalogs = state
+            .commands
+            .iter()
+            .filter_map(|envelope| match &envelope.command {
+                Command::ModelCatalogRefresh {
+                    harness,
+                    executable,
+                    environment,
+                    ..
+                } => Some((harness, executable, environment)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(catalogs.len(), 1);
+        let (harness, executable, environment) = catalogs[0];
+        assert_eq!(*harness, HarnessKind::Codex);
+        assert_eq!(executable, "codex");
+        assert_eq!(environment.len(), 1);
+        assert_eq!(environment[0].value, "codex-secret");
+    }
     assert_eq!(
         presenter
             .model()

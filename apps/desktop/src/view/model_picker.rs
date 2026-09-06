@@ -717,18 +717,18 @@ impl NexusView {
                 row.child(Icon::new(IconName::Check).size(px(14.)))
             })
             .on_click(cx.listener(move |app, _, window, cx| {
-                app.select_harness(harness, window, cx);
+                let executable = app.executable_input.read(cx).value().to_string();
                 if app
                     .presenter
-                    .model()
-                    .selected_provider_profile()
-                    .map(|profile| profile.id)
-                    != profile_id
+                    .select_model_configuration(harness, profile_id, &executable)
                 {
-                    app.select_provider_profile(profile_id, false, window, cx);
+                    app.sync_executable(window, cx);
+                    app.sync_provider_profile_form(profile_id, window, cx);
+                    app.presenter.notify_remote_changed();
                 }
                 app.catalog_model_select
                     .update(cx, |list, cx| list.focus(window, cx));
+                cx.notify();
             }))
     }
 }
