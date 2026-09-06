@@ -11,12 +11,14 @@ axum.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
 gpui-kit.workspace = true
+gpui-pre-reqwest-client = "0.3.3"
 keyring.workspace = true
 nexus-domain = { path = "../../crates/domain" }
 nexus-protocol = { path = "../../crates/protocol" }
 nexus-runner = { path = "../runner" }
 rfd.workspace = true
 rusqlite.workspace = true
+semver = "1.0.28"
 serde.workspace = true
 serde_json.workspace = true
 smol.workspace = true

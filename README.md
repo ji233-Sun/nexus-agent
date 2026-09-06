@@ -83,6 +83,23 @@ Windows 的程序探测支持 `PATHEXT` 中的 `.exe`、`.com`、`.bat` 和 `.cm
 
 应用内可切换 Harness 并修改各自的可执行文件路径。Claude 模型与通用思考层级会持久化：Claude 分别转换为 `--model` 与 `--effort` 参数，Codex 通过 `model_reasoning_effort` 配置覆盖思考层级，OMP 使用 `--thinking`；OMP 不支持 `Max`，因此会映射为其最高层级 `xhigh`。三个 Harness 的 Prompt 都通过子进程 stdin 传递，不会出现在进程参数中。
 
+## 下载与发布
+
+[GitHub Releases](https://github.com/ji233-Sun/nexus-agent/releases) 提供以下压缩包，每个文件名都包含版本和目标架构：
+
+| 平台 | 目标架构 | 安装方式 |
+| --- | --- | --- |
+| macOS Apple Silicon | `aarch64-apple-darwin` | 解压 ZIP，将 `Nexus Agent.app` 移入“应用程序” |
+| macOS Intel | `x86_64-apple-darwin` | 解压 ZIP，将 `Nexus Agent.app` 移入“应用程序” |
+| Linux | `x86_64-unknown-linux-gnu` | 解压 TAR.GZ，运行 `nexus-desktop`；需要上述 GUI 运行依赖 |
+| Windows | `x86_64-pc-windows-msvc` | 解压 ZIP，运行 `nexus-desktop.exe` |
+
+Desktop 已内置 Runner，无需单独配置。Release 同时附带 `SHA256SUMS.txt`。macOS 应用只有本地临时签名，没有开发者签名或 Apple 公证；macOS 与 Windows 首次启动时可能需要按系统提示允许运行。
+
+维护者发布时，先更新根目录 `Cargo.toml` 的 `workspace.package.version` 和 `Cargo.lock`，完成检查后再推送对应的 `v<版本>` 标签（例如 `v0.1.0-alpha.2`）。[Release 工作流](.github/workflows/release.yml) 会校验标签与应用版本一致，重新构建内嵌 Web Client，在四个目标上检查、测试、构建和打包；全部成功后才创建 GitHub Release，上传压缩包、校验和及自动生成的发布说明。含预发布标识的版本会标记为 Pre-release。
+
+每次向 `main` 推送新提交（包括合并 PR）也会执行同一套检查和四平台打包流程，全部成功后自动发布一个 Nightly 预发布版。标签及压缩包文件名使用 `nightly-YYYY-MM-DD-<Unix秒时间戳>-<12位提交SHA>`，例如 `nightly-2026-09-06-1788673923-6bbbdd981018`。日期与时间戳取自该提交的提交者时间，日期按 UTC 计算；同一提交重跑工作流时保持相同标签。Nightly 标签指向本次构建的完整提交 SHA，始终标记为 Pre-release，不占用 Latest；不同提交的发布独立执行。应用与 macOS bundle 的基础版本继续沿用 `Cargo.toml`，无需为每次 Nightly 修改版本文件。
+
 ## Remote Control
 
 Desktop 启动后默认在 `127.0.0.1:3210` 提供 HTTP/WebSocket 服务。设置页面的 `REMOTE CONTROL` 区域会显示服务地址，并提供“复制链接”和“复制令牌”按钮。访问令牌保存在现有 SQLite `settings` 表中；API 请求必须使用 Bearer Token，WebSocket 使用页面生成的临时连接参数。
