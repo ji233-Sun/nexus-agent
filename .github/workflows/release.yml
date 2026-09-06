@@ -2,13 +2,14 @@ name: Release
 
 on:
   push:
+    branches: [main]
     tags: ["v*"]
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: false
 
 env:
@@ -17,11 +18,35 @@ env:
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
-  RELEASE_TAG: ${{ github.ref_name }}
 
 jobs:
+  prepare:
+    name: Prepare release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Determine release tag
+        id: release
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "branch" ]]; then
+            # Commit time keeps the tag stable across platforms and workflow retries.
+            tag=$(TZ=UTC git show -s --date=format-local:%Y-%m-%d \
+              --format="nightly-%cd-%ct-${GITHUB_SHA:0:12}" "$GITHUB_SHA")
+          else
+            tag="$GITHUB_REF_NAME"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
   build:
     name: Package (${{ matrix.target }})
+    needs: prepare
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
@@ -37,6 +62,7 @@ jobs:
           - os: windows-2025
             target: x86_64-pc-windows-msvc
     env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
       RELEASE_TARGET: ${{ matrix.target }}
     defaults:
       run:
@@ -49,13 +75,15 @@ jobs:
       - name: Install Rust toolchain
         run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt --component clippy --target "$RELEASE_TARGET"
 
-      - name: Verify tag matches the application version
+      - name: Read application version and verify release tags
+        id: version
         run: |
           version=$(cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[] | select(.name == "nexus-desktop") | .version')
-          if [[ "$RELEASE_TAG" != "v$version" ]]; then
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$RELEASE_TAG" != "v$version" ]]; then
             echo "::error::Release tag $RELEASE_TAG must match Cargo.toml version v$version"
             exit 1
           fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Install Linux GUI dependencies
         if: runner.os == 'Linux'
@@ -104,14 +132,15 @@ jobs:
 
       - name: Package macOS application
         if: runner.os == 'macOS'
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
         run: |
           package="nexus-agent-$RELEASE_TAG-$RELEASE_TARGET"
           bundle="target/package/$package/Nexus Agent.app"
           mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources" "target/release-assets"
           cp "target/$RELEASE_TARGET/release/nexus-desktop" "$bundle/Contents/MacOS/nexus-desktop"
           cp "apps/desktop/assets/brand/nexus-icon.icns" "$bundle/Contents/Resources/nexus-icon.icns"
-          version="${RELEASE_TAG#v}"
-          short_version="${version%%[-+]*}"
+          short_version="${APP_VERSION%%[-+]*}"
           cat > "$bundle/Contents/Info.plist" <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -159,11 +188,13 @@ jobs:
 
   publish:
     name: Publish GitHub Release
-    needs: build
+    needs: [prepare, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -180,10 +211,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          version="${RELEASE_TAG#v}"
           release_flags=()
-          if [[ "${version%%+*}" == *-* ]]; then
-            release_flags+=(--prerelease --latest=false)
+          if [[ "$GITHUB_REF_TYPE" == "branch" ]]; then
+            release_flags+=(--target "$GITHUB_SHA" --prerelease --latest=false)
+          else
+            release_flags+=(--verify-tag)
+            version="${RELEASE_TAG#v}"
+            if [[ "${version%%+*}" == *-* ]]; then
+              release_flags+=(--prerelease --latest=false)
+            fi
           fi
           gh release create "$RELEASE_TAG" "release-assets/"* \
-            --verify-tag --generate-notes --title "$RELEASE_TAG" "${release_flags[@]}"
+            --generate-notes --title "$RELEASE_TAG" "${release_flags[@]}"
