@@ -1,5 +1,6 @@
 use super::*;
 use crate::model::tools::{TimelineItem, timeline_items};
+use gpui_kit::component::button::ButtonCustomVariant;
 
 impl NexusView {
     pub(super) fn render_timeline(
@@ -131,6 +132,7 @@ impl NexusView {
                     && self.timeline_scroll.max_offset().y + self.timeline_scroll.offset().y
                         > px(48.),
                 |element| {
+                    let latest_message_background: Hsla = rgb(0x202020).into();
                     element.child(
                         div()
                             .absolute()
@@ -141,11 +143,19 @@ impl NexusView {
                             .justify_center()
                             .child(
                                 Button::new("latest-message")
+                                    .custom(
+                                        ButtonCustomVariant::new(cx)
+                                            .color(latest_message_background)
+                                            .foreground(rgb(0xffffff).into())
+                                            .hover(rgb(0x303030).into())
+                                            .active(rgb(0x101010).into()),
+                                    )
                                     .outline()
                                     .small()
                                     .h(px(COMPACT_CONTROL_HEIGHT))
                                     .rounded(px(CONTROL_RADIUS))
-                                    .bg(materials(cx).floating)
+                                    // Custom variants soften their normal fill; keep this overlay opaque.
+                                    .bg(latest_message_background)
                                     .shadow(materials(cx).shadow())
                                     .icon(IconName::ArrowDown)
                                     .label("回到最新消息")
