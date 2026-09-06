@@ -428,7 +428,7 @@ impl NexusView {
                                     .disabled(active_run)
                                     .on_click(move |_, window, cx| {
                                         app.update(cx, |app, cx| {
-                                            app.delete_task(task_id, window, cx)
+                                            app.confirm_delete_task(task_id, window, cx)
                                         });
                                     }),
                             ),
@@ -457,7 +457,7 @@ impl NexusView {
                         .icon(IconName::Delete)
                         .label("清空全部")
                         .disabled(active_run || archived_count == 0)
-                        .on_click(cx.listener(Self::delete_archived_tasks)),
+                        .on_click(cx.listener(Self::confirm_delete_archived_tasks)),
                 )],
             ))
             .child(settings_group(colors, "已归档", archived_rows))

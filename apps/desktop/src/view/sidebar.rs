@@ -165,7 +165,9 @@ impl NexusView {
                                                             .icon(IconName::Delete)
                                                             .on_click(move |_, window, cx| {
                                                                 delete_app.update(cx, |app, cx| {
-                                                                    app.delete_task(id, window, cx)
+                                                                    app.confirm_delete_task(
+                                                                        id, window, cx,
+                                                                    )
                                                                 });
                                                             }),
                                                     )
@@ -734,6 +736,125 @@ mod tests {
                     .any(|task| task.id == task_id)
             );
         });
+    }
+
+    #[gpui::test]
+    fn permanent_task_deletion_requires_explicit_confirmation(cx: &mut TestAppContext) {
+        let (view, cx) = scroll_test_view(cx);
+        let (task_id, task_title) = view.read_with(cx, |view, _| {
+            let task_id = view.presenter.model().selected_task.unwrap();
+            let task_title = view
+                .presenter
+                .model()
+                .tasks
+                .iter()
+                .find(|task| task.id == task_id)
+                .unwrap()
+                .title
+                .clone();
+            (task_id, task_title)
+        });
+
+        let actions_selector = format!("task-actions-{task_id}").leak();
+        let actions = cx.debug_bounds(actions_selector).unwrap().center();
+        cx.simulate_click(actions, Default::default());
+        cx.update(|window, cx| {
+            window.refresh();
+            let _ = window.draw(cx);
+        });
+        cx.simulate_keystrokes("down down enter");
+        assert!(cx.has_pending_prompt());
+        let (message, detail) = cx.pending_prompt().unwrap();
+        assert_eq!(message, format!("永久删除“{task_title}”？"));
+        assert!(detail.contains("无法撤销"));
+        assert!(view.read_with(cx, |view, _| {
+            view.presenter
+                .model()
+                .tasks
+                .iter()
+                .any(|task| task.id == task_id)
+        }));
+
+        cx.simulate_prompt_answer("取消");
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |view, _| {
+            view.presenter
+                .model()
+                .tasks
+                .iter()
+                .any(|task| task.id == task_id)
+        }));
+
+        view.update_in(cx, |view, window, cx| {
+            view.archive_task(task_id, window, cx);
+        });
+        let settings = cx.debug_bounds("open-settings").unwrap().center();
+        cx.simulate_click(settings, Default::default());
+        cx.run_until_parked();
+        let archived = cx.debug_bounds("settings-nav-archived").unwrap().center();
+        cx.simulate_click(archived, Default::default());
+        cx.run_until_parked();
+
+        let delete_selector = format!("delete-archived-{task_id}").leak();
+        let delete = cx.debug_bounds(delete_selector).unwrap().center();
+        cx.simulate_click(delete, Default::default());
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("永久删除");
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |view, _| {
+            view.presenter.model().archived_tasks.is_empty()
+        }));
+    }
+
+    #[gpui::test]
+    fn clearing_archived_tasks_requires_counted_confirmation(cx: &mut TestAppContext) {
+        let (view, cx) = scroll_test_view(cx);
+        let task_ids = view.read_with(cx, |view, _| {
+            view.presenter
+                .model()
+                .tasks
+                .iter()
+                .take(2)
+                .map(|task| task.id)
+                .collect::<Vec<_>>()
+        });
+        view.update_in(cx, |view, window, cx| {
+            for task_id in task_ids {
+                view.archive_task(task_id, window, cx);
+            }
+        });
+        let settings = cx.debug_bounds("open-settings").unwrap().center();
+        cx.simulate_click(settings, Default::default());
+        cx.run_until_parked();
+        let archived = cx.debug_bounds("settings-nav-archived").unwrap().center();
+        cx.simulate_click(archived, Default::default());
+        cx.run_until_parked();
+
+        let clear = cx.debug_bounds("delete-all-archived").unwrap().center();
+        cx.simulate_click(clear, Default::default());
+        assert!(cx.has_pending_prompt());
+        let (message, detail) = cx.pending_prompt().unwrap();
+        assert_eq!(message, "永久删除 2 个归档对话？");
+        assert!(detail.contains("这 2 个对话"));
+        assert_eq!(
+            view.read_with(cx, |view, _| view.presenter.model().archived_tasks.len()),
+            2
+        );
+
+        cx.simulate_prompt_answer("取消");
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(cx, |view, _| view.presenter.model().archived_tasks.len()),
+            2
+        );
+
+        let clear = cx.debug_bounds("delete-all-archived").unwrap().center();
+        cx.simulate_click(clear, Default::default());
+        cx.simulate_prompt_answer("全部删除");
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |view, _| {
+            view.presenter.model().archived_tasks.is_empty()
+        }));
     }
 
     #[gpui::test]
