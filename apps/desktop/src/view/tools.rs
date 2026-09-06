@@ -20,6 +20,7 @@ impl NexusView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let colors = palette(cx);
         let first = batch[0].call.id;
         let id: ElementId = (ElementId::from(first), "tool-batch").into();
         let expanded = self.expanded_messages.contains(&id);
@@ -87,7 +88,7 @@ impl NexusView {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_color(rgb(TEXT_SECONDARY))
+                            .text_color(rgb(colors.text_secondary))
                             .child(summary),
                     )
                     .on_click(cx.listener(move |app, _, _, cx| {
@@ -134,6 +135,7 @@ impl NexusView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let colors = palette(cx);
         let id = tool.call.id;
         let expanded = self.expanded_messages.contains(&id.into());
         let error = tool.is_error();
@@ -186,14 +188,14 @@ impl NexusView {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_color(rgb(TEXT_SECONDARY))
+                            .text_color(rgb(colors.text_secondary))
                             .child(preview),
                     )
                     .child(
                         div()
                             .flex_none()
-                            .text_xs()
-                            .text_color(rgb(if error { DANGER } else { MUTED }))
+                            .text_size(px(12.))
+                            .text_color(rgb(if error { colors.danger } else { colors.muted }))
                             .child(status),
                     )
                     .child(
@@ -235,13 +237,16 @@ impl NexusView {
                             }),
                         )
                         .when(tool.result.is_none(), |element| {
-                            element.child(div().text_xs().text_color(rgb(MUTED)).child(
-                                if running {
-                                    "等待工具返回结果…"
-                                } else {
-                                    "未收到此工具的执行结果。"
-                                },
-                            ))
+                            element.child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(colors.muted))
+                                    .child(if running {
+                                        "等待工具返回结果…"
+                                    } else {
+                                        "未收到此工具的执行结果。"
+                                    }),
+                            )
                         }),
                 )
             })
@@ -256,6 +261,8 @@ fn render_detail(
     window: &mut Window,
     cx: &mut gpui::App,
 ) -> AnyElement {
+    let colors = palette(cx);
+    let dark = cx.global::<ResolvedAppearance>().dark;
     let id: ElementId = (
         ElementId::from(tool_id),
         SharedString::from(format!("detail-{index}")),
@@ -280,9 +287,9 @@ fn render_detail(
         .flex_none()
         .rounded(px(CONTROL_RADIUS))
         .overflow_hidden()
-        .bg(rgb(SURFACE))
+        .bg(rgb(colors.surface))
         .border_1()
-        .border_color(rgb(BORDER))
+        .border_color(rgb(colors.border))
         .child(
             div()
                 .h(px(30.))
@@ -290,8 +297,8 @@ fn render_detail(
                 .flex()
                 .items_center()
                 .gap_2()
-                .text_xs()
-                .text_color(rgb(MUTED))
+                .text_size(px(12.))
+                .text_color(rgb(colors.muted))
                 .child(
                     div()
                         .flex_1()
@@ -301,8 +308,16 @@ fn render_detail(
                 )
                 .when(is_diff, |element| {
                     element
-                        .child(div().text_color(rgb(SUCCESS)).child(format!("+{added}")))
-                        .child(div().text_color(rgb(DANGER)).child(format!("−{removed}")))
+                        .child(
+                            div()
+                                .text_color(rgb(colors.success))
+                                .child(format!("+{added}")),
+                        )
+                        .child(
+                            div()
+                                .text_color(rgb(colors.danger))
+                                .child(format!("−{removed}")),
+                        )
                 })
                 .child(
                     Button::new((id.clone(), "copy"))
@@ -348,19 +363,19 @@ fn render_detail(
                                     .selectable(true)
                                     .style(
                                         CodeStyle::default()
-                                            .with_foreground(rgb(TEXT).into())
-                                            .with_dark(true)
+                                            .with_foreground(rgb(colors.text).into())
+                                            .with_dark(dark)
                                             .with_code_block(
                                                 gpui::StyleRefinement::default()
                                                     .font_family(MONO_FONT)
                                                     .text_size(px(12.))
                                                     .line_height(relative(1.65))
                                                     .p(px(10.))
-                                                    .bg(rgb(SURFACE)),
+                                                    .bg(rgb(colors.surface)),
                                             ),
                                     )
                                     .code_block_highlighter(move |block| {
-                                        code_highlights(&block.code(), &language, is_diff)
+                                        code_highlights(&block.code(), &language, is_diff, dark)
                                     }),
                                 ),
                         ),
@@ -405,29 +420,39 @@ fn diff_lines(code: &str) -> impl Iterator<Item = (&str, Option<char>)> {
     })
 }
 
-fn code_highlights(code: &str, language: &str, diff: bool) -> Vec<(Range<usize>, HighlightStyle)> {
+pub(super) fn code_highlights(
+    code: &str,
+    language: &str,
+    diff: bool,
+    dark: bool,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let colors = Palette::for_dark(dark);
     static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
     static THEMES: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
     let syntax = SYNTAXES
         .find_syntax_by_token(language)
         .unwrap_or_else(|| SYNTAXES.find_syntax_plain_text());
-    let theme = &THEMES.themes["base16-ocean.dark"];
+    let theme = &THEMES.themes[if dark {
+        "base16-ocean.dark"
+    } else {
+        "InspiredGitHub"
+    }];
     let mut before = HighlightLines::new(syntax, theme);
     let mut after = HighlightLines::new(syntax, theme);
     let mut ranges = Vec::new();
     let mut offset = 0;
     for (line, kind) in diff_lines(code) {
         let (prefix, background) = if diff && kind == Some('+') {
-            (1, Some(rgba(0x34d39925).into()))
+            (1, Some(rgb(colors.diff_added).into()))
         } else if diff && kind == Some('-') {
-            (1, Some(rgba(0xf8717125).into()))
+            (1, Some(rgb(colors.diff_removed).into()))
         } else if diff && kind == Some(' ') {
             (1, None)
         } else if diff {
             ranges.push((
                 offset..offset + line.len(),
                 HighlightStyle {
-                    color: Some(rgb(MUTED).into()),
+                    color: Some(rgb(colors.muted).into()),
                     ..Default::default()
                 },
             ));
@@ -443,11 +468,11 @@ fn code_highlights(code: &str, language: &str, diff: bool) -> Vec<(Range<usize>,
                     background_color: background,
                     color: Some(
                         rgb(if line.starts_with('+') {
-                            SUCCESS
+                            colors.success
                         } else if line.starts_with('-') {
-                            DANGER
+                            colors.danger
                         } else {
-                            MUTED
+                            colors.muted
                         })
                         .into(),
                     ),
@@ -469,12 +494,22 @@ fn code_highlights(code: &str, language: &str, diff: bool) -> Vec<(Range<usize>,
         if let Ok(tokens) = highlighter.highlight_line(text, &SYNTAXES) {
             for (style, token) in tokens {
                 let color = style.foreground;
+                let mut color = rgba(u32::from_be_bytes([color.r, color.g, color.b, color.a]));
+                let backdrop: gpui::Rgba = background
+                    .unwrap_or_else(|| rgb(colors.surface).into())
+                    .into();
+                // Some bundled syntax themes have low-contrast comments. Preserve
+                // their hue while moving toward the readable foreground as needed.
+                let target = rgb(colors.text);
+                while contrast_ratio(color, backdrop) < 4.5 {
+                    color.r += (target.r - color.r) * 0.2;
+                    color.g += (target.g - color.g) * 0.2;
+                    color.b += (target.b - color.b) * 0.2;
+                }
                 ranges.push((
                     offset..offset + token.len(),
                     HighlightStyle {
-                        color: Some(
-                            rgba(u32::from_be_bytes([color.r, color.g, color.b, color.a])).into(),
-                        ),
+                        color: Some(color.into()),
                         background_color: background,
                         font_weight: style
                             .font_style
@@ -510,36 +545,57 @@ mod tests {
     #[test]
     fn code_and_diff_highlights_preserve_unicode_and_addition_deletion_colors() {
         let code = "fn main() { println!(\"你好\"); }\n";
-        let styles = code_highlights(code, "rs", false);
-        assert!(
-            styles
-                .windows(2)
-                .any(|pair| pair[0].1.color != pair[1].1.color)
-        );
-        let diff = format!("@@ -1 +1 @@\n-old\n+{code}");
-        let styles = code_highlights(&diff, "rs", true);
-        let color_at = |offset| {
-            styles
-                .iter()
-                .find(|(range, _)| range.contains(&offset))
-                .unwrap()
-                .1
-        };
-        assert_eq!(
-            color_at(diff.find("-old").unwrap()).background_color,
-            Some(rgba(0xf8717125).into())
-        );
-        assert_eq!(
-            color_at(diff.find("+fn").unwrap()).background_color,
-            Some(rgba(0x34d39925).into())
-        );
-        assert_eq!(
-            color_at(diff.find("你好").unwrap()).background_color,
-            Some(rgba(0x34d39925).into())
-        );
-        for (range, _) in styles {
-            assert!(diff.is_char_boundary(range.start) && diff.is_char_boundary(range.end));
+        for dark in [true, false] {
+            let colors = Palette::for_dark(dark);
+            let styles = code_highlights(code, "rs", false, dark);
+            assert!(
+                styles
+                    .windows(2)
+                    .any(|pair| pair[0].1.color != pair[1].1.color)
+            );
+            let diff = format!("@@ -1 +1 @@\n-old\n+{code}");
+            let styles = code_highlights(&diff, "rs", true, dark);
+            let color_at = |offset| {
+                styles
+                    .iter()
+                    .find(|(range, _)| range.contains(&offset))
+                    .unwrap()
+                    .1
+            };
+            assert_eq!(
+                color_at(diff.find("-old").unwrap()).background_color,
+                Some(rgb(colors.diff_removed).into())
+            );
+            assert_eq!(
+                color_at(diff.find("+fn").unwrap()).background_color,
+                Some(rgb(colors.diff_added).into())
+            );
+            assert_eq!(
+                color_at(diff.find("你好").unwrap()).background_color,
+                Some(rgb(colors.diff_added).into())
+            );
+            for (range, style) in styles {
+                assert!(diff.is_char_boundary(range.start) && diff.is_char_boundary(range.end));
+                assert!(
+                    contrast_ratio(
+                        style.color.unwrap().into(),
+                        style
+                            .background_color
+                            .unwrap_or_else(|| rgb(colors.surface).into())
+                            .into()
+                    ) >= 4.5
+                );
+            }
+            let comment = code_highlights("// Readable comment\n", "rs", false, dark);
+            assert!(comment.iter().all(|(_, style)| contrast_ratio(
+                style.color.unwrap().into(),
+                rgb(colors.surface)
+            ) >= 4.5));
         }
+        assert_ne!(
+            code_highlights(code, "rs", false, false),
+            code_highlights(code, "rs", false, true)
+        );
         assert_eq!(
             fenced_code("```\n# literal", "md"),
             "````md\n```\n# literal\n````"

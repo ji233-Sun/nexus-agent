@@ -7,6 +7,7 @@ impl NexusView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let colors = palette(cx);
         let model = self.presenter.model();
         let compact = window.viewport_size().height < px(740.);
         let history = model.selected_codex_thread.is_some();
@@ -17,6 +18,7 @@ impl NexusView {
         };
         div()
             .relative()
+            .bg(rgb(colors.canvas))
             .flex_1()
             .min_h_0()
             .flex()
@@ -32,15 +34,17 @@ impl NexusView {
                     .child(
                         div()
                             .w_full()
-                            .max_w(px(if empty { 880. } else { 784. }))
+                            .max_w(px(CONTENT_WIDTH + 48.))
                             .min_h_full()
                             .mx_auto()
-                            .px_8()
+                            .px(px(24.))
                             .py(px(if compact { 16. } else { 32. }))
                             .flex()
                             .flex_col()
-                            .gap(px(20.))
-                            .when(empty, |element| element.child(self.render_welcome(compact)))
+                            .gap(px(16.))
+                            .when(empty, |element| {
+                                element.child(self.render_welcome(colors, compact))
+                            })
                             .when(!history, |element| {
                                 element.children(timeline_items(&model.messages).iter().map(
                                     |item| match item {
@@ -82,10 +86,10 @@ impl NexusView {
                                             .flex()
                                             .items_center()
                                             .gap_3()
-                                            .text_sm()
-                                            .text_color(rgb(TEXT_SECONDARY))
+                                            .text_size(px(13.))
+                                            .text_color(rgb(colors.text_secondary))
                                             .child(live_status_dot(
-                                                rgb(ACCENT).into(),
+                                                rgb(colors.accent).into(),
                                                 !self.reduced_motion,
                                             ))
                                             .child(
@@ -106,8 +110,8 @@ impl NexusView {
                                                             .items_center()
                                                             .justify_end()
                                                             .gap_2()
-                                                            .text_xs()
-                                                            .text_color(rgb(MUTED))
+                                                            .text_size(px(12.))
+                                                            .text_color(rgb(colors.muted))
                                                             .child("已运行")
                                                             .child(
                                                                 div().font_family(MONO_FONT).child(
@@ -141,6 +145,8 @@ impl NexusView {
                                     .small()
                                     .h(px(COMPACT_CONTROL_HEIGHT))
                                     .rounded(px(CONTROL_RADIUS))
+                                    .bg(materials(cx).floating)
+                                    .shadow(materials(cx).shadow())
                                     .icon(IconName::ArrowDown)
                                     .label("回到最新消息")
                                     .on_click(cx.listener(|app, _, _, cx| {
@@ -153,7 +159,7 @@ impl NexusView {
             )
     }
 
-    fn render_welcome(&self, compact: bool) -> impl IntoElement {
+    fn render_welcome(&self, colors: Palette, compact: bool) -> impl IntoElement {
         let model = self.presenter.model();
         let history = model.selected_codex_thread.is_some();
         if !history {
@@ -163,7 +169,10 @@ impl NexusView {
                     include_bytes!("../../assets/harness/claude.svg"),
                     rgb(0xd97757),
                 ),
-                HarnessKind::Codex => (include_bytes!("../../assets/harness/codex.svg"), rgb(TEXT)),
+                HarnessKind::Codex => (
+                    include_bytes!("../../assets/harness/codex.svg"),
+                    rgb(colors.text),
+                ),
                 HarnessKind::Omp => (
                     include_bytes!("../../assets/harness/omp.svg"),
                     rgb(0xf97316),
@@ -217,14 +226,14 @@ impl NexusView {
             .justify_center()
             .py(px(if compact { 8. } else { 32. }))
             .text_center()
-            .child(brand_mark(if compact { 40. } else { 48. }))
+            .child(brand_mark(colors, if compact { 40. } else { 48. }))
             .when(!compact, |element| {
                 element.child(
                     div()
                         .mt_6()
-                        .text_xs()
+                        .text_size(px(12.))
                         .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(rgb(MUTED))
+                        .text_color(rgb(colors.muted))
                         .child(eyebrow),
                 )
             })
@@ -240,7 +249,7 @@ impl NexusView {
                 div()
                     .mt_3()
                     .text_base()
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(colors.muted))
                     .line_height(relative(1.6))
                     .child(description),
             )
@@ -251,8 +260,11 @@ impl NexusView {
                         .flex()
                         .items_center()
                         .gap_2()
-                        .text_color(rgb(MUTED))
-                        .child(live_status_dot(rgb(ACCENT).into(), !self.reduced_motion))
+                        .text_color(rgb(colors.muted))
+                        .child(live_status_dot(
+                            rgb(colors.accent).into(),
+                            !self.reduced_motion,
+                        ))
                         .child("正在加载…"),
                 )
             })
@@ -301,7 +313,14 @@ mod tests {
         let now = Instant::now();
         let (view, cx) = cx.add_window_view(|window, cx| {
             let mut view = NexusView::new(presenter, window, cx);
-            view.reduced_motion = true;
+            view.set_appearance(
+                AppearanceSettings {
+                    reduced_motion: true,
+                    ..view.presenter.model().appearance
+                },
+                window,
+                cx,
+            );
             view
         });
         for (width, height, seconds) in [(1040., 680., 65), (1280., 800., 3601)] {

@@ -78,6 +78,58 @@ pub(crate) fn fixture() -> (Presenter, FakeRunner, tempfile::TempDir) {
 }
 
 #[test]
+fn appearance_preferences_restore_and_accept_missing_or_invalid_settings() {
+    use crate::model::{AppearanceSettings, ThemePreference};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("appearance.sqlite");
+    let mut presenter = Presenter::new(
+        Storage::open(&path).unwrap(),
+        Err(anyhow::anyhow!("test")),
+        None,
+    );
+    assert_eq!(presenter.model().appearance, AppearanceSettings::default());
+    for theme in [
+        ThemePreference::Dark,
+        ThemePreference::Light,
+        ThemePreference::System,
+    ] {
+        let appearance = AppearanceSettings {
+            theme,
+            glass: false,
+            reduced_motion: true,
+        };
+        assert!(presenter.set_appearance(appearance));
+        drop(presenter);
+        presenter = Presenter::new(
+            Storage::open(&path).unwrap(),
+            Err(anyhow::anyhow!("test")),
+            None,
+        );
+        assert_eq!(presenter.model().appearance, appearance);
+    }
+    for (raw, expected) in [
+        (
+            r#"{"theme":"dark"}"#,
+            AppearanceSettings {
+                theme: ThemePreference::Dark,
+                ..Default::default()
+            },
+        ),
+        ("invalid json", AppearanceSettings::default()),
+        (r#"{"theme":"unknown"}"#, AppearanceSettings::default()),
+    ] {
+        presenter.storage.set_setting("appearance", raw).unwrap();
+        drop(presenter);
+        presenter = Presenter::new(
+            Storage::open(&path).unwrap(),
+            Err(anyhow::anyhow!("test")),
+            None,
+        );
+        assert_eq!(presenter.model().appearance, expected);
+    }
+}
+
+#[test]
 fn tool_events_preserve_ids_and_full_payloads_after_reloading_a_task() {
     let (mut presenter, runner, _directory) = fixture();
     assert!(presenter.submit("run tools", "claude"));

@@ -12,7 +12,7 @@ use crate::{
         git::is_git_dirty,
         storage::Storage,
     },
-    model::AppModel,
+    model::{AppModel, AppearanceSettings},
     remote_control::{RemoteCommand, RemoteControl, TOKEN_SETTING_KEY},
 };
 use anyhow::{Result, bail};
@@ -72,6 +72,12 @@ impl Presenter {
         credentials: Box<dyn CredentialStore>,
     ) -> Self {
         let projects = storage.projects().unwrap_or_default();
+        let appearance = storage
+            .setting("appearance")
+            .ok()
+            .flatten()
+            .and_then(|value| serde_json::from_str(&value).ok())
+            .unwrap_or_default();
         let selected_harness = storage
             .setting("default_harness")
             .ok()
@@ -142,6 +148,7 @@ impl Presenter {
             runner,
             active_run_started_at: None,
             model: AppModel {
+                appearance,
                 projects,
                 selected_harness,
                 claude_model: model,
@@ -184,6 +191,22 @@ impl Presenter {
 
     pub(crate) fn model(&self) -> &AppModel {
         &self.model
+    }
+
+    pub(crate) fn set_appearance(&mut self, appearance: AppearanceSettings) -> bool {
+        let result = serde_json::to_string(&appearance)
+            .map_err(anyhow::Error::from)
+            .and_then(|value| self.storage.set_setting("appearance", &value));
+        match result {
+            Ok(()) => {
+                self.model.appearance = appearance;
+                true
+            }
+            Err(error) => {
+                self.model.status = format!("无法保存外观偏好：{error}");
+                false
+            }
+        }
     }
 
     pub(crate) fn drain_events(&mut self) -> bool {

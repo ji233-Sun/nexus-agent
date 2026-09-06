@@ -57,6 +57,8 @@ impl NexusView {
     }
 
     pub(super) fn render_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = palette(cx);
+        let material = materials(cx);
         let section = self.settings_section;
         let content = match section {
             SettingsSection::General => self.render_general_settings(cx).into_any_element(),
@@ -69,7 +71,6 @@ impl NexusView {
         div()
             .debug_selector(|| "settings-page".into())
             .size_full()
-            .bg(rgb(CANVAS))
             .flex()
             .child(
                 div()
@@ -78,9 +79,9 @@ impl NexusView {
                     .h_full()
                     .flex_none()
                     .pt(px(titlebar_inset))
-                    .bg(rgb(SURFACE))
-                    .border_r_1()
-                    .border_color(rgb(BORDER))
+                    .bg(material.chrome)
+                    .border_r(px(0.5))
+                    .border_color(material.edge)
                     .flex()
                     .flex_col()
                     .child(
@@ -91,7 +92,7 @@ impl NexusView {
                             .flex()
                             .items_center()
                             .gap_3()
-                            .child(brand_mark(28.))
+                            .child(brand_mark(colors, 28.))
                             .child(
                                 div()
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -106,7 +107,12 @@ impl NexusView {
                             .flex()
                             .flex_col()
                             .gap_1()
-                            .child(div().px(px(10.)).pb_3().child(section_label("设置")))
+                            .child(
+                                div()
+                                    .px(px(10.))
+                                    .pb_3()
+                                    .child(section_label(colors, "设置")),
+                            )
                             .children(SettingsSection::ALL.map(|section| {
                                 Button::new(section.id())
                                     .ghost()
@@ -159,27 +165,30 @@ impl NexusView {
                     .child(
                         div()
                             .debug_selector(|| "settings-breadcrumb".into())
-                            .h(px(HEADER_HEIGHT + titlebar_inset))
-                            .pt(px(titlebar_inset))
+                            .bg(material.chrome)
+                            .border_b(px(0.5))
+                            .border_color(material.edge)
+                            .h(px(HEADER_HEIGHT))
                             .flex_none()
                             .px_8()
                             .flex()
                             .items_center()
                             .gap_3()
-                            .child(div().text_color(rgb(MUTED)).child("设置"))
-                            .child(div().text_color(rgb(MUTED)).child("/"))
+                            .child(div().text_color(rgb(colors.muted)).child("设置"))
+                            .child(div().text_color(rgb(colors.muted)).child("/"))
                             .child(section.label()),
                     )
                     .child(
                         div()
                             .id("settings-scroll")
+                            .bg(rgb(colors.canvas))
                             .flex_1()
                             .min_h_0()
                             .overflow_y_scroll()
                             .lock_scroll_axis()
                             .track_scroll(&self.settings_scroll)
                             .px_8()
-                            .pt_5()
+                            .pt_8()
                             .pb_8()
                             .child(
                                 div()
@@ -187,7 +196,7 @@ impl NexusView {
                                         format!("settings-content-{}", section.id())
                                     })
                                     .w_full()
-                                    .max_w(px(960.))
+                                    .max_w(px(CONTENT_WIDTH))
                                     .mx_auto()
                                     .child(content),
                             )
@@ -197,37 +206,141 @@ impl NexusView {
     }
 
     fn render_general_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = palette(cx);
         let model = self.presenter.model();
+        let appearance = model.appearance;
         div()
             .flex()
             .flex_col()
             .gap_8()
             .child(settings_group(
-                "交互偏好",
-                [settings_row(
-                    "减少动效",
-                    "关闭入场位移和状态呼吸效果。本次窗口内生效。",
-                    Switch::new("reduce-motion")
-                        .accessibility_label("减少动效")
-                        .small()
-                        .checked(self.reduced_motion)
-                        .on_click(cx.listener(|app, checked, _, cx| {
-                            app.reduced_motion = *checked;
-                            cx.notify();
-                        })),
-                )],
+                colors,
+                "外观",
+                [
+                    div().py_4().flex().flex_col().gap_3().child("主题").child(
+                        div().w_full().max_w(px(600.)).flex().gap_3().children(
+                            [
+                                (ThemePreference::System, "system", "系统"),
+                                (ThemePreference::Light, "light", "浅色"),
+                                (ThemePreference::Dark, "dark", "深色"),
+                            ]
+                            .map(|(theme, id, label)| {
+                                let selected = appearance.theme == theme;
+                                Button::new(id)
+                                    .debug_selector(move || format!("appearance-theme-{id}"))
+                                    .ghost()
+                                    .p_1()
+                                    .h_auto()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .accessibility_label(format!("{label}主题"))
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_2()
+                                            .child(theme_preview(theme).border_2().border_color(
+                                                rgb(if selected {
+                                                    colors.accent
+                                                } else {
+                                                    colors.border
+                                                }),
+                                            ))
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .gap_1()
+                                                    .text_size(px(13.))
+                                                    .child(label)
+                                                    .child(
+                                                        Icon::new(IconName::Check)
+                                                            .size(px(14.))
+                                                            .opacity(if selected {
+                                                                1.
+                                                            } else {
+                                                                0.
+                                                            }),
+                                                    ),
+                                            ),
+                                    )
+                                    .on_click(cx.listener(move |app, _, window, cx| {
+                                        app.set_appearance(
+                                            AppearanceSettings {
+                                                theme,
+                                                ..app.presenter.model().appearance
+                                            },
+                                            window,
+                                            cx,
+                                        );
+                                    }))
+                            }),
+                        ),
+                    ),
+                    settings_row(
+                        colors,
+                        "玻璃效果",
+                        if cfg!(target_os = "macos") {
+                            "轻透的导航与浮层；系统减少透明度时自动使用实色。"
+                        } else {
+                            "此平台使用有边界的实色外观。偏好仍会保存。"
+                        },
+                        div().debug_selector(|| "appearance-glass".into()).child(
+                            Switch::new("appearance-glass")
+                                .accessibility_label("玻璃效果")
+                                .small()
+                                .checked(appearance.glass)
+                                .on_click(cx.listener(|app, checked, window, cx| {
+                                    app.set_appearance(
+                                        AppearanceSettings {
+                                            glass: *checked,
+                                            ..app.presenter.model().appearance
+                                        },
+                                        window,
+                                        cx,
+                                    );
+                                })),
+                        ),
+                    ),
+                    settings_row(
+                        colors,
+                        "减少动效",
+                        "关闭装饰动画和平滑滚动，同时遵循系统减少动效设置。",
+                        div().debug_selector(|| "reduce-motion".into()).child(
+                            Switch::new("reduce-motion")
+                                .accessibility_label("减少动效")
+                                .small()
+                                .checked(appearance.reduced_motion)
+                                .on_click(cx.listener(|app, checked, window, cx| {
+                                    app.set_appearance(
+                                        AppearanceSettings {
+                                            reduced_motion: *checked,
+                                            ..app.presenter.model().appearance
+                                        },
+                                        window,
+                                        cx,
+                                    );
+                                })),
+                        ),
+                    ),
+                ],
             ))
             .when_some(model.selected_project.as_ref(), |element, project| {
                 element
                     .child(settings_group(
+                        colors,
                         "项目空间",
                         [
                             settings_row(
+                                colors,
                                 "当前项目",
                                 "正在使用的本地项目。",
                                 project.display_name.clone(),
                             ),
                             settings_row(
+                                colors,
                                 "工作目录",
                                 "Agent 执行任务时使用的目录。",
                                 project.canonical_path.clone(),
@@ -245,6 +358,7 @@ impl NexusView {
     }
 
     fn render_agent_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = palette(cx);
         let model = self.presenter.model();
         let probe = model.selected_probe();
         let selected_profile = model.selected_provider_profile();
@@ -252,12 +366,12 @@ impl NexusView {
         let harness_color: Hsla = probe
             .map(|probe| {
                 if probe.available && (probe.authenticated || profile_ready) {
-                    rgb(SUCCESS).into()
+                    rgb(colors.success).into()
                 } else {
-                    rgb(DANGER).into()
+                    rgb(colors.danger).into()
                 }
             })
-            .unwrap_or_else(|| rgb(MUTED).into());
+            .unwrap_or_else(|| rgb(colors.muted).into());
         let harness_status = match (probe, selected_profile) {
             (Some(probe), Some(profile)) if probe.available && profile.credential_configured => {
                 format!(
@@ -270,23 +384,27 @@ impl NexusView {
         };
 
         settings_group(
+            colors,
             "执行环境",
             [
                 settings_row(
+                    colors,
                     "执行引擎",
                     "选择用于运行任务的本地 Agent。",
                     self.harness_selector("settings-harness", false, cx),
                 ),
                 settings_row(
+                    colors,
                     "可执行文件",
                     "使用命令名或完整路径，修改后重新探测环境。",
                     Input::new(&self.executable_input)
                         .small()
                         .min_h(px(CONTROL_HEIGHT))
-                        .text_sm()
+                        .text_size(px(13.))
                         .prefix(Icon::new(IconName::SquareTerminal).small()),
                 ),
                 settings_row(
+                    colors,
                     "环境检测",
                     "检查可执行文件、版本和登录状态。",
                     Button::new("probe")
@@ -308,8 +426,8 @@ impl NexusView {
                             .flex()
                             .items_start()
                             .gap_2()
-                            .text_xs()
-                            .text_color(rgb(TEXT_SECONDARY))
+                            .text_size(px(12.))
+                            .text_color(rgb(colors.text_secondary))
                             .child(status_dot(harness_color))
                             .child(
                                 div()
@@ -321,13 +439,14 @@ impl NexusView {
                     )
                     .when_some(
                         probe.and_then(|probe| probe.version.clone()),
-                        |element, version| element.child(label_value("版本", version)),
+                        |element, version| element.child(label_value(colors, "版本", version)),
                     ),
             ],
         )
     }
 
     fn render_provider_profiles(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = palette(cx);
         let model = self.presenter.model();
         let active_run = model.active_run.is_some();
         let editing_profile = self.editing_provider_profile.and_then(|profile_id| {
@@ -350,14 +469,17 @@ impl NexusView {
             .flex_col()
             .gap_8()
             .child(settings_group(
+                colors,
                 "当前配置",
                 [
                     settings_row(
+                        colors,
                         "执行引擎",
                         "每种引擎分别管理自己的 Provider Profile。",
                         self.harness_selector("settings-provider-harness", false, cx),
                     ),
                     settings_row(
+                        colors,
                         "Provider Profile",
                         "选择已有配置，或使用 CLI 当前凭据。",
                         self.provider_profile_selector(
@@ -370,60 +492,67 @@ impl NexusView {
                 ],
             ))
             .child(settings_group(
+                colors,
                 form_title,
                 [
                     settings_row(
+                        colors,
                         "名称",
                         "用于区分不同服务商或账户。",
                         Input::new(&self.provider_name_input)
                             .small()
                             .min_h(px(CONTROL_HEIGHT))
-                            .text_sm()
+                            .text_size(px(13.))
                             .prefix(Icon::new(IconName::Bot).small()),
                     ),
                     settings_row(
+                        colors,
                         "API Key 环境变量",
                         "目标引擎读取 API Key 的环境变量名。",
                         Input::new(&self.provider_api_key_env_input)
                             .small()
                             .min_h(px(CONTROL_HEIGHT))
-                            .text_sm()
+                            .text_size(px(13.))
                             .prefix(Icon::new(IconName::SquareTerminal).small()),
                     ),
                     settings_row(
+                        colors,
                         api_key_label,
                         "保存在系统凭据库；编辑时留空保留原值。",
                         Input::new(&self.provider_api_key_input)
                             .small()
                             .min_h(px(CONTROL_HEIGHT))
-                            .text_sm()
+                            .text_size(px(13.))
                             .prefix(Icon::new(IconName::EyeOff).small()),
                     ),
                     settings_row(
+                        colors,
                         "Base URL 环境变量",
                         "可选，目标引擎读取服务地址的环境变量名。",
                         Input::new(&self.provider_base_url_env_input)
                             .small()
                             .min_h(px(CONTROL_HEIGHT))
-                            .text_sm()
+                            .text_size(px(13.))
                             .prefix(Icon::new(IconName::SquareTerminal).small()),
                     ),
                     settings_row(
+                        colors,
                         "Base URL",
                         "可选，自定义 API 服务地址。",
                         Input::new(&self.provider_base_url_input)
                             .small()
                             .min_h(px(CONTROL_HEIGHT))
-                            .text_sm()
+                            .text_size(px(13.))
                             .prefix(Icon::new(IconName::Globe).small()),
                     ),
                     settings_row(
+                        colors,
                         "默认模型",
                         "可选，使用此配置时优先选择的模型。",
                         Input::new(&self.provider_model_input)
                             .small()
                             .min_h(px(CONTROL_HEIGHT))
-                            .text_sm()
+                            .text_size(px(13.))
                             .prefix(Icon::new(IconName::Cpu).small()),
                     ),
                     div()
@@ -474,6 +603,7 @@ impl NexusView {
     }
 
     fn render_remote_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = palette(cx);
         let remote_endpoint = self.presenter.remote_endpoint();
         let remote_available = remote_endpoint.is_some();
         let remote_token = self.presenter.remote_token().map(masked_token);
@@ -483,19 +613,23 @@ impl NexusView {
             .flex_col()
             .gap_8()
             .child(settings_group(
+                colors,
                 "Remote Control",
                 [
                     settings_row(
+                        colors,
                         "本地服务",
                         "监听本机回环地址，可通过 FRP TCP 转发。",
                         remote_endpoint.unwrap_or_else(|| "服务不可用".into()),
                     ),
                     settings_row(
+                        colors,
                         "访问令牌",
                         "连接远程页面时用于鉴权，请妥善保管。",
                         remote_token.unwrap_or_else(|| "不可用".into()),
                     ),
                     settings_row(
+                        colors,
                         "远程连接",
                         "在浏览器中打开链接，即可访问远程页面。",
                         div()
@@ -535,6 +669,7 @@ impl NexusView {
 }
 
 fn settings_group(
+    colors: Palette,
     title: impl Into<SharedString>,
     rows: impl IntoIterator<Item = gpui::Div>,
 ) -> impl IntoElement {
@@ -545,29 +680,26 @@ fn settings_group(
         .child(
             div()
                 .min_w_0()
-                .px_5()
                 .truncate()
-                .child(section_label(title)),
+                .child(section_label(colors, title)),
         )
         .child(
-            div()
-                .bg(rgb(SURFACE))
-                .border_1()
-                .border_color(rgb(BORDER))
-                .rounded(px(CARD_RADIUS))
-                .children(rows.into_iter().enumerate().map(|(index, row)| {
-                    row.when(index > 0, |row| row.border_t_1().border_color(rgb(BORDER)))
-                })),
+            div().children(rows.into_iter().enumerate().map(|(index, row)| {
+                row.when(index > 0, |row| {
+                    row.border_t(px(0.5)).border_color(rgb(colors.border))
+                })
+            })),
         )
 }
 
 fn settings_row(
+    colors: Palette,
     label: impl Into<SharedString>,
     description: impl Into<SharedString>,
     control: impl IntoElement,
 ) -> gpui::Div {
     div()
-        .px_5()
+        .min_h(px(64.))
         .py_4()
         .flex()
         .items_center()
@@ -586,8 +718,8 @@ fn settings_row(
                 )
                 .child(
                     div()
-                        .text_xs()
-                        .text_color(rgb(MUTED))
+                        .text_size(px(12.))
+                        .text_color(rgb(colors.muted))
                         .line_height(relative(1.6))
                         .child(description.into()),
                 ),
@@ -598,9 +730,76 @@ fn settings_row(
                 .flex_none()
                 .flex()
                 .justify_end()
-                .text_color(rgb(TEXT_SECONDARY))
+                .text_color(rgb(colors.text_secondary))
                 .whitespace_normal()
                 .child(control),
+        )
+}
+
+fn theme_preview(theme: ThemePreference) -> gpui::Div {
+    let sidebar = Palette::for_dark(theme == ThemePreference::Dark);
+    let content = Palette::for_dark(theme != ThemePreference::Light);
+    div()
+        .w_full()
+        .h(px(124.))
+        .rounded(px(10.))
+        .overflow_hidden()
+        .flex()
+        .child(
+            div()
+                .w(px(46.))
+                .h_full()
+                .flex_none()
+                .bg(rgb(sidebar.surface))
+                .p_2()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(div().flex().gap(px(3.)).children(
+                    (0..3).map(|_| div().size(px(4.)).rounded_full().bg(rgb(sidebar.border))),
+                ))
+                .children([24., 18., 26.].map(|width| {
+                    div()
+                        .w(px(width))
+                        .h(px(3.))
+                        .rounded_full()
+                        .bg(rgb(sidebar.border))
+                })),
+        )
+        .child(
+            div()
+                .flex_1()
+                .h_full()
+                .bg(rgb(content.canvas))
+                .p_3()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .w(px(46.))
+                        .h(px(15.))
+                        .ml_auto()
+                        .rounded(px(4.))
+                        .bg(rgb(content.recessed)),
+                )
+                .children([1., 0.8, 0.55].map(|width| {
+                    div()
+                        .w(relative(width))
+                        .h(px(3.))
+                        .rounded_full()
+                        .bg(rgb(content.border))
+                }))
+                .child(
+                    div()
+                        .mt_auto()
+                        .w_full()
+                        .h(px(22.))
+                        .rounded(px(6.))
+                        .bg(rgb(content.surface))
+                        .border_1()
+                        .border_color(rgb(content.border)),
+                ),
         )
 }
 
