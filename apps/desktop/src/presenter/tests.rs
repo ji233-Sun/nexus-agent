@@ -1979,6 +1979,34 @@ fn codex_preferences_are_isolated_per_profile_and_invalid_effort_resets() {
     presenter.select_catalog_model(Some("model-alpha".into()));
     presenter.select_effort(ThinkingEffort::High);
 
+    assert!(presenter.refresh_model_catalog());
+    runner.emit(Event::ModelCatalogFailed {
+        request_id: current_catalog_request_id(&presenter),
+        harness: HarnessKind::Codex,
+        message: "temporary catalog failure".into(),
+    });
+    presenter.drain_events();
+    assert_eq!(presenter.model().effort, ThinkingEffort::High);
+    assert_eq!(
+        presenter
+            .storage
+            .setting(&catalog_effort_setting_key(
+                HarnessKind::Codex,
+                Some(first_profile_id),
+            ))
+            .unwrap()
+            .as_deref(),
+        Some("high")
+    );
+    assert!(presenter.refresh_model_catalog());
+    emit_current_catalog(&presenter, &runner, models.clone());
+    presenter.drain_events();
+    assert_eq!(presenter.model().effort, ThinkingEffort::High);
+    assert_eq!(
+        presenter.model().resolved_model_selection().effort,
+        ThinkingEffort::High
+    );
+
     let mut second_draft = profile_draft(None, "Second Codex", "second-secret");
     second_draft.model = "profile-second".into();
     let second_profile_id = presenter.save_provider_profile(second_draft).unwrap();

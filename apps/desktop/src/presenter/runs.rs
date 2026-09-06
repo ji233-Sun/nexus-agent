@@ -117,7 +117,6 @@ impl Presenter {
                 && self.model.model_catalog.accepts(request_id) =>
             {
                 self.model.model_catalog = ModelCatalogState::Failed(message.clone().into());
-                self.normalize_catalog_effort();
                 self.model.status = LocalizedText::new(
                     "{harness} 模型目录加载失败：{message}",
                     &[
