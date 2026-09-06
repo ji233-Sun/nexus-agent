@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandEnvelope {
@@ -54,6 +54,7 @@ pub enum Command {
 pub struct StartRun {
     pub run_id: Uuid,
     pub task_id: Uuid,
+    pub session_id: Option<String>,
     pub cwd: String,
     pub prompt: String,
     pub harness: HarnessKind,
@@ -135,6 +136,8 @@ pub enum Event {
     },
     #[serde(rename = "run.started")]
     RunStarted { run_id: Uuid, pid: u32 },
+    #[serde(rename = "run.session.started")]
+    RunSessionStarted { run_id: Uuid, session_id: String },
     #[serde(rename = "run.output.delta")]
     RunOutputDelta { run_id: Uuid, text: String },
     #[serde(rename = "run.message.completed")]
@@ -209,6 +212,7 @@ mod tests {
         let command = CommandEnvelope::new(Command::RunStart(StartRun {
             run_id: Uuid::new_v4(),
             task_id: Uuid::new_v4(),
+            session_id: Some("existing-session".into()),
             cwd: "/tmp/project".into(),
             prompt: "fix it".into(),
             harness: HarnessKind::Codex,
@@ -228,6 +232,7 @@ mod tests {
             panic!("expected run.start")
         };
         assert_eq!(request.harness, HarnessKind::Codex);
+        assert_eq!(request.session_id.as_deref(), Some("existing-session"));
         assert_eq!(request.model.as_deref(), Some("gpt-test"));
         assert_eq!(request.effort, ThinkingEffort::XHigh);
         assert_eq!(request.environment[0].name, "OPENAI_API_KEY");

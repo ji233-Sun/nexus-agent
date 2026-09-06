@@ -15,6 +15,7 @@ pub struct LaunchSpec {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DecodedEvent {
+    SessionStarted(String),
     TextDelta(String),
     MessageCompleted(String),
     ToolStarted {

@@ -15,12 +15,14 @@ pub struct Storage {
 
 pub struct ConversationConfig {
     pub harness: HarnessKind,
+    pub session_id: Option<String>,
     pub executable: String,
     pub model: String,
     pub effort: ThinkingEffort,
 }
 
 pub struct NewTaskRun<'a> {
+    pub task_id: Option<Uuid>,
     pub project_id: Uuid,
     pub title: &'a str,
     pub prompt: &'a str,
@@ -106,7 +108,10 @@ impl Storage {
         if !table_has_column(&connection, "messages", "tool")? {
             connection.execute("ALTER TABLE messages ADD COLUMN tool TEXT", [])?;
         }
-        connection.execute_batch("PRAGMA user_version = 4;")?;
+        if !table_has_column(&connection, "tasks", "session_id")? {
+            connection.execute("ALTER TABLE tasks ADD COLUMN session_id TEXT", [])?;
+        }
+        connection.execute_batch("PRAGMA user_version = 5;")?;
         let storage = Self { connection };
         storage.recover_interrupted()?;
         Ok(storage)
@@ -210,6 +215,7 @@ impl Storage {
 
     pub fn create_task_run(&mut self, request: NewTaskRun<'_>) -> Result<(Uuid, Uuid)> {
         let NewTaskRun {
+            task_id,
             project_id,
             title,
             prompt,
@@ -219,16 +225,28 @@ impl Storage {
             effort,
             harness_version,
         } = request;
-        let task_id = Uuid::new_v4();
+        let existing_task = task_id;
+        let task_id = task_id.unwrap_or_else(Uuid::new_v4);
         let run_id = Uuid::new_v4();
         let message_id = Uuid::new_v4();
         let now = Utc::now().to_rfc3339();
         let transaction = self.connection.transaction()?;
-        transaction.execute(
-            "INSERT INTO tasks(id, project_id, title, status, created_at, updated_at)
-             VALUES(?1, ?2, ?3, 'starting', ?4, ?4)",
-            params![task_id.to_string(), project_id.to_string(), title, now],
-        )?;
+        if existing_task.is_some() {
+            let updated = transaction.execute(
+                "UPDATE tasks SET status = 'starting', updated_at = ?3
+                 WHERE id = ?1 AND project_id = ?2",
+                params![task_id.to_string(), project_id.to_string(), now],
+            )?;
+            if updated != 1 {
+                return Err(anyhow!("任务不属于当前项目"));
+            }
+        } else {
+            transaction.execute(
+                "INSERT INTO tasks(id, project_id, title, status, created_at, updated_at)
+                 VALUES(?1, ?2, ?3, 'starting', ?4, ?4)",
+                params![task_id.to_string(), project_id.to_string(), title, now],
+            )?;
+        }
         transaction.execute(
             "INSERT INTO runs(
                  id, task_id, status, harness_kind, executable, model, effort,
@@ -247,7 +265,9 @@ impl Storage {
         )?;
         transaction.execute(
             "INSERT INTO messages(id, task_id, run_id, sequence, role, kind, content, created_at)
-             VALUES(?1, ?2, ?3, 1, 'user', 'text', ?4, ?5)",
+             VALUES(?1, ?2, ?3,
+                 (SELECT COALESCE(MAX(sequence), 0) + 1 FROM messages WHERE task_id = ?2),
+                 'user', 'text', ?4, ?5)",
             params![
                 message_id.to_string(),
                 task_id.to_string(),
@@ -263,8 +283,9 @@ impl Storage {
     pub fn conversation_config(&self, task_id: Uuid) -> Result<Option<ConversationConfig>> {
         self.connection
             .query_row(
-                "SELECT harness_kind, executable, model, effort
-                 FROM runs WHERE task_id = ?1 ORDER BY started_at DESC LIMIT 1",
+                "SELECT harness_kind, executable, model, effort, tasks.session_id
+                 FROM runs JOIN tasks ON tasks.id = runs.task_id
+                 WHERE task_id = ?1 ORDER BY started_at DESC, runs.rowid DESC LIMIT 1",
                 [task_id.to_string()],
                 |row| {
                     Ok(ConversationConfig {
@@ -274,11 +295,21 @@ impl Storage {
                         model: row.get(2)?,
                         effort: ThinkingEffort::from_str(&row.get::<_, String>(3)?)
                             .map_err(to_sql_data_error)?,
+                        session_id: row.get(4)?,
                     })
                 },
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    pub fn save_run_session(&self, run_id: Uuid, session_id: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE tasks SET session_id = ?2
+             WHERE id = (SELECT task_id FROM runs WHERE id = ?1)",
+            params![run_id.to_string(), session_id],
+        )?;
+        Ok(())
     }
 
     pub fn update_run_status(&self, run_id: Uuid, status: RunStatus) -> Result<()> {
@@ -514,6 +545,7 @@ mod tests {
         let project = storage.open_project(&project_dir).unwrap();
         let (task_id, run_id) = storage
             .create_task_run(NewTaskRun {
+                task_id: None,
                 project_id: project.id,
                 title: "Test task",
                 prompt: "hello",
@@ -527,6 +559,7 @@ mod tests {
         storage
             .update_run_status(run_id, RunStatus::Running)
             .unwrap();
+        storage.save_run_session(run_id, "claude-session").unwrap();
         drop(storage);
 
         let storage = Storage::open(&database).unwrap();
@@ -536,6 +569,7 @@ mod tests {
         assert_eq!(messages[0].content, "hello");
         let config = storage.conversation_config(task_id).unwrap().unwrap();
         assert_eq!(config.harness, HarnessKind::Claude);
+        assert_eq!(config.session_id.as_deref(), Some("claude-session"));
         assert_eq!(config.executable, "claude-custom");
         assert_eq!(config.model, "sonnet");
         assert_eq!(config.effort, ThinkingEffort::High);
@@ -561,6 +595,7 @@ mod tests {
         let project = storage.open_project(&project_dir).unwrap();
         let (task_id, run_id) = storage
             .create_task_run(NewTaskRun {
+                task_id: None,
                 project_id: project.id,
                 title: "Codex task",
                 prompt: "describe this project",
@@ -603,11 +638,23 @@ mod tests {
             .connection
             .execute("ALTER TABLE messages DROP COLUMN tool", [])
             .unwrap();
+        storage
+            .connection
+            .execute("ALTER TABLE tasks DROP COLUMN session_id", [])
+            .unwrap();
         drop(storage);
         let storage = Storage::open(&database).unwrap();
         assert_eq!(
             storage.messages(task_id).unwrap()[1].content,
             "project summary"
+        );
+        assert!(
+            storage
+                .conversation_config(task_id)
+                .unwrap()
+                .unwrap()
+                .session_id
+                .is_none()
         );
         let content = "完整工具输出\n".repeat(100);
         let metadata = ToolMetadata {

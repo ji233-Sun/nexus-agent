@@ -91,6 +91,13 @@ impl Presenter {
                 self.model.status = format!("{harness} 正在执行…");
                 let _ = self.storage.update_run_status(run_id, RunStatus::Running);
             }
+            Event::RunSessionStarted { run_id, session_id }
+                if self.model.active_run == Some(run_id) && !session_id.is_empty() =>
+            {
+                if let Err(error) = self.storage.save_run_session(run_id, &session_id) {
+                    self.model.status = format!("无法保存会话，后续可能无法续聊：{error}");
+                }
+            }
             Event::RunOutputDelta { run_id, text } if self.model.active_run == Some(run_id) => {
                 self.model.streaming_text.push_str(&text);
             }
@@ -216,6 +223,15 @@ impl Presenter {
     }
 
     pub(crate) fn submit(&mut self, prompt: &str, configured_executable: &str) -> bool {
+        self.start_run(self.model.selected_task, prompt, configured_executable)
+    }
+
+    pub(super) fn start_run(
+        &mut self,
+        task_id: Option<Uuid>,
+        prompt: &str,
+        configured_executable: &str,
+    ) -> bool {
         if self.model.active_run.is_some() {
             return false;
         }
@@ -251,6 +267,29 @@ impl Presenter {
         let executable = probe.executable.clone();
         let harness_version = probe.version.clone();
         let harness = self.model.selected_harness;
+        let session_id = if let Some(task_id) = task_id {
+            let config = match self.storage.conversation_config(task_id) {
+                Ok(Some(config)) => config,
+                _ => {
+                    self.model.status = "无法读取当前任务的会话配置。".into();
+                    return false;
+                }
+            };
+            if config.harness != harness {
+                self.model.status = format!(
+                    "当前会话使用 {}，请切回该 Harness 继续对话，或新建任务。",
+                    config.harness
+                );
+                return false;
+            }
+            let Some(session_id) = config.session_id.filter(|id| !id.is_empty()) else {
+                self.model.status = "当前任务未保存可恢复的会话，无法继续对话；请新建任务。".into();
+                return false;
+            };
+            Some(session_id)
+        } else {
+            None
+        };
         if harness == HarnessKind::Codex && !self.model.codex_selection_is_valid() {
             self.model.status =
                 "当前 Codex 模型或 effort 未通过目录验证，请调整选择后重试。".into();
@@ -277,6 +316,7 @@ impl Presenter {
         };
         let title: String = prompt.chars().take(48).collect();
         let created = self.storage.create_task_run(NewTaskRun {
+            task_id,
             project_id: project.id,
             title: &title,
             prompt: &prompt,
@@ -287,12 +327,13 @@ impl Presenter {
             harness_version: harness_version.as_deref(),
         });
         let Ok((task_id, run_id)) = created else {
-            self.model.status = "无法保存新任务。".into();
+            self.model.status = "无法保存任务运行。".into();
             return false;
         };
         let command = CommandEnvelope::new(Command::RunStart(StartRun {
             run_id,
             task_id,
+            session_id,
             cwd: project.canonical_path,
             prompt: prompt.clone(),
             harness,

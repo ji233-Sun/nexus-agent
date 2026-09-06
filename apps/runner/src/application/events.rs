@@ -39,6 +39,7 @@ impl Emitter {
 
 pub(crate) async fn emit_decoded(run_id: Uuid, decoded: DecodedEvent, emitter: &Emitter) {
     let event = match decoded {
+        DecodedEvent::SessionStarted(session_id) => Event::RunSessionStarted { run_id, session_id },
         DecodedEvent::TextDelta(text) => Event::RunOutputDelta { run_id, text },
         DecodedEvent::MessageCompleted(text) => Event::RunMessageCompleted { run_id, text },
         DecodedEvent::ToolStarted { id, name, summary } => Event::RunToolStarted {

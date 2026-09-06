@@ -546,6 +546,7 @@ mod tests {
         for index in 0..30 {
             storage
                 .create_task_run(NewTaskRun {
+                    task_id: None,
                     project_id: project.id,
                     title: if index % 2 == 0 {
                         "Hi"

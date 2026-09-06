@@ -28,6 +28,7 @@ pub fn build_launch_spec(
     prompt: &str,
     model: Option<&str>,
     effort: ThinkingEffort,
+    session_id: Option<&str>,
 ) -> LaunchSpec {
     let mut args = vec![
         "exec".into(),
@@ -35,7 +36,6 @@ pub fn build_launch_spec(
         "--json".into(),
         "--sandbox".into(),
         "workspace-write".into(),
-        "--ephemeral".into(),
         "--color".into(),
         "never".into(),
     ];
@@ -46,6 +46,10 @@ pub fn build_launch_spec(
     if let Some(model) = model {
         args.push("--model".into());
         args.push(model.into());
+    }
+    if let Some(session_id) = session_id {
+        args.push("resume".into());
+        args.push(session_id.into());
     }
     args.push("-".into());
 
@@ -416,7 +420,16 @@ impl LineDecoder for EventDecoder {
 
 fn decode_frame(frame: &Value) -> Vec<DecodedEvent> {
     match frame.get("type").and_then(Value::as_str) {
-        Some("thread.started") => vec![DecodedEvent::Status("Codex 会话已启动".into())],
+        Some("thread.started") => {
+            let mut events = Vec::new();
+            if let Some(session_id) = frame.get("thread_id").and_then(Value::as_str)
+                && !session_id.is_empty()
+            {
+                events.push(DecodedEvent::SessionStarted(session_id.to_owned()));
+            }
+            events.push(DecodedEvent::Status("Codex 会话已启动".into()));
+            events
+        }
         Some("turn.started") => vec![DecodedEvent::Status("Codex 正在处理任务…".into())],
         Some("item.started") => frame
             .get("item")
@@ -620,10 +633,17 @@ mod tests {
             "secret prompt",
             None,
             ThinkingEffort::XHigh,
+            None,
         );
         assert_eq!(spec.args.first().map(String::as_str), Some("exec"));
         assert!(spec.args.iter().any(|arg| arg == "--skip-git-repo-check"));
         assert!(spec.args.iter().any(|arg| arg == "--json"));
+        assert!(
+            !spec
+                .args
+                .iter()
+                .any(|arg| arg == "--ephemeral" || arg == "resume")
+        );
         assert!(
             spec.args
                 .windows(2)
@@ -637,6 +657,38 @@ mod tests {
         assert_eq!(spec.args.last().map(String::as_str), Some("-"));
         assert!(!spec.args.iter().any(|arg| arg.contains("secret prompt")));
         assert_eq!(spec.stdin, "secret prompt");
+        let resumed = build_launch_spec(
+            "codex",
+            Path::new("/tmp/project"),
+            "follow-up",
+            Some("gpt-test"),
+            ThinkingEffort::High,
+            Some("existing-thread"),
+        );
+        assert!(
+            resumed
+                .args
+                .ends_with(&["resume".into(), "existing-thread".into(), "-".into()])
+        );
+        assert!(
+            resumed
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--sandbox", "workspace-write"])
+        );
+        assert!(
+            resumed
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--model", "gpt-test"])
+        );
+        assert!(
+            !resumed
+                .args
+                .iter()
+                .any(|arg| arg == "--ephemeral" || arg == "--last")
+        );
+        assert_eq!(resumed.stdin, "follow-up");
     }
 
     #[test]
@@ -647,6 +699,7 @@ mod tests {
             "prompt",
             None,
             ThinkingEffort::Default,
+            None,
         );
         assert!(!spec.args.iter().any(|arg| arg == "--model"));
         assert!(!spec.args.iter().any(|arg| arg == "--config"));
@@ -697,6 +750,15 @@ mod tests {
     #[test]
     fn decoder_maps_messages_and_command_events() {
         let mut decoder = EventDecoder;
+        assert_eq!(
+            decoder
+                .decode_line(r#"{"type":"thread.started","thread_id":"existing-thread"}"#)
+                .unwrap(),
+            vec![
+                DecodedEvent::SessionStarted("existing-thread".into()),
+                DecodedEvent::Status("Codex 会话已启动".into())
+            ]
+        );
         let started = r#"{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"cargo test","aggregated_output":"","exit_code":null,"status":"in_progress"}}"#;
         assert!(matches!(
             decoder.decode_line(started).unwrap().as_slice(),

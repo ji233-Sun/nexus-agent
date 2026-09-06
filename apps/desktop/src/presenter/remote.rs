@@ -40,7 +40,7 @@ impl Presenter {
                         self.select_project(project);
                     }
                     let executable = self.model.executable.clone();
-                    if self.submit(&prompt, &executable) {
+                    if self.start_run(None, &prompt, &executable) {
                         Ok(())
                     } else {
                         Err(self.model.status.clone())

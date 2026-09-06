@@ -13,12 +13,12 @@ pub fn build_launch_spec(
     prompt: &str,
     model: Option<&str>,
     effort: ThinkingEffort,
+    session_id: Option<&str>,
 ) -> LaunchSpec {
     let mut args = vec![
         "--print".into(),
         "--mode".into(),
         "json".into(),
-        "--no-session".into(),
         "--no-title".into(),
         "--approval-mode".into(),
         "write".into(),
@@ -28,6 +28,10 @@ pub fn build_launch_spec(
     if let Some(model) = model {
         args.push("--model".into());
         args.push(model.into());
+    }
+    if let Some(session_id) = session_id {
+        args.push("--resume".into());
+        args.push(session_id.into());
     }
 
     LaunchSpec {
@@ -116,6 +120,12 @@ impl LineDecoder for EventDecoder {
 
 fn decode_frame(frame: &Value) -> Vec<DecodedEvent> {
     match frame.get("type").and_then(Value::as_str) {
+        Some("session") => frame
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(|id| vec![DecodedEvent::SessionStarted(id.to_owned())])
+            .unwrap_or_default(),
         Some("agent_start") => vec![DecodedEvent::Status("Oh My Pi 会话已启动".into())],
         Some("turn_start") => vec![DecodedEvent::Status("Oh My Pi 正在处理任务…".into())],
         Some("message_update") => frame
@@ -236,6 +246,7 @@ mod tests {
             "secret prompt",
             Some("deepseek/deepseek-v4-pro"),
             ThinkingEffort::High,
+            None,
         );
         assert!(spec.args.windows(2).any(|pair| pair == ["--mode", "json"]));
         assert!(
@@ -255,6 +266,39 @@ mod tests {
         );
         assert!(!spec.args.iter().any(|arg| arg.contains("secret prompt")));
         assert_eq!(spec.stdin, "secret prompt");
+        assert!(
+            !spec
+                .args
+                .iter()
+                .any(|arg| arg == "--no-session" || arg == "--resume")
+        );
+        let resumed = build_launch_spec(
+            "omp",
+            Path::new("/tmp/project"),
+            "follow-up",
+            None,
+            ThinkingEffort::High,
+            Some("existing-session"),
+        );
+        assert!(
+            resumed
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--resume", "existing-session"])
+        );
+        assert!(
+            resumed
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--approval-mode", "write"])
+        );
+        assert!(
+            !resumed
+                .args
+                .iter()
+                .any(|arg| arg == "--no-session" || arg == "--continue")
+        );
+        assert_eq!(resumed.stdin, "follow-up");
 
         let max_spec = build_launch_spec(
             "omp",
@@ -262,6 +306,7 @@ mod tests {
             "prompt",
             None,
             ThinkingEffort::Max,
+            None,
         );
         assert!(
             max_spec
@@ -275,6 +320,12 @@ mod tests {
     #[test]
     fn decoder_maps_stream_messages_and_tool_events() {
         let mut decoder = EventDecoder;
+        assert_eq!(
+            decoder
+                .decode_line(r#"{"type":"session","id":"existing-session","version":3}"#)
+                .unwrap(),
+            vec![DecodedEvent::SessionStarted("existing-session".into())]
+        );
         let delta = r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"你好"}}"#;
         assert_eq!(
             decoder.decode_line(delta).unwrap(),

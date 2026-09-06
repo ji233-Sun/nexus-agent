@@ -37,6 +37,7 @@ fn main() {
     }
     let mut prompt = String::new();
     io::stdin().read_to_string(&mut prompt).unwrap();
+    fs::write("stdin.txt", &prompt).unwrap();
     if prompt == "wait-for-cancel" {
         let _child = Command::new(env::current_exe().unwrap())
             .arg("--child")
@@ -51,8 +52,35 @@ fn main() {
             thread::sleep(Duration::from_secs(1));
         }
     }
+    let resume_id = args.windows(2)
+        .find(|pair| pair[0] == "resume" || pair[0] == "--resume")
+        .map(|pair| &pair[1]);
+    let session_id = resume_id.cloned().unwrap_or_else(|| format!("session-{}", std::process::id()));
+    let session_file = format!("{session_id}.txt");
+    let previous_prompt = if resume_id.is_some() {
+        Some(fs::read_to_string(&session_file).expect("resume must reuse a saved session"))
+    } else {
+        fs::write(&session_file, &prompt).unwrap();
+        None
+    };
     if codex {
-        println!(r#"{{"type":"thread.started","thread_id":"thread-1"}}"#);
+        println!(r#"{{"type":"thread.started","thread_id":{session_id:?}}}"#);
+    } else if omp {
+        println!(r#"{{"type":"session","id":{session_id:?},"version":3}}"#);
+    } else {
+        println!(r#"{{"type":"system","subtype":"init","session_id":{session_id:?}}}"#);
+    }
+    if let Some(text) = previous_prompt {
+        if codex {
+            println!(r#"{{"type":"item.completed","item":{{"id":"resumed","type":"agent_message","text":{text:?}}}}}"#);
+        } else if omp {
+            println!(r#"{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":{text:?}}}],"stopReason":"stop"}}}}"#);
+        } else {
+            println!(r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":{text:?}}}]}}}}"#);
+        }
+        return;
+    }
+    if codex {
         println!(
             r#"{{"type":"item.started","item":{{"id":"item-1","type":"command_execution","command":"pwd","aggregated_output":"","exit_code":null,"status":"in_progress"}}}}"#
         );

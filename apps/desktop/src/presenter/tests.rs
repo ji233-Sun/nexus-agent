@@ -471,6 +471,42 @@ fn expired_remote_start_does_not_change_selection_or_start_a_run() {
     assert_eq!(response.try_recv().unwrap(), Ok(()));
     assert_eq!(presenter.storage.tasks(project_id).unwrap().len(), 1);
     assert_eq!(runner.0.borrow().commands.len(), 1);
+    let task_id = presenter.model().selected_task.unwrap();
+    let run_id = presenter.model().active_run.unwrap();
+    runner.emit(Event::RunSessionStarted {
+        run_id,
+        session_id: "desktop-session".into(),
+    });
+    runner.emit(Event::RunExited {
+        run_id,
+        status: RunStatus::Completed,
+        exit_code: Some(0),
+    });
+    presenter.drain_events();
+
+    // Remote StartRun remains an explicit new-task request, even with a task selected.
+    let (reply, mut response) = tokio::sync::oneshot::channel();
+    presenter.handle_remote_command(RemoteCommand::StartRun {
+        project_id,
+        prompt: " ".into(),
+        reply,
+    });
+    assert!(response.try_recv().unwrap().is_err());
+    assert_eq!(presenter.model().selected_task, Some(task_id));
+    let (reply, mut response) = tokio::sync::oneshot::channel();
+    presenter.handle_remote_command(RemoteCommand::StartRun {
+        project_id,
+        prompt: "new remote task".into(),
+        reply,
+    });
+    assert_eq!(response.try_recv().unwrap(), Ok(()));
+    assert_ne!(presenter.model().selected_task, Some(task_id));
+    assert_eq!(presenter.storage.tasks(project_id).unwrap().len(), 2);
+    let state = runner.0.borrow();
+    let Command::RunStart(request) = &state.commands.last().unwrap().command else {
+        panic!("expected new remote task");
+    };
+    assert!(request.session_id.is_none());
 }
 
 #[test]
@@ -488,6 +524,7 @@ fn submit_persists_configuration_and_prevents_duplicate_runs() {
         panic!("expected start");
     };
     assert_eq!(request.prompt, "explain this project");
+    assert!(request.session_id.is_none());
     assert_eq!(request.model.as_deref(), Some("opus"));
     assert_eq!(request.effort, ThinkingEffort::XHigh);
     assert_eq!(
@@ -506,6 +543,159 @@ fn submit_persists_configuration_and_prevents_duplicate_runs() {
     assert_eq!(config.effort, request.effort);
     assert_eq!(presenter.model().messages[0].content, request.prompt);
     assert_eq!(presenter.model().tasks.len(), 1);
+}
+
+#[test]
+fn follow_up_resumes_the_saved_session_after_reopening_and_new_task_starts_fresh() {
+    for harness in HarnessKind::ALL {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("nexus.db");
+        let runner = FakeRunner::default();
+        let mut presenter = Presenter::new(
+            Storage::open(&database).unwrap(),
+            Ok(Box::new(runner.clone())),
+            None,
+        );
+        presenter.open_project(directory.path());
+        presenter.select_harness(harness, "claude");
+        presenter
+            .model
+            .harnesses
+            .insert(harness, ready_probe(harness));
+        assert!(presenter.submit("first question", harness.default_executable()));
+        let task_id = presenter.model().active_task.unwrap();
+        let first_run = presenter.model().active_run.unwrap();
+        let first_message = presenter.model().messages[0].id;
+        runner.emit(Event::RunSessionStarted {
+            run_id: first_run,
+            session_id: "saved-session".into(),
+        });
+        runner.emit(Event::RunMessageCompleted {
+            run_id: first_run,
+            text: "first answer".into(),
+        });
+        runner.emit(Event::RunExited {
+            run_id: first_run,
+            status: RunStatus::Completed,
+            exit_code: Some(0),
+        });
+        presenter.drain_events();
+        drop(presenter);
+
+        let mut presenter = Presenter::new(
+            Storage::open(&database).unwrap(),
+            Ok(Box::new(runner.clone())),
+            None,
+        );
+        presenter.open_project(directory.path());
+        presenter.select_task(task_id);
+        presenter
+            .model
+            .harnesses
+            .insert(harness, ready_probe(harness));
+        assert!(presenter.submit("  follow-up  ", harness.default_executable()));
+        let second_run = presenter.model().active_run.unwrap();
+        assert_ne!(first_run, second_run);
+        assert_eq!(presenter.model().selected_task, Some(task_id));
+        assert_eq!(presenter.model().tasks.len(), 1);
+        assert_eq!(presenter.model().tasks[0].title, "first question");
+        assert_eq!(presenter.model().messages[0].id, first_message);
+        assert_eq!(
+            presenter
+                .model()
+                .messages
+                .iter()
+                .map(|message| (message.sequence, message.content.as_str(), message.run_id))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, "first question", first_run),
+                (2, "first answer", first_run),
+                (3, "follow-up", second_run)
+            ]
+        );
+        {
+            let state = runner.0.borrow();
+            let Command::RunStart(request) = &state.commands.last().unwrap().command else {
+                panic!("expected follow-up run");
+            };
+            assert_eq!(request.task_id, task_id);
+            assert_eq!(request.session_id.as_deref(), Some("saved-session"));
+            assert_eq!(request.prompt, "follow-up");
+            assert_eq!(request.harness, harness);
+        }
+        // A failed continuation must not lose the saved session.
+        runner.emit(Event::RunExited {
+            run_id: second_run,
+            status: RunStatus::Failed,
+            exit_code: Some(1),
+        });
+        presenter.drain_events();
+        assert!(presenter.submit("retry", harness.default_executable()));
+        let retry_run = presenter.model().active_run.unwrap();
+        {
+            let state = runner.0.borrow();
+            let Command::RunStart(request) = &state.commands.last().unwrap().command else {
+                panic!("expected retry run");
+            };
+            assert_eq!(request.task_id, task_id);
+            assert_eq!(request.session_id.as_deref(), Some("saved-session"));
+        }
+        runner.emit(Event::RunExited {
+            run_id: retry_run,
+            status: RunStatus::Completed,
+            exit_code: Some(0),
+        });
+        presenter.drain_events();
+        presenter.new_task();
+        assert!(presenter.submit("new question", harness.default_executable()));
+        let state = runner.0.borrow();
+        let Command::RunStart(request) = &state.commands.last().unwrap().command else {
+            panic!("expected new task");
+        };
+        assert_ne!(request.task_id, task_id);
+        assert!(request.session_id.is_none());
+        assert_eq!(presenter.model().tasks.len(), 2);
+        assert_eq!(presenter.model().messages.len(), 1);
+    }
+}
+
+#[test]
+fn follow_up_does_not_silently_restart_when_the_session_is_missing_or_harness_changes() {
+    for missing_session in [true, false] {
+        let (mut presenter, runner, _directory) = fixture();
+        assert!(presenter.submit("first question", "claude"));
+        let run_id = presenter.model().active_run.unwrap();
+        if !missing_session {
+            runner.emit(Event::RunSessionStarted {
+                run_id,
+                session_id: "claude-session".into(),
+            });
+        }
+        runner.emit(Event::RunExited {
+            run_id,
+            status: RunStatus::Completed,
+            exit_code: Some(0),
+        });
+        presenter.drain_events();
+        if !missing_session {
+            presenter.select_harness(HarnessKind::Codex, "claude");
+            presenter
+                .model
+                .harnesses
+                .insert(HarnessKind::Codex, ready_probe(HarnessKind::Codex));
+        }
+        runner.0.borrow_mut().commands.clear();
+        assert!(!presenter.submit("follow-up", "configured-cli"));
+        assert!(runner.0.borrow().commands.is_empty());
+        assert!(presenter.model().active_run.is_none());
+        assert_eq!(presenter.model().messages.len(), 1);
+        assert_eq!(presenter.model().tasks.len(), 1);
+        assert!(presenter.model().status.contains(if missing_session {
+            "未保存可恢复的会话"
+        } else {
+            "切回该 Harness"
+        }));
+    }
 }
 
 #[test]
@@ -538,6 +728,10 @@ fn runner_events_update_timeline_and_persist_terminal_statuses() {
         let run_id = presenter.model().active_run.unwrap();
         let task_id = presenter.model().active_task.unwrap();
         runner.emit(Event::RunStarted { run_id, pid: 42 });
+        runner.emit(Event::RunSessionStarted {
+            run_id,
+            session_id: "saved-session".into(),
+        });
         runner.emit(Event::RunOutputDelta {
             run_id,
             text: "partial".into(),
@@ -577,6 +771,8 @@ fn runner_events_update_timeline_and_persist_terminal_statuses() {
             assert_eq!(messages[2].kind, MessageKind::Error);
         }
         assert!(presenter.submit("next task", "claude"));
+        assert_eq!(presenter.model().selected_task, Some(task_id));
+        assert_eq!(presenter.model().tasks.len(), 1);
         assert_eq!(presenter.model().active_run_elapsed_seconds, Some(0));
         assert!(presenter.active_run_started_at.unwrap() >= started);
     }
@@ -624,6 +820,10 @@ fn unrelated_run_events_cannot_replace_the_active_run() {
         run_id: other_run,
         pid: 42,
     });
+    runner.emit(Event::RunSessionStarted {
+        run_id: other_run,
+        session_id: "unrelated".into(),
+    });
     runner.emit(Event::RunOutputDelta {
         run_id: other_run,
         text: "unrelated".into(),
@@ -643,6 +843,15 @@ fn unrelated_run_events_cannot_replace_the_active_run() {
     assert_eq!(presenter.model().active_run_elapsed_seconds, Some(0));
     assert_eq!(presenter.model().messages.len(), 1);
     assert!(presenter.model().streaming_text.is_empty());
+    assert!(
+        presenter
+            .storage
+            .conversation_config(presenter.model().active_task.unwrap())
+            .unwrap()
+            .unwrap()
+            .session_id
+            .is_none()
+    );
 }
 
 #[test]
