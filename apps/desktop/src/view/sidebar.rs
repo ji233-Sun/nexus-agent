@@ -1,6 +1,6 @@
 use super::*;
 use crate::model::history::ThreadSummary;
-use gpui_kit::component::{list::ListItem, scroll::ScrollableElement as _};
+use gpui_kit::component::{list::ListItem, scroll::ScrollableElement as _, spinner::Spinner};
 
 const SIDEBAR_ROW_HEIGHT: f32 = 32.;
 pub(super) const HISTORY_PAGE_SIZE: usize = 10;
@@ -91,11 +91,7 @@ impl NexusView {
                     .map(|task| {
                         let id = task.id;
                         let color = run_status_color(colors, task.status);
-                        let status_icon = match task.status {
-                            RunStatus::Failed => IconName::CircleX,
-                            RunStatus::Cancelled | RunStatus::Interrupted => IconName::Pause,
-                            _ => IconName::LoaderCircle,
-                        };
+                        let active = task.status.is_active();
                         navigation_row(colors, id, task.title.clone(), None)
                             .debug_selector(move || format!("sidebar-task-{id}"))
                             .selected(
@@ -109,11 +105,18 @@ impl NexusView {
                                         .right(px(12.))
                                         .top(px((SIDEBAR_ROW_HEIGHT - 14.) / 2.))
                                         .size(px(14.))
-                                        .child(
-                                            Icon::new(status_icon.clone())
+                                        .child(if active {
+                                            Spinner::new()
+                                                .icon(IconName::LoaderCircle)
+                                                .with_size(px(14.))
+                                                .color(color)
+                                                .into_any_element()
+                                        } else {
+                                            Icon::new(IconName::CircleX)
                                                 .size(px(14.))
-                                                .text_color(color),
-                                        )
+                                                .text_color(color)
+                                                .into_any_element()
+                                        })
                                 })
                             })
                             .on_click(cx.listener(move |app, _, window, cx| {
