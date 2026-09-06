@@ -1,0 +1,189 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RUSTUP_TOOLCHAIN: "1.98.1"
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  RELEASE_TAG: ${{ github.ref_name }}
+
+jobs:
+  build:
+    name: Package (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+    env:
+      RELEASE_TARGET: ${{ matrix.target }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt --component clippy --target "$RELEASE_TARGET"
+
+      - name: Verify tag matches the application version
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[] | select(.name == "nexus-desktop") | .version')
+          if [[ "$RELEASE_TAG" != "v$version" ]]; then
+            echo "::error::Release tag $RELEASE_TAG must match Cargo.toml version v$version"
+            exit 1
+          fi
+
+      - name: Install Linux GUI dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang cmake pkg-config \
+            libfontconfig1-dev libfreetype6-dev libwayland-dev libx11-xcb-dev \
+            libxkbcommon-x11-dev libssl-dev libvulkan1 libglib2.0-dev
+
+      - name: Locate Windows shader compiler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/bin/*/x64/fxc.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $fxc) { throw "Windows SDK fxc.exe was not found" }
+          "GPUI_FXC_PATH=$($fxc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: apps/remote-web/package-lock.json
+
+      - name: Build embedded remote client
+        working-directory: apps/remote-web
+        run: |
+          npm ci
+          npm run build
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked --target "$RELEASE_TARGET" -- -D warnings
+
+      - name: Unit and integration tests
+        run: cargo test --workspace --locked --target "$RELEASE_TARGET"
+
+      - name: Build release binaries
+        run: cargo build --workspace --release --locked --target "$RELEASE_TARGET"
+
+      - name: Package macOS application
+        if: runner.os == 'macOS'
+        run: |
+          package="nexus-agent-$RELEASE_TAG-$RELEASE_TARGET"
+          bundle="target/package/$package/Nexus Agent.app"
+          mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources" "target/release-assets"
+          cp "target/$RELEASE_TARGET/release/nexus-desktop" "$bundle/Contents/MacOS/nexus-desktop"
+          cp "apps/desktop/assets/brand/nexus-icon.icns" "$bundle/Contents/Resources/nexus-icon.icns"
+          version="${RELEASE_TAG#v}"
+          short_version="${version%%[-+]*}"
+          cat > "$bundle/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleName</key><string>Nexus Agent</string>
+            <key>CFBundleDisplayName</key><string>Nexus Agent</string>
+            <key>CFBundleIdentifier</key><string>com.ji233-sun.nexus-agent</string>
+            <key>CFBundleExecutable</key><string>nexus-desktop</string>
+            <key>CFBundleIconFile</key><string>nexus-icon.icns</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>$short_version</string>
+            <key>CFBundleVersion</key><string>$short_version</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          EOF
+          plutil -lint "$bundle/Contents/Info.plist"
+          codesign --force --sign - "$bundle"
+          cp "README.md" "target/package/$package/README.md"
+          ditto -c -k --sequesterRsrc --keepParent "target/package/$package" "target/release-assets/$package.zip"
+
+      - name: Package Linux binaries
+        if: runner.os == 'Linux'
+        run: |
+          package="nexus-agent-$RELEASE_TAG-$RELEASE_TARGET"
+          mkdir -p "target/package/$package" "target/release-assets"
+          cp "target/$RELEASE_TARGET/release/nexus-desktop" "target/$RELEASE_TARGET/release/nexus-runner" "README.md" "target/package/$package/"
+          tar -czf "target/release-assets/$package.tar.gz" -C "target/package" "$package"
+
+      - name: Package Windows binaries
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $package = "nexus-agent-$env:RELEASE_TAG-$env:RELEASE_TARGET"
+          New-Item -ItemType Directory -Force "target/package/$package", "target/release-assets" | Out-Null
+          Copy-Item "target/$env:RELEASE_TARGET/release/nexus-desktop.exe", "target/$env:RELEASE_TARGET/release/nexus-runner.exe", "README.md" "target/package/$package/"
+          Compress-Archive -Path "target/package/$package" -DestinationPath "target/release-assets/$package.zip"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.target }}
+          path: target/release-assets/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Generate checksums
+        working-directory: release-assets
+        run: sha256sum *.zip *.tar.gz > SHA256SUMS.txt
+
+      - name: Publish packages and release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          release_flags=()
+          if [[ "${version%%+*}" == *-* ]]; then
+            release_flags+=(--prerelease --latest=false)
+          fi
+          gh release create "$RELEASE_TAG" "release-assets/"* \
+            --verify-tag --generate-notes --title "$RELEASE_TAG" "${release_flags[@]}"
