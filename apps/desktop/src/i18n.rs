@@ -1,4 +1,4 @@
-use nexus_domain::{ClaudeModel, ThinkingEffort};
+use nexus_domain::ThinkingEffort;
 use nexus_protocol::HarnessProbe;
 use std::{collections::BTreeMap, sync::LazyLock};
 
@@ -33,15 +33,6 @@ impl Language {
         match self {
             Self::Chinese => source,
             Self::English => ENGLISH.get(source).map(String::as_str).unwrap_or(source),
-        }
-    }
-
-    pub(crate) fn claude_model(self, model: ClaudeModel) -> &'static str {
-        match model {
-            ClaudeModel::Default => self.text("默认模型"),
-            ClaudeModel::Sonnet => "Sonnet",
-            ClaudeModel::Opus => "Opus",
-            ClaudeModel::Haiku => "Haiku",
         }
     }
 
@@ -192,10 +183,6 @@ mod tests {
         }
         assert_eq!(Language::English.text("设置"), "Settings");
         assert_eq!(Language::Chinese.text("设置"), "设置");
-        assert_eq!(
-            Language::English.claude_model(ClaudeModel::Default),
-            "Default model"
-        );
         assert_eq!(
             Language::English.effort(ThinkingEffort::Default),
             "Model default"

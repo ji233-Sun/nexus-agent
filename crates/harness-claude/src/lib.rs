@@ -1,11 +1,49 @@
 use std::path::{Path, PathBuf};
 
-use nexus_domain::{HarnessKind, ThinkingEffort};
+use nexus_domain::{
+    ClaudeModel, HarnessKind, ModelAvailability, ModelDescriptor, ModelSource, ThinkingEffort,
+};
 pub use nexus_harness_core::{DecodedEvent, LaunchSpec};
-use nexus_harness_core::{InputFrame, LineDecoder, resolve_executable, tool_content};
-use nexus_protocol::HarnessProbe;
+use nexus_harness_core::{
+    InputFrame, LineDecoder, ModelCatalogError, resolve_executable, tool_content,
+};
+use nexus_protocol::{EnvironmentVariable, HarnessProbe};
 use serde_json::{Value, json};
 use tokio::process::Command;
+use tokio::sync::watch;
+
+pub async fn discover_models(
+    executable: &str,
+    _cwd: &Path,
+    _environment: &[EnvironmentVariable],
+    cancel: watch::Receiver<bool>,
+) -> Result<Vec<ModelDescriptor>, ModelCatalogError> {
+    if *cancel.borrow() {
+        return Err(ModelCatalogError::Cancelled);
+    }
+    if resolve_executable(executable).is_none() {
+        return Err(ModelCatalogError::Failed(
+            "未找到 Claude Code，无法加载模型别名。".into(),
+        ));
+    }
+    // These are CLI aliases, not a discovered account catalog. Version-specific
+    // model capabilities are deliberately left unknown until the adapter reports them.
+    Ok(ClaudeModel::ALL
+        .into_iter()
+        .filter_map(|model| {
+            Some(ModelDescriptor {
+                id: model.cli_value()?.into(),
+                display_name: model.to_string(),
+                source: ModelSource::ClaudeAliases,
+                availability: ModelAvailability::Unknown,
+                provider: None,
+                is_default: false,
+                supported_reasoning_efforts: Vec::new(),
+                default_reasoning_effort: None,
+            })
+        })
+        .collect())
+}
 
 pub fn build_launch_spec(
     executable: &str,
@@ -26,9 +64,10 @@ pub fn build_launch_spec(
         "--replay-user-messages".into(),
         "--permission-mode".into(),
         "acceptEdits".into(),
-        "--effort".into(),
-        effort.as_str().into(),
     ];
+    if !effort.is_default() {
+        args.extend(["--effort".into(), effort.as_str().into()]);
+    }
     if let Some(model) = model {
         args.push("--model".into());
         args.push(model.into());
@@ -272,8 +311,64 @@ fn decode_tool_results(frame: &Value) -> Vec<DecodedEvent> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn catalog_exposes_aliases_without_claiming_unknown_capabilities() {
+        let executable = std::env::current_exe().unwrap();
+        let (cancel, receiver) = watch::channel(false);
+        let models = discover_models(
+            executable.to_str().unwrap(),
+            Path::new("."),
+            &[],
+            receiver.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["sonnet", "opus", "haiku"]
+        );
+        for model in models {
+            assert_eq!(model.source.harness(), HarnessKind::Claude);
+            assert_eq!(model.availability, ModelAvailability::Unknown);
+            assert!(model.supported_reasoning_efforts.is_empty());
+            assert!(model.default_reasoning_effort.is_none());
+        }
+        cancel.send_replace(true);
+        assert_eq!(
+            discover_models("unused", Path::new("."), &[], receiver).await,
+            Err(ModelCatalogError::Cancelled)
+        );
+        assert!(matches!(
+            discover_models(
+                "nexus-missing-claude",
+                Path::new("."),
+                &[],
+                watch::channel(false).1
+            )
+            .await,
+            Err(ModelCatalogError::Failed(_))
+        ));
+    }
+
     #[test]
     fn launch_spec_includes_model_and_effort_without_prompt_in_argv() {
+        let defaults = build_launch_spec(
+            "claude",
+            Path::new("."),
+            "test",
+            None,
+            ThinkingEffort::Default,
+            None,
+        );
+        assert!(
+            !defaults
+                .args
+                .iter()
+                .any(|arg| arg == "--model" || arg == "--effort")
+        );
         let spec = build_launch_spec(
             "/usr/local/bin/claude",
             Path::new("/tmp/project"),

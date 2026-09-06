@@ -25,9 +25,7 @@ pub(crate) async fn discover_models(
     match harness {
         HarnessKind::Codex => codex::discover_models(executable, cwd, environment, cancel).await,
         HarnessKind::Omp => omp::discover_models(executable, cwd, environment, cancel).await,
-        HarnessKind::Claude => Err(ModelCatalogError::Failed(format!(
-            "{harness} 尚未提供模型目录。"
-        ))),
+        HarnessKind::Claude => claude::discover_models(executable, cwd, environment, cancel).await,
     }
 }
 

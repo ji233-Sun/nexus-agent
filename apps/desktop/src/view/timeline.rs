@@ -175,21 +175,6 @@ impl NexusView {
         let model = self.presenter.model();
         let history = model.selected_codex_thread.is_some();
         if !history {
-            // Brand SVGs from LobeHub Icons; see assets/harness/LICENSE.
-            let (icon, color): (&[u8], _) = match model.selected_harness {
-                HarnessKind::Claude => (
-                    include_bytes!("../../assets/harness/claude.svg"),
-                    rgb(0xd97757),
-                ),
-                HarnessKind::Codex => (
-                    include_bytes!("../../assets/harness/codex.svg"),
-                    rgb(colors.text),
-                ),
-                HarnessKind::Omp => (
-                    include_bytes!("../../assets/harness/omp.svg"),
-                    rgb(0xf97316),
-                ),
-            };
             return div()
                 .flex_1()
                 .w_full()
@@ -199,13 +184,11 @@ impl NexusView {
                 .justify_center()
                 .py(px(if compact { 8. } else { 32. }))
                 .text_center()
-                .child(
-                    gpui::svg()
-                        .data(icon)
-                        .size(px(if compact { 40. } else { 48. }))
-                        .flex_none()
-                        .text_color(color),
-                )
+                .child(harness_icon(
+                    model.selected_harness,
+                    colors,
+                    if compact { 40. } else { 48. },
+                ))
                 .child(
                     div()
                         .mt_3()

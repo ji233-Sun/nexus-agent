@@ -205,6 +205,8 @@ fn parse_model_catalog(output: &[u8]) -> Result<Vec<ModelDescriptor>, ModelCatal
         models.push(ModelDescriptor {
             id: selector,
             display_name,
+            source: nexus_domain::ModelSource::OmpCli,
+            availability: nexus_domain::ModelAvailability::Available,
             provider: Some(provider),
             is_default: false,
             supported_reasoning_efforts,

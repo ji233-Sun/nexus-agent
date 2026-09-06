@@ -329,6 +329,8 @@ fn parse_model_page(
         models.push(ModelDescriptor {
             id,
             display_name,
+            source: nexus_domain::ModelSource::CodexAppServer,
+            availability: nexus_domain::ModelAvailability::Available,
             provider: None,
             is_default: item
                 .get("isDefault")

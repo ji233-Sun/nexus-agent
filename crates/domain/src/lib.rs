@@ -306,9 +306,44 @@ pub struct ModelReasoningEffort {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelSource {
+    ClaudeAliases,
+    CodexAppServer,
+    OmpCli,
+}
+
+impl ModelSource {
+    pub fn harness(&self) -> HarnessKind {
+        match self {
+            Self::ClaudeAliases => HarnessKind::Claude,
+            Self::CodexAppServer => HarnessKind::Codex,
+            Self::OmpCli => HarnessKind::Omp,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ModelAvailability {
+    // Reported by the catalog, not a guarantee of account quota or successful execution.
+    Available,
+    Unknown,
+    Unavailable { reason: String },
+}
+
+impl ModelAvailability {
+    pub fn is_selectable(&self) -> bool {
+        !matches!(self, Self::Unavailable { .. })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelDescriptor {
     pub id: String,
     pub display_name: String,
+    pub source: ModelSource,
+    pub availability: ModelAvailability,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     pub is_default: bool,

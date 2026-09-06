@@ -1,7 +1,7 @@
-use super::{Presenter, executable_setting_key, supports_model_catalog};
+use super::{Presenter, executable_setting_key};
 use crate::i18n::{Language, LocalizedText, probe_status};
 use crate::infrastructure::storage::NewTaskRun;
-use crate::model::{ModelCatalogState, QueuedMessage};
+use crate::model::{ModelCatalogState, QueuedMessage, ResolvedModelSelection};
 use nexus_domain::{HarnessKind, MessageKind, MessageRole, RunStatus, ToolMetadata};
 use nexus_protocol::{Command, CommandEnvelope, Event, StartRun};
 use std::time::Instant;
@@ -29,11 +29,20 @@ impl Presenter {
             }
             Event::HarnessDetected(probe) => {
                 let harness = probe.harness;
+                let available = probe.available;
                 let message = probe_status(&probe);
                 let history_executable =
                     (harness == HarnessKind::Codex).then(|| probe.executable.clone());
                 self.model.harnesses.insert(harness, probe);
                 if harness == self.model.selected_harness {
+                    if self.model.active_run.is_none() {
+                        if !available {
+                            self.model.model_catalog = ModelCatalogState::NotReady(message.clone());
+                        } else if matches!(self.model.model_catalog, ModelCatalogState::NotReady(_))
+                        {
+                            self.refresh_model_catalog();
+                        }
+                    }
                     self.model.status = message;
                 }
                 if let Some(executable) = history_executable {
@@ -45,7 +54,7 @@ impl Presenter {
                 harness,
                 models,
             } if harness == self.model.selected_harness
-                && supports_model_catalog(harness)
+                && self.model.active_run.is_none()
                 && self.model.model_catalog.accepts(request_id) =>
             {
                 let count = models.len();
@@ -54,6 +63,11 @@ impl Presenter {
                 } else {
                     ModelCatalogState::Ready(models)
                 };
+                if self.model.model_override.is_some()
+                    && self.model.selected_catalog_model().is_some()
+                {
+                    self.remember_model_name();
+                }
                 let selected_unavailable = self.model.model_override_is_unavailable();
                 let effort_reset = !selected_unavailable && self.normalize_catalog_effort();
                 let profile_model_unverified = self.model.model_override.is_none()
@@ -65,7 +79,7 @@ impl Presenter {
                     && self.model.selected_catalog_model().is_none();
                 self.model.status = if selected_unavailable {
                     LocalizedText::new(
-                        "当前 {harness} 模型 {0} 不在目录中，请重新选择或跟随默认。",
+                        "当前 {harness} 模型 {0} 不可用，请重新选择或跟随默认。",
                         &[
                             ("harness", (harness).to_string()),
                             (
@@ -99,10 +113,10 @@ impl Presenter {
                 harness,
                 message,
             } if harness == self.model.selected_harness
-                && supports_model_catalog(harness)
+                && self.model.active_run.is_none()
                 && self.model.model_catalog.accepts(request_id) =>
             {
-                self.model.model_catalog = ModelCatalogState::Failed(message.clone().into());
+                self.model.model_catalog.fail(message.clone().into());
                 self.model.status = LocalizedText::new(
                     "{harness} 模型目录加载失败：{message}",
                     &[
@@ -250,6 +264,10 @@ impl Presenter {
                 status,
                 exit_code,
             } if self.model.active_run == Some(run_id) => {
+                let pending_catalog_request = match self.model.model_catalog {
+                    ModelCatalogState::Loading { request_id, .. } => Some(request_id),
+                    _ => None,
+                };
                 let _ = self.storage.finish_run(run_id, status, exit_code);
                 let task_id = self.model.active_task;
                 let cancelled = self.model.run_cancelling;
@@ -271,6 +289,11 @@ impl Presenter {
                     ),
                 };
                 self.reload_tasks();
+                if self.model.selected_task != task_id
+                    && let Some(selected_task) = self.model.selected_task
+                {
+                    self.select_task(selected_task);
+                }
                 if status == RunStatus::Completed
                     && !cancelled
                     && let Some(message) = self
@@ -280,6 +303,21 @@ impl Presenter {
                         .find(|message| Some(message.task_id) == task_id)
                 {
                     self.send_queued_message(message.id);
+                }
+                if self.model.active_run.is_none()
+                    && (pending_catalog_request
+                        .is_some_and(|request_id| self.model.model_catalog.accepts(request_id))
+                        || self.catalog_project
+                            != self
+                                .model
+                                .selected_project
+                                .as_ref()
+                                .map(|project| project.id))
+                {
+                    // Retry an ignored response only if task restoration has not replaced the request.
+                    let status = self.model.status.clone();
+                    self.refresh_model_catalog();
+                    self.model.status = status;
                 }
             }
             _ => {}
@@ -457,14 +495,14 @@ impl Presenter {
         } else {
             None
         };
-        if supports_model_catalog(harness) && !self.model.catalog_selection_is_valid() {
+        if !self.model.catalog_selection_is_valid() {
             self.model.status = LocalizedText::new(
                 "当前 {harness} 模型或 effort 未通过目录验证，请调整选择后重试。",
                 &[("harness", (harness).to_string())],
             );
             return false;
         }
-        let (environment, profile_model) = match self.provider_launch_configuration() {
+        let environment = match self.provider_launch_configuration() {
             Ok(configuration) => configuration,
             Err(error) => {
                 self.model.status = LocalizedText::new(
@@ -474,19 +512,7 @@ impl Presenter {
                 return false;
             }
         };
-        let model = match harness {
-            HarnessKind::Claude => {
-                profile_model.or_else(|| self.model.claude_model.cli_value().map(str::to_owned))
-            }
-            HarnessKind::Codex | HarnessKind::Omp => {
-                self.model.model_override.clone().or(profile_model)
-            }
-        };
-        let effort = if supports_model_catalog(harness) {
-            self.resolved_catalog_effort(model.as_deref())
-        } else {
-            self.model.effort
-        };
+        let ResolvedModelSelection { model, effort } = self.model.resolved_model_selection();
         let title: String = prompt.chars().take(48).collect();
         let Ok(pending_run) = self.storage.prepare_task_run(NewTaskRun {
             task_id,

@@ -1,4 +1,5 @@
 mod components;
+mod model_picker;
 mod pane;
 mod settings;
 mod sidebar;
@@ -28,15 +29,18 @@ use gpui_kit::component::{
     alert::Alert,
     button::{Button, ButtonVariants as _},
     input::{Enter, Input, InputEvent, InputState, Textarea, TextareaState},
+    list::{List, ListDelegate, ListEvent, ListItem, ListState},
     menu::PopupMenuItem,
-    searchable_list::{SearchableGroup, SearchableListItem, SearchableVec},
-    select::{Select, SelectEvent, SelectState},
+    popover::Popover,
+    searchable_list::SearchableListItem,
     switch::Switch,
     text::{TextView, TextViewStyle},
+    tooltip::Tooltip,
 };
+use model_picker::{CatalogModelChoice, CatalogModelSelectContent, ModelPickerList};
 use nexus_domain::{
-    ClaudeModel, HarnessKind, Message, MessageKind, MessageRole, ModelDescriptor, Project,
-    ProviderProfile, RunStatus, ThinkingEffort,
+    HarnessKind, Message, MessageKind, MessageRole, ModelDescriptor, Project, ProviderProfile,
+    RunStatus, ThinkingEffort,
 };
 use pane::{PaneKind, WorkspacePane};
 use settings::SettingsSection;
@@ -49,304 +53,12 @@ use uuid::Uuid;
 
 gpui::actions!(nexus_view, [SearchSessions, NewTask, ToggleSettings]);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum CatalogModelChoice {
-    FollowDefault,
-    Model(String),
-    Status(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CatalogModelItem {
-    choice: CatalogModelChoice,
-    title: String,
-    trigger_title: String,
-    search_text: String,
-    disabled: bool,
-}
-
-impl CatalogModelItem {
-    fn follow_default(title: String, trigger_title: String, search_text: String) -> Self {
-        Self {
-            choice: CatalogModelChoice::FollowDefault,
-            title,
-            trigger_title,
-            search_text,
-            disabled: false,
-        }
-    }
-
-    fn model(model: &ModelDescriptor) -> Self {
-        let title = catalog_model_row_title(model);
-        let trigger_title = catalog_model_trigger_title(model);
-        let provider = model.provider.as_deref().unwrap_or_default();
-        Self {
-            choice: CatalogModelChoice::Model(model.id.clone()),
-            search_text: format!("{provider} {} {}", model.display_name, model.id),
-            title,
-            trigger_title,
-            disabled: false,
-        }
-    }
-
-    fn unavailable(model_id: &str, state: &ModelCatalogState, locale: Language) -> Self {
-        let availability = match state {
-            ModelCatalogState::Loading { .. } => locale.text("验证中"),
-            ModelCatalogState::Ready(_) | ModelCatalogState::Empty => locale.text("不可用"),
-            ModelCatalogState::Idle | ModelCatalogState::Failed(_) => locale.text("未验证"),
-        };
-        let title = format!("{model_id} · {availability}");
-        Self {
-            choice: CatalogModelChoice::Model(model_id.to_owned()),
-            trigger_title: title.clone(),
-            search_text: format!("{model_id} {availability}"),
-            title,
-            disabled: true,
-        }
-    }
-
-    fn status(title: String) -> Self {
-        Self {
-            choice: CatalogModelChoice::Status(title.clone()),
-            trigger_title: title.clone(),
-            search_text: title.clone(),
-            title,
-            disabled: true,
-        }
-    }
-}
-
-impl SearchableListItem for CatalogModelItem {
-    type Value = CatalogModelChoice;
-
-    fn title(&self) -> SharedString {
-        self.title.clone().into()
-    }
-
-    fn display_title(&self) -> Option<AnyElement> {
-        Some(self.trigger_title.clone().into_any_element())
-    }
-
-    fn value(&self) -> &Self::Value {
-        &self.choice
-    }
-
-    fn matches(&self, query: &str) -> bool {
-        self.search_text
-            .to_lowercase()
-            .contains(&query.trim().to_lowercase())
-    }
-
-    fn disabled(&self) -> bool {
-        self.disabled
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CatalogModelGroup {
-    title: String,
-    items: Vec<CatalogModelItem>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CatalogModelSelectContent {
-    groups: Vec<CatalogModelGroup>,
-    selected: CatalogModelChoice,
-}
-
-type CatalogModelSelect = SearchableVec<SearchableGroup<CatalogModelItem>>;
-
-impl CatalogModelSelectContent {
-    fn from_model(model: &AppModel) -> Self {
-        let locale = model.language;
-        let selected = model
-            .model_override
-            .as_ref()
-            .map(|model_id| CatalogModelChoice::Model(model_id.clone()))
-            .unwrap_or(CatalogModelChoice::FollowDefault);
-        let mut groups = vec![CatalogModelGroup {
-            title: locale.text("默认").into(),
-            items: vec![catalog_follow_default_item(model)],
-        }];
-        let catalog_models = model.model_catalog.models().unwrap_or_default();
-
-        if let Some(model_id) = model.model_override.as_deref()
-            && !catalog_models.iter().any(|entry| entry.id == model_id)
-        {
-            groups.push(CatalogModelGroup {
-                title: locale.text("当前选择").into(),
-                items: vec![CatalogModelItem::unavailable(
-                    model_id,
-                    &model.model_catalog,
-                    locale,
-                )],
-            });
-        }
-
-        let mut provider_groups = BTreeMap::<String, Vec<CatalogModelItem>>::new();
-        for descriptor in catalog_models {
-            let provider = descriptor
-                .provider
-                .clone()
-                .unwrap_or_else(|| model.selected_harness.to_string());
-            provider_groups
-                .entry(provider)
-                .or_default()
-                .push(CatalogModelItem::model(descriptor));
-        }
-        groups.extend(
-            provider_groups
-                .into_iter()
-                .map(|(title, items)| CatalogModelGroup { title, items }),
-        );
-
-        let status = match &model.model_catalog {
-            ModelCatalogState::Idle if model.selected_project.is_none() => {
-                Some(locale.text("选择项目后加载模型目录").into())
-            }
-            ModelCatalogState::Idle => Some(locale.text("模型目录尚未加载").into()),
-            ModelCatalogState::Loading { .. } => Some(locale.text("正在加载模型目录…").into()),
-            ModelCatalogState::Empty => Some(locale.text("当前模型目录为空").into()),
-            ModelCatalogState::Failed(message) => Some(locale.format(
-                "模型目录加载失败：{message}",
-                &[("message", message.render(locale).to_owned())],
-            )),
-            ModelCatalogState::Ready(_) => None,
-        };
-        if let Some(status) = status {
-            groups.push(CatalogModelGroup {
-                title: locale.text("状态").into(),
-                items: vec![CatalogModelItem::status(status)],
-            });
-        }
-
-        Self { groups, selected }
-    }
-
-    fn delegate(&self) -> CatalogModelSelect {
-        SearchableVec::new(
-            self.groups
-                .iter()
-                .map(|group| {
-                    SearchableGroup::new(group.title.clone()).items(group.items.iter().cloned())
-                })
-                .collect::<Vec<_>>(),
-        )
-    }
-
-    fn selected_index(&self) -> Option<IndexPath> {
-        self.groups.iter().enumerate().find_map(|(section, group)| {
-            group
-                .items
-                .iter()
-                .position(|item| item.choice == self.selected)
-                .map(|row| IndexPath::new(row).section(section))
-        })
-    }
-}
-
-fn catalog_model_row_title(model: &ModelDescriptor) -> String {
-    if model.display_name == model.id {
-        model.id.clone()
-    } else {
-        format!("{} · {}", model.display_name, model.id)
-    }
-}
-
-fn catalog_model_trigger_title(model: &ModelDescriptor) -> String {
-    model
-        .provider
-        .as_deref()
-        .map(|provider| format!("{provider} · {}", model.display_name))
-        .unwrap_or_else(|| model.display_name.clone())
-}
-
-fn catalog_follow_default_item(model: &AppModel) -> CatalogModelItem {
-    let locale = model.language;
-    let profile_model = model
-        .selected_provider_profile()
-        .and_then(|profile| profile.model.as_deref());
-    if let Some(model_id) = profile_model {
-        if let Some(descriptor) = model
-            .model_catalog
-            .models()
-            .and_then(|models| models.iter().find(|entry| entry.id == model_id))
-        {
-            return CatalogModelItem::follow_default(
-                locale.format(
-                    "跟随 Profile 默认 · {0}",
-                    &[("0", (catalog_model_row_title(descriptor)).to_string())],
-                ),
-                locale.format(
-                    "默认 · {0}",
-                    &[("0", (catalog_model_trigger_title(descriptor)).to_string())],
-                ),
-                format!(
-                    "default 默认 profile {} {}",
-                    descriptor.display_name, descriptor.id
-                ),
-            );
-        }
-        let verification = match &model.model_catalog {
-            ModelCatalogState::Loading { .. } => locale.text("验证中"),
-            ModelCatalogState::Failed(_) => locale.text("目录加载失败"),
-            ModelCatalogState::Ready(_) | ModelCatalogState::Empty => locale.text("目录未验证"),
-            ModelCatalogState::Idle => locale.text("未验证"),
-        };
-        return CatalogModelItem::follow_default(
-            locale.format(
-                "跟随 Profile 默认 · {model_id}（{verification}）",
-                &[
-                    ("model_id", (model_id).to_string()),
-                    ("verification", (verification).to_string()),
-                ],
-            ),
-            locale.format(
-                "默认 · {model_id} · {verification}",
-                &[
-                    ("model_id", (model_id).to_string()),
-                    ("verification", (verification).to_string()),
-                ],
-            ),
-            format!("default 默认 profile {model_id} {verification}"),
-        );
-    }
-
-    if let Some(descriptor) = model.selected_catalog_model() {
-        return CatalogModelItem::follow_default(
-            locale.format(
-                "跟随 CLI 默认 · {0}",
-                &[("0", (catalog_model_row_title(descriptor)).to_string())],
-            ),
-            locale.format(
-                "CLI 默认 · {0}",
-                &[("0", (catalog_model_trigger_title(descriptor)).to_string())],
-            ),
-            format!(
-                "default 默认 cli {} {}",
-                descriptor.display_name, descriptor.id
-            ),
-        );
-    }
-
-    let suffix = match &model.model_catalog {
-        ModelCatalogState::Loading { .. } => locale.text(" · 目录加载中"),
-        ModelCatalogState::Failed(_) => locale.text(" · 目录加载失败"),
-        ModelCatalogState::Empty => locale.text(" · 目录为空"),
-        ModelCatalogState::Idle | ModelCatalogState::Ready(_) => "",
-    };
-    CatalogModelItem::follow_default(
-        locale.text("跟随 CLI 默认模型").into(),
-        locale.format("CLI 默认模型{suffix}", &[("suffix", (suffix).to_string())]),
-        "default 默认 cli".into(),
-    )
-}
-
 pub(crate) struct NexusView {
     presenter: Presenter,
     prompt_input: Entity<TextareaState>,
-    catalog_model_select: Entity<SelectState<CatalogModelSelect>>,
+    catalog_model_select: Entity<ListState<ModelPickerList>>,
     catalog_model_select_content: CatalogModelSelectContent,
+    model_picker_open: bool,
     executable_input: Entity<InputState>,
     provider_name_input: Entity<InputState>,
     provider_api_key_env_input: Entity<InputState>,
@@ -441,13 +153,14 @@ impl NexusView {
             cx.new(|cx| InputState::new(window, cx).placeholder(locale.text("搜索任务与历史…")));
         let catalog_model_select_content = CatalogModelSelectContent::from_model(presenter.model());
         let catalog_model_select = cx.new(|cx| {
-            SelectState::new(
-                catalog_model_select_content.delegate(),
-                catalog_model_select_content.selected_index(),
+            let mut state = ListState::new(
+                ModelPickerList::new(catalog_model_select_content.clone()),
                 window,
                 cx,
             )
-            .searchable(true)
+            .searchable(true);
+            state.set_selected_index(catalog_model_select_content.selected_index(), window, cx);
+            state
         });
         cx.subscribe(&prompt_input, |_, _, event: &InputEvent, cx| {
             if matches!(
@@ -465,19 +178,33 @@ impl NexusView {
             cx.notify();
         })
         .detach();
-        cx.subscribe(
+        cx.subscribe_in(
             &catalog_model_select,
-            |app, _, event: &SelectEvent<CatalogModelSelect>, cx| {
-                let SelectEvent::Confirm(choice) = event;
-                match choice {
-                    Some(CatalogModelChoice::FollowDefault) => {
-                        app.select_catalog_model(None, cx);
+            window,
+            |app, list, event: &ListEvent, _, cx| {
+                match event {
+                    ListEvent::Confirm(index) => {
+                        let choice = list
+                            .read(cx)
+                            .delegate()
+                            .item(*index)
+                            .filter(|item| !item.disabled)
+                            .map(|item| item.choice.clone());
+                        match choice {
+                            Some(CatalogModelChoice::FollowDefault) => {
+                                app.select_catalog_model(None, cx)
+                            }
+                            Some(CatalogModelChoice::Model(id)) => {
+                                app.select_catalog_model(Some(id), cx)
+                            }
+                            _ => return,
+                        }
+                        app.model_picker_open = false;
                     }
-                    Some(CatalogModelChoice::Model(model_id)) => {
-                        app.select_catalog_model(Some(model_id.clone()), cx);
-                    }
-                    Some(CatalogModelChoice::Status(_)) | None => {}
+                    ListEvent::Cancel => app.model_picker_open = false,
+                    _ => return,
                 }
+                cx.notify();
             },
         )
         .detach();
@@ -495,6 +222,7 @@ impl NexusView {
             prompt_input,
             catalog_model_select,
             catalog_model_select_content,
+            model_picker_open: false,
             executable_input,
             provider_name_input,
             provider_api_key_env_input,
@@ -892,12 +620,6 @@ impl NexusView {
         cx.notify();
     }
 
-    fn select_model(&mut self, model: ClaudeModel, cx: &mut Context<Self>) {
-        self.presenter.select_model(model);
-        self.presenter.notify_remote_changed();
-        cx.notify();
-    }
-
     fn select_catalog_model(&mut self, model_id: Option<String>, cx: &mut Context<Self>) {
         self.presenter.select_catalog_model(model_id);
         self.presenter.notify_remote_changed();
@@ -1031,10 +753,11 @@ impl NexusView {
             return;
         }
         self.catalog_model_select_content = content.clone();
-        let selected = content.selected.clone();
         self.catalog_model_select.update(cx, |state, cx| {
-            state.set_items(content.delegate(), window, cx);
-            state.set_selected_value(&selected, window, cx);
+            state.delegate_mut().replace_content(content);
+            let selected = state.delegate().selected_index();
+            state.set_selected_index(selected, window, cx);
+            cx.notify();
         });
     }
 
@@ -1154,141 +877,59 @@ impl NexusView {
             })
     }
 
-    fn model_selector(&self, cx: &mut Context<Self>) -> AnyElement {
-        let locale = self.presenter.model().language;
-        let model = self.presenter.model();
-        if model.uses_model_catalog() {
-            return self.catalog_model_selector(cx);
-        }
-        let selected = model.claude_model;
-        let app = cx.entity().clone();
-        let profile_model = model
-            .selected_provider_profile()
-            .and_then(|profile| profile.model.clone());
-        let label = profile_model.clone().unwrap_or_else(|| {
-            if model.selected_harness == HarnessKind::Claude {
-                locale.claude_model(selected).to_owned()
-            } else {
-                locale.text("CLI 默认模型").into()
-            }
-        });
-        let button_id = "composer-model";
-        Button::new(button_id)
-            .ghost()
-            .small()
-            .h(px(COMPACT_CONTROL_HEIGHT))
-            .max_w(px(200.))
-            .label(label)
-            .disabled(
-                model.selected_harness != HarnessKind::Claude
-                    || profile_model.is_some()
-                    || model.active_run.is_some(),
-            )
-            .map(|button| {
-                AnimatedDropdown::new(button_id, button, self.reduced_motion, move |menu, _, _| {
-                    ClaudeModel::ALL
-                        .into_iter()
-                        .fold(menu.min_w(px(160.)), |menu, model| {
-                            let app = app.clone();
-                            menu.item(
-                                PopupMenuItem::new(locale.claude_model(model))
-                                    .checked(model == selected)
-                                    .on_click(move |_, _, cx| {
-                                        app.update(cx, |app, cx| app.select_model(model, cx));
-                                    }),
-                            )
-                        })
-                })
-            })
-            .into_any_element()
-    }
-
-    fn catalog_model_selector(&self, cx: &mut Context<Self>) -> AnyElement {
-        let locale = self.presenter.model().language;
-        let model = self.presenter.model();
-        let active = model.active_run.is_some();
-        div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .child(
-                div().w(px(220.)).h(px(COMPACT_CONTROL_HEIGHT)).child(
-                    Select::new(&self.catalog_model_select)
-                        .small()
-                        .appearance(false)
-                        .accessibility_label(locale.text("模型"))
-                        .search_placeholder(locale.text("按 Provider、名称或模型 ID 搜索"))
-                        .menu_width(px(360.))
-                        .menu_max_h(px(360.))
-                        .disabled(active)
-                        .size_full(),
-                ),
-            )
-            .child(
-                Button::new("composer-model-refresh")
-                    .ghost()
-                    .small()
-                    .size(px(COMPACT_CONTROL_HEIGHT))
-                    .p_0()
-                    .icon(IconName::RotateCw)
-                    .accessibility_label(locale.text("刷新模型目录"))
-                    .tooltip(locale.format(
-                        "刷新 {0} 模型目录",
-                        &[("0", (model.selected_harness).to_string())],
-                    ))
-                    .disabled(active || model.selected_project.is_none())
-                    .on_click(cx.listener(Self::refresh_model_catalog)),
-            )
-            .into_any_element()
-    }
-
-    fn effort_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn effort_selector(&self, cx: &mut Context<Self>) -> AnyElement {
         let model = self.presenter.model();
         let locale = model.language;
         let selected = model.effort;
-        let efforts = if model.uses_model_catalog() {
-            let mut efforts = vec![ThinkingEffort::Default];
-            if let Some(catalog_model) = model.selected_catalog_model() {
-                efforts.extend(
-                    catalog_model
-                        .supported_reasoning_efforts
-                        .iter()
-                        .map(|option| option.effort),
-                );
-            }
-            if !efforts.contains(&selected) {
-                efforts.push(selected);
-            }
-            efforts
+        let mut efforts = vec![ThinkingEffort::Default];
+        if let Some(descriptor) = model.selected_catalog_model() {
+            efforts.extend(
+                descriptor
+                    .supported_reasoning_efforts
+                    .iter()
+                    .map(|option| option.effort),
+            );
+        }
+        let resolved = model.resolved_model_selection().effort;
+        let label = if selected.is_default() && !resolved.is_default() {
+            format!("{} · {}", locale.effort(selected), locale.effort(resolved))
         } else {
-            ThinkingEffort::ALL.to_vec()
+            locale.effort(resolved).to_owned()
         };
+        let supported = efforts.len() > 1;
         let app = cx.entity().clone();
         let button_id = "composer-effort";
-        Button::new(button_id)
+        let button = Button::new(button_id)
             .ghost()
             .small()
             .h(px(COMPACT_CONTROL_HEIGHT))
             .icon(IconName::Cpu)
-            .label(locale.effort(selected))
-            .disabled(model.active_run.is_some())
-            .map(|button| {
-                AnimatedDropdown::new(button_id, button, self.reduced_motion, move |menu, _, _| {
-                    efforts
-                        .iter()
-                        .copied()
-                        .fold(menu.min_w(px(140.)), |menu, effort| {
-                            let app = app.clone();
-                            menu.item(
-                                PopupMenuItem::new(locale.effort(effort))
-                                    .checked(effort == selected)
-                                    .on_click(move |_, _, cx| {
-                                        app.update(cx, |app, cx| app.select_effort(effort, cx));
-                                    }),
-                            )
-                        })
-                })
+            .label(label)
+            .tooltip(if supported {
+                locale.text("思考档位")
+            } else {
+                locale.text("当前模型未确认支持独立思考设置，将使用默认行为。")
             })
+            .disabled(model.active_run.is_some() || !supported);
+        if model.active_run.is_some() || !supported {
+            return button.into_any_element();
+        }
+        AnimatedDropdown::new(button_id, button, self.reduced_motion, move |menu, _, _| {
+            efforts
+                .iter()
+                .copied()
+                .fold(menu.min_w(px(140.)), |menu, effort| {
+                    let app = app.clone();
+                    menu.item(
+                        PopupMenuItem::new(locale.effort(effort))
+                            .checked(effort == selected)
+                            .on_click(move |_, _, cx| {
+                                app.update(cx, |app, cx| app.select_effort(effort, cx));
+                            }),
+                    )
+                })
+        })
+        .into_any_element()
     }
 }
 
@@ -1599,18 +1240,7 @@ impl NexusView {
                                                     .flex_wrap()
                                                     .items_center()
                                                     .gap_1()
-                                                    .child(self.harness_selector(
-                                                        "composer-harness",
-                                                        true,
-                                                        cx,
-                                                    ))
-                                                    .child(self.provider_profile_selector(
-                                                        "composer-provider-profile",
-                                                        true,
-                                                        false,
-                                                        cx,
-                                                    ))
-                                                    .child(self.model_selector(cx))
+                                                    .child(self.model_selector(window, cx))
                                                     .child(self.effort_selector(cx)),
                                             )
                                             .child(
@@ -1703,6 +1333,11 @@ impl NexusView {
 
 impl Render for NexusView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.model_picker_open && self.presenter.model().active_run.is_some() {
+            self.model_picker_open = false;
+            self.prompt_input
+                .update(cx, |input, cx| input.focus(window, cx));
+        }
         self.sync_catalog_model_select(window, cx);
         let colors = palette(cx);
         div()
@@ -1800,6 +1435,8 @@ mod catalog_model_tests {
 
     fn omp_model(provider: &str, id: &str) -> ModelDescriptor {
         ModelDescriptor {
+            source: nexus_domain::ModelSource::OmpCli,
+            availability: nexus_domain::ModelAvailability::Available,
             id: id.into(),
             display_name: "Shared Model".into(),
             provider: Some(provider.into()),
@@ -1872,6 +1509,168 @@ mod catalog_model_tests {
         assert!(content.selected_index().is_some());
     }
 
+    #[test]
+    fn picker_distinguishes_catalog_states_and_does_not_confuse_default_with_override() {
+        let mut default = omp_model("provider", "default-model");
+        default.is_default = true;
+        let mut explicit = omp_model("provider", "explicit-model");
+        explicit.display_name = "Chosen display name".into();
+        let mut model = AppModel {
+            selected_harness: HarnessKind::Omp,
+            model_override: Some("explicit-model".into()),
+            model_override_name: Some(explicit.display_name.clone()),
+            model_catalog: ModelCatalogState::Ready(vec![default, explicit]),
+            ..Default::default()
+        };
+        let content = CatalogModelSelectContent::from_model(&model);
+        assert!(content.groups[0].items[0].title.contains("default-model"));
+        assert!(!content.groups[0].items[0].title.contains("explicit-model"));
+        for (state, status) in [
+            (ModelCatalogState::Idle, "选择项目"),
+            (
+                ModelCatalogState::Loading {
+                    request_id: Uuid::new_v4(),
+                    models: vec![],
+                },
+                "正在加载",
+            ),
+            (ModelCatalogState::Empty, "目录为空"),
+            (
+                ModelCatalogState::Failed {
+                    message: "test failure".into(),
+                    models: vec![],
+                },
+                "test failure",
+            ),
+            (
+                ModelCatalogState::NotReady("CLI not ready".into()),
+                "CLI not ready",
+            ),
+        ] {
+            model.model_catalog = state;
+            let content = CatalogModelSelectContent::from_model(&model);
+            let items = content
+                .groups
+                .iter()
+                .flat_map(|group| &group.items)
+                .collect::<Vec<_>>();
+            assert!(items.iter().any(|item| item.title.contains(status)));
+            assert!(
+                items
+                    .iter()
+                    .any(|item| item.disabled && item.title.contains("Chosen display name"))
+            );
+        }
+        let mut default = omp_model("provider", "default-model");
+        default.is_default = true;
+        default.availability = nexus_domain::ModelAvailability::Unavailable {
+            reason: "disabled by provider".into(),
+        };
+        model.model_catalog = ModelCatalogState::Ready(vec![default]);
+        model.model_override = None;
+        let content = CatalogModelSelectContent::from_model(&model);
+        let default = &content.groups[0].items[0];
+        assert!(default.title.contains("disabled by provider"));
+        assert!(default.trigger_title.contains("不可用"));
+    }
+
+    #[gpui::test]
+    fn unified_picker_supports_keyboard_focus_and_minimum_window_bounds(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (mut presenter, runner, _directory) = fixture();
+        presenter.select_harness(HarnessKind::Omp, "claude");
+        let ModelCatalogState::Loading { request_id, .. } = presenter.model().model_catalog else {
+            panic!("loading")
+        };
+        let mut long = omp_model("provider", "provider/needle-target");
+        long.display_name = "Long model name · 很长的模型名称 ".repeat(40);
+        runner.emit(Event::ModelCatalogLoaded {
+            request_id,
+            harness: HarnessKind::Omp,
+            models: vec![long, omp_model("provider", "provider/other-model")],
+        });
+        presenter.drain_events();
+        let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
+        for (width, height, theme, glass) in [
+            (1040., 680., ThemePreference::Light, true),
+            (1280., 800., ThemePreference::Dark, false),
+        ] {
+            cx.simulate_resize(gpui::size(px(width), px(height)));
+            view.update_in(cx, |view, window, cx| {
+                view.set_appearance(
+                    AppearanceSettings {
+                        theme,
+                        glass,
+                        reduced_motion: true,
+                    },
+                    window,
+                    cx,
+                );
+                view.prompt_input
+                    .update(cx, |input, cx| input.focus(window, cx));
+            });
+            cx.run_until_parked();
+            let trigger = cx.debug_bounds("composer-model").unwrap();
+            assert!(trigger.right() <= px(width));
+            assert!(trigger.size.width <= px(300.));
+            cx.simulate_click(trigger.center(), Default::default());
+            cx.run_until_parked();
+            let bounds = cx.debug_bounds("model-picker-surface").unwrap();
+            assert!(
+                bounds.left() >= px(0.) && bounds.right() <= px(width),
+                "{bounds:?}"
+            );
+            assert!(
+                bounds.top() >= px(0.) && bounds.bottom() <= px(height),
+                "{bounds:?}"
+            );
+            assert!(cx.debug_bounds("model-config-claude-cli").is_some());
+            assert!(cx.debug_bounds("model-config-codex-cli").is_some());
+            assert!(cx.debug_bounds("model-config-omp-cli").is_some());
+            view.update_in(cx, |view, window, cx| {
+                assert!(
+                    view.catalog_model_select
+                        .focus_handle(cx)
+                        .is_focused(window)
+                );
+            });
+            cx.simulate_keystrokes("down up escape");
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("model-picker-surface").is_none());
+            view.update_in(cx, |view, window, cx| {
+                assert!(view.prompt_input.focus_handle(cx).is_focused(window));
+            });
+            cx.simulate_click(trigger.center(), Default::default());
+            cx.run_until_parked();
+            cx.simulate_input("NEEDLE-target");
+            cx.run_until_parked();
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("model-picker-surface").is_none());
+            assert_eq!(
+                view.read_with(cx, |view, _| view.presenter.model().model_override.clone()),
+                Some("provider/needle-target".into())
+            );
+        }
+        let trigger = cx.debug_bounds("composer-model").unwrap();
+        cx.simulate_click(trigger.center(), Default::default());
+        cx.run_until_parked();
+        let claude = cx.debug_bounds("model-config-claude-cli").unwrap();
+        cx.simulate_click(claude.center(), Default::default());
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(cx, |view, _| view.presenter.model().selected_harness),
+            HarnessKind::Claude
+        );
+        assert!(cx.debug_bounds("model-picker-surface").is_some());
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("model-picker-surface").is_none());
+    }
+
     #[gpui::test]
     fn queued_message_steer_button_targets_the_message_and_waits_for_receipt(
         cx: &mut gpui::TestAppContext,
@@ -1919,7 +1718,7 @@ mod catalog_model_tests {
         cx.update(theme::configure_theme);
         let (mut presenter, runner, _directory) = fixture();
         assert!(presenter.select_harness(HarnessKind::Omp, "claude"));
-        let ModelCatalogState::Loading { request_id } = presenter.model().model_catalog else {
+        let ModelCatalogState::Loading { request_id, .. } = presenter.model().model_catalog else {
             panic!("expected loading catalog")
         };
         let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
@@ -1953,7 +1752,17 @@ mod catalog_model_tests {
 
         assert_eq!(
             view.read_with(cx, |view, cx| {
-                view.catalog_model_select.read(cx).selected_value().cloned()
+                view.catalog_model_select
+                    .read(cx)
+                    .delegate()
+                    .selected_index()
+                    .and_then(|index| {
+                        view.catalog_model_select
+                            .read(cx)
+                            .delegate()
+                            .item(index)
+                            .map(|item| item.choice.clone())
+                    })
             }),
             Some(CatalogModelChoice::Model("bigmodel/shared-model".into()))
         );
