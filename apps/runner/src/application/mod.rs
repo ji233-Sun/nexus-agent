@@ -1,9 +1,12 @@
 pub(crate) mod events;
 
 use nexus_domain::RunStatus;
-use nexus_protocol::{Command, ErrorCode, Event, StartRun};
+use nexus_protocol::{Command, EnvironmentVariable, ErrorCode, Event, StartRun};
 use std::{collections::HashSet, path::Path, sync::Arc};
-use tokio::sync::{Mutex, watch};
+use tokio::{
+    sync::{Mutex, watch},
+    task::JoinHandle,
+};
 use uuid::Uuid;
 
 use crate::infrastructure::{harness, process::run_harness};
@@ -15,8 +18,14 @@ struct ActiveRun {
     cancel: watch::Sender<bool>,
 }
 
+struct CatalogTask {
+    cancel: watch::Sender<bool>,
+    task: JoinHandle<()>,
+}
+
 pub(crate) struct Runner {
     active: Arc<Mutex<Option<ActiveRun>>>,
+    catalog_task: Option<CatalogTask>,
     emitter: Emitter,
 }
 
@@ -24,6 +33,7 @@ impl Runner {
     pub(crate) fn new(emitter: Emitter) -> Self {
         Self {
             active: Arc::new(Mutex::new(None)),
+            catalog_task: None,
             emitter,
         }
     }
@@ -41,6 +51,75 @@ impl Runner {
                     ))
                     .await;
             }
+            Command::ModelCatalogRefresh {
+                request_id,
+                harness: kind,
+                executable,
+                cwd,
+                environment,
+            } => {
+                self.cancel_catalog_task().await;
+                if !environment_is_valid(&environment) {
+                    self.emitter
+                        .send(Event::ModelCatalogFailed {
+                            request_id,
+                            harness: kind,
+                            message: "Provider Profile 包含无效或重复的环境变量。".into(),
+                        })
+                        .await;
+                } else {
+                    let cwd = Path::new(&cwd).canonicalize();
+                    match cwd {
+                        Ok(cwd) if cwd.is_dir() => {
+                            let (cancel, cancel_rx) = watch::channel(false);
+                            let emitter = self.emitter.clone();
+                            let task = tokio::spawn(async move {
+                                match harness::discover_models(
+                                    kind,
+                                    &executable,
+                                    &cwd,
+                                    &environment,
+                                    cancel_rx,
+                                )
+                                .await
+                                {
+                                    Ok(models) => {
+                                        emitter
+                                            .send(Event::ModelCatalogLoaded {
+                                                request_id,
+                                                harness: kind,
+                                                models,
+                                            })
+                                            .await;
+                                    }
+                                    Err(nexus_harness_codex::ModelCatalogError::Cancelled) => {}
+                                    Err(nexus_harness_codex::ModelCatalogError::Failed(
+                                        message,
+                                    )) => {
+                                        emitter
+                                            .send(Event::ModelCatalogFailed {
+                                                request_id,
+                                                harness: kind,
+                                                message,
+                                            })
+                                            .await;
+                                    }
+                                }
+                            });
+                            self.catalog_task = Some(CatalogTask { cancel, task });
+                        }
+                        _ => {
+                            self.emitter
+                                .send(Event::ModelCatalogFailed {
+                                    request_id,
+                                    harness: kind,
+                                    message: "项目目录不存在或无法访问，无法加载模型目录。".into(),
+                                })
+                                .await;
+                        }
+                    }
+                }
+            }
             Command::RunStart(request) => {
                 start_run(request, self.active.clone(), self.emitter.clone()).await;
             }
@@ -52,7 +131,15 @@ impl Runner {
         true
     }
 
-    pub(crate) async fn shutdown(&self) {
+    async fn cancel_catalog_task(&mut self) {
+        if let Some(task) = self.catalog_task.take() {
+            let _ = task.cancel.send(true);
+            let _ = task.task.await;
+        }
+    }
+
+    pub(crate) async fn shutdown(&mut self) {
+        self.cancel_catalog_task().await;
         if let Some(run) = self.active.lock().await.as_ref() {
             let _ = run.cancel.send(true);
         }
@@ -79,10 +166,7 @@ async fn start_run(request: StartRun, active: Arc<Mutex<Option<ActiveRun>>>, emi
         return;
     }
 
-    let mut environment_names = HashSet::new();
-    if request.environment.iter().any(|variable| {
-        !variable.has_safe_name() || !environment_names.insert(variable.name.as_str())
-    }) {
+    if !environment_is_valid(&request.environment) {
         emitter
             .send(Event::RunFailed {
                 run_id: request.run_id,
@@ -137,6 +221,13 @@ async fn start_run(request: StartRun, active: Arc<Mutex<Option<ActiveRun>>>, emi
             *guard = None;
         }
     });
+}
+
+fn environment_is_valid(environment: &[EnvironmentVariable]) -> bool {
+    let mut names = HashSet::new();
+    environment
+        .iter()
+        .all(|variable| variable.has_safe_name() && names.insert(variable.name.as_str()))
 }
 
 async fn cancel_run(run_id: Uuid, active: &Mutex<Option<ActiveRun>>, emitter: &Emitter) {

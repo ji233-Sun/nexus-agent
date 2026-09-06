@@ -1,16 +1,32 @@
-use nexus_domain::HarnessKind;
+use nexus_domain::{HarnessKind, ModelDescriptor};
 use nexus_harness_claude as claude;
 use nexus_harness_codex as codex;
 use nexus_harness_core::{LaunchSpec, LineDecoder};
 use nexus_harness_omp as omp;
-use nexus_protocol::{HarnessProbe, StartRun};
+use nexus_protocol::{EnvironmentVariable, HarnessProbe, StartRun};
 use std::path::Path;
+use tokio::sync::watch;
 
 pub(crate) async fn probe(harness: HarnessKind, executable: &str) -> HarnessProbe {
     match harness {
         HarnessKind::Claude => claude::probe(executable).await,
         HarnessKind::Codex => codex::probe(executable).await,
         HarnessKind::Omp => omp::probe(executable).await,
+    }
+}
+
+pub(crate) async fn discover_models(
+    harness: HarnessKind,
+    executable: &str,
+    cwd: &Path,
+    environment: &[EnvironmentVariable],
+    cancel: watch::Receiver<bool>,
+) -> Result<Vec<ModelDescriptor>, codex::ModelCatalogError> {
+    match harness {
+        HarnessKind::Codex => codex::discover_models(executable, cwd, environment, cancel).await,
+        HarnessKind::Claude | HarnessKind::Omp => Err(codex::ModelCatalogError::Failed(format!(
+            "{harness} 尚未提供模型目录。"
+        ))),
     }
 }
 

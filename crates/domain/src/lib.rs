@@ -211,12 +211,16 @@ impl ClaudeModel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ThinkingEffort {
+    Default,
+    None,
+    Minimal,
     Low,
     #[default]
     Medium,
     High,
     XHigh,
     Max,
+    Ultra,
 }
 
 impl ThinkingEffort {
@@ -224,33 +228,45 @@ impl ThinkingEffort {
 
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Default => "default",
+            Self::None => "none",
+            Self::Minimal => "minimal",
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
             Self::XHigh => "xhigh",
             Self::Max => "max",
+            Self::Ultra => "ultra",
         }
     }
 
-    pub fn next(self) -> Self {
+    pub fn next(&self) -> Self {
         match self {
             Self::Low => Self::Medium,
             Self::Medium => Self::High,
             Self::High => Self::XHigh,
             Self::XHigh => Self::Max,
-            Self::Max => Self::Low,
+            _ => Self::Low,
         }
+    }
+
+    pub fn is_default(&self) -> bool {
+        matches!(self, Self::Default)
     }
 }
 
 impl fmt::Display for ThinkingEffort {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::Default => "模型默认",
+            Self::None => "None",
+            Self::Minimal => "Minimal",
             Self::Low => "Low",
             Self::Medium => "Medium",
             Self::High => "High",
             Self::XHigh => "XHigh",
             Self::Max => "Max",
+            Self::Ultra => "Ultra",
         })
     }
 }
@@ -259,10 +275,42 @@ impl FromStr for ThinkingEffort {
     type Err = String;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Self::ALL
-            .into_iter()
-            .find(|effort| effort.as_str() == value)
-            .ok_or_else(|| format!("unknown thinking effort: {value}"))
+        match value.trim() {
+            "" => Err("thinking effort cannot be empty".into()),
+            "default" => Ok(Self::Default),
+            "none" => Ok(Self::None),
+            "minimal" => Ok(Self::Minimal),
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "xhigh" => Ok(Self::XHigh),
+            "max" => Ok(Self::Max),
+            "ultra" => Ok(Self::Ultra),
+            _ => Err(format!("unknown thinking effort: {value}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelReasoningEffort {
+    pub effort: ThinkingEffort,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelDescriptor {
+    pub id: String,
+    pub display_name: String,
+    pub is_default: bool,
+    pub supported_reasoning_efforts: Vec<ModelReasoningEffort>,
+    pub default_reasoning_effort: Option<ThinkingEffort>,
+}
+
+impl ModelDescriptor {
+    pub fn supports_effort(&self, effort: &ThinkingEffort) -> bool {
+        self.supported_reasoning_efforts
+            .iter()
+            .any(|option| &option.effort == effort)
     }
 }
 
@@ -345,5 +393,15 @@ mod tests {
         assert_eq!(ClaudeModel::Haiku.next(), ClaudeModel::Default);
         assert_eq!(ThinkingEffort::Max.next(), ThinkingEffort::Low);
         assert_eq!(ThinkingEffort::XHigh.as_str(), "xhigh");
+    }
+
+    #[test]
+    fn thinking_effort_parses_all_codex_catalog_values() {
+        assert_eq!(
+            ThinkingEffort::from_str("ultra").unwrap(),
+            ThinkingEffort::Ultra
+        );
+        assert!(ThinkingEffort::from_str("provider-specific").is_err());
+        assert!(ThinkingEffort::from_str("").is_err());
     }
 }
