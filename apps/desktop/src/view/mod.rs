@@ -610,10 +610,13 @@ impl NexusView {
     }
 
     fn archive_task(&mut self, task_id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        let selected = self.presenter.model().selected_task == Some(task_id);
         if self.presenter.archive_task(task_id) {
-            self.expanded_messages.clear();
-            self.timeline_scroll.scroll_to_bottom();
-            self.focus_prompt(window, cx);
+            if selected {
+                self.expanded_messages.clear();
+                self.timeline_scroll.scroll_to_bottom();
+                self.focus_prompt(window, cx);
+            }
         }
         self.presenter.notify_remote_changed();
         cx.notify();
@@ -626,13 +629,16 @@ impl NexusView {
     }
 
     fn delete_task(&mut self, task_id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        let selected = self.presenter.model().selected_task == Some(task_id);
         if self.presenter.delete_task(task_id) {
-            self.expanded_messages.clear();
-            self.timeline_scroll.scroll_to_bottom();
-            if self.settings_open {
-                self.focus_handle.focus(window, cx);
-            } else {
-                self.focus_prompt(window, cx);
+            if selected {
+                self.expanded_messages.clear();
+                self.timeline_scroll.scroll_to_bottom();
+                if self.settings_open {
+                    self.focus_handle.focus(window, cx);
+                } else {
+                    self.focus_prompt(window, cx);
+                }
             }
         }
         self.presenter.notify_remote_changed();

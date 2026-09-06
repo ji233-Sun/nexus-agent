@@ -737,6 +737,53 @@ mod tests {
     }
 
     #[gpui::test]
+    fn managing_another_task_preserves_the_current_timeline_state(cx: &mut TestAppContext) {
+        let (view, cx) = scroll_test_view(cx);
+        let (selected_task, other_tasks) = view.read_with(cx, |view, _| {
+            let selected_task = view.presenter.model().selected_task.unwrap();
+            let other_tasks = view
+                .presenter
+                .model()
+                .tasks
+                .iter()
+                .filter(|task| task.id != selected_task)
+                .take(2)
+                .map(|task| task.id)
+                .collect::<Vec<_>>();
+            (selected_task, other_tasks)
+        });
+        let expanded_message = ElementId::from("expanded-message");
+        view.update_in(cx, |view, window, cx| {
+            view.timeline_scroll.set_offset(point(px(0.), px(-120.)));
+            view.expanded_messages.insert(expanded_message.clone());
+            view.search_input
+                .update(cx, |input, cx| input.focus(window, cx));
+
+            view.archive_task(other_tasks[0], window, cx);
+            assert_eq!(view.presenter.model().selected_task, Some(selected_task));
+            assert_eq!(view.timeline_scroll.offset().y, px(-120.));
+            assert!(view.expanded_messages.contains(&expanded_message));
+            assert!(
+                view.search_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+            );
+
+            view.delete_task(other_tasks[1], window, cx);
+            assert_eq!(view.presenter.model().selected_task, Some(selected_task));
+            assert_eq!(view.timeline_scroll.offset().y, px(-120.));
+            assert!(view.expanded_messages.contains(&expanded_message));
+            assert!(
+                view.search_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+            );
+        });
+    }
+
+    #[gpui::test]
     fn project_disclosure_animates_layout_reversibly_and_can_skip_motion(cx: &mut TestAppContext) {
         let (view, cx) = scroll_test_view(cx);
         let project_id = view.read_with(cx, |view, _| {
