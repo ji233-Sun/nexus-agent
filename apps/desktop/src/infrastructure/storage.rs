@@ -179,8 +179,17 @@ impl Storage {
 
     pub fn projects(&self) -> Result<Vec<Project>> {
         let mut statement = self.connection.prepare(
-            "SELECT id, display_name, canonical_path, created_at, last_opened_at
-             FROM projects ORDER BY last_opened_at DESC LIMIT 20",
+            "WITH recent_projects AS (
+                 SELECT id FROM projects ORDER BY last_opened_at DESC LIMIT 20
+             )
+             SELECT id, display_name, canonical_path, created_at, last_opened_at
+             FROM projects
+             WHERE id IN (SELECT id FROM recent_projects)
+                OR EXISTS (
+                    SELECT 1 FROM tasks
+                    WHERE tasks.project_id = projects.id AND archived_at IS NOT NULL
+                )
+             ORDER BY last_opened_at DESC",
         )?;
         let rows = statement.query_map([], project_from_row)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -236,16 +245,26 @@ impl Storage {
         Ok(())
     }
 
-    pub fn restore_task(&self, task_id: Uuid) -> Result<()> {
+    pub fn restore_task(&mut self, task_id: Uuid) -> Result<()> {
         let now = Utc::now().to_rfc3339();
-        let updated = self.connection.execute(
+        let transaction = self.connection.transaction()?;
+        let updated = transaction.execute(
             "UPDATE tasks SET archived_at = NULL, updated_at = ?2
              WHERE id = ?1 AND archived_at IS NOT NULL",
-            params![task_id.to_string(), now],
+            params![task_id.to_string(), &now],
         )?;
         if updated != 1 {
             return Err(anyhow!("归档对话不存在"));
         }
+        let updated = transaction.execute(
+            "UPDATE projects SET last_opened_at = ?2
+             WHERE id = (SELECT project_id FROM tasks WHERE id = ?1)",
+            params![task_id.to_string(), now],
+        )?;
+        if updated != 1 {
+            return Err(anyhow!("归档对话所属项目不存在"));
+        }
+        transaction.commit()?;
         Ok(())
     }
 

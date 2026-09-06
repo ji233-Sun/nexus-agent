@@ -368,6 +368,9 @@ impl Presenter {
             self.model.status = format!("无法取消归档：{error}");
             return false;
         }
+        if let Ok(projects) = self.storage.projects() {
+            self.model.projects = projects;
+        }
         self.reload_tasks();
         self.model.status = "对话已恢复。".into();
         true

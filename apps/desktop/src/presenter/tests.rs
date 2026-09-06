@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Duration};
+use std::{cell::RefCell, collections::HashMap, fs, rc::Rc, time::Duration};
 
 use super::*;
 use crate::{
@@ -179,6 +179,59 @@ fn conversation_actions_keep_active_and_archived_models_in_sync() {
     assert!(presenter.delete_archived_tasks());
     assert!(presenter.model().archived_tasks.is_empty());
     assert!(presenter.model().tasks.is_empty());
+}
+
+#[test]
+fn archived_project_outside_recent_limit_remains_available_after_restore() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut storage = Storage::open(&directory.path().join("nexus.db")).unwrap();
+    let archived_project_path = directory.path().join("archived-project");
+    fs::create_dir(&archived_project_path).unwrap();
+    let archived_project = storage.open_project(&archived_project_path).unwrap();
+    let archived_task = storage
+        .create_task_run(NewTaskRun {
+            task_id: None,
+            project_id: archived_project.id,
+            title: "Archived conversation",
+            prompt: "Archived conversation",
+            harness: HarnessKind::Claude,
+            executable: "claude",
+            model: None,
+            effort: ThinkingEffort::Medium,
+            harness_version: None,
+        })
+        .unwrap()
+        .0;
+    storage.archive_task(archived_task).unwrap();
+    for index in 0..20 {
+        let project_path = directory.path().join(format!("recent-project-{index:02}"));
+        fs::create_dir(&project_path).unwrap();
+        storage.open_project(&project_path).unwrap();
+    }
+
+    let mut presenter = Presenter::new(storage, Err(anyhow::anyhow!("test")), None);
+    assert_eq!(presenter.model().archived_tasks[0].id, archived_task);
+    let archived_project_metadata = presenter
+        .model()
+        .projects
+        .iter()
+        .find(|project| project.id == archived_project.id)
+        .unwrap();
+    assert_eq!(archived_project_metadata.display_name, "archived-project");
+
+    assert!(presenter.restore_task(archived_task));
+    assert!(presenter.model().archived_tasks.is_empty());
+    assert_eq!(presenter.model().projects.len(), 20);
+    assert_eq!(presenter.model().projects[0].id, archived_project.id);
+    let restored_project = presenter.model().projects[0].clone();
+    presenter.select_project(restored_project);
+    assert!(
+        presenter
+            .model()
+            .tasks
+            .iter()
+            .any(|task| task.id == archived_task)
+    );
 }
 
 #[test]
