@@ -149,6 +149,7 @@ impl RenderOnce for AnimatedDropdown {
                     .track_focus(&focus_handle)
                     .tab_group()
                     .relative()
+                    .occlude()
                     .top(px(4. - 6. * (1. - presence.progress)))
                     .opacity(presence.progress)
                     .children(menu)
@@ -179,21 +180,21 @@ impl RenderOnce for AnimatedDropdown {
     }
 }
 
-pub(super) fn brand_mark(size: f32) -> impl IntoElement {
+pub(super) fn brand_mark(colors: Palette, size: f32) -> impl IntoElement {
     div()
         .size(px(size))
         .flex_none()
         .rounded(px(CARD_RADIUS))
-        .bg(rgb(RECESSED))
+        .bg(rgb(colors.recessed))
         .border_1()
-        .border_color(rgb(BORDER))
+        .border_color(rgb(colors.border))
         .flex()
         .items_center()
         .justify_center()
         .child(
             Icon::new(IconName::Asterisk)
                 .size(px(size * 0.55))
-                .text_color(rgb(TEXT_SECONDARY)),
+                .text_color(rgb(colors.text_secondary)),
         )
 }
 
@@ -267,8 +268,9 @@ impl NexusView {
         content: &str,
         kind: MessageKind,
         _window: &mut Window,
-        _cx: &mut Context<NexusView>,
+        cx: &mut Context<NexusView>,
     ) -> AnyElement {
+        let colors = palette(cx);
         let id = id.into();
         let animated = !self.reduced_motion;
         let label = match role {
@@ -292,10 +294,8 @@ impl NexusView {
                     .when(is_user, |element| {
                         element
                             .max_w(px(600.))
-                            .rounded(px(CARD_RADIUS))
-                            .bg(rgb(RECESSED))
-                            .border_1()
-                            .border_color(rgb(BORDER))
+                            .rounded(px(16.))
+                            .bg(rgb(colors.recessed))
                             .px_4()
                             .py_3()
                     })
@@ -303,9 +303,9 @@ impl NexusView {
                     .when(!is_user && is_panel, |element| {
                         element
                             .rounded(px(CONTROL_RADIUS))
-                            .bg(rgb(SURFACE))
+                            .bg(rgb(colors.surface))
                             .border_1()
-                            .border_color(rgb(BORDER))
+                            .border_color(rgb(colors.border))
                             .p_3()
                     })
                     .when(!is_user && !is_panel, |element| element.px_1().py_1())
@@ -315,17 +315,17 @@ impl NexusView {
                                 .flex()
                                 .items_center()
                                 .gap_2()
-                                .text_xs()
-                                .text_color(rgb(MUTED))
+                                .text_size(px(12.))
+                                .text_color(rgb(colors.muted))
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .mb_2()
-                                .child(status_dot(message_indicator(kind)))
+                                .child(status_dot(message_indicator(colors, kind)))
                                 .child(label.to_owned()),
                         )
                     })
                     .child(if kind == MessageKind::Text {
                         TextView::markdown(id.clone(), content.to_owned())
-                            .text_size(px(15.))
+                            .text_size(px(14.))
                             .font_weight(gpui::FontWeight::NORMAL)
                             .line_height(relative(1.65))
                             .style(
@@ -346,15 +346,15 @@ impl NexusView {
                                             .text_size(px(13.))
                                             .line_height(relative(1.6))
                                             .p(px(12.))
-                                            .bg(rgb(SURFACE))
+                                            .bg(rgb(colors.surface))
                                             .border_1()
-                                            .border_color(rgb(BORDER))
+                                            .border_color(rgb(colors.border))
                                             .rounded(px(CONTROL_RADIUS)),
                                     )
                                     .table_head(
                                         gpui::StyleRefinement::default()
-                                            .bg(rgb(SURFACE))
-                                            .text_color(rgb(TEXT_SECONDARY)),
+                                            .bg(rgb(colors.surface))
+                                            .text_color(rgb(colors.text_secondary)),
                                     )
                                     .table_cell(
                                         gpui::StyleRefinement::default().px(px(12.)).py(px(8.)),
@@ -364,11 +364,11 @@ impl NexusView {
                             .into_any_element()
                     } else {
                         div()
-                            .text_sm()
+                            .text_size(px(13.))
                             .text_color(if kind == MessageKind::Status {
-                                rgb(TEXT_SECONDARY)
+                                rgb(colors.text_secondary)
                             } else {
-                                rgb(TEXT)
+                                rgb(colors.text)
                             })
                             .whitespace_normal()
                             .line_height(relative(1.55))
@@ -384,15 +384,16 @@ impl NexusView {
     }
 }
 
-pub(super) fn message_indicator(kind: MessageKind) -> Hsla {
+pub(super) fn message_indicator(colors: Palette, kind: MessageKind) -> Hsla {
     match kind {
-        MessageKind::Error => rgb(DANGER).into(),
-        MessageKind::ToolCall | MessageKind::ToolResult => rgb(TOOL).into(),
-        _ => rgb(MUTED).into(),
+        MessageKind::Error => rgb(colors.danger).into(),
+        MessageKind::ToolCall | MessageKind::ToolResult => rgb(colors.text_secondary).into(),
+        _ => rgb(colors.muted).into(),
     }
 }
 
 pub(super) fn label_value(
+    colors: Palette,
     label: impl Into<SharedString>,
     value: impl Into<SharedString>,
 ) -> impl IntoElement {
@@ -402,21 +403,26 @@ pub(super) fn label_value(
         .flex()
         .flex_col()
         .gap_1()
-        .child(div().text_xs().text_color(rgb(MUTED)).child(label))
         .child(
             div()
-                .text_sm()
-                .text_color(rgb(TEXT_SECONDARY))
+                .text_size(px(12.))
+                .text_color(rgb(colors.muted))
+                .child(label),
+        )
+        .child(
+            div()
+                .text_size(px(13.))
+                .text_color(rgb(colors.text_secondary))
                 .whitespace_normal()
                 .child(value),
         )
 }
 
-pub(super) fn section_label(label: impl Into<SharedString>) -> impl IntoElement {
+pub(super) fn section_label(colors: Palette, label: impl Into<SharedString>) -> impl IntoElement {
     div()
-        .text_xs()
+        .text_size(px(12.))
         .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(rgb(MUTED))
+        .text_color(rgb(colors.muted))
         .child(label.into())
 }
 
@@ -445,22 +451,15 @@ pub(super) fn live_status_dot(color: Hsla, animated: bool) -> gpui::AnyElement {
     }
 }
 
-pub(super) fn run_status_color(status: RunStatus) -> Option<Hsla> {
+pub(super) fn run_status_color(colors: Palette, status: RunStatus) -> Option<Hsla> {
     match status {
         RunStatus::Completed => None,
-        RunStatus::Failed => Some(rgb(DANGER).into()),
+        RunStatus::Failed => Some(rgb(colors.danger).into()),
         RunStatus::Running | RunStatus::Starting | RunStatus::Cancelling => {
-            Some(rgb(ACCENT).into())
+            Some(rgb(colors.accent).into())
         }
-        RunStatus::Cancelled | RunStatus::Interrupted => Some(rgb(MUTED).into()),
+        RunStatus::Cancelled | RunStatus::Interrupted => Some(rgb(colors.muted).into()),
     }
-}
-
-pub(super) fn glass_shadow() -> Vec<gpui::BoxShadow> {
-    vec![
-        box_shadow(0., 2., 8., -4., rgba(0x00000060).into()),
-        box_shadow(0., 12., 28., -16., rgba(0x00000080).into()),
-    ]
 }
 
 #[cfg(test)]
@@ -536,7 +535,14 @@ mod tests {
         presenter.select_task(task_id);
         let (view, cx) = cx.add_window_view(|window, cx| {
             let mut view = NexusView::new(presenter, window, cx);
-            view.reduced_motion = true;
+            view.set_appearance(
+                AppearanceSettings {
+                    reduced_motion: true,
+                    ..view.presenter.model().appearance
+                },
+                window,
+                cx,
+            );
             view
         });
         dropdown_frame(cx, 0);
@@ -593,6 +599,23 @@ mod tests {
         assert!(cx.debug_bounds(content_selector).unwrap().top() < content_before.top());
         assert_eq!(cx.debug_bounds(row_selector).unwrap(), row_before);
         assert_eq!(timeline.offset(), before);
+        let scrolled_content = cx.debug_bounds(content_selector).unwrap();
+        for theme in [ThemePreference::Light, ThemePreference::Dark] {
+            view.update_in(cx, |view, window, cx| {
+                view.set_appearance(
+                    AppearanceSettings {
+                        theme,
+                        ..view.presenter.model().appearance
+                    },
+                    window,
+                    cx,
+                );
+            });
+            dropdown_frame(cx, 0);
+            assert_eq!(cx.debug_bounds(content_selector).unwrap(), scrolled_content);
+            assert_eq!(cx.debug_bounds(row_selector).unwrap(), row_before);
+            assert_eq!(timeline.offset(), before);
+        }
         let trigger = cx.debug_bounds(batch_selector).unwrap().center();
         cx.simulate_click(trigger, Default::default());
         dropdown_frame(cx, 0);
@@ -743,17 +766,21 @@ mod tests {
 
     #[test]
     fn completed_tasks_do_not_show_a_dot_that_looks_like_an_unread_badge() {
-        assert!(run_status_color(RunStatus::Completed).is_none());
+        let colors = Palette::for_dark(true);
+        assert!(run_status_color(colors, RunStatus::Completed).is_none());
         for status in [
             RunStatus::Starting,
             RunStatus::Running,
             RunStatus::Cancelling,
         ] {
-            assert_eq!(run_status_color(status), Some(rgb(ACCENT).into()));
+            assert_eq!(
+                run_status_color(colors, status),
+                Some(rgb(colors.accent).into())
+            );
         }
         assert_eq!(
-            run_status_color(RunStatus::Failed),
-            Some(rgb(DANGER).into())
+            run_status_color(colors, RunStatus::Failed),
+            Some(rgb(colors.danger).into())
         );
     }
 

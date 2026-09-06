@@ -2,7 +2,7 @@ use super::*;
 use crate::model::history::ThreadSummary;
 use gpui_kit::component::{list::ListItem, scroll::ScrollableElement as _};
 
-const SIDEBAR_ROW_HEIGHT: f32 = CONTROL_HEIGHT;
+const SIDEBAR_ROW_HEIGHT: f32 = 32.;
 pub(super) const HISTORY_PAGE_SIZE: usize = 10;
 
 fn visible_history<'a>(
@@ -19,6 +19,7 @@ fn visible_history<'a>(
 }
 
 fn navigation_row(
+    colors: Palette,
     id: impl Into<ElementId>,
     title: impl Into<SharedString>,
     icon: Option<IconName>,
@@ -39,7 +40,7 @@ fn navigation_row(
                 .items_center()
                 .gap_2()
                 .when_some(icon, |row, icon| {
-                    row.child(Icon::new(icon).size(px(16.)).text_color(rgb(MUTED)))
+                    row.child(Icon::new(icon).size(px(16.)).text_color(rgb(colors.muted)))
                 })
                 .child(div().flex_1().min_w_0().truncate().child(title.into())),
         )
@@ -51,6 +52,8 @@ impl NexusView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let colors = palette(cx);
+        let material = materials(cx);
         let model = self.presenter.model();
         let query = self.search_input.read(cx).value();
         let selected_project_id = model.selected_project.as_ref().map(|project| project.id);
@@ -87,8 +90,13 @@ impl NexusView {
                     .filter(|task| matches_search(&task.title, &query))
                     .map(|task| {
                         let id = task.id;
-                        let color = run_status_color(task.status);
-                        navigation_row(id, task.title.clone(), None)
+                        let color = run_status_color(colors, task.status);
+                        let status_icon = match task.status {
+                            RunStatus::Failed => IconName::CircleX,
+                            RunStatus::Cancelled | RunStatus::Interrupted => IconName::Pause,
+                            _ => IconName::LoaderCircle,
+                        };
+                        navigation_row(colors, id, task.title.clone(), None)
                             .debug_selector(move || format!("sidebar-task-{id}"))
                             .selected(
                                 model.selected_task == Some(id)
@@ -99,10 +107,13 @@ impl NexusView {
                                     div()
                                         .absolute()
                                         .right(px(12.))
-                                        .top(px((SIDEBAR_ROW_HEIGHT - 6.) / 2.))
-                                        .size(px(6.))
-                                        .rounded_full()
-                                        .bg(color)
+                                        .top(px((SIDEBAR_ROW_HEIGHT - 14.) / 2.))
+                                        .size(px(14.))
+                                        .child(
+                                            Icon::new(status_icon.clone())
+                                                .size(px(14.))
+                                                .text_color(color),
+                                        )
                                 })
                             })
                             .on_click(cx.listener(move |app, _, window, cx| {
@@ -117,6 +128,7 @@ impl NexusView {
                     .flex_col()
                     .child(
                         navigation_row(
+                            colors,
                             project_id,
                             project.display_name.clone(),
                             Some(IconName::Folder),
@@ -162,7 +174,7 @@ impl NexusView {
                                                     )
                                                     .size(px(16.))
                                                     .flex_none()
-                                                    .text_color(rgb(TEXT)),
+                                                    .text_color(rgb(colors.text)),
                                             )
                                             .accessibility_label("在此项目中新建对话")
                                             .tooltip("新建对话")
@@ -196,6 +208,7 @@ impl NexusView {
                             .when(tasks.is_empty(), |list| {
                                 list.child(
                                     navigation_row(
+                                        colors,
                                         (ElementId::from(project_id), "empty"),
                                         if query.trim().is_empty() {
                                             "开始任务后，记录会出现在这里"
@@ -220,6 +233,7 @@ impl NexusView {
             .map(|thread| {
                 let id = thread.id.clone();
                 navigation_row(
+                    colors,
                     SharedString::from(format!("codex-{id}")),
                     thread.title.clone(),
                     None,
@@ -238,13 +252,14 @@ impl NexusView {
         );
         div()
             .id("workspace-sidebar")
-            .w(px(300.))
+            .debug_selector(|| "workspace-sidebar".into())
+            .w(px(SIDEBAR_WIDTH))
             .h_full()
             .flex_none()
             .pt(px(if cfg!(target_os = "macos") { 36. } else { 0. }))
-            .bg(rgb(SURFACE))
-            .border_r_1()
-            .border_color(rgb(BORDER))
+            .bg(material.chrome)
+            .border_r(px(0.5))
+            .border_color(material.edge)
             .flex()
             .flex_col()
             .child(
@@ -258,14 +273,14 @@ impl NexusView {
                         .child(
                             div()
                                 .px_2()
-                                .py_2()
-                                .text_size(px(14.))
+                                .py_3()
+                                .text_size(px(16.))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .child("Nexus Agent"),
                         )
                         .child(
                             Button::new("new-task")
-                                .outline()
+                                .ghost()
                                 .small()
                                 .w_full()
                                 .h(px(SIDEBAR_ROW_HEIGHT))
@@ -286,13 +301,16 @@ impl NexusView {
                                                 .child(Icon::new(IconName::Plus))
                                                 .child("新建任务"),
                                         )
-                                        .child(div().text_xs().opacity(0.65).child(
-                                            if cfg!(target_os = "macos") {
-                                                "⌘ N"
-                                            } else {
-                                                "Ctrl N"
-                                            },
-                                        )),
+                                        .child(
+                                            div()
+                                                .text_size(px(12.))
+                                                .text_color(rgb(colors.muted))
+                                                .child(if cfg!(target_os = "macos") {
+                                                    "⌘ N"
+                                                } else {
+                                                    "Ctrl N"
+                                                }),
+                                        ),
                                 )
                                 .tooltip("在当前项目中开始新任务")
                                 .disabled(
@@ -305,6 +323,8 @@ impl NexusView {
                         .child(
                             Input::new(&self.search_input)
                                 .small()
+                                .appearance(false)
+                                .bordered(false)
                                 .min_h(px(SIDEBAR_ROW_HEIGHT))
                                 .text_size(px(13.))
                                 .prefix(Icon::new(IconName::Search).small())
@@ -332,15 +352,20 @@ impl NexusView {
                                     .px(px(10.))
                                     .pb(px(10.))
                                     .text_size(px(12.))
-                                    .text_color(rgb(MUTED))
+                                    .text_color(rgb(colors.muted))
                                     .child("项目空间"),
                             )
                             .child(projects)
                             .child(
-                                navigation_row("add-project", "添加本地项目", Some(IconName::Plus))
-                                    .debug_selector(|| "add-project".into())
-                                    .mt(px(8.))
-                                    .on_click(cx.listener(Self::choose_project)),
+                                navigation_row(
+                                    colors,
+                                    "add-project",
+                                    "添加本地项目",
+                                    Some(IconName::Plus),
+                                )
+                                .debug_selector(|| "add-project".into())
+                                .mt(px(8.))
+                                .on_click(cx.listener(Self::choose_project)),
                             )
                             .child(
                                 gpui_kit::base::Collapsible::new()
@@ -351,6 +376,7 @@ impl NexusView {
                                     .flex_col()
                                     .child(
                                         navigation_row(
+                                            colors,
                                             "codex-history-disclosure",
                                             "Codex 最近会话",
                                             Some(IconName::FileText),
@@ -384,6 +410,7 @@ impl NexusView {
                                             .when(history.is_empty(), |list| {
                                                 list.child(
                                                     navigation_row(
+                                                        colors,
                                                         "history-empty",
                                                         if query.trim().is_empty() {
                                                             "暂无可显示的会话"
@@ -399,11 +426,12 @@ impl NexusView {
                                             .when(has_more_history, |list| {
                                                 list.child(
                                                     navigation_row(
+                                                        colors,
                                                         "codex-history-read-more",
                                                         "Read More",
                                                         Some(IconName::ChevronDown),
                                                     )
-                                                    .text_color(rgb(MUTED))
+                                                    .text_color(rgb(colors.muted))
                                                     .on_click(cx.listener(|app, _, _, cx| {
                                                         app.codex_history_visible_count +=
                                                             HISTORY_PAGE_SIZE;
@@ -421,8 +449,8 @@ impl NexusView {
                     div()
                         .w_full()
                         .pt_3()
-                        .border_t_1()
-                        .border_color(rgb(BORDER))
+                        .border_t(px(0.5))
+                        .border_color(rgb(colors.border))
                         .flex()
                         .flex_col()
                         .gap_2()
@@ -436,7 +464,7 @@ impl NexusView {
                                         .flex_1()
                                         .min_w_0()
                                         .text_size(px(12.))
-                                        .text_color(rgb(MUTED))
+                                        .text_color(rgb(colors.muted))
                                         .line_clamp(2)
                                         .child(history_status),
                                 )
@@ -483,12 +511,12 @@ impl NexusView {
                                                 .selected_probe()
                                                 .map(|probe| {
                                                     if probe.available && probe.authenticated {
-                                                        rgb(SUCCESS).into()
+                                                        rgb(colors.success).into()
                                                     } else {
-                                                        rgb(WARNING).into()
+                                                        rgb(colors.warning).into()
                                                     }
                                                 })
-                                                .unwrap_or_else(|| rgb(MUTED).into()),
+                                                .unwrap_or_else(|| rgb(colors.muted).into()),
                                         )),
                                 )
                                 .on_click(cx.listener(|app, _, window, cx| {
@@ -538,7 +566,14 @@ mod tests {
         presenter.select_task(presenter.model().tasks[0].id);
         let (view, cx) = cx.add_window_view(|window, cx| {
             let mut view = NexusView::new(presenter, window, cx);
-            view.reduced_motion = true;
+            view.set_appearance(
+                AppearanceSettings {
+                    reduced_motion: true,
+                    ..view.presenter.model().appearance
+                },
+                window,
+                cx,
+            );
             view
         });
         cx.run_until_parked();
@@ -595,9 +630,15 @@ mod tests {
         let project_bounds = cx.debug_bounds(project_selector).unwrap();
         let trigger = point(project_bounds.left() + px(60.), project_bounds.center().y);
         let selected_task = view.read_with(cx, |view, _| view.presenter.model().selected_task);
-        view.update(cx, |view, cx| {
-            view.reduced_motion = false;
-            cx.notify();
+        view.update_in(cx, |view, window, cx| {
+            view.set_appearance(
+                AppearanceSettings {
+                    reduced_motion: false,
+                    ..view.presenter.model().appearance
+                },
+                window,
+                cx,
+            );
         });
         let frame = |cx: &mut gpui::VisualTestContext, millis| {
             cx.executor().advance_clock(Duration::from_millis(millis));
@@ -624,9 +665,15 @@ mod tests {
         frame(cx, 0);
         frame(cx, 200);
         assert!(cx.debug_bounds("add-project").unwrap().origin.y < closing_y);
-        view.update(cx, |view, cx| {
-            view.reduced_motion = true;
-            cx.notify();
+        view.update_in(cx, |view, window, cx| {
+            view.set_appearance(
+                AppearanceSettings {
+                    reduced_motion: true,
+                    ..view.presenter.model().appearance
+                },
+                window,
+                cx,
+            );
         });
         cx.simulate_click(trigger, Default::default());
         frame(cx, 0);
@@ -883,6 +930,104 @@ mod tests {
     }
 
     #[gpui::test]
+    fn appearance_controls_and_system_changes_preserve_workspace_state(cx: &mut TestAppContext) {
+        let (view, cx) = scroll_test_view(cx);
+        let task = view.read_with(cx, |view, _| view.presenter.model().selected_task);
+        view.update_in(cx, |view, window, cx| {
+            view.timeline_scroll.set_offset(point(px(0.), px(-120.)));
+            view.sidebar_scroll.set_offset(point(px(0.), px(-60.)));
+            view.prompt_input
+                .update(cx, |input, cx| input.set_value("Keep my draft", window, cx));
+            view.toggle_settings(window, cx);
+        });
+        for size in [
+            gpui::size(px(1040.), px(680.)),
+            gpui::size(px(1280.), px(800.)),
+        ] {
+            cx.simulate_resize(size);
+            cx.run_until_parked();
+            for (selector, theme) in [
+                ("appearance-theme-dark", ThemePreference::Dark),
+                ("appearance-theme-light", ThemePreference::Light),
+                ("appearance-theme-system", ThemePreference::System),
+            ] {
+                let bounds = cx.debug_bounds(selector).unwrap();
+                assert!(
+                    cx.debug_bounds("settings-page")
+                        .unwrap()
+                        .contains(&bounds.center())
+                );
+                cx.simulate_click(bounds.center(), Default::default());
+                cx.run_until_parked();
+                view.read_with(cx, |view, cx| {
+                    assert_eq!(view.presenter.model().appearance.theme, theme);
+                    assert_eq!(view.presenter.model().selected_task, task);
+                    assert_eq!(view.prompt_input.read(cx).value(), "Keep my draft");
+                    assert_eq!(view.timeline_scroll.offset().y, px(-120.));
+                    assert_eq!(view.sidebar_scroll.offset().y, px(-60.));
+                });
+            }
+            for selector in [
+                "appearance-glass",
+                "appearance-glass",
+                "reduce-motion",
+                "reduce-motion",
+            ] {
+                let bounds = cx.debug_bounds(selector).unwrap();
+                cx.simulate_click(bounds.center(), Default::default());
+                cx.run_until_parked();
+                view.read_with(cx, |view, cx| {
+                    assert_eq!(
+                        cx.reduce_motion(),
+                        view.presenter.model().appearance.reduced_motion
+                    );
+                    assert_eq!(view.timeline_scroll.offset().y, px(-120.));
+                    assert_eq!(view.presenter.model().selected_task, task);
+                    assert_eq!(view.prompt_input.read(cx).value(), "Keep my draft");
+                });
+            }
+        }
+        for system in [gpui::WindowAppearance::Dark, gpui::WindowAppearance::Light] {
+            view.update_in(cx, |view, window, cx| {
+                let appearance = ResolvedAppearance::resolve(
+                    view.presenter.model().appearance,
+                    system,
+                    SystemAccessibility::default(),
+                    true,
+                    cfg!(target_os = "macos"),
+                );
+                apply_theme(appearance, cx);
+                window.refresh();
+                cx.notify();
+            });
+            cx.run_until_parked();
+            cx.update(|_, cx| {
+                assert_eq!(
+                    cx.global::<ResolvedAppearance>().dark,
+                    system == gpui::WindowAppearance::Dark,
+                )
+            });
+        }
+        let counts = view.read_with(cx, |view, cx| {
+            (
+                view.sidebar_pane.read(cx).render_count,
+                view.timeline_pane.read(cx).render_count,
+            )
+        });
+        cx.executor().advance_clock(Duration::from_millis(500));
+        cx.run_until_parked();
+        view.read_with(cx, |view, cx| {
+            assert_eq!(
+                counts,
+                (
+                    view.sidebar_pane.read(cx).render_count,
+                    view.timeline_pane.read(cx).render_count
+                )
+            );
+        });
+    }
+
+    #[gpui::test]
     fn settings_navigation_preserves_drafts_and_restores_visible_focus(cx: &mut TestAppContext) {
         let (view, cx) = scroll_test_view(cx);
         cx.simulate_resize(gpui::size(px(1040.), px(680.)));
@@ -1022,9 +1167,15 @@ mod tests {
         for reduced_motion in [true, false] {
             for scroll in &handles {
                 scroll.set_offset(point(px(0.), px(-100.)));
-                view.update(cx, |view, cx| {
-                    view.reduced_motion = reduced_motion;
-                    cx.notify();
+                view.update_in(cx, |view, window, cx| {
+                    view.set_appearance(
+                        AppearanceSettings {
+                            reduced_motion,
+                            ..view.presenter.model().appearance
+                        },
+                        window,
+                        cx,
+                    );
                 });
                 cx.run_until_parked();
                 cx.update(|window, cx| {
@@ -1058,6 +1209,10 @@ mod tests {
     fn wheel_smoothing_preserves_native_trackpad_input(cx: &mut TestAppContext) {
         let (view, cx) = scroll_test_view(cx);
         let scroll = view.read_with(cx, |view, _| view.sidebar_scroll.clone());
+        let marker = view.read_with(cx, |view, _| {
+            format!("sidebar-task-{}", view.presenter.model().tasks[3].id).leak()
+        });
+        let marker_y = cx.debug_bounds(marker).unwrap().top();
         let event = ScrollWheelEvent {
             position: scroll.bounds().center(),
             delta: ScrollDelta::Lines(point(0., -3.)),
@@ -1069,10 +1224,20 @@ mod tests {
         });
         let native_target = scroll.offset().y;
         assert!(native_target < px(0.));
+        assert_eq!(
+            cx.debug_bounds(marker).unwrap().top(),
+            marker_y + native_target
+        );
         scroll.set_offset(point(px(0.), px(0.)));
-        view.update(cx, |view, cx| {
-            view.reduced_motion = false;
-            cx.notify();
+        view.update_in(cx, |view, window, cx| {
+            view.set_appearance(
+                AppearanceSettings {
+                    reduced_motion: false,
+                    ..view.presenter.model().appearance
+                },
+                window,
+                cx,
+            );
         });
         cx.run_until_parked();
         cx.update(|window, cx| {
