@@ -298,7 +298,6 @@ impl Presenter {
         } else {
             None
         };
-        if harness == HarnessKind::Codex && !self.model.codex_selection_is_valid() {
         if supports_model_catalog(harness) && !self.model.catalog_selection_is_valid() {
             self.model.status =
                 format!("当前 {harness} 模型或 effort 未通过目录验证，请调整选择后重试。");
