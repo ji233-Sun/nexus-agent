@@ -126,18 +126,12 @@ impl Presenter {
                     .then_some((harness, profile_id))
             })
             .collect::<BTreeMap<_, _>>();
-        let codex_profile_id = active_provider_profiles.get(&HarnessKind::Codex).copied();
-        let codex_model_override = storage
-            .setting(&codex_model_setting_key(codex_profile_id))
-            .ok()
-            .flatten()
-            .filter(|model| !model.is_empty());
-        let codex_effort = storage
-            .setting(&codex_effort_setting_key(codex_profile_id))
-            .ok()
-            .flatten()
-            .and_then(|value| ThinkingEffort::from_str(&value).ok())
-            .unwrap_or(ThinkingEffort::Default);
+        let (model_override, effort) = if supports_model_catalog(selected_harness) {
+            let profile_id = active_provider_profiles.get(&selected_harness).copied();
+            load_catalog_preferences(&storage, selected_harness, profile_id, stored_effort)
+        } else {
+            (None, stored_effort)
+        };
         let remote_token = storage
             .setting(TOKEN_SETTING_KEY)
             .ok()
@@ -164,12 +158,8 @@ impl Presenter {
                 projects,
                 selected_harness,
                 claude_model: model,
-                codex_model_override,
-                effort: if selected_harness == HarnessKind::Codex {
-                    codex_effort
-                } else {
-                    stored_effort
-                },
+                model_override,
+                effort,
                 executable,
                 provider_profiles,
                 active_provider_profiles,
@@ -311,11 +301,11 @@ impl Presenter {
         self.model.messages = self.storage.messages(task_id).unwrap_or_default();
         if let Ok(Some(config)) = self.storage.conversation_config(task_id) {
             self.model.selected_harness = config.harness;
-            self.model.effort = config.effort;
+            self.model.effort = normalize_effort_for_harness(config.harness, config.effort);
             if config.harness == HarnessKind::Claude {
                 self.model.claude_model = ClaudeModel::from_str(&config.model).unwrap_or_default();
-            } else if config.harness == HarnessKind::Codex {
-                self.model.codex_model_override =
+            } else if supports_model_catalog(config.harness) {
+                self.model.model_override =
                     (config.model != "default").then_some(config.model.clone());
             }
             let executable = if config.executable.is_empty() {
@@ -385,8 +375,8 @@ impl Presenter {
         }
 
         self.model.selected_harness = harness;
-        if harness == HarnessKind::Codex {
-            self.restore_codex_preferences();
+        if supports_model_catalog(harness) {
+            self.restore_catalog_preferences();
         } else {
             self.model.effort = self
                 .storage
@@ -395,7 +385,7 @@ impl Presenter {
                 .flatten()
                 .and_then(|value| ThinkingEffort::from_str(&value).ok())
                 .unwrap_or_default();
-            self.model.codex_model_catalog = ModelCatalogState::Idle;
+            self.model.model_catalog = ModelCatalogState::Idle;
         }
         let _ = self
             .storage
@@ -431,42 +421,43 @@ impl Presenter {
             .set_setting("claude_model", self.model.claude_model.as_str());
     }
 
-    pub(crate) fn select_codex_model(&mut self, model_id: Option<String>) {
-        if self.model.active_run.is_some() || self.model.selected_harness != HarnessKind::Codex {
+    pub(crate) fn select_catalog_model(&mut self, model_id: Option<String>) {
+        if self.model.active_run.is_some() || !self.model.uses_model_catalog() {
             return;
         }
         if model_id.as_deref().is_some_and(|id| {
             !self
                 .model
-                .codex_model_catalog
+                .model_catalog
                 .models()
                 .is_some_and(|models| models.iter().any(|model| model.id == id))
         }) {
-            self.model.status = "所选模型不在当前 Codex 目录中，请刷新后重试。".into();
+            self.model.status = format!(
+                "所选模型不在当前 {} 目录中，请刷新后重试。",
+                self.model.selected_harness
+            );
             return;
         }
-        if self.model.codex_model_override == model_id {
+        if self.model.model_override == model_id {
             return;
         }
-        self.model.codex_model_override = model_id;
+        self.model.model_override = model_id;
+        let harness = self.model.selected_harness;
         let profile_id = self
             .model
             .selected_provider_profile()
             .map(|profile| profile.id);
         let _ = self.storage.set_setting(
-            &codex_model_setting_key(profile_id),
-            self.model
-                .codex_model_override
-                .as_deref()
-                .unwrap_or_default(),
+            &catalog_model_setting_key(harness, profile_id),
+            self.model.model_override.as_deref().unwrap_or_default(),
         );
-        let effort_reset = self.normalize_codex_effort();
+        let effort_reset = self.normalize_catalog_effort();
         self.model.status = if effort_reset {
             "模型已切换；原 effort 不受支持，已恢复为模型默认。".into()
-        } else if let Some(model) = &self.model.codex_model_override {
-            format!("本次 Codex 任务将使用 {model}。")
+        } else if let Some(model) = &self.model.model_override {
+            format!("本次 {harness} 任务将使用 {model}。")
         } else {
-            "Codex 模型已恢复为跟随 Profile / CLI 默认。".into()
+            format!("{harness} 模型已恢复为跟随 Profile / CLI 默认。")
         };
     }
 
@@ -474,19 +465,22 @@ impl Presenter {
         if self.model.active_run.is_some() || self.model.effort == effort {
             return;
         }
-        if self.model.selected_harness == HarnessKind::Codex
+        if self.model.uses_model_catalog()
             && !effort.is_default()
-            && !self
+            && self
                 .model
-                .selected_codex_catalog_model()
-                .is_some_and(|model| model.supports_effort(&effort))
+                .selected_catalog_model()
+                .is_some_and(|model| !model.supports_effort(&effort))
         {
-            self.model.status = "当前 Codex 模型不支持所选 effort。".into();
+            self.model.status = format!(
+                "当前 {} 模型不支持所选 effort。",
+                self.model.selected_harness
+            );
             return;
         }
-        self.model.effort = effort;
-        if self.model.selected_harness == HarnessKind::Codex {
-            self.persist_codex_effort();
+        self.model.effort = normalize_effort_for_harness(self.model.selected_harness, effort);
+        if self.model.uses_model_catalog() {
+            self.persist_catalog_effort();
         } else {
             let _ = self
                 .storage
@@ -495,41 +489,42 @@ impl Presenter {
     }
 
     pub(crate) fn refresh_model_catalog(&mut self) -> bool {
-        if self.model.active_run.is_some() || self.model.selected_harness != HarnessKind::Codex {
+        if self.model.active_run.is_some() || !self.model.uses_model_catalog() {
             return false;
         }
+        let harness = self.model.selected_harness;
         let Some(project) = self.model.selected_project.as_ref() else {
-            self.model.codex_model_catalog = ModelCatalogState::Idle;
+            self.model.model_catalog = ModelCatalogState::Idle;
             return false;
         };
         let (environment, _) = match self.provider_launch_configuration() {
             Ok(configuration) => configuration,
             Err(error) => {
-                self.model.codex_model_catalog = ModelCatalogState::Failed(error.to_string());
-                self.model.status = format!("无法加载 Codex 模型目录：{error}");
+                self.model.model_catalog = ModelCatalogState::Failed(error.to_string());
+                self.model.status = format!("无法加载 {harness} 模型目录：{error}");
                 return false;
             }
         };
         let Some(runner) = &self.runner else {
-            self.model.codex_model_catalog = ModelCatalogState::Failed("Runner 不可用。".into());
-            self.model.status = "Runner 不可用，无法加载 Codex 模型目录。".into();
+            self.model.model_catalog = ModelCatalogState::Failed("Runner 不可用。".into());
+            self.model.status = format!("Runner 不可用，无法加载 {harness} 模型目录。");
             return false;
         };
         let request_id = Uuid::new_v4();
         let command = CommandEnvelope::new(Command::ModelCatalogRefresh {
             request_id,
-            harness: HarnessKind::Codex,
+            harness,
             executable: self.model.executable.clone(),
             cwd: project.canonical_path.clone(),
             environment,
         });
-        self.model.codex_model_catalog = ModelCatalogState::Loading { request_id };
+        self.model.model_catalog = ModelCatalogState::Loading { request_id };
         if runner.send(command).is_err() {
-            self.model.codex_model_catalog = ModelCatalogState::Failed("Runner 不可用。".into());
-            self.model.status = "Runner 不可用，无法加载 Codex 模型目录。".into();
+            self.model.model_catalog = ModelCatalogState::Failed("Runner 不可用。".into());
+            self.model.status = format!("Runner 不可用，无法加载 {harness} 模型目录。");
             return false;
         }
-        self.model.status = "正在加载 Codex 模型目录…".into();
+        self.model.status = format!("正在加载 {harness} 模型目录…");
         true
     }
 
@@ -573,8 +568,8 @@ impl Presenter {
                 .set_setting(&active_profile_setting_key(harness), "");
             self.model.status = format!("{harness} 将使用 CLI 当前登录配置。");
         }
-        if harness == HarnessKind::Codex {
-            self.restore_codex_preferences();
+        if supports_model_catalog(harness) {
+            self.restore_catalog_preferences();
             self.refresh_model_catalog();
         }
         true
@@ -693,8 +688,8 @@ impl Presenter {
             &profile_id.to_string(),
         );
         self.model.status = format!("Provider Profile 已保存并启用：{}", profile.name);
-        if harness == HarnessKind::Codex {
-            self.restore_codex_preferences();
+        if supports_model_catalog(harness) {
+            self.restore_catalog_preferences();
             self.refresh_model_catalog();
         }
         Some(profile_id)
@@ -734,8 +729,8 @@ impl Presenter {
                 .set_setting(&active_profile_setting_key(harness), "");
         }
         self.model.status = "Provider Profile 已删除。".into();
-        if self.model.selected_harness == HarnessKind::Codex {
-            self.restore_codex_preferences();
+        if self.model.uses_model_catalog() {
+            self.restore_catalog_preferences();
             self.refresh_model_catalog();
         }
         true
@@ -764,53 +759,52 @@ impl Presenter {
         Ok((environment, profile.model.clone()))
     }
 
-    fn restore_codex_preferences(&mut self) {
+    fn restore_catalog_preferences(&mut self) {
+        let harness = self.model.selected_harness;
         let profile_id = self
             .model
             .selected_provider_profile()
             .map(|profile| profile.id);
-        self.model.codex_model_override = self
+        let legacy_effort = self
             .storage
-            .setting(&codex_model_setting_key(profile_id))
-            .ok()
-            .flatten()
-            .filter(|model| !model.is_empty());
-        self.model.effort = self
-            .storage
-            .setting(&codex_effort_setting_key(profile_id))
+            .setting("thinking_effort")
             .ok()
             .flatten()
             .and_then(|value| ThinkingEffort::from_str(&value).ok())
-            .unwrap_or(ThinkingEffort::Default);
-        self.model.codex_model_catalog = ModelCatalogState::Idle;
+            .unwrap_or_default();
+        (self.model.model_override, self.model.effort) =
+            load_catalog_preferences(&self.storage, harness, profile_id, legacy_effort);
+        self.model.model_catalog = ModelCatalogState::Idle;
     }
 
-    fn persist_codex_effort(&self) {
+    fn persist_catalog_effort(&self) {
+        let harness = self.model.selected_harness;
         let profile_id = self
             .model
             .selected_provider_profile()
             .map(|profile| profile.id);
         let _ = self.storage.set_setting(
-            &codex_effort_setting_key(profile_id),
+            &catalog_effort_setting_key(harness, profile_id),
             self.model.effort.as_str(),
         );
     }
 
-    fn normalize_codex_effort(&mut self) -> bool {
+    fn normalize_catalog_effort(&mut self) -> bool {
         if self.model.effort.is_default()
             || self
                 .model
-                .selected_codex_catalog_model()
+                .selected_catalog_model()
                 .is_some_and(|model| model.supports_effort(&self.model.effort))
+            || self.model.selected_catalog_model().is_none()
         {
             return false;
         }
         self.model.effort = ThinkingEffort::Default;
-        self.persist_codex_effort();
+        self.persist_catalog_effort();
         true
     }
 
-    fn resolved_codex_effort(&self, model_id: Option<&str>) -> ThinkingEffort {
+    fn resolved_catalog_effort(&self, model_id: Option<&str>) -> ThinkingEffort {
         if !self.model.effort.is_default() {
             return self.model.effort;
         }
@@ -818,7 +812,7 @@ impl Presenter {
             return ThinkingEffort::Default;
         };
         self.model
-            .codex_model_catalog
+            .model_catalog
             .models()
             .and_then(|models| models.iter().find(|model| model.id == model_id))
             .and_then(|model| model.default_reasoning_effort)
@@ -838,22 +832,75 @@ fn active_profile_setting_key(harness: HarnessKind) -> String {
     format!("active_provider_profile_{}", harness.as_str())
 }
 
-fn codex_model_setting_key(profile_id: Option<Uuid>) -> String {
+fn supports_model_catalog(harness: HarnessKind) -> bool {
+    matches!(harness, HarnessKind::Codex | HarnessKind::Omp)
+}
+
+fn catalog_model_setting_key(harness: HarnessKind, profile_id: Option<Uuid>) -> String {
     format!(
-        "codex_model_override_{}",
+        "{}_model_override_{}",
+        harness.as_str(),
         profile_id
             .map(|id| id.to_string())
             .unwrap_or_else(|| "cli".into())
     )
 }
 
-fn codex_effort_setting_key(profile_id: Option<Uuid>) -> String {
+fn catalog_effort_setting_key(harness: HarnessKind, profile_id: Option<Uuid>) -> String {
     format!(
-        "codex_effort_{}",
+        "{}_effort_{}",
+        harness.as_str(),
         profile_id
             .map(|id| id.to_string())
             .unwrap_or_else(|| "cli".into())
     )
+}
+
+fn load_catalog_preferences(
+    storage: &Storage,
+    harness: HarnessKind,
+    profile_id: Option<Uuid>,
+    legacy_effort: ThinkingEffort,
+) -> (Option<String>, ThinkingEffort) {
+    let model_override = storage
+        .setting(&catalog_model_setting_key(harness, profile_id))
+        .ok()
+        .flatten()
+        .filter(|model| !model.is_empty());
+    let stored_effort = storage
+        .setting(&catalog_effort_setting_key(harness, profile_id))
+        .ok()
+        .flatten()
+        .and_then(|value| ThinkingEffort::from_str(&value).ok());
+    let effort = normalize_effort_for_harness(
+        harness,
+        stored_effort.unwrap_or_else(|| {
+            if harness == HarnessKind::Omp {
+                legacy_effort
+            } else {
+                ThinkingEffort::Default
+            }
+        }),
+    );
+    if harness == HarnessKind::Omp && stored_effort != Some(effort) {
+        let _ = storage.set_setting(
+            &catalog_effort_setting_key(harness, profile_id),
+            effort.as_str(),
+        );
+    }
+    (model_override, effort)
+}
+
+fn normalize_effort_for_harness(harness: HarnessKind, effort: ThinkingEffort) -> ThinkingEffort {
+    if harness != HarnessKind::Omp {
+        return effort;
+    }
+    match effort {
+        ThinkingEffort::None => ThinkingEffort::Off,
+        ThinkingEffort::Max => ThinkingEffort::XHigh,
+        ThinkingEffort::Ultra => ThinkingEffort::Default,
+        effort => effort,
+    }
 }
 
 fn optional_trimmed(value: String) -> Option<String> {

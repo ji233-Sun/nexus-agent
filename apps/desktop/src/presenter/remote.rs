@@ -92,11 +92,9 @@ impl Presenter {
                     .selected_provider_profile()
                     .and_then(|profile| profile.model.clone())
                     .or_else(|| Some(self.model.claude_model.to_string())),
-                HarnessKind::Codex => self.model.configured_codex_model().map(str::to_owned),
-                HarnessKind::Omp => self
-                    .model
-                    .selected_provider_profile()
-                    .and_then(|profile| profile.model.clone()),
+                HarnessKind::Codex | HarnessKind::Omp => {
+                    self.model.configured_catalog_model().map(str::to_owned)
+                }
             },
             effort: self.model.effort,
             harness_ready: self.model.selected_probe().is_some_and(|probe| {
