@@ -75,6 +75,7 @@ pub(crate) struct AppModel {
     pub(crate) projects: Vec<Project>,
     pub(crate) selected_project: Option<Project>,
     pub(crate) tasks: Vec<TaskSummary>,
+    pub(crate) archived_tasks: Vec<TaskSummary>,
     pub(crate) selected_task: Option<Uuid>,
     pub(crate) messages: Vec<Message>,
     pub(crate) active_run: Option<Uuid>,

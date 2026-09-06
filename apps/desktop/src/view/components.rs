@@ -38,6 +38,7 @@ pub(super) struct AnimatedDropdown {
     id: ElementId,
     trigger: Button,
     reduced_motion: bool,
+    show_caret: bool,
     builder: MenuBuilder,
 }
 
@@ -58,8 +59,14 @@ impl AnimatedDropdown {
             id: id.into(),
             trigger,
             reduced_motion,
+            show_caret: true,
             builder: std::rc::Rc::new(builder),
         }
+    }
+
+    pub(super) fn show_caret(mut self, show_caret: bool) -> Self {
+        self.show_caret = show_caret;
+        self
     }
 }
 
@@ -113,11 +120,13 @@ impl RenderOnce for AnimatedDropdown {
             .trigger
             .selected(open)
             .dropdown_caret(false)
-            .child(
-                Icon::new(IconName::ChevronDown)
-                    .size(px(14.))
-                    .rotate(gpui::radians(-std::f32::consts::PI * progress)),
-            )
+            .when(self.show_caret, |trigger| {
+                trigger.child(
+                    Icon::new(IconName::ChevronDown)
+                        .size(px(14.))
+                        .rotate(gpui::radians(-std::f32::consts::PI * progress)),
+                )
+            })
             .on_click({
                 let toggle = toggle.clone();
                 move |event, window, cx| {

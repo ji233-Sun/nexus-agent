@@ -1,8 +1,10 @@
-use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Duration};
+use std::{cell::RefCell, collections::HashMap, fs, rc::Rc, time::Duration};
 
 use super::*;
 use crate::{
-    infrastructure::{codex_history::Event as HistoryEvent, credentials::CredentialStore},
+    infrastructure::{
+        codex_history::Event as HistoryEvent, credentials::CredentialStore, storage::NewTaskRun,
+    },
     model::history::HistoryMessage,
 };
 use nexus_domain::{MessageKind, MessageRole, ModelDescriptor, ModelReasoningEffort, RunStatus};
@@ -126,6 +128,216 @@ fn appearance_preferences_restore_and_accept_missing_or_invalid_settings() {
             None,
         );
         assert_eq!(presenter.model().appearance, expected);
+    }
+}
+
+#[test]
+fn conversation_actions_keep_active_and_archived_models_in_sync() {
+    let (mut presenter, _runner, _directory) = fixture();
+    let project = presenter.model().selected_project.clone().unwrap();
+    let create_task = |presenter: &mut Presenter, title: &str| {
+        presenter
+            .storage
+            .create_task_run(NewTaskRun {
+                task_id: None,
+                project_id: project.id,
+                title,
+                prompt: title,
+                harness: HarnessKind::Claude,
+                executable: "claude",
+                model: None,
+                effort: ThinkingEffort::Medium,
+                harness_version: None,
+            })
+            .unwrap()
+            .0
+    };
+    let first_task = create_task(&mut presenter, "First conversation");
+    let second_task = create_task(&mut presenter, "Second conversation");
+    presenter.select_project(project);
+    presenter.select_task(first_task);
+
+    assert!(presenter.archive_task(first_task));
+    assert!(presenter.model().selected_task.is_none());
+    assert!(presenter.model().messages.is_empty());
+    assert_eq!(presenter.model().tasks[0].id, second_task);
+    assert_eq!(presenter.model().archived_tasks[0].id, first_task);
+
+    assert!(presenter.restore_task(first_task));
+    assert_eq!(presenter.model().tasks.len(), 2);
+    assert!(presenter.model().archived_tasks.is_empty());
+
+    presenter.model.active_run = Some(Uuid::new_v4());
+    assert!(!presenter.delete_task(first_task));
+    assert_eq!(presenter.model().tasks.len(), 2);
+    presenter.model.active_run = None;
+
+    assert!(presenter.delete_task(first_task));
+    assert_eq!(presenter.model().tasks.len(), 1);
+    assert!(presenter.archive_task(second_task));
+    assert_eq!(presenter.model().archived_tasks.len(), 1);
+    assert!(presenter.delete_archived_tasks());
+    assert!(presenter.model().archived_tasks.is_empty());
+    assert!(presenter.model().tasks.is_empty());
+}
+
+struct ArchivedProjectFixture {
+    presenter: Presenter,
+    _directory: tempfile::TempDir,
+    archived_project: Project,
+    archived_task: Uuid,
+    oldest_recent_project: Project,
+    oldest_recent_task: Uuid,
+}
+
+fn archived_project_fixture() -> ArchivedProjectFixture {
+    let directory = tempfile::tempdir().unwrap();
+    let mut storage = Storage::open(&directory.path().join("nexus.db")).unwrap();
+    let archived_project_path = directory.path().join("archived-project");
+    fs::create_dir(&archived_project_path).unwrap();
+    let archived_project = storage.open_project(&archived_project_path).unwrap();
+    let archived_task = storage
+        .create_task_run(NewTaskRun {
+            task_id: None,
+            project_id: archived_project.id,
+            title: "Archived conversation",
+            prompt: "Archived conversation",
+            harness: HarnessKind::Claude,
+            executable: "claude",
+            model: None,
+            effort: ThinkingEffort::Medium,
+            harness_version: None,
+        })
+        .unwrap()
+        .0;
+    storage.archive_task(archived_task).unwrap();
+    let mut oldest_recent = None;
+    for index in 0..20 {
+        let project_path = directory.path().join(format!("recent-project-{index:02}"));
+        fs::create_dir(&project_path).unwrap();
+        let project = storage.open_project(&project_path).unwrap();
+        if index == 0 {
+            let task = storage
+                .create_task_run(NewTaskRun {
+                    task_id: None,
+                    project_id: project.id,
+                    title: "Selected conversation",
+                    prompt: "Selected conversation",
+                    harness: HarnessKind::Claude,
+                    executable: "claude",
+                    model: None,
+                    effort: ThinkingEffort::Medium,
+                    harness_version: None,
+                })
+                .unwrap()
+                .0;
+            oldest_recent = Some((project, task));
+        }
+    }
+    let (oldest_recent_project, oldest_recent_task) = oldest_recent.unwrap();
+
+    ArchivedProjectFixture {
+        presenter: Presenter::new(storage, Err(anyhow::anyhow!("test")), None),
+        _directory: directory,
+        archived_project,
+        archived_task,
+        oldest_recent_project,
+        oldest_recent_task,
+    }
+}
+
+#[test]
+fn restoring_archived_project_preserves_the_selected_project_and_tasks() {
+    let ArchivedProjectFixture {
+        mut presenter,
+        _directory,
+        archived_project,
+        archived_task,
+        oldest_recent_project,
+        oldest_recent_task,
+    } = archived_project_fixture();
+    assert_eq!(presenter.model().archived_tasks[0].id, archived_task);
+    let archived_project_metadata = presenter
+        .model()
+        .projects
+        .iter()
+        .find(|project| project.id == archived_project.id)
+        .unwrap();
+    assert_eq!(archived_project_metadata.display_name, "archived-project");
+    presenter.select_project(oldest_recent_project.clone());
+    presenter.select_task(oldest_recent_task);
+
+    assert!(presenter.restore_task(archived_task));
+    assert!(presenter.model().archived_tasks.is_empty());
+    assert_eq!(
+        presenter.model().selected_project.as_ref().unwrap().id,
+        oldest_recent_project.id
+    );
+    assert_eq!(presenter.model().selected_task, Some(oldest_recent_task));
+    assert!(
+        presenter
+            .model()
+            .tasks
+            .iter()
+            .any(|task| task.id == oldest_recent_task)
+    );
+    assert!(
+        presenter
+            .model()
+            .projects
+            .iter()
+            .any(|project| project.id == oldest_recent_project.id)
+    );
+    let restored_project = presenter
+        .model()
+        .projects
+        .iter()
+        .find(|project| project.id == archived_project.id)
+        .unwrap()
+        .clone();
+    presenter.select_project(restored_project);
+    assert!(
+        presenter
+            .model()
+            .tasks
+            .iter()
+            .any(|task| task.id == archived_task)
+    );
+}
+
+#[test]
+fn deleting_archived_tasks_refreshes_projects_for_individual_and_bulk_actions() {
+    for delete_all in [false, true] {
+        let ArchivedProjectFixture {
+            mut presenter,
+            _directory,
+            archived_project,
+            archived_task,
+            ..
+        } = archived_project_fixture();
+        assert!(
+            presenter
+                .model()
+                .projects
+                .iter()
+                .any(|project| project.id == archived_project.id)
+        );
+
+        if delete_all {
+            assert!(presenter.delete_archived_tasks());
+        } else {
+            assert!(presenter.delete_task(archived_task));
+        }
+
+        assert!(presenter.model().archived_tasks.is_empty());
+        assert_eq!(presenter.model().projects.len(), 20);
+        assert!(
+            presenter
+                .model()
+                .projects
+                .iter()
+                .all(|project| project.id != archived_project.id)
+        );
     }
 }
 
