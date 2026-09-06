@@ -1,6 +1,6 @@
 use super::*;
 use crate::model::history::ThreadSummary;
-use gpui_kit::component::{list::ListItem, scroll::ScrollableElement as _};
+use gpui_kit::component::{list::ListItem, scroll::ScrollableElement as _, spinner::Spinner};
 
 const SIDEBAR_ROW_HEIGHT: f32 = 32.;
 pub(super) const HISTORY_PAGE_SIZE: usize = 10;
@@ -94,11 +94,7 @@ impl NexusView {
                         let can_manage = model.active_run.is_none();
                         let reduced_motion = self.reduced_motion;
                         let color = run_status_color(colors, task.status);
-                        let status_icon = match task.status {
-                            RunStatus::Failed => IconName::CircleX,
-                            RunStatus::Cancelled | RunStatus::Interrupted => IconName::Pause,
-                            _ => IconName::LoaderCircle,
-                        };
+                        let active = task.status.is_active();
                         navigation_row(colors, id, task.title.clone(), None)
                             .pr(px(62.))
                             .group("sidebar-task")
@@ -119,11 +115,18 @@ impl NexusView {
                                     .items_center()
                                     .gap_1()
                                     .when_some(color, |actions, color| {
-                                        actions.child(
-                                            Icon::new(status_icon.clone())
+                                        actions.child(if active {
+                                            Spinner::new()
+                                                .icon(IconName::LoaderCircle)
+                                                .with_size(px(14.))
+                                                .color(color)
+                                                .into_any_element()
+                                        } else {
+                                            Icon::new(IconName::CircleX)
                                                 .size(px(14.))
-                                                .text_color(color),
-                                        )
+                                                .text_color(color)
+                                                .into_any_element()
+                                        })
                                     })
                                     .child(
                                         AnimatedDropdown::new(

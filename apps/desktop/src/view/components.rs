@@ -462,12 +462,11 @@ pub(super) fn live_status_dot(color: Hsla, animated: bool) -> gpui::AnyElement {
 
 pub(super) fn run_status_color(colors: Palette, status: RunStatus) -> Option<Hsla> {
     match status {
-        RunStatus::Completed => None,
+        RunStatus::Completed | RunStatus::Cancelled | RunStatus::Interrupted => None,
         RunStatus::Failed => Some(rgb(colors.danger).into()),
         RunStatus::Running | RunStatus::Starting | RunStatus::Cancelling => {
             Some(rgb(colors.accent).into())
         }
-        RunStatus::Cancelled | RunStatus::Interrupted => Some(rgb(colors.muted).into()),
     }
 }
 
@@ -775,9 +774,15 @@ mod tests {
     }
 
     #[test]
-    fn completed_tasks_do_not_show_a_dot_that_looks_like_an_unread_badge() {
+    fn finished_tasks_only_show_a_status_indicator_for_failures() {
         let colors = Palette::for_dark(true);
-        assert!(run_status_color(colors, RunStatus::Completed).is_none());
+        for status in [
+            RunStatus::Completed,
+            RunStatus::Cancelled,
+            RunStatus::Interrupted,
+        ] {
+            assert!(run_status_color(colors, status).is_none());
+        }
         for status in [
             RunStatus::Starting,
             RunStatus::Running,
