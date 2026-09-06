@@ -123,6 +123,25 @@ fn request(directory: &Path, executable: PathBuf, harness: HarnessKind, prompt: 
 }
 
 #[tokio::test]
+async fn exited_run_releases_the_slot_before_the_next_message_starts() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = fake_harness(directory.path());
+    let mut runner = TestRunner::spawn();
+    for _ in 0..10 {
+        let request = request(
+            directory.path(),
+            executable.clone(),
+            HarnessKind::Claude,
+            "next message",
+        );
+        let run_id = request.run_id;
+        runner.send(Command::RunStart(request)).await;
+        runner.collect_run(run_id, RunStatus::Completed).await;
+    }
+    runner.shutdown().await;
+}
+
+#[tokio::test]
 async fn runner_resumes_each_harness_session_across_processes() {
     let directory = tempfile::tempdir().unwrap();
     let executable = fake_harness(directory.path());

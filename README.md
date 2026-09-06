@@ -14,6 +14,7 @@ Nexus Agent 是一个面向 Linux、macOS 和 Windows 的本地桌面应用，�
 - 取消和关闭时清理 Harness 进程树：Unix 先中断再超时终止，Windows 使用系统 `taskkill /T /F`。
 - SQLite 持久化 Nexus 发起的项目、任务、Run 和最终消息；启动时将遗留运行标为 `Interrupted`。
 - 当前任务中的后续消息追加为新一轮 Run，并复用同一个 Harness Session；重新打开任务后仍可继续对话，点击“新建任务”才开始独立会话。
+- 运行中发送的消息默认排队，每轮成功结束后按顺序发送一条；输入区可查看和移除排队消息。停止或运行失败会暂停队列，可手动继续发送。队列属于原任务，仅保留在当前应用内，退出应用后不恢复。
 - 在本机回环地址提供带令牌鉴权的 Remote Control 服务，并内置 React Web Client，可通过 FRP TCP 转发后远程查看会话、发起任务和取消运行。
 - 提示项目中的未提交修改，但不创建 Worktree，也不执行 Git 写操作。
 

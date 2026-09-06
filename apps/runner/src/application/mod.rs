@@ -213,11 +213,19 @@ async fn start_run(request: StartRun, active: Arc<Mutex<Option<ActiveRun>>>, emi
     let run_id = request.run_id;
     let active_for_task = active.clone();
     tokio::spawn(async move {
-        run_harness(request, cwd, cancel_rx, emitter).await;
+        let (status, exit_code) = run_harness(request, cwd, cancel_rx, emitter.clone()).await;
         let mut guard = active_for_task.lock().await;
         if guard.as_ref().is_some_and(|run| run.id == run_id) {
             *guard = None;
         }
+        drop(guard);
+        emitter
+            .send(Event::RunExited {
+                run_id,
+                status,
+                exit_code,
+            })
+            .await;
     });
 }
 

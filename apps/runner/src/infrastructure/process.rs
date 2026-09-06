@@ -16,7 +16,7 @@ pub(crate) async fn run_harness(
     cwd: std::path::PathBuf,
     mut cancel: watch::Receiver<bool>,
     emitter: Emitter,
-) {
+) -> (RunStatus, Option<i32>) {
     let harness = request.harness;
     let (spec, decoder) = super::harness::prepare(&request, &cwd);
     let mut command = ProcessCommand::new(&spec.executable);
@@ -45,14 +45,7 @@ pub(crate) async fn run_harness(
                     message: format!("无法启动 {harness}，请重新探测可执行文件。"),
                 })
                 .await;
-            emitter
-                .send(Event::RunExited {
-                    run_id: request.run_id,
-                    status: RunStatus::Failed,
-                    exit_code: None,
-                })
-                .await;
-            return;
+            return (RunStatus::Failed, None);
         }
     };
     let pid = child.id().unwrap_or_default();
@@ -75,14 +68,7 @@ pub(crate) async fn run_harness(
                 message: format!("无法向 {harness} 发送 Prompt。"),
             })
             .await;
-        emitter
-            .send(Event::RunExited {
-                run_id: request.run_id,
-                status: RunStatus::Failed,
-                exit_code: None,
-            })
-            .await;
-        return;
+        return (RunStatus::Failed, None);
     }
 
     let stdout = child.stdout.take();
@@ -142,13 +128,7 @@ pub(crate) async fn run_harness(
             .await;
         RunStatus::Failed
     };
-    emitter
-        .send(Event::RunExited {
-            run_id: request.run_id,
-            status: final_status,
-            exit_code,
-        })
-        .await;
+    (final_status, exit_code)
 }
 
 async fn read_stdout(

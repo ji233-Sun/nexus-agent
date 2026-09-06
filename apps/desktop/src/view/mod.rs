@@ -1109,6 +1109,72 @@ impl NexusView {
 }
 
 impl NexusView {
+    fn render_message_queue(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let model = self.presenter.model();
+        let colors = palette(cx);
+        let queued = model
+            .queued_messages
+            .iter()
+            .filter(|message| Some(message.task_id) == model.selected_task)
+            .collect::<Vec<_>>();
+        div().when(!queued.is_empty(), |element| {
+            element
+                .pb_2()
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(rgb(colors.muted))
+                        .child(format!("排队消息 · {}", queued.len())),
+                )
+                .child(
+                    div()
+                        .id("message-queue")
+                        .max_h(px(160.))
+                        .overflow_y_scroll()
+                        .children(queued.into_iter().map(|message| {
+                            let id = message.id;
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .py_1()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_size(px(13.))
+                                        .child(message.prompt.clone()),
+                                )
+                                .when(model.active_run.is_none(), |element| {
+                                    element.child(
+                                        Button::new((ElementId::from(id), "send-queued"))
+                                            .ghost()
+                                            .small()
+                                            .label("发送")
+                                            .on_click(cx.listener(move |app, _, _, cx| {
+                                                app.presenter.send_queued_message(id);
+                                                app.presenter.notify_remote_changed();
+                                                cx.notify();
+                                            })),
+                                    )
+                                })
+                                .child(
+                                    Button::new((ElementId::from(id), "remove-queued"))
+                                        .ghost()
+                                        .small()
+                                        .icon(IconName::Close)
+                                        .accessibility_label("移除排队消息")
+                                        .on_click(cx.listener(move |app, _, _, cx| {
+                                            app.presenter.remove_queued_message(id);
+                                            cx.notify();
+                                        })),
+                                )
+                        })),
+                )
+        })
+    }
+
     fn render_workspace(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = palette(cx);
         let material = materials(cx);
@@ -1126,7 +1192,7 @@ impl NexusView {
         } else if model.selected_project.is_none() {
             "先选择本地项目，再描述你希望完成的工作。"
         } else if model.active_run.is_some() {
-            "Agent 正在执行 · 可以提前起草下一条消息"
+            "Agent 正在执行 · 发送后排队，每轮结束后发送一条"
         } else if !model.can_submit() {
             "Agent 尚未就绪 · 打开设置检查探测和登录状态"
         } else if cfg!(target_os = "macos") {
@@ -1298,6 +1364,7 @@ impl NexusView {
                                     .p_3()
                                     .flex()
                                     .flex_col()
+                                    .child(self.render_message_queue(cx))
                                     .child(
                                         Textarea::new(&self.prompt_input)
                                             .disabled(history)
@@ -1334,36 +1401,51 @@ impl NexusView {
                                                     .child(self.model_selector(cx))
                                                     .child(self.effort_selector(cx)),
                                             )
-                                            .when(model.active_run.is_some(), |element| {
-                                                element.child(
-                                                    Button::new("composer-cancel")
-                                                        .danger()
-                                                        .outline()
-                                                        .small()
-                                                        .h(px(COMPACT_CONTROL_HEIGHT))
-                                                        .icon(IconName::Pause)
-                                                        .label("停止")
-                                                        .tooltip("停止当前运行，保留已有输出")
-                                                        .on_click(cx.listener(Self::cancel)),
-                                                )
-                                            })
-                                            .when(model.active_run.is_none(), |element| {
-                                                element.child(
-                                                    Button::new("submit")
-                                                        .primary()
-                                                        .small()
-                                                        .size(px(COMPACT_CONTROL_HEIGHT))
-                                                        .p_0()
-                                                        .icon(IconName::ArrowUp)
-                                                        .accessibility_label("发送任务")
-                                                        .tooltip(composer_hint)
-                                                        .when(!can_submit, |button| {
-                                                            button.opacity(0.42)
-                                                        })
-                                                        .disabled(!can_submit)
-                                                        .on_click(cx.listener(Self::submit)),
-                                                )
-                                            }),
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_2()
+                                                    .when(model.active_run.is_some(), |element| {
+                                                        element.child(
+                                                            Button::new("composer-cancel")
+                                                                .danger()
+                                                                .outline()
+                                                                .small()
+                                                                .h(px(COMPACT_CONTROL_HEIGHT))
+                                                                .icon(IconName::Pause)
+                                                                .label("停止")
+                                                                .disabled(model.run_cancelling)
+                                                                .tooltip(
+                                                                    "停止当前运行，保留已有输出",
+                                                                )
+                                                                .on_click(
+                                                                    cx.listener(Self::cancel),
+                                                                ),
+                                                        )
+                                                    })
+                                                    .child(
+                                                        Button::new("submit")
+                                                            .primary()
+                                                            .small()
+                                                            .size(px(COMPACT_CONTROL_HEIGHT))
+                                                            .p_0()
+                                                            .icon(IconName::ArrowUp)
+                                                            .accessibility_label(
+                                                                if model.active_run.is_some() {
+                                                                    "加入消息队列"
+                                                                } else {
+                                                                    "发送任务"
+                                                                },
+                                                            )
+                                                            .tooltip(composer_hint)
+                                                            .when(!can_submit, |button| {
+                                                                button.opacity(0.42)
+                                                            })
+                                                            .disabled(!can_submit)
+                                                            .on_click(cx.listener(Self::submit)),
+                                                    ),
+                                            ),
                                     )
                                     .map(|element| {
                                         entrance(element, "composer-enter", !self.reduced_motion)

@@ -543,14 +543,16 @@ fn expired_remote_start_does_not_change_selection_or_start_a_run() {
 }
 
 #[test]
-fn submit_persists_configuration_and_prevents_duplicate_runs() {
+fn submit_persists_configuration_and_queues_without_starting_concurrent_runs() {
     let (mut presenter, runner, _directory) = fixture();
     presenter.select_model(ClaudeModel::Opus);
     presenter.select_effort(ThinkingEffort::XHigh);
     assert!(presenter.model().can_submit());
     assert!(presenter.submit("  explain this project\n", "claude-custom"));
     assert!(!presenter.model().can_submit());
-    assert!(!presenter.submit("duplicate", "claude-custom"));
+    assert!(presenter.submit("follow-up", "claude-custom"));
+    assert_eq!(presenter.model().queued_messages.len(), 1);
+    assert_eq!(presenter.model().queued_messages[0].prompt, "follow-up");
     let state = runner.0.borrow();
     assert_eq!(state.commands.len(), 1);
     let Command::RunStart(request) = &state.commands[0].command else {
@@ -576,6 +578,134 @@ fn submit_persists_configuration_and_prevents_duplicate_runs() {
     assert_eq!(config.effort, request.effort);
     assert_eq!(presenter.model().messages[0].content, request.prompt);
     assert_eq!(presenter.model().tasks.len(), 1);
+}
+
+#[test]
+fn queued_messages_start_one_at_a_time_and_resume_the_same_session() {
+    for harness in HarnessKind::ALL {
+        let (mut presenter, runner, _directory) = fixture();
+        presenter.select_harness(harness, "claude");
+        presenter
+            .model
+            .harnesses
+            .insert(harness, ready_probe(harness));
+        assert!(presenter.submit("first", harness.default_executable()));
+        let task_id = presenter.model().active_task.unwrap();
+        let mut run_id = presenter.model().active_run.unwrap();
+        assert!(presenter.submit(" second ", harness.default_executable()));
+        assert!(presenter.submit("third", harness.default_executable()));
+        assert_eq!(presenter.model().messages.len(), 1);
+        assert!(!presenter.submit(" \n ", harness.default_executable()));
+        runner.emit(Event::RunSessionStarted {
+            run_id,
+            session_id: "queued-session".into(),
+        });
+        for (prompt, remaining) in [("second", 1), ("third", 0)] {
+            runner.emit(Event::RunExited {
+                run_id,
+                status: RunStatus::Completed,
+                exit_code: Some(0),
+            });
+            presenter.drain_events();
+            let request = last_start(&runner);
+            assert_ne!(request.run_id, run_id);
+            assert_eq!(request.task_id, task_id);
+            assert_eq!(request.session_id.as_deref(), Some("queued-session"));
+            assert_eq!(request.prompt, prompt);
+            assert_eq!(request.harness, harness);
+            assert_eq!(presenter.model().queued_messages.len(), remaining);
+            run_id = request.run_id;
+        }
+        runner.emit(Event::RunExited {
+            run_id,
+            status: RunStatus::Completed,
+            exit_code: Some(0),
+        });
+        presenter.drain_events();
+        assert!(presenter.model().active_run.is_none());
+        assert_eq!(presenter.model().tasks.len(), 1);
+        assert_eq!(
+            presenter
+                .model()
+                .messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second", "third"]
+        );
+    }
+}
+
+#[test]
+fn failed_or_cancelled_runs_keep_the_queue_for_explicit_retry() {
+    for status in [
+        RunStatus::Failed,
+        RunStatus::Cancelled,
+        RunStatus::Interrupted,
+        RunStatus::Completed,
+    ] {
+        let (mut presenter, runner, _directory) = fixture();
+        assert!(presenter.submit("first", "claude"));
+        let run_id = presenter.model().active_run.unwrap();
+        let task_id = presenter.model().active_task.unwrap();
+        assert!(presenter.submit("keep me", "claude"));
+        assert!(presenter.submit("remove me", "claude"));
+        let message_id = presenter.model().queued_messages[0].id;
+        presenter.remove_queued_message(presenter.model().queued_messages[1].id);
+        if status == RunStatus::Completed {
+            // Stop can race with a successful exit; it must still pause the queue.
+            presenter.cancel();
+            assert!(!presenter.submit("too late", "claude"));
+        }
+        runner.emit(Event::RunSessionStarted {
+            run_id,
+            session_id: "saved-session".into(),
+        });
+        runner.emit(Event::RunExited {
+            run_id,
+            status,
+            exit_code: None,
+        });
+        presenter.drain_events();
+        assert!(presenter.model().active_run.is_none());
+        assert_eq!(presenter.model().queued_messages.len(), 1);
+        presenter.new_task();
+        assert!(!presenter.send_queued_message(message_id));
+        presenter.select_task(task_id);
+        assert!(presenter.send_queued_message(message_id));
+        assert_eq!(last_start(&runner).prompt, "keep me");
+        assert!(presenter.model().queued_messages.is_empty());
+    }
+}
+
+#[test]
+fn queued_message_survives_missing_session_and_runner_send_failure() {
+    for missing_session in [true, false] {
+        let (mut presenter, runner, _directory) = fixture();
+        assert!(presenter.submit("first", "claude"));
+        let run_id = presenter.model().active_run.unwrap();
+        assert!(presenter.submit("keep me", "claude"));
+        if !missing_session {
+            runner.emit(Event::RunSessionStarted {
+                run_id,
+                session_id: "saved-session".into(),
+            });
+            runner.0.borrow_mut().fail_send = true;
+        }
+        runner.emit(Event::RunExited {
+            run_id,
+            status: RunStatus::Completed,
+            exit_code: Some(0),
+        });
+        presenter.drain_events();
+        assert!(presenter.model().active_run.is_none());
+        assert_eq!(presenter.model().queued_messages[0].prompt, "keep me");
+        assert!(presenter.model().status.contains(if missing_session {
+            "无法继续对话"
+        } else {
+            "Runner 不可用"
+        }));
+    }
 }
 
 #[test]

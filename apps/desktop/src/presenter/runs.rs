@@ -1,6 +1,6 @@
 use super::{Presenter, executable_setting_key, supports_model_catalog};
 use crate::infrastructure::storage::NewTaskRun;
-use crate::model::ModelCatalogState;
+use crate::model::{ModelCatalogState, QueuedMessage};
 use nexus_domain::{HarnessKind, MessageKind, MessageRole, RunStatus, ToolMetadata};
 use nexus_protocol::{Command, CommandEnvelope, Event, StartRun};
 use std::time::Instant;
@@ -188,8 +188,11 @@ impl Presenter {
                 exit_code,
             } if self.model.active_run == Some(run_id) => {
                 let _ = self.storage.finish_run(run_id, status, exit_code);
+                let task_id = self.model.active_task;
+                let cancelled = self.model.run_cancelling;
                 self.model.streaming_text.clear();
                 self.model.active_run = None;
+                self.model.run_cancelling = false;
                 self.active_run_started_at = None;
                 self.model.active_run_elapsed_seconds = None;
                 self.model.active_task = None;
@@ -201,6 +204,16 @@ impl Presenter {
                     _ => format!("任务状态：{status}"),
                 };
                 self.reload_tasks();
+                if status == RunStatus::Completed
+                    && !cancelled
+                    && let Some(message) = self
+                        .model
+                        .queued_messages
+                        .iter()
+                        .find(|message| Some(message.task_id) == task_id)
+                {
+                    self.send_queued_message(message.id);
+                }
             }
             _ => {}
         }
@@ -226,7 +239,48 @@ impl Presenter {
     }
 
     pub(crate) fn submit(&mut self, prompt: &str, configured_executable: &str) -> bool {
+        if self.model.active_run.is_some() {
+            if !self.model.can_queue() || prompt.trim().is_empty() {
+                return false;
+            }
+            self.model.queued_messages.push_back(QueuedMessage {
+                id: Uuid::new_v4(),
+                task_id: self.model.active_task.unwrap(),
+                prompt: prompt.trim().to_owned(),
+            });
+            self.model.status = "消息已排队，将在当前轮次结束后依次发送。".into();
+            return true;
+        }
         self.start_run(self.model.selected_task, prompt, configured_executable)
+    }
+
+    pub(crate) fn send_queued_message(&mut self, message_id: Uuid) -> bool {
+        let Some(message) = self
+            .model
+            .queued_messages
+            .iter()
+            .find(|message| message.id == message_id)
+            .cloned()
+        else {
+            return false;
+        };
+        if self.model.active_run.is_some() || self.model.selected_task != Some(message.task_id) {
+            return false;
+        }
+        let executable = self.model.executable.clone();
+        if !self.start_run(Some(message.task_id), &message.prompt, &executable) {
+            return false;
+        }
+        self.model
+            .queued_messages
+            .retain(|queued| queued.id != message_id);
+        true
+    }
+
+    pub(crate) fn remove_queued_message(&mut self, message_id: Uuid) {
+        self.model
+            .queued_messages
+            .retain(|message| message.id != message_id);
     }
 
     pub(super) fn start_run(
@@ -393,6 +447,7 @@ impl Presenter {
         runner
             .send(CommandEnvelope::new(Command::RunCancel { run_id }))
             .map_err(|error| error.to_string())?;
+        self.model.run_cancelling = true;
         let _ = self
             .storage
             .update_run_status(run_id, RunStatus::Cancelling);
