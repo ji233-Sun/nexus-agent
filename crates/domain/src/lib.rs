@@ -213,6 +213,7 @@ impl ClaudeModel {
 pub enum ThinkingEffort {
     Default,
     None,
+    Off,
     Minimal,
     Low,
     #[default]
@@ -221,6 +222,7 @@ pub enum ThinkingEffort {
     XHigh,
     Max,
     Ultra,
+    Auto,
 }
 
 impl ThinkingEffort {
@@ -230,6 +232,7 @@ impl ThinkingEffort {
         match self {
             Self::Default => "default",
             Self::None => "none",
+            Self::Off => "off",
             Self::Minimal => "minimal",
             Self::Low => "low",
             Self::Medium => "medium",
@@ -237,6 +240,7 @@ impl ThinkingEffort {
             Self::XHigh => "xhigh",
             Self::Max => "max",
             Self::Ultra => "ultra",
+            Self::Auto => "auto",
         }
     }
 
@@ -260,6 +264,7 @@ impl fmt::Display for ThinkingEffort {
         f.write_str(match self {
             Self::Default => "模型默认",
             Self::None => "None",
+            Self::Off => "Off",
             Self::Minimal => "Minimal",
             Self::Low => "Low",
             Self::Medium => "Medium",
@@ -267,6 +272,7 @@ impl fmt::Display for ThinkingEffort {
             Self::XHigh => "XHigh",
             Self::Max => "Max",
             Self::Ultra => "Ultra",
+            Self::Auto => "Auto",
         })
     }
 }
@@ -279,6 +285,7 @@ impl FromStr for ThinkingEffort {
             "" => Err("thinking effort cannot be empty".into()),
             "default" => Ok(Self::Default),
             "none" => Ok(Self::None),
+            "off" => Ok(Self::Off),
             "minimal" => Ok(Self::Minimal),
             "low" => Ok(Self::Low),
             "medium" => Ok(Self::Medium),
@@ -286,6 +293,7 @@ impl FromStr for ThinkingEffort {
             "xhigh" => Ok(Self::XHigh),
             "max" => Ok(Self::Max),
             "ultra" => Ok(Self::Ultra),
+            "auto" => Ok(Self::Auto),
             _ => Err(format!("unknown thinking effort: {value}")),
         }
     }
@@ -301,6 +309,8 @@ pub struct ModelReasoningEffort {
 pub struct ModelDescriptor {
     pub id: String,
     pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     pub is_default: bool,
     pub supported_reasoning_efforts: Vec<ModelReasoningEffort>,
     pub default_reasoning_effort: Option<ThinkingEffort>,
@@ -400,6 +410,14 @@ mod tests {
         assert_eq!(
             ThinkingEffort::from_str("ultra").unwrap(),
             ThinkingEffort::Ultra
+        );
+        assert_eq!(
+            ThinkingEffort::from_str("off").unwrap(),
+            ThinkingEffort::Off
+        );
+        assert_eq!(
+            ThinkingEffort::from_str("auto").unwrap(),
+            ThinkingEffort::Auto
         );
         assert!(ThinkingEffort::from_str("provider-specific").is_err());
         assert!(ThinkingEffort::from_str("").is_err());

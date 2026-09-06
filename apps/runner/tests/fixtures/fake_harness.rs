@@ -13,6 +13,10 @@ fn main() {
             thread::sleep(Duration::from_secs(1));
         }
     }
+    if args.as_slice() == ["models", "--json"] {
+        run_omp_catalog();
+        return;
+    }
     if args.first().map(String::as_str) == Some("app-server") {
         run_app_server();
         return;
@@ -111,6 +115,37 @@ fn main() {
             r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"hello"}}]}}}}"#
         );
     }
+}
+
+fn run_omp_catalog() {
+    fs::write(
+        "omp-catalog-cwd.txt",
+        env::current_dir().unwrap().to_string_lossy().as_bytes(),
+    )
+    .unwrap();
+    if let Ok(value) = env::var("TEST_PROVIDER_API_KEY") {
+        fs::write("omp-catalog-env.txt", value).unwrap();
+    }
+    if env::var_os("TEST_OMP_CATALOG_BLOCK").is_some() {
+        loop {
+            thread::sleep(Duration::from_secs(1));
+        }
+    }
+    if env::var_os("TEST_OMP_CATALOG_ERROR").is_some() {
+        eprintln!("provider request failed; credential=test-secret-must-not-leak");
+        std::process::exit(23);
+    }
+    if env::var_os("TEST_OMP_CATALOG_MALFORMED").is_some() {
+        println!("not json");
+    } else if env::var_os("TEST_OMP_CATALOG_EMPTY").is_some() {
+        println!(r#"{{"models":[]}}"#);
+    } else {
+        println!(
+            r#"{{"models":[{{"provider":"alpha","id":"shared-model","selector":"alpha/shared-model","name":"Shared Model","contextWindow":131072,"maxTokens":32768,"reasoning":true,"thinking":["off","low","high","xhigh","auto"],"input":["text"],"cost":{{}}}},{{"provider":"beta","id":"shared-model","selector":"beta/shared-model","name":"Shared Model","contextWindow":65536,"maxTokens":16384,"reasoning":true,"thinking":["minimal","medium"],"input":["text"],"cost":{{}}}}]}}"#
+        );
+    }
+    io::stdout().flush().unwrap();
+    fs::write("omp-catalog-stopped.txt", "stopped").unwrap();
 }
 
 fn run_app_server() {

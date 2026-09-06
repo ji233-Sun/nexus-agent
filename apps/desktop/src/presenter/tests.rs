@@ -6,7 +6,7 @@ use crate::{
     model::history::HistoryMessage,
 };
 use nexus_domain::{MessageKind, MessageRole, ModelDescriptor, ModelReasoningEffort, RunStatus};
-use nexus_protocol::{ErrorCode, Event, HarnessProbe, PROTOCOL_VERSION};
+use nexus_protocol::{ErrorCode, Event, HarnessProbe, PROTOCOL_VERSION, StartRun};
 
 #[derive(Clone, Default)]
 pub(crate) struct FakeRunner(Rc<RefCell<FakeRunnerState>>);
@@ -213,9 +213,28 @@ fn catalog_model(
     supported_efforts: &[ThinkingEffort],
     default_effort: ThinkingEffort,
 ) -> ModelDescriptor {
+    catalog_model_with_provider(
+        None,
+        id,
+        id,
+        is_default,
+        supported_efforts,
+        Some(default_effort),
+    )
+}
+
+fn catalog_model_with_provider(
+    provider: Option<&str>,
+    id: &str,
+    display_name: &str,
+    is_default: bool,
+    supported_efforts: &[ThinkingEffort],
+    default_effort: Option<ThinkingEffort>,
+) -> ModelDescriptor {
     ModelDescriptor {
         id: id.into(),
-        display_name: id.into(),
+        display_name: display_name.into(),
+        provider: provider.map(str::to_owned),
         is_default,
         supported_reasoning_efforts: supported_efforts
             .iter()
@@ -224,12 +243,12 @@ fn catalog_model(
                 description: effort.to_string(),
             })
             .collect(),
-        default_reasoning_effort: Some(default_effort),
+        default_reasoning_effort: default_effort,
     }
 }
 
 fn current_catalog_request_id(presenter: &Presenter) -> Uuid {
-    let ModelCatalogState::Loading { request_id } = &presenter.model().codex_model_catalog else {
+    let ModelCatalogState::Loading { request_id } = &presenter.model().model_catalog else {
         panic!("expected a loading model catalog")
     };
     *request_id
@@ -238,9 +257,23 @@ fn current_catalog_request_id(presenter: &Presenter) -> Uuid {
 fn emit_current_catalog(presenter: &Presenter, runner: &FakeRunner, models: Vec<ModelDescriptor>) {
     runner.emit(Event::ModelCatalogLoaded {
         request_id: current_catalog_request_id(presenter),
-        harness: HarnessKind::Codex,
+        harness: presenter.model().selected_harness,
         models,
     });
+}
+
+fn last_start(runner: &FakeRunner) -> StartRun {
+    runner
+        .0
+        .borrow()
+        .commands
+        .iter()
+        .rev()
+        .find_map(|envelope| match &envelope.command {
+            Command::RunStart(request) => Some(request.clone()),
+            _ => None,
+        })
+        .expect("expected start")
 }
 
 fn profile_draft(id: Option<Uuid>, name: &str, api_key: &str) -> ProviderProfileDraft {
@@ -303,7 +336,7 @@ fn codex_catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
     });
     assert!(presenter.drain_events());
     assert!(matches!(
-        presenter.model().codex_model_catalog,
+        presenter.model().model_catalog,
         ModelCatalogState::Loading { request_id } if request_id == failed_request_id
     ));
 
@@ -314,7 +347,7 @@ fn codex_catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
     });
     presenter.drain_events();
     assert!(matches!(
-        &presenter.model().codex_model_catalog,
+        &presenter.model().model_catalog,
         ModelCatalogState::Failed(message) if message == "model/list unavailable"
     ));
     assert!(presenter.model().status.contains("model/list unavailable"));
@@ -323,7 +356,7 @@ fn codex_catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
     emit_current_catalog(&presenter, &runner, Vec::new());
     presenter.drain_events();
     assert!(matches!(
-        presenter.model().codex_model_catalog,
+        presenter.model().model_catalog,
         ModelCatalogState::Empty
     ));
     assert!(presenter.model().status.contains("目录为空"));
@@ -340,11 +373,11 @@ fn codex_catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
         )],
     );
     presenter.drain_events();
-    let ModelCatalogState::Ready(models) = &presenter.model().codex_model_catalog else {
+    let ModelCatalogState::Ready(models) = &presenter.model().model_catalog else {
         panic!("expected a ready model catalog")
     };
     assert_eq!(models[0].id, "codex-current");
-    assert_eq!(presenter.model().status, "已加载 1 个 Codex 模型。");
+    assert_eq!(presenter.model().status, "已加载 1 个 Codex CLI 模型。");
 }
 
 #[test]
@@ -988,39 +1021,45 @@ fn codex_selection_priority_follow_default_and_run_configuration_match() {
     );
     presenter.drain_events();
     assert_eq!(
-        presenter.model().configured_codex_model(),
+        presenter.model().configured_catalog_model(),
         Some("profile-model")
     );
 
-    presenter.select_codex_model(Some("explicit-model".into()));
+    presenter.select_catalog_model(Some("explicit-model".into()));
     assert_eq!(
-        presenter.model().configured_codex_model(),
+        presenter.model().configured_catalog_model(),
         Some("explicit-model")
     );
     assert_eq!(
         presenter
             .storage
-            .setting(&codex_model_setting_key(Some(profile_id)))
+            .setting(&catalog_model_setting_key(
+                HarnessKind::Codex,
+                Some(profile_id),
+            ))
             .unwrap()
             .as_deref(),
         Some("explicit-model")
     );
 
-    presenter.select_codex_model(None);
+    presenter.select_catalog_model(None);
     assert_eq!(
-        presenter.model().configured_codex_model(),
+        presenter.model().configured_catalog_model(),
         Some("profile-model")
     );
     assert_eq!(
         presenter
             .storage
-            .setting(&codex_model_setting_key(Some(profile_id)))
+            .setting(&catalog_model_setting_key(
+                HarnessKind::Codex,
+                Some(profile_id),
+            ))
             .unwrap()
             .as_deref(),
         Some("")
     );
 
-    presenter.select_codex_model(Some("explicit-model".into()));
+    presenter.select_catalog_model(Some("explicit-model".into()));
     assert!(presenter.model().can_submit());
     assert!(presenter.submit("use catalog selection", "codex"));
     let state = runner.0.borrow();
@@ -1068,7 +1107,7 @@ fn codex_preferences_are_isolated_per_profile_and_invalid_effort_resets() {
     let first_profile_id = presenter.save_provider_profile(first_draft).unwrap();
     emit_current_catalog(&presenter, &runner, models.clone());
     presenter.drain_events();
-    presenter.select_codex_model(Some("model-alpha".into()));
+    presenter.select_catalog_model(Some("model-alpha".into()));
     presenter.select_effort(ThinkingEffort::High);
 
     let mut second_draft = profile_draft(None, "Second Codex", "second-secret");
@@ -1076,14 +1115,14 @@ fn codex_preferences_are_isolated_per_profile_and_invalid_effort_resets() {
     let second_profile_id = presenter.save_provider_profile(second_draft).unwrap();
     emit_current_catalog(&presenter, &runner, models.clone());
     presenter.drain_events();
-    assert!(presenter.model().codex_model_override.is_none());
+    assert!(presenter.model().model_override.is_none());
     assert_eq!(presenter.model().effort, ThinkingEffort::Default);
-    presenter.select_codex_model(Some("model-beta".into()));
+    presenter.select_catalog_model(Some("model-beta".into()));
     presenter.select_effort(ThinkingEffort::Low);
 
     assert!(presenter.select_provider_profile(Some(first_profile_id)));
     assert_eq!(
-        presenter.model().codex_model_override.as_deref(),
+        presenter.model().model_override.as_deref(),
         Some("model-alpha")
     );
     assert_eq!(presenter.model().effort, ThinkingEffort::High);
@@ -1093,7 +1132,7 @@ fn codex_preferences_are_isolated_per_profile_and_invalid_effort_resets() {
 
     assert!(presenter.select_provider_profile(Some(second_profile_id)));
     assert_eq!(
-        presenter.model().codex_model_override.as_deref(),
+        presenter.model().model_override.as_deref(),
         Some("model-beta")
     );
     assert_eq!(presenter.model().effort, ThinkingEffort::Low);
@@ -1112,12 +1151,298 @@ fn codex_preferences_are_isolated_per_profile_and_invalid_effort_resets() {
     assert_eq!(
         presenter
             .storage
-            .setting(&codex_effort_setting_key(Some(second_profile_id)))
+            .setting(&catalog_effort_setting_key(
+                HarnessKind::Codex,
+                Some(second_profile_id),
+            ))
             .unwrap()
             .as_deref(),
         Some("default")
     );
     assert!(presenter.model().status.contains("恢复为模型默认"));
+}
+
+#[test]
+fn omp_selection_preserves_full_selector_and_default_priority_in_run_configuration() {
+    let (mut presenter, runner, _credentials, _directory) = provider_fixture();
+    assert!(presenter.select_harness(HarnessKind::Omp, "claude"));
+    presenter
+        .model
+        .harnesses
+        .insert(HarnessKind::Omp, ready_probe(HarnessKind::Omp));
+    let mut draft = profile_draft(None, "OMP Profile", "profile-secret");
+    draft.model = "openai/shared-model".into();
+    presenter.save_provider_profile(draft).unwrap();
+    let models = vec![
+        catalog_model_with_provider(
+            Some("openai"),
+            "openai/shared-model",
+            "Shared Model",
+            false,
+            &[ThinkingEffort::Low],
+            None,
+        ),
+        catalog_model_with_provider(
+            Some("bigmodel"),
+            "bigmodel/shared-model",
+            "Shared Model",
+            false,
+            &[
+                ThinkingEffort::Off,
+                ThinkingEffort::Minimal,
+                ThinkingEffort::XHigh,
+                ThinkingEffort::Auto,
+            ],
+            None,
+        ),
+    ];
+    emit_current_catalog(&presenter, &runner, models.clone());
+    presenter.drain_events();
+
+    assert_eq!(
+        presenter.model().configured_catalog_model(),
+        Some("openai/shared-model")
+    );
+    presenter.select_catalog_model(Some("bigmodel/shared-model".into()));
+    assert_eq!(
+        presenter
+            .model()
+            .selected_catalog_model()
+            .and_then(|model| model.provider.as_deref()),
+        Some("bigmodel")
+    );
+    presenter.select_effort(ThinkingEffort::XHigh);
+    assert!(presenter.submit("use explicit OMP model", "omp"));
+    let explicit = last_start(&runner);
+    assert_eq!(explicit.model.as_deref(), Some("bigmodel/shared-model"));
+    assert_eq!(explicit.effort, ThinkingEffort::XHigh);
+    let config = presenter
+        .storage
+        .conversation_config(explicit.task_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(config.model, "bigmodel/shared-model");
+    assert_eq!(config.effort, ThinkingEffort::XHigh);
+
+    runner.emit(Event::RunExited {
+        run_id: explicit.run_id,
+        status: RunStatus::Completed,
+        exit_code: Some(0),
+    });
+    presenter.drain_events();
+    presenter.new_task();
+    presenter.select_catalog_model(None);
+    assert!(presenter.submit("use Profile default", "omp"));
+    let profile_default = last_start(&runner);
+    assert_eq!(
+        profile_default.model.as_deref(),
+        Some("openai/shared-model")
+    );
+    assert_eq!(profile_default.effort, ThinkingEffort::Default);
+
+    runner.emit(Event::RunExited {
+        run_id: profile_default.run_id,
+        status: RunStatus::Completed,
+        exit_code: Some(0),
+    });
+    presenter.drain_events();
+    presenter.new_task();
+    assert!(presenter.select_provider_profile(None));
+    emit_current_catalog(&presenter, &runner, models);
+    presenter.drain_events();
+    assert!(presenter.submit("use CLI default", "omp"));
+    let cli_default = last_start(&runner);
+    assert!(cli_default.model.is_none());
+    let config = presenter
+        .storage
+        .conversation_config(cli_default.task_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(config.model, "default");
+}
+
+#[test]
+fn catalog_preferences_are_isolated_by_harness_and_profile() {
+    let (mut presenter, runner, _credentials, _directory) = provider_fixture();
+    assert!(presenter.select_harness(HarnessKind::Codex, "claude"));
+    let mut codex_draft = profile_draft(None, "Codex Profile", "codex-secret");
+    codex_draft.model = String::new();
+    let codex_profile_id = presenter.save_provider_profile(codex_draft).unwrap();
+    emit_current_catalog(
+        &presenter,
+        &runner,
+        vec![catalog_model(
+            "codex-model",
+            true,
+            &[ThinkingEffort::High],
+            ThinkingEffort::High,
+        )],
+    );
+    presenter.drain_events();
+    presenter.select_catalog_model(Some("codex-model".into()));
+    presenter.select_effort(ThinkingEffort::High);
+
+    assert!(presenter.select_harness(HarnessKind::Omp, "codex"));
+    let mut omp_draft = profile_draft(None, "OMP Profile", "omp-secret");
+    omp_draft.model = String::new();
+    let omp_profile_id = presenter.save_provider_profile(omp_draft).unwrap();
+    emit_current_catalog(
+        &presenter,
+        &runner,
+        vec![catalog_model_with_provider(
+            Some("bigmodel"),
+            "bigmodel/omp-model",
+            "OMP Model",
+            false,
+            &[ThinkingEffort::XHigh],
+            None,
+        )],
+    );
+    presenter.drain_events();
+    assert!(presenter.model().model_override.is_none());
+    presenter.select_catalog_model(Some("bigmodel/omp-model".into()));
+    presenter.select_effort(ThinkingEffort::XHigh);
+
+    assert!(presenter.select_harness(HarnessKind::Codex, "omp"));
+    assert_eq!(
+        presenter
+            .model()
+            .selected_provider_profile()
+            .map(|profile| profile.id),
+        Some(codex_profile_id)
+    );
+    assert_eq!(
+        presenter.model().model_override.as_deref(),
+        Some("codex-model")
+    );
+    assert_eq!(presenter.model().effort, ThinkingEffort::High);
+
+    assert!(presenter.select_harness(HarnessKind::Omp, "codex"));
+    assert_eq!(
+        presenter
+            .model()
+            .selected_provider_profile()
+            .map(|profile| profile.id),
+        Some(omp_profile_id)
+    );
+    assert_eq!(
+        presenter.model().model_override.as_deref(),
+        Some("bigmodel/omp-model")
+    );
+    assert_eq!(presenter.model().effort, ThinkingEffort::XHigh);
+}
+
+#[test]
+fn omp_legacy_efforts_migrate_to_their_actual_cli_values() {
+    let storage = Storage::open(Path::new(":memory:")).unwrap();
+    storage.set_setting("omp_effort_cli", "max").unwrap();
+    let (_, effort) =
+        load_catalog_preferences(&storage, HarnessKind::Omp, None, ThinkingEffort::Default);
+    assert_eq!(effort, ThinkingEffort::XHigh);
+    assert_eq!(
+        storage.setting("omp_effort_cli").unwrap().as_deref(),
+        Some("xhigh")
+    );
+
+    let storage = Storage::open(Path::new(":memory:")).unwrap();
+    let (_, effort) =
+        load_catalog_preferences(&storage, HarnessKind::Omp, None, ThinkingEffort::None);
+    assert_eq!(effort, ThinkingEffort::Off);
+    assert_eq!(
+        storage.setting("omp_effort_cli").unwrap().as_deref(),
+        Some("off")
+    );
+}
+
+#[test]
+fn omp_catalog_ignores_a_response_from_the_previous_profile() {
+    let (mut presenter, runner, _credentials, _directory) = provider_fixture();
+    assert!(presenter.select_harness(HarnessKind::Omp, "claude"));
+    let first_profile = presenter
+        .save_provider_profile(profile_draft(None, "First OMP", "first-secret"))
+        .unwrap();
+    let stale_request_id = current_catalog_request_id(&presenter);
+
+    let mut second_draft = profile_draft(None, "Second OMP", "second-secret");
+    second_draft.model = "second/profile-model".into();
+    let second_profile = presenter.save_provider_profile(second_draft).unwrap();
+    let current_request_id = current_catalog_request_id(&presenter);
+    assert_ne!(first_profile, second_profile);
+    assert_ne!(stale_request_id, current_request_id);
+
+    runner.emit(Event::ModelCatalogLoaded {
+        request_id: stale_request_id,
+        harness: HarnessKind::Omp,
+        models: vec![catalog_model_with_provider(
+            Some("stale"),
+            "stale/model",
+            "Stale Model",
+            false,
+            &[ThinkingEffort::Low],
+            None,
+        )],
+    });
+    presenter.drain_events();
+    assert!(matches!(
+        presenter.model().model_catalog,
+        ModelCatalogState::Loading { request_id } if request_id == current_request_id
+    ));
+
+    emit_current_catalog(
+        &presenter,
+        &runner,
+        vec![catalog_model_with_provider(
+            Some("second"),
+            "second/model",
+            "Current Model",
+            false,
+            &[ThinkingEffort::Auto],
+            None,
+        )],
+    );
+    presenter.drain_events();
+    let ModelCatalogState::Ready(models) = &presenter.model().model_catalog else {
+        panic!("expected current catalog")
+    };
+    assert_eq!(models[0].id, "second/model");
+}
+
+#[test]
+fn omp_profile_custom_model_is_preserved_when_catalog_availability_is_unknown() {
+    let (mut presenter, runner, _credentials, _directory) = provider_fixture();
+    assert!(presenter.select_harness(HarnessKind::Omp, "claude"));
+    presenter.model.harnesses.insert(
+        HarnessKind::Omp,
+        HarnessProbe {
+            authenticated: false,
+            ..ready_probe(HarnessKind::Omp)
+        },
+    );
+    let mut draft = profile_draft(None, "Custom OMP", "custom-secret");
+    draft.model = "private-provider/custom-model".into();
+    presenter.save_provider_profile(draft).unwrap();
+    emit_current_catalog(
+        &presenter,
+        &runner,
+        vec![catalog_model_with_provider(
+            Some("public-provider"),
+            "public-provider/custom-model",
+            "Custom Model",
+            false,
+            &[ThinkingEffort::Medium],
+            None,
+        )],
+    );
+    presenter.drain_events();
+
+    assert!(presenter.model().model_override.is_none());
+    assert_eq!(
+        presenter.model().configured_catalog_model(),
+        Some("private-provider/custom-model")
+    );
+    assert!(presenter.model().selected_catalog_model().is_none());
+    assert!(presenter.model().can_submit());
+    assert!(presenter.model().status.contains("尚未验证可用"));
 }
 
 #[test]
@@ -1201,15 +1526,27 @@ fn provider_profile_keeps_secret_out_of_storage_and_injects_only_the_selected_ru
     );
     assert!(presenter.submit("use the selected provider", "omp"));
     let state = runner.0.borrow();
-    let Command::RunStart(request) = &state.commands[0].command else {
-        panic!("expected start");
-    };
+    assert!(matches!(
+        &state.commands[0].command,
+        Command::ModelCatalogRefresh { .. }
+    ));
+    let request = state
+        .commands
+        .iter()
+        .find_map(|envelope| match &envelope.command {
+            Command::RunStart(request) => Some(request),
+            _ => None,
+        })
+        .expect("expected start");
     assert_eq!(request.harness, HarnessKind::Omp);
     assert_eq!(request.model.as_deref(), Some("deepseek/deepseek-v4-pro"));
     assert_eq!(request.environment.len(), 1);
     assert_eq!(request.environment[0].name, "DEEPSEEK_API_KEY");
     assert_eq!(request.environment[0].value, "super-secret");
-    assert!(!format!("{:?}", state.commands[0]).contains("super-secret"));
+    assert_eq!(
+        format!("{:?}", request.environment[0]),
+        r#"EnvironmentVariable { name: "DEEPSEEK_API_KEY", value: "[REDACTED]" }"#
+    );
 }
 
 #[test]

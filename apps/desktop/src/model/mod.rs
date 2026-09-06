@@ -86,8 +86,8 @@ pub(crate) struct AppModel {
     pub(crate) selected_harness: HarnessKind,
     pub(crate) project_dirty: bool,
     pub(crate) claude_model: ClaudeModel,
-    pub(crate) codex_model_override: Option<String>,
-    pub(crate) codex_model_catalog: ModelCatalogState,
+    pub(crate) model_override: Option<String>,
+    pub(crate) model_catalog: ModelCatalogState,
     pub(crate) effort: ThinkingEffort,
     pub(crate) executable: String,
     pub(crate) provider_profiles: Vec<ProviderProfile>,
@@ -108,7 +108,7 @@ impl AppModel {
             && self
                 .selected_probe()
                 .is_some_and(|probe| probe.available && (probe.authenticated || profile_ready))
-            && self.codex_selection_is_valid()
+            && self.catalog_selection_is_valid()
     }
 
     pub(crate) fn selected_provider_profile(&self) -> Option<&ProviderProfile> {
@@ -118,41 +118,45 @@ impl AppModel {
             .find(|profile| profile.id == *profile_id && profile.harness == self.selected_harness)
     }
 
-    pub(crate) fn configured_codex_model(&self) -> Option<&str> {
-        self.codex_model_override.as_deref().or_else(|| {
+    pub(crate) fn uses_model_catalog(&self) -> bool {
+        matches!(self.selected_harness, HarnessKind::Codex | HarnessKind::Omp)
+    }
+
+    pub(crate) fn configured_catalog_model(&self) -> Option<&str> {
+        self.model_override.as_deref().or_else(|| {
             self.selected_provider_profile()
                 .and_then(|profile| profile.model.as_deref())
         })
     }
 
-    pub(crate) fn selected_codex_catalog_model(&self) -> Option<&ModelDescriptor> {
-        let models = self.codex_model_catalog.models()?;
-        if let Some(id) = self.configured_codex_model() {
+    pub(crate) fn selected_catalog_model(&self) -> Option<&ModelDescriptor> {
+        let models = self.model_catalog.models()?;
+        if let Some(id) = self.configured_catalog_model() {
             models.iter().find(|model| model.id == id)
         } else {
             models.iter().find(|model| model.is_default)
         }
     }
 
-    pub(crate) fn codex_model_override_is_unavailable(&self) -> bool {
-        self.codex_model_override.is_some()
+    pub(crate) fn model_override_is_unavailable(&self) -> bool {
+        self.model_override.is_some()
             && matches!(
-                self.codex_model_catalog,
+                self.model_catalog,
                 ModelCatalogState::Ready(_) | ModelCatalogState::Empty
             )
-            && self.selected_codex_catalog_model().is_none()
+            && self.selected_catalog_model().is_none()
     }
 
-    pub(crate) fn codex_selection_is_valid(&self) -> bool {
-        if self.selected_harness != HarnessKind::Codex {
+    pub(crate) fn catalog_selection_is_valid(&self) -> bool {
+        if !self.uses_model_catalog() {
             return true;
         }
-        if self.codex_model_override.is_some() && self.selected_codex_catalog_model().is_none() {
+        if self.model_override_is_unavailable() {
             return false;
         }
         self.effort.is_default()
             || self
-                .selected_codex_catalog_model()
-                .is_some_and(|model| model.supports_effort(&self.effort))
+                .selected_catalog_model()
+                .is_none_or(|model| model.supports_effort(&self.effort))
     }
 }

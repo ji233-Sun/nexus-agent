@@ -92,10 +92,8 @@ impl Runner {
                                             })
                                             .await;
                                     }
-                                    Err(nexus_harness_codex::ModelCatalogError::Cancelled) => {}
-                                    Err(nexus_harness_codex::ModelCatalogError::Failed(
-                                        message,
-                                    )) => {
+                                    Err(nexus_harness_core::ModelCatalogError::Cancelled) => {}
+                                    Err(nexus_harness_core::ModelCatalogError::Failed(message)) => {
                                         emitter
                                             .send(Event::ModelCatalogFailed {
                                                 request_id,

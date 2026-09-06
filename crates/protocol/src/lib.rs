@@ -275,6 +275,36 @@ mod tests {
     }
 
     #[test]
+    fn protocol_round_trip_preserves_model_provider_metadata() {
+        let request_id = Uuid::new_v4();
+        let event = EventEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            id: Uuid::new_v4(),
+            sequence: 1,
+            event: Event::ModelCatalogLoaded {
+                request_id,
+                harness: HarnessKind::Omp,
+                models: vec![ModelDescriptor {
+                    id: "provider/model".into(),
+                    display_name: "Model".into(),
+                    provider: Some("provider".into()),
+                    is_default: false,
+                    supported_reasoning_efforts: Vec::new(),
+                    default_reasoning_effort: None,
+                }],
+            },
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        let decoded: EventEnvelope = serde_json::from_str(&json).unwrap();
+        let Event::ModelCatalogLoaded { models, .. } = decoded.event else {
+            panic!("expected model catalog")
+        };
+        assert_eq!(models[0].provider.as_deref(), Some("provider"));
+        assert_eq!(models[0].id, "provider/model");
+    }
+
+    #[test]
     fn environment_names_reject_process_control_variables() {
         for name in ["OPENAI_API_KEY", "ANTHROPIC_BASE_URL", "_PRIVATE_TOKEN"] {
             assert!(
