@@ -154,6 +154,16 @@ fn conversation_actions_keep_active_and_archived_models_in_sync() {
     };
     let first_task = create_task(&mut presenter, "First conversation");
     let second_task = create_task(&mut presenter, "Second conversation");
+    for task_id in [first_task, second_task] {
+        presenter
+            .model
+            .queued_messages
+            .push_back(crate::model::QueuedMessage {
+                id: Uuid::new_v4(),
+                task_id,
+                prompt: "unsent follow-up".into(),
+            });
+    }
     presenter.select_project(project);
     presenter.select_task(first_task);
 
@@ -162,6 +172,7 @@ fn conversation_actions_keep_active_and_archived_models_in_sync() {
     assert!(presenter.model().messages.is_empty());
     assert_eq!(presenter.model().tasks[0].id, second_task);
     assert_eq!(presenter.model().archived_tasks[0].id, first_task);
+    assert_eq!(presenter.model().queued_messages.len(), 2);
 
     assert!(presenter.restore_task(first_task));
     assert_eq!(presenter.model().tasks.len(), 2);
@@ -170,15 +181,19 @@ fn conversation_actions_keep_active_and_archived_models_in_sync() {
     presenter.model.active_run = Some(Uuid::new_v4());
     assert!(!presenter.delete_task(first_task));
     assert_eq!(presenter.model().tasks.len(), 2);
+    assert_eq!(presenter.model().queued_messages.len(), 2);
     presenter.model.active_run = None;
 
     assert!(presenter.delete_task(first_task));
     assert_eq!(presenter.model().tasks.len(), 1);
+    assert_eq!(presenter.model().queued_messages.len(), 1);
+    assert_eq!(presenter.model().queued_messages[0].task_id, second_task);
     assert!(presenter.archive_task(second_task));
     assert_eq!(presenter.model().archived_tasks.len(), 1);
     assert!(presenter.delete_archived_tasks());
     assert!(presenter.model().archived_tasks.is_empty());
     assert!(presenter.model().tasks.is_empty());
+    assert!(presenter.model().queued_messages.is_empty());
 }
 
 struct ArchivedProjectFixture {

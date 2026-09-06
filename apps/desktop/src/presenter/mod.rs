@@ -396,6 +396,9 @@ impl Presenter {
             self.model.status = format!("无法删除对话：{error}");
             return false;
         }
+        self.model
+            .queued_messages
+            .retain(|message| message.task_id != task_id);
         if self.model.selected_task == Some(task_id) {
             self.new_task();
         }
@@ -411,6 +414,13 @@ impl Presenter {
         }
         match self.storage.delete_archived_tasks() {
             Ok(count) => {
+                self.model.queued_messages.retain(|message| {
+                    !self
+                        .model
+                        .archived_tasks
+                        .iter()
+                        .any(|task| task.id == message.task_id)
+                });
                 self.reload_projects();
                 self.reload_tasks();
                 self.model.status = format!("已删除 {count} 个归档对话。");
