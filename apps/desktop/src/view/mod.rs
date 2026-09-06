@@ -1800,6 +1800,8 @@ mod catalog_model_tests {
 
     fn omp_model(provider: &str, id: &str) -> ModelDescriptor {
         ModelDescriptor {
+            source: nexus_domain::ModelSource::OmpCli,
+            availability: nexus_domain::ModelAvailability::Available,
             id: id.into(),
             display_name: "Shared Model".into(),
             provider: Some(provider.into()),

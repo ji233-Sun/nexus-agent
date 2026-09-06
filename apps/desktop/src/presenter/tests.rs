@@ -586,6 +586,12 @@ fn catalog_model_with_provider(
     default_effort: Option<ThinkingEffort>,
 ) -> ModelDescriptor {
     ModelDescriptor {
+        source: if provider.is_some() {
+            nexus_domain::ModelSource::OmpCli
+        } else {
+            nexus_domain::ModelSource::CodexAppServer
+        },
+        availability: nexus_domain::ModelAvailability::Available,
         id: id.into(),
         display_name: display_name.into(),
         provider: provider.map(str::to_owned),

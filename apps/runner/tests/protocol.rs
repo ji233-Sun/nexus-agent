@@ -295,6 +295,36 @@ async fn runner_streams_fake_codex_and_preserves_non_interactive_permissions() {
 }
 
 #[tokio::test]
+async fn runner_routes_claude_alias_catalog_without_starting_a_run() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = fake_harness(directory.path());
+    let request_id = Uuid::new_v4();
+    let mut runner = TestRunner::spawn();
+    runner
+        .send(Command::ModelCatalogRefresh {
+            request_id,
+            harness: HarnessKind::Claude,
+            executable: executable.to_string_lossy().into_owned(),
+            cwd: directory.path().to_string_lossy().into_owned(),
+            environment: vec![EnvironmentVariable {
+                name: "ANTHROPIC_API_KEY".into(),
+                value: "catalog-secret".into(),
+            }],
+        })
+        .await;
+    let event = runner.next().await;
+    assert!(!format!("{event:?}").contains("catalog-secret"));
+    assert!(
+        matches!(event, Event::ModelCatalogLoaded { request_id: id, harness: HarnessKind::Claude, models }
+        if id == request_id && models.len() == 3 && models.iter().all(|model|
+            model.source.harness() == HarnessKind::Claude && model.supported_reasoning_efforts.is_empty()))
+    );
+    runner.send(Command::RunnerHello).await;
+    assert!(matches!(runner.next().await, Event::RunnerReady));
+    runner.shutdown().await;
+}
+
+#[tokio::test]
 async fn runner_loads_all_codex_model_pages_and_reaps_the_app_server() {
     let directory = tempfile::tempdir().unwrap();
     let executable = fake_harness(directory.path());

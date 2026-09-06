@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandEnvelope {
@@ -330,6 +330,10 @@ mod tests {
                 models: vec![ModelDescriptor {
                     id: "provider/model".into(),
                     display_name: "Model".into(),
+                    source: nexus_domain::ModelSource::OmpCli,
+                    availability: nexus_domain::ModelAvailability::Unavailable {
+                        reason: "Provider disabled".into(),
+                    },
                     provider: Some("provider".into()),
                     is_default: false,
                     supported_reasoning_efforts: Vec::new(),
@@ -345,6 +349,14 @@ mod tests {
         };
         assert_eq!(models[0].provider.as_deref(), Some("provider"));
         assert_eq!(models[0].id, "provider/model");
+        assert_eq!(models[0].source.harness(), HarnessKind::Omp);
+        assert_eq!(
+            models[0].availability,
+            nexus_domain::ModelAvailability::Unavailable {
+                reason: "Provider disabled".into()
+            }
+        );
+        assert!(!models[0].availability.is_selectable());
     }
 
     #[test]
