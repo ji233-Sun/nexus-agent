@@ -254,7 +254,7 @@ impl Presenter {
         match self.storage.open_project(path) {
             Ok(project) => {
                 self.select_project(project);
-                self.model.projects = self.storage.projects().unwrap_or_default();
+                self.reload_projects();
             }
             Err(error) => self.model.status = format!("无法打开项目：{error}"),
         }
@@ -284,6 +284,20 @@ impl Presenter {
         self.model.streaming_text.clear();
         self.reload_tasks();
         self.refresh_model_catalog();
+    }
+
+    fn reload_projects(&mut self) {
+        let Ok(mut projects) = self.storage.projects() else {
+            return;
+        };
+        if let Some(selected_project) = &self.model.selected_project
+            && !projects
+                .iter()
+                .any(|project| project.id == selected_project.id)
+        {
+            projects.push(selected_project.clone());
+        }
+        self.model.projects = projects;
     }
 
     fn reload_tasks(&mut self) {
@@ -368,9 +382,7 @@ impl Presenter {
             self.model.status = format!("无法取消归档：{error}");
             return false;
         }
-        if let Ok(projects) = self.storage.projects() {
-            self.model.projects = projects;
-        }
+        self.reload_projects();
         self.reload_tasks();
         self.model.status = "对话已恢复。".into();
         true
@@ -387,6 +399,7 @@ impl Presenter {
         if self.model.selected_task == Some(task_id) {
             self.new_task();
         }
+        self.reload_projects();
         self.reload_tasks();
         self.model.status = "对话已删除。".into();
         true
@@ -398,6 +411,7 @@ impl Presenter {
         }
         match self.storage.delete_archived_tasks() {
             Ok(count) => {
+                self.reload_projects();
                 self.reload_tasks();
                 self.model.status = format!("已删除 {count} 个归档对话。");
                 true
