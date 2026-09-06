@@ -72,6 +72,7 @@ impl Presenter {
         credentials: Box<dyn CredentialStore>,
     ) -> Self {
         let projects = storage.projects().unwrap_or_default();
+        let archived_tasks = storage.archived_tasks().unwrap_or_default();
         let appearance = storage
             .setting("appearance")
             .ok()
@@ -156,6 +157,7 @@ impl Presenter {
             model: AppModel {
                 appearance,
                 projects,
+                archived_tasks,
                 selected_harness,
                 claude_model: model,
                 model_override,
@@ -252,7 +254,7 @@ impl Presenter {
         match self.storage.open_project(path) {
             Ok(project) => {
                 self.select_project(project);
-                self.model.projects = self.storage.projects().unwrap_or_default();
+                self.reload_projects();
             }
             Err(error) => self.model.status = format!("无法打开项目：{error}"),
         }
@@ -284,6 +286,20 @@ impl Presenter {
         self.refresh_model_catalog();
     }
 
+    fn reload_projects(&mut self) {
+        let Ok(mut projects) = self.storage.projects() else {
+            return;
+        };
+        if let Some(selected_project) = &self.model.selected_project
+            && !projects
+                .iter()
+                .any(|project| project.id == selected_project.id)
+        {
+            projects.push(selected_project.clone());
+        }
+        self.model.projects = projects;
+    }
+
     fn reload_tasks(&mut self) {
         self.model.tasks = self
             .model
@@ -291,6 +307,7 @@ impl Presenter {
             .as_ref()
             .and_then(|project| self.storage.tasks(project.id).ok())
             .unwrap_or_default();
+        self.model.archived_tasks = self.storage.archived_tasks().unwrap_or_default();
     }
 
     pub(crate) fn select_task(&mut self, task_id: Uuid) {
@@ -338,6 +355,71 @@ impl Presenter {
                 };
             }
             self.refresh_model_catalog();
+        }
+    }
+
+    pub(crate) fn archive_task(&mut self, task_id: Uuid) -> bool {
+        if self.model.active_run.is_some() {
+            return false;
+        }
+        if let Err(error) = self.storage.archive_task(task_id) {
+            self.model.status = format!("无法归档对话：{error}");
+            return false;
+        }
+        if self.model.selected_task == Some(task_id) {
+            self.new_task();
+        }
+        self.reload_tasks();
+        self.model.status = "对话已归档。".into();
+        true
+    }
+
+    pub(crate) fn restore_task(&mut self, task_id: Uuid) -> bool {
+        if self.model.active_run.is_some() {
+            return false;
+        }
+        if let Err(error) = self.storage.restore_task(task_id) {
+            self.model.status = format!("无法取消归档：{error}");
+            return false;
+        }
+        self.reload_projects();
+        self.reload_tasks();
+        self.model.status = "对话已恢复。".into();
+        true
+    }
+
+    pub(crate) fn delete_task(&mut self, task_id: Uuid) -> bool {
+        if self.model.active_run.is_some() {
+            return false;
+        }
+        if let Err(error) = self.storage.delete_task(task_id) {
+            self.model.status = format!("无法删除对话：{error}");
+            return false;
+        }
+        if self.model.selected_task == Some(task_id) {
+            self.new_task();
+        }
+        self.reload_projects();
+        self.reload_tasks();
+        self.model.status = "对话已删除。".into();
+        true
+    }
+
+    pub(crate) fn delete_archived_tasks(&mut self) -> bool {
+        if self.model.active_run.is_some() {
+            return false;
+        }
+        match self.storage.delete_archived_tasks() {
+            Ok(count) => {
+                self.reload_projects();
+                self.reload_tasks();
+                self.model.status = format!("已删除 {count} 个归档对话。");
+                true
+            }
+            Err(error) => {
+                self.model.status = format!("无法清空归档对话：{error}");
+                false
+            }
         }
     }
 

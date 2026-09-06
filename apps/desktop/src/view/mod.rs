@@ -16,7 +16,7 @@ use components::*;
 use gpui::{
     Anchor, Animation, AnimationExt as _, AnyElement, AppContext as _, ClipboardItem, Context,
     ElementId, Entity, FocusHandle, Focusable as _, Hsla, InteractiveElement as _, IntoElement,
-    KeyBinding, ParentElement as _, Render, ScrollHandle, SharedString,
+    KeyBinding, ParentElement as _, PromptButton, PromptLevel, Render, ScrollHandle, SharedString,
     StatefulInteractiveElement as _, Styled as _, Window, div, ease_out_quint,
     prelude::FluentBuilder as _, pulsating_between, px, relative, rgb, rgba,
 };
@@ -605,6 +605,99 @@ impl NexusView {
             window,
             cx,
         );
+        self.presenter.notify_remote_changed();
+        cx.notify();
+    }
+
+    fn archive_task(&mut self, task_id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        let selected = self.presenter.model().selected_task == Some(task_id);
+        if self.presenter.archive_task(task_id) && selected {
+            self.expanded_messages.clear();
+            self.timeline_scroll.scroll_to_bottom();
+            self.focus_prompt(window, cx);
+        }
+        self.presenter.notify_remote_changed();
+        cx.notify();
+    }
+
+    fn restore_task(&mut self, task_id: Uuid, cx: &mut Context<Self>) {
+        self.presenter.restore_task(task_id);
+        self.presenter.notify_remote_changed();
+        cx.notify();
+    }
+
+    fn confirm_delete_task(&mut self, task_id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(title) = self
+            .presenter
+            .model()
+            .tasks
+            .iter()
+            .chain(&self.presenter.model().archived_tasks)
+            .find(|task| task.id == task_id)
+            .map(|task| task.title.clone())
+        else {
+            return;
+        };
+        let message = format!("永久删除“{title}”？");
+        let answer = window.prompt(
+            PromptLevel::Critical,
+            &message,
+            Some("此操作会删除该对话的全部消息和运行记录，且无法撤销。"),
+            &[PromptButton::ok("永久删除"), PromptButton::cancel("取消")],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await.ok() == Some(0) {
+                let _ = this.update_in(cx, |app, window, cx| app.delete_task(task_id, window, cx));
+            }
+        })
+        .detach();
+    }
+
+    fn delete_task(&mut self, task_id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        let selected = self.presenter.model().selected_task == Some(task_id);
+        if self.presenter.delete_task(task_id) && selected {
+            self.expanded_messages.clear();
+            self.timeline_scroll.scroll_to_bottom();
+            if self.settings_open {
+                self.focus_handle.focus(window, cx);
+            } else {
+                self.focus_prompt(window, cx);
+            }
+        }
+        self.presenter.notify_remote_changed();
+        cx.notify();
+    }
+
+    fn confirm_delete_archived_tasks(
+        &mut self,
+        _: &gpui::ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let count = self.presenter.model().archived_tasks.len();
+        if count == 0 || self.presenter.model().active_run.is_some() {
+            return;
+        }
+        let message = format!("永久删除 {count} 个归档对话？");
+        let detail = format!("此操作会删除这 {count} 个对话的全部消息和运行记录，且无法撤销。");
+        let answer = window.prompt(
+            PromptLevel::Critical,
+            &message,
+            Some(&detail),
+            &[PromptButton::ok("全部删除"), PromptButton::cancel("取消")],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await.ok() == Some(0) {
+                let _ = this.update(cx, |app, cx| app.delete_archived_tasks(cx));
+            }
+        })
+        .detach();
+    }
+
+    fn delete_archived_tasks(&mut self, cx: &mut Context<Self>) {
+        self.presenter.delete_archived_tasks();
         self.presenter.notify_remote_changed();
         cx.notify();
     }
