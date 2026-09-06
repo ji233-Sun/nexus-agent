@@ -4,17 +4,25 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SettingsSection {
     General,
+    Archived,
     Agent,
     Providers,
     Remote,
 }
 
 impl SettingsSection {
-    const ALL: [Self; 4] = [Self::General, Self::Agent, Self::Providers, Self::Remote];
+    const ALL: [Self; 5] = [
+        Self::General,
+        Self::Archived,
+        Self::Agent,
+        Self::Providers,
+        Self::Remote,
+    ];
 
     fn id(self) -> &'static str {
         match self {
             Self::General => "general",
+            Self::Archived => "archived",
             Self::Agent => "agent",
             Self::Providers => "providers",
             Self::Remote => "remote",
@@ -24,6 +32,7 @@ impl SettingsSection {
     fn label(self) -> &'static str {
         match self {
             Self::General => "通用",
+            Self::Archived => "归档对话",
             Self::Agent => "执行引擎",
             Self::Providers => "凭据配置",
             Self::Remote => "远程访问",
@@ -33,6 +42,7 @@ impl SettingsSection {
     fn icon(self) -> IconName {
         match self {
             Self::General => IconName::Settings2,
+            Self::Archived => IconName::Inbox,
             Self::Agent => IconName::Bot,
             Self::Providers => IconName::Cpu,
             Self::Remote => IconName::Globe,
@@ -62,6 +72,7 @@ impl NexusView {
         let section = self.settings_section;
         let content = match section {
             SettingsSection::General => self.render_general_settings(cx).into_any_element(),
+            SettingsSection::Archived => self.render_archived_settings(cx).into_any_element(),
             SettingsSection::Agent => self.render_agent_settings(cx).into_any_element(),
             SettingsSection::Providers => self.render_provider_profiles(cx).into_any_element(),
             SettingsSection::Remote => self.render_remote_settings(cx).into_any_element(),
@@ -355,6 +366,101 @@ impl NexusView {
                         )
                     })
             })
+    }
+
+    fn render_archived_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = palette(cx);
+        let model = self.presenter.model();
+        let active_run = model.active_run.is_some();
+        let archived_count = model.archived_tasks.len();
+        let archived_rows = if model.archived_tasks.is_empty() {
+            vec![settings_row(
+                colors,
+                "暂无归档对话",
+                "从工作区侧栏的对话菜单中可以归档对话。",
+                div().text_size(px(12.)).child("空"),
+            )]
+        } else {
+            model
+                .archived_tasks
+                .iter()
+                .map(|task| {
+                    let task_id = task.id;
+                    let app = cx.entity().clone();
+                    let restore_app = app.clone();
+                    let project_name = model
+                        .projects
+                        .iter()
+                        .find(|project| project.id == task.project_id)
+                        .map(|project| project.display_name.clone())
+                        .unwrap_or_else(|| "未知项目".into());
+                    settings_row(
+                        colors,
+                        task.title.clone(),
+                        project_name,
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                Button::new((ElementId::from(task_id), "restore-archived"))
+                                    .debug_selector(move || format!("restore-archived-{task_id}"))
+                                    .outline()
+                                    .small()
+                                    .h(px(CONTROL_HEIGHT))
+                                    .icon(IconName::Undo)
+                                    .label("取消归档")
+                                    .disabled(active_run)
+                                    .on_click(move |_, _, cx| {
+                                        restore_app
+                                            .update(cx, |app, cx| app.restore_task(task_id, cx));
+                                    }),
+                            )
+                            .child(
+                                Button::new((ElementId::from(task_id), "delete-archived"))
+                                    .debug_selector(move || format!("delete-archived-{task_id}"))
+                                    .danger()
+                                    .outline()
+                                    .small()
+                                    .size(px(CONTROL_HEIGHT))
+                                    .icon(IconName::Delete)
+                                    .tooltip("永久删除")
+                                    .disabled(active_run)
+                                    .on_click(move |_, window, cx| {
+                                        app.update(cx, |app, cx| {
+                                            app.delete_task(task_id, window, cx)
+                                        });
+                                    }),
+                            ),
+                    )
+                })
+                .collect()
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_8()
+            .child(settings_group(
+                colors,
+                "归档管理",
+                [settings_row(
+                    colors,
+                    "清空归档",
+                    format!("当前共有 {archived_count} 个归档对话。此操作会永久删除其全部记录。"),
+                    Button::new("delete-all-archived")
+                        .debug_selector(|| "delete-all-archived".into())
+                        .danger()
+                        .outline()
+                        .small()
+                        .h(px(CONTROL_HEIGHT))
+                        .icon(IconName::Delete)
+                        .label("清空全部")
+                        .disabled(active_run || archived_count == 0)
+                        .on_click(cx.listener(Self::delete_archived_tasks)),
+                )],
+            ))
+            .child(settings_group(colors, "已归档", archived_rows))
     }
 
     fn render_agent_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {

@@ -609,6 +609,47 @@ impl NexusView {
         cx.notify();
     }
 
+    fn archive_task(&mut self, task_id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        if self.presenter.archive_task(task_id) {
+            self.expanded_messages.clear();
+            self.timeline_scroll.scroll_to_bottom();
+            self.focus_prompt(window, cx);
+        }
+        self.presenter.notify_remote_changed();
+        cx.notify();
+    }
+
+    fn restore_task(&mut self, task_id: Uuid, cx: &mut Context<Self>) {
+        self.presenter.restore_task(task_id);
+        self.presenter.notify_remote_changed();
+        cx.notify();
+    }
+
+    fn delete_task(&mut self, task_id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        if self.presenter.delete_task(task_id) {
+            self.expanded_messages.clear();
+            self.timeline_scroll.scroll_to_bottom();
+            if self.settings_open {
+                self.focus_handle.focus(window, cx);
+            } else {
+                self.focus_prompt(window, cx);
+            }
+        }
+        self.presenter.notify_remote_changed();
+        cx.notify();
+    }
+
+    fn delete_archived_tasks(
+        &mut self,
+        _: &gpui::ClickEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.presenter.delete_archived_tasks();
+        self.presenter.notify_remote_changed();
+        cx.notify();
+    }
+
     fn select_codex_thread(&mut self, thread_id: String, cx: &mut Context<Self>) {
         self.presenter.select_codex_thread(thread_id);
         self.expanded_messages.clear();

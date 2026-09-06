@@ -90,6 +90,9 @@ impl NexusView {
                     .filter(|task| matches_search(&task.title, &query))
                     .map(|task| {
                         let id = task.id;
+                        let app = cx.entity().clone();
+                        let can_manage = model.active_run.is_none();
+                        let reduced_motion = self.reduced_motion;
                         let color = run_status_color(colors, task.status);
                         let status_icon = match task.status {
                             RunStatus::Failed => IconName::CircleX,
@@ -97,24 +100,79 @@ impl NexusView {
                             _ => IconName::LoaderCircle,
                         };
                         navigation_row(colors, id, task.title.clone(), None)
+                            .pr(px(62.))
+                            .group("sidebar-task")
                             .debug_selector(move || format!("sidebar-task-{id}"))
                             .selected(
                                 model.selected_task == Some(id)
                                     && model.selected_codex_thread.is_none(),
                             )
-                            .when_some(color, |row, color| {
-                                row.suffix(move |_, _| {
-                                    div()
-                                        .absolute()
-                                        .right(px(12.))
-                                        .top(px((SIDEBAR_ROW_HEIGHT - 14.) / 2.))
-                                        .size(px(14.))
-                                        .child(
+                            .suffix(move |_, _| {
+                                let archive_app = app.clone();
+                                let delete_app = app.clone();
+                                div()
+                                    .absolute()
+                                    .right(px(2.))
+                                    .top(px((SIDEBAR_ROW_HEIGHT - COMPACT_CONTROL_HEIGHT) / 2.))
+                                    .h(px(COMPACT_CONTROL_HEIGHT))
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .when_some(color, |actions, color| {
+                                        actions.child(
                                             Icon::new(status_icon.clone())
                                                 .size(px(14.))
                                                 .text_color(color),
                                         )
-                                })
+                                    })
+                                    .child(
+                                        AnimatedDropdown::new(
+                                            (ElementId::from(id), "actions-menu"),
+                                            Button::new((ElementId::from(id), "actions-trigger"))
+                                                .debug_selector(move || {
+                                                    format!("task-actions-{id}")
+                                                })
+                                                .ghost()
+                                                .small()
+                                                .size(px(COMPACT_CONTROL_HEIGHT))
+                                                .p_0()
+                                                .icon(IconName::Ellipsis)
+                                                .accessibility_label("对话操作")
+                                                .tooltip("对话操作")
+                                                .disabled(!can_manage),
+                                            reduced_motion,
+                                            move |menu, _, _| {
+                                                let archive_app = archive_app.clone();
+                                                let delete_app = delete_app.clone();
+                                                menu.min_w(px(144.))
+                                                    .item(
+                                                        PopupMenuItem::new("归档对话")
+                                                            .icon(IconName::Inbox)
+                                                            .on_click(move |_, window, cx| {
+                                                                archive_app.update(
+                                                                    cx,
+                                                                    |app, cx| {
+                                                                        app.archive_task(
+                                                                            id, window, cx,
+                                                                        )
+                                                                    },
+                                                                );
+                                                            }),
+                                                    )
+                                                    .item(PopupMenuItem::separator())
+                                                    .item(
+                                                        PopupMenuItem::new("删除对话")
+                                                            .icon(IconName::Delete)
+                                                            .on_click(move |_, window, cx| {
+                                                                delete_app.update(cx, |app, cx| {
+                                                                    app.delete_task(id, window, cx)
+                                                                });
+                                                            }),
+                                                    )
+                                            },
+                                        )
+                                        .show_caret(false),
+                                    )
                             })
                             .on_click(cx.listener(move |app, _, window, cx| {
                                 app.select_task(id, window, cx)
@@ -608,9 +666,11 @@ mod tests {
             cx.notify();
         });
         cx.run_until_parked();
+        let action_selector = format!("task-actions-{}", tasks[short_index].id).leak();
+        let action_bounds = cx.debug_bounds(action_selector).unwrap();
         cx.simulate_click(
             point(
-                bounds[short_index].right() - px(8.),
+                action_bounds.left() - px(8.),
                 bounds[short_index].center().y,
             ),
             Default::default(),
@@ -619,6 +679,61 @@ mod tests {
             view.read_with(cx, |view, _| view.presenter.model().selected_task),
             Some(tasks[short_index].id),
         );
+    }
+
+    #[gpui::test]
+    fn task_menu_archives_and_settings_restores_the_conversation(cx: &mut TestAppContext) {
+        let (view, cx) = scroll_test_view(cx);
+        let task_id = view.read_with(cx, |view, _| view.presenter.model().selected_task.unwrap());
+        let task_selector = format!("sidebar-task-{task_id}").leak();
+        let actions_selector = format!("task-actions-{task_id}").leak();
+        let actions = cx.debug_bounds(actions_selector).unwrap().center();
+
+        cx.simulate_click(actions, Default::default());
+        cx.update(|window, cx| {
+            window.refresh();
+            let _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds("animated-menu-surface").is_some());
+        cx.simulate_keystrokes("down enter");
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            let _ = window.draw(cx);
+        });
+        view.read_with(cx, |view, _| {
+            assert!(view.presenter.model().selected_task.is_none());
+            assert_eq!(view.presenter.model().archived_tasks[0].id, task_id);
+        });
+        assert!(cx.debug_bounds(task_selector).is_none());
+
+        let settings = cx.debug_bounds("open-settings").unwrap().center();
+        cx.simulate_click(settings, Default::default());
+        cx.run_until_parked();
+        let archived = cx.debug_bounds("settings-nav-archived").unwrap().center();
+        cx.simulate_click(archived, Default::default());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            let _ = window.draw(cx);
+        });
+        let restore_selector = format!("restore-archived-{task_id}").leak();
+        let delete_selector = format!("delete-archived-{task_id}").leak();
+        assert!(cx.debug_bounds(delete_selector).is_some());
+        assert!(cx.debug_bounds("delete-all-archived").is_some());
+        let restore = cx.debug_bounds(restore_selector).unwrap().center();
+        cx.simulate_click(restore, Default::default());
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert!(view.presenter.model().archived_tasks.is_empty());
+            assert!(
+                view.presenter
+                    .model()
+                    .tasks
+                    .iter()
+                    .any(|task| task.id == task_id)
+            );
+        });
     }
 
     #[gpui::test]

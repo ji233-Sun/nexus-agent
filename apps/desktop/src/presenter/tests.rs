@@ -2,7 +2,9 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Duration};
 
 use super::*;
 use crate::{
-    infrastructure::{codex_history::Event as HistoryEvent, credentials::CredentialStore},
+    infrastructure::{
+        codex_history::Event as HistoryEvent, credentials::CredentialStore, storage::NewTaskRun,
+    },
     model::history::HistoryMessage,
 };
 use nexus_domain::{MessageKind, MessageRole, ModelDescriptor, ModelReasoningEffort, RunStatus};
@@ -127,6 +129,56 @@ fn appearance_preferences_restore_and_accept_missing_or_invalid_settings() {
         );
         assert_eq!(presenter.model().appearance, expected);
     }
+}
+
+#[test]
+fn conversation_actions_keep_active_and_archived_models_in_sync() {
+    let (mut presenter, _runner, _directory) = fixture();
+    let project = presenter.model().selected_project.clone().unwrap();
+    let create_task = |presenter: &mut Presenter, title: &str| {
+        presenter
+            .storage
+            .create_task_run(NewTaskRun {
+                task_id: None,
+                project_id: project.id,
+                title,
+                prompt: title,
+                harness: HarnessKind::Claude,
+                executable: "claude",
+                model: None,
+                effort: ThinkingEffort::Medium,
+                harness_version: None,
+            })
+            .unwrap()
+            .0
+    };
+    let first_task = create_task(&mut presenter, "First conversation");
+    let second_task = create_task(&mut presenter, "Second conversation");
+    presenter.select_project(project);
+    presenter.select_task(first_task);
+
+    assert!(presenter.archive_task(first_task));
+    assert!(presenter.model().selected_task.is_none());
+    assert!(presenter.model().messages.is_empty());
+    assert_eq!(presenter.model().tasks[0].id, second_task);
+    assert_eq!(presenter.model().archived_tasks[0].id, first_task);
+
+    assert!(presenter.restore_task(first_task));
+    assert_eq!(presenter.model().tasks.len(), 2);
+    assert!(presenter.model().archived_tasks.is_empty());
+
+    presenter.model.active_run = Some(Uuid::new_v4());
+    assert!(!presenter.delete_task(first_task));
+    assert_eq!(presenter.model().tasks.len(), 2);
+    presenter.model.active_run = None;
+
+    assert!(presenter.delete_task(first_task));
+    assert_eq!(presenter.model().tasks.len(), 1);
+    assert!(presenter.archive_task(second_task));
+    assert_eq!(presenter.model().archived_tasks.len(), 1);
+    assert!(presenter.delete_archived_tasks());
+    assert!(presenter.model().archived_tasks.is_empty());
+    assert!(presenter.model().tasks.is_empty());
 }
 
 #[test]
