@@ -80,6 +80,133 @@ pub(crate) fn fixture() -> (Presenter, FakeRunner, tempfile::TempDir) {
 }
 
 #[test]
+fn language_preferences_restore_and_fall_back_without_changing_appearance() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("language.sqlite");
+    let mut presenter = Presenter::new(
+        Storage::open(&path).unwrap(),
+        Err(anyhow::anyhow!("test")),
+        None,
+    );
+    assert_eq!(presenter.model().language, Language::Chinese);
+    let appearance = AppearanceSettings {
+        glass: false,
+        ..Default::default()
+    };
+    assert!(presenter.set_appearance(appearance));
+    for language in [Language::English, Language::Chinese] {
+        assert!(presenter.set_language(language));
+        assert_eq!(
+            presenter.storage.setting("language").unwrap().as_deref(),
+            Some(language.as_str())
+        );
+        drop(presenter);
+        presenter = Presenter::new(
+            Storage::open(&path).unwrap(),
+            Err(anyhow::anyhow!("test")),
+            None,
+        );
+        assert_eq!(presenter.model().language, language);
+        assert_eq!(presenter.model().appearance, appearance);
+    }
+    for invalid in ["", "fr", "invalid json"] {
+        presenter.storage.set_setting("language", invalid).unwrap();
+        drop(presenter);
+        presenter = Presenter::new(
+            Storage::open(&path).unwrap(),
+            Err(anyhow::anyhow!("test")),
+            None,
+        );
+        assert_eq!(presenter.model().language, Language::Chinese);
+    }
+}
+
+fn remote_status(presenter: &mut Presenter) -> String {
+    let (reply, mut response) = tokio::sync::oneshot::channel();
+    assert!(!presenter.handle_remote_command(RemoteCommand::GetState { reply }));
+    response.try_recv().unwrap().status
+}
+
+#[test]
+fn language_switch_updates_status_and_preserves_active_runs_and_remote_content() {
+    let (mut presenter, runner, _directory) = fixture();
+    assert!(!presenter.submit(" ", "claude"));
+    assert!(presenter.set_language(Language::English));
+    assert_eq!(presenter.model().status_text(), "Prompt cannot be empty.");
+    assert_eq!(remote_status(&mut presenter), "Prompt 不能为空。");
+    assert!(presenter.submit("设置 {count} café", "claude"));
+    let task_id = presenter.model().selected_task;
+    let run_id = presenter.model().active_run;
+    assert!(presenter.submit("待发送 {error}", "claude"));
+    let command_count = runner.0.borrow().commands.len();
+    let status_before = remote_status(&mut presenter);
+    for language in [Language::Chinese, Language::English] {
+        assert!(presenter.set_language(language));
+        assert_eq!(presenter.model().selected_task, task_id);
+        assert_eq!(presenter.model().active_run, run_id);
+        assert_eq!(presenter.model().messages[0].content, "设置 {count} café");
+        assert_eq!(
+            presenter.model().queued_messages[0].prompt,
+            "待发送 {error}"
+        );
+        assert_eq!(presenter.model().tasks[0].title, "设置 {count} café");
+        assert_eq!(remote_status(&mut presenter), status_before);
+        assert_eq!(runner.0.borrow().commands.len(), command_count);
+    }
+    runner.emit(Event::RunFailed {
+        run_id: run_id.unwrap(),
+        code: ErrorCode::UnexpectedExit,
+        message: "原始诊断 {message}".into(),
+    });
+    presenter.drain_events();
+    assert_eq!(presenter.model().status_text(), "原始诊断 {message}");
+}
+
+#[test]
+fn language_translates_probe_summaries_and_default_effort_without_changing_cli_values() {
+    let (mut presenter, runner, _directory) = fixture();
+    assert!(presenter.set_language(Language::English));
+    for (available, authenticated, expected) in [
+        (true, true, "Claude Code is ready."),
+        (
+            true,
+            false,
+            "Claude Code is not signed in. Sign in to the CLI or configure a provider profile.",
+        ),
+        (
+            false,
+            false,
+            "Claude Code unavailable. Check its executable in settings.",
+        ),
+    ] {
+        let mut probe = ready_probe(HarnessKind::Claude);
+        probe.available = available;
+        probe.authenticated = authenticated;
+        probe.message = "原始探测诊断".into();
+        runner.emit(Event::HarnessDetected(probe));
+        presenter.drain_events();
+        assert_eq!(presenter.model().status_text(), expected);
+        assert_eq!(remote_status(&mut presenter), "原始探测诊断");
+    }
+    runner.emit(Event::HarnessDetected(ready_probe(HarnessKind::Claude)));
+    presenter.drain_events();
+    presenter.select_effort(ThinkingEffort::Default);
+    assert!(presenter.submit("hello", "claude"));
+    assert_eq!(
+        presenter.model().status_text(),
+        "Starting Claude Code · Model default"
+    );
+    assert_eq!(
+        remote_status(&mut presenter),
+        "正在启动 Claude Code · 模型默认"
+    );
+    assert!(runner.0.borrow().commands.iter().any(|command| matches!(
+        &command.command,
+        Command::RunStart(request) if request.effort == ThinkingEffort::Default && request.model.is_none()
+    )));
+}
+
+#[test]
 fn appearance_preferences_restore_and_accept_missing_or_invalid_settings() {
     use crate::model::{AppearanceSettings, ThemePreference};
     let directory = tempfile::tempdir().unwrap();
@@ -575,9 +702,14 @@ fn codex_catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
     presenter.drain_events();
     assert!(matches!(
         &presenter.model().model_catalog,
-        ModelCatalogState::Failed(message) if message == "model/list unavailable"
+        ModelCatalogState::Failed(message) if message.render(Language::Chinese) == "model/list unavailable"
     ));
-    assert!(presenter.model().status.contains("model/list unavailable"));
+    assert!(
+        presenter
+            .model()
+            .status_text()
+            .contains("model/list unavailable")
+    );
 
     assert!(presenter.refresh_model_catalog());
     emit_current_catalog(&presenter, &runner, Vec::new());
@@ -586,7 +718,7 @@ fn codex_catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
         presenter.model().model_catalog,
         ModelCatalogState::Empty
     ));
-    assert!(presenter.model().status.contains("目录为空"));
+    assert!(presenter.model().status_text().contains("目录为空"));
 
     assert!(presenter.refresh_model_catalog());
     emit_current_catalog(
@@ -604,7 +736,10 @@ fn codex_catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
         panic!("expected a ready model catalog")
     };
     assert_eq!(models[0].id, "codex-current");
-    assert_eq!(presenter.model().status, "已加载 1 个 Codex CLI 模型。");
+    assert_eq!(
+        presenter.model().status_text(),
+        "已加载 1 个 Codex CLI 模型。"
+    );
 }
 
 #[test]
@@ -674,10 +809,10 @@ fn invalid_submissions_never_create_tasks_or_send_commands() {
     let (mut presenter, runner, _directory) = fixture();
     let project = presenter.model.selected_project.take().unwrap();
     assert!(!presenter.submit("hello", "claude"));
-    assert_eq!(presenter.model().status, "请先选择项目目录。");
+    assert_eq!(presenter.model().status_text(), "请先选择项目目录。");
     presenter.model.selected_project = Some(project.clone());
     assert!(!presenter.submit(" \n ", "claude"));
-    assert_eq!(presenter.model().status, "Prompt 不能为空。");
+    assert_eq!(presenter.model().status_text(), "Prompt 不能为空。");
     assert!(!presenter.submit("hello", " "));
     for (available, authenticated) in [(false, false), (true, false), (false, true)] {
         let probe = presenter
@@ -927,11 +1062,16 @@ fn queued_message_survives_missing_session_and_runner_send_failure() {
         presenter.drain_events();
         assert!(presenter.model().active_run.is_none());
         assert_eq!(presenter.model().queued_messages[0].prompt, "keep me");
-        assert!(presenter.model().status.contains(if missing_session {
-            "无法继续对话"
-        } else {
-            "Runner 不可用"
-        }));
+        assert!(
+            presenter
+                .model()
+                .status_text()
+                .contains(if missing_session {
+                    "无法继续对话"
+                } else {
+                    "Runner 不可用"
+                })
+        );
         if !missing_session {
             let task_id = presenter.model().selected_task.unwrap();
             let message_id = presenter.model().queued_messages[0].id;
@@ -1241,7 +1381,7 @@ fn follow_up_resumes_the_saved_session_after_reopening_and_new_task_starts_fresh
         runner.emit(Event::HarnessDetected(other_probe));
         presenter.drain_events();
         assert!(!presenter.submit("follow-up with stale probe", &saved_probe.executable));
-        assert!(presenter.model().status.contains("可执行文件不一致"));
+        assert!(presenter.model().status_text().contains("可执行文件不一致"));
         assert!(
             runner
                 .0
@@ -1353,11 +1493,16 @@ fn follow_up_does_not_silently_restart_when_the_session_is_missing_or_harness_ch
         assert!(presenter.model().active_run.is_none());
         assert_eq!(presenter.model().messages.len(), 1);
         assert_eq!(presenter.model().tasks.len(), 1);
-        assert!(presenter.model().status.contains(if missing_session {
-            "未保存可恢复的会话"
-        } else {
-            "切回该 Harness"
-        }));
+        assert!(
+            presenter
+                .model()
+                .status_text()
+                .contains(if missing_session {
+                    "未保存可恢复的会话"
+                } else {
+                    "切回该 Harness"
+                })
+        );
     }
 }
 
@@ -1369,7 +1514,10 @@ fn send_failure_rolls_back_a_new_task_without_entering_busy_state() {
     assert!(presenter.model().active_run.is_none());
     assert!(presenter.active_run_started_at.is_none());
     assert!(presenter.model().active_run_elapsed_seconds.is_none());
-    assert_eq!(presenter.model().status, "Runner 不可用，任务未启动。");
+    assert_eq!(
+        presenter.model().status_text(),
+        "Runner 不可用，任务未启动。"
+    );
     let project_id = presenter.model().selected_project.as_ref().unwrap().id;
     assert!(presenter.storage.tasks(project_id).unwrap().is_empty());
     runner.0.borrow_mut().fail_send = false;
@@ -1754,7 +1902,7 @@ fn codex_preferences_are_isolated_per_profile_and_invalid_effort_resets() {
             .as_deref(),
         Some("default")
     );
-    assert!(presenter.model().status.contains("恢复为模型默认"));
+    assert!(presenter.model().status_text().contains("恢复为模型默认"));
 }
 
 #[test]
@@ -2037,7 +2185,7 @@ fn omp_profile_custom_model_is_preserved_when_catalog_availability_is_unknown() 
     );
     assert!(presenter.model().selected_catalog_model().is_none());
     assert!(presenter.model().can_submit());
-    assert!(presenter.model().status.contains("尚未验证可用"));
+    assert!(presenter.model().status_text().contains("尚未验证可用"));
 }
 
 #[test]
@@ -2076,7 +2224,7 @@ fn invalid_codex_catalog_selection_cannot_be_submitted() {
             .is_empty()
     );
     assert!(runner.0.borrow().commands.is_empty());
-    assert!(presenter.model().status.contains("未通过目录验证"));
+    assert!(presenter.model().status_text().contains("未通过目录验证"));
 }
 
 #[test]
@@ -2215,7 +2363,7 @@ fn provider_profiles_can_be_updated_switched_and_deleted() {
             .unwrap()
             .credential_configured
     );
-    assert!(presenter.model().status.contains("没有 API Key"));
+    assert!(presenter.model().status_text().contains("没有 API Key"));
     assert!(presenter.delete_provider_profile(profile_id));
     assert!(presenter.model().provider_profiles.is_empty());
     assert!(!credentials.0.borrow().contains_key(&profile_id));
@@ -2235,7 +2383,7 @@ fn provider_profiles_reject_process_control_environment_variables() {
 
     assert!(presenter.save_provider_profile(draft).is_none());
     assert!(presenter.model().provider_profiles.is_empty());
-    assert!(presenter.model().status.contains("*_API_KEY"));
+    assert!(presenter.model().status_text().contains("*_API_KEY"));
 }
 
 #[test]
@@ -2250,12 +2398,12 @@ fn provider_profiles_bound_visible_name_and_model_lengths() {
     let mut draft = profile_draft(None, &"n".repeat(49), "secret");
 
     assert!(presenter.save_provider_profile(draft).is_none());
-    assert!(presenter.model().status.contains("48"));
+    assert!(presenter.model().status_text().contains("48"));
 
     draft = profile_draft(None, "Valid name", "secret");
     draft.model = "m".repeat(129);
     assert!(presenter.save_provider_profile(draft).is_none());
-    assert!(presenter.model().status.contains("128"));
+    assert!(presenter.model().status_text().contains("128"));
     assert!(presenter.model().provider_profiles.is_empty());
 }
 

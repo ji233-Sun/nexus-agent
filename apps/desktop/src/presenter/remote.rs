@@ -1,4 +1,5 @@
 use super::{Presenter, RemoteCommand};
+use crate::i18n::Language;
 use crate::remote_control::{RemoteControl, RemoteProject, RemoteState};
 use nexus_domain::HarnessKind;
 
@@ -43,7 +44,7 @@ impl Presenter {
                     if self.start_run(None, &prompt, &executable) {
                         Ok(())
                     } else {
-                        Err(self.model.status.clone())
+                        Err(self.model.status.render(Language::Chinese).to_owned())
                     }
                 } else {
                     Err("项目不存在，请先在 Nexus 中打开项目".into())
@@ -84,7 +85,7 @@ impl Presenter {
             active_run_id: self.model.active_run,
             active_task_id: self.model.active_task,
             streaming_text: self.model.streaming_text.clone(),
-            status: self.model.status.clone(),
+            status: self.model.status.render(Language::Chinese).to_owned(),
             harness: self.model.selected_harness,
             model: match self.model.selected_harness {
                 HarnessKind::Claude => self

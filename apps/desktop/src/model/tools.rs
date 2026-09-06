@@ -1,3 +1,4 @@
+use crate::i18n::Language;
 use nexus_domain::{Message, MessageKind};
 use serde_json::Value;
 use std::{
@@ -79,15 +80,15 @@ pub(crate) enum ToolCategory {
 }
 
 impl ToolCategory {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
+    pub(crate) fn label(self, locale: Language) -> &'static str {
+        locale.text(match self {
             Self::Command => "执行命令",
             Self::Read => "读取文件",
             Self::Search => "搜索",
             Self::Edit => "编辑文件",
             Self::Create => "写入文件",
             Self::Other => "调用工具",
-        }
+        })
     }
 }
 
@@ -152,7 +153,7 @@ impl<'a> ToolActivity<'a> {
         self.result.is_none() && self.call.tool.is_some() && active_run == Some(self.call.run_id)
     }
 
-    pub(crate) fn preview(&self) -> String {
+    pub(crate) fn preview(&self, locale: Language) -> String {
         let input: Value = serde_json::from_str(self.input()).unwrap_or(Value::Null);
         let value = string_field(
             &input,
@@ -174,13 +175,18 @@ impl<'a> ToolActivity<'a> {
             .take(160)
             .collect::<String>();
         if self.category() == ToolCategory::Other {
-            format!("{} · {preview}", self.name())
+            let name = if self.call.kind == MessageKind::ToolResult {
+                locale.text("工具输出")
+            } else {
+                self.name()
+            };
+            format!("{name} · {preview}")
         } else {
-            format!("{} · {preview}", self.category().label())
+            format!("{} · {preview}", self.category().label(locale))
         }
     }
 
-    pub(crate) fn details(&self) -> Vec<ToolDetail> {
+    pub(crate) fn details(&self, locale: Language) -> Vec<ToolDetail> {
         let input: Value = serde_json::from_str(self.input()).unwrap_or(Value::Null);
         let output = self.result.map(|result| {
             if self.is_error() {
@@ -195,11 +201,11 @@ impl<'a> ToolActivity<'a> {
         let result: Value = output
             .and_then(|text| serde_json::from_str(text).ok())
             .unwrap_or(Value::Null);
-        let path = string_field(&input, &["file_path", "path"]).unwrap_or("文件");
+        let path = string_field(&input, &["file_path", "path"]).unwrap_or(locale.text("文件"));
         let mut details = Vec::new();
         match self.category() {
             ToolCategory::Command => details.push(detail(
-                "命令",
+                locale.text("命令"),
                 "sh",
                 string_field(&input, &["command", "cmd"]).unwrap_or(self.input()),
                 false,
@@ -212,7 +218,7 @@ impl<'a> ToolActivity<'a> {
             ToolCategory::Edit => {
                 if let Some(changes) = input.get("changes").and_then(Value::as_array) {
                     for change in changes {
-                        let path = string_field(change, &["path"]).unwrap_or("文件");
+                        let path = string_field(change, &["path"]).unwrap_or(locale.text("文件"));
                         if let Some(diff) = string_field(change, &["diff", "patch"]) {
                             details.push(detail(path, language_for_path(path), diff, true));
                         } else if let Some(code) = string_field(change, &["content"]) {
@@ -221,7 +227,7 @@ impl<'a> ToolActivity<'a> {
                             details.push(detail(
                                 path,
                                 "text",
-                                "此工具事件未提供文件内容或 diff。",
+                                locale.text("此工具事件未提供文件内容或 diff。"),
                                 false,
                             ));
                         }
@@ -234,24 +240,29 @@ impl<'a> ToolActivity<'a> {
                     details.push(detail(path, language_for_path(path), diff, true));
                 } else if let Some(edits) = input.get("edits").and_then(Value::as_array) {
                     for edit in edits {
-                        append_edit(&mut details, path, edit);
+                        append_edit(&mut details, path, edit, locale);
                     }
                 } else {
-                    append_edit(&mut details, path, &input);
+                    append_edit(&mut details, path, &input, locale);
                 }
             }
             _ => {}
         }
         if details.is_empty() && !self.input().is_empty() {
             details.push(detail(
-                "输入",
+                locale.text("输入"),
                 if input.is_null() { "text" } else { "json" },
                 &pretty_payload(self.input()),
                 false,
             ));
         }
         if let Some(output) = output {
-            details.push(detail("输出", "text", &pretty_payload(output), false));
+            details.push(detail(
+                locale.text("输出"),
+                "text",
+                &pretty_payload(output),
+                false,
+            ));
         }
         details
     }
@@ -279,13 +290,13 @@ fn detail(title: &str, language: &str, text: &str, diff: bool) -> ToolDetail {
     }
 }
 
-fn append_edit(details: &mut Vec<ToolDetail>, path: &str, input: &Value) {
+fn append_edit(details: &mut Vec<ToolDetail>, path: &str, input: &Value, locale: Language) {
     if let (Some(before), Some(after)) = (
         string_field(input, &["old_string", "oldText"]),
         string_field(input, &["new_string", "newText"]),
     ) {
         details.push(detail(
-            &format!("{path} · 修改片段"),
+            &locale.format("{path} · 修改片段", &[("path", path.to_owned())]),
             language_for_path(path),
             &replacement_diff(before, after),
             true,
@@ -401,7 +412,11 @@ mod tests {
         };
         assert_eq!(last.len(), 2);
         assert_eq!(last[0].result.unwrap().content, "two");
-        assert!(last[1].details()[0].text.contains("Legacy output"));
+        assert!(
+            last[1].details(Language::Chinese)[0]
+                .text
+                .contains("Legacy output")
+        );
     }
 
     #[test]
@@ -435,7 +450,7 @@ mod tests {
                 call: &call,
                 result: None,
             };
-            let details = activity.details();
+            let details = activity.details(Language::Chinese);
             assert_eq!(details.len(), 1);
             assert_eq!(details[0].language, "rs");
             assert_eq!(details[0].diff, diff);
@@ -446,6 +461,19 @@ mod tests {
             } else {
                 assert_eq!(details[0].text, code);
             }
+            let english = activity.details(Language::English);
+            assert_eq!(english[0].text, details[0].text);
+            assert_eq!(english[0].language, "rs");
+            assert_eq!(
+                english[0].title,
+                if diff {
+                    "main.rs · Changed snippet"
+                } else {
+                    "main.rs"
+                }
+            );
+            assert!(activity.preview(Language::English).ends_with("main.rs"));
+            assert!(!activity.preview(Language::English).contains("文件"));
         }
         let call = message(
             run,
@@ -466,9 +494,17 @@ mod tests {
             call: &call,
             result: Some(&output),
         }
-        .details();
+        .details(Language::Chinese);
         assert_eq!(details[0].text, "cargo test");
         assert_eq!(details[1].text, code);
+        let english = ToolActivity {
+            call: &call,
+            result: Some(&output),
+        }
+        .details(Language::English);
+        assert_eq!(english[0].title, "Command");
+        assert_eq!(english[1].title, "Output");
+        assert_eq!(english[1].text, code);
         let call = message(
             run,
             MessageKind::ToolCall,
@@ -485,7 +521,7 @@ mod tests {
             call: &call,
             result: Some(&output),
         }
-        .details();
+        .details(Language::Chinese);
         assert_eq!(details[0].text, "-old\n+new");
         assert!(details[0].diff);
         assert_eq!(details[1].text, "done");
@@ -503,7 +539,7 @@ mod tests {
             call: &call,
             result: None,
         }
-        .details();
+        .details(Language::Chinese);
         assert_eq!(details[0].title, "main.rs");
         assert!(details[0].text.contains("未提供"));
         assert!(!details[0].diff);

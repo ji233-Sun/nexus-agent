@@ -8,6 +8,7 @@ impl NexusView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let locale = self.presenter.model().language;
         let colors = palette(cx);
         let model = self.presenter.model();
         let compact = window.viewport_size().height < px(740.);
@@ -97,7 +98,7 @@ impl NexusView {
                                                 div()
                                                     .flex_1()
                                                     .min_w_0()
-                                                    .child(model.status.clone()),
+                                                    .child(model.status_text().to_owned()),
                                             )
                                             .when_some(
                                                 model.active_run_elapsed_seconds,
@@ -113,7 +114,7 @@ impl NexusView {
                                                             .gap_2()
                                                             .text_size(px(12.))
                                                             .text_color(rgb(colors.muted))
-                                                            .child("已运行")
+                                                            .child(locale.text("已运行"))
                                                             .child(
                                                                 div().font_family(MONO_FONT).child(
                                                                     format_run_elapsed(seconds),
@@ -158,7 +159,7 @@ impl NexusView {
                                     .bg(latest_message_background)
                                     .shadow(materials(cx).shadow())
                                     .icon(IconName::ArrowDown)
-                                    .label("回到最新消息")
+                                    .label(locale.text("回到最新消息"))
                                     .on_click(cx.listener(|app, _, _, cx| {
                                         app.timeline_scroll.scroll_to_bottom();
                                         cx.notify();
@@ -170,6 +171,7 @@ impl NexusView {
     }
 
     fn render_welcome(&self, colors: Palette, compact: bool) -> impl IntoElement {
+        let locale = self.presenter.model().language;
         let model = self.presenter.model();
         let history = model.selected_codex_thread.is_some();
         if !history {
@@ -216,15 +218,15 @@ impl NexusView {
         }
         let (eyebrow, title, description) = if model.codex_thread_loading {
             (
-                "CODEX HISTORY",
-                "正在读取会话",
-                "正在从本机加载消息，稍等片刻。",
+                locale.text("Codex 历史"),
+                locale.text("正在读取会话"),
+                locale.text("正在从本机加载消息，稍等片刻。"),
             )
         } else {
             (
-                "CODEX HISTORY",
-                "此会话没有消息",
-                "这条历史记录中没有可显示的用户或助手消息。",
+                locale.text("Codex 历史"),
+                locale.text("此会话没有消息"),
+                locale.text("这条历史记录中没有可显示的用户或助手消息。"),
             )
         };
         div()
@@ -275,7 +277,7 @@ impl NexusView {
                             rgb(colors.accent).into(),
                             !self.reduced_motion,
                         ))
-                        .child("正在加载…"),
+                        .child(locale.text("正在加载…")),
                 )
             })
             .map(|element| entrance(element, "empty-state-enter", !self.reduced_motion))

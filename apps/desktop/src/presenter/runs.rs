@@ -1,4 +1,5 @@
 use super::{Presenter, executable_setting_key, supports_model_catalog};
+use crate::i18n::{Language, LocalizedText, probe_status};
 use crate::infrastructure::storage::NewTaskRun;
 use crate::model::{ModelCatalogState, QueuedMessage};
 use nexus_domain::{HarnessKind, MessageKind, MessageRole, RunStatus, ToolMetadata};
@@ -21,12 +22,14 @@ impl Presenter {
     pub(super) fn handle_event(&mut self, event: Event) {
         match event {
             Event::RunnerReady => {
-                self.model.status =
-                    format!("Runner 已连接，正在探测 {}…", self.model.selected_harness)
+                self.model.status = LocalizedText::new(
+                    "Runner 已连接，正在探测 {0}…",
+                    &[("0", (self.model.selected_harness).to_string())],
+                )
             }
             Event::HarnessDetected(probe) => {
                 let harness = probe.harness;
-                let message = probe.message.clone();
+                let message = probe_status(&probe);
                 let history_executable =
                     (harness == HarnessKind::Codex).then(|| probe.executable.clone());
                 self.model.harnesses.insert(harness, probe);
@@ -61,18 +64,34 @@ impl Presenter {
                         .is_some()
                     && self.model.selected_catalog_model().is_none();
                 self.model.status = if selected_unavailable {
-                    format!(
-                        "当前 {harness} 模型 {} 不在目录中，请重新选择或跟随默认。",
-                        self.model.model_override.as_deref().unwrap_or_default()
+                    LocalizedText::new(
+                        "当前 {harness} 模型 {0} 不在目录中，请重新选择或跟随默认。",
+                        &[
+                            ("harness", (harness).to_string()),
+                            (
+                                "0",
+                                (self.model.model_override.as_deref().unwrap_or_default())
+                                    .to_string(),
+                            ),
+                        ],
                     )
                 } else if effort_reset {
                     "当前模型不支持原 effort，已恢复为模型默认。".into()
                 } else if profile_model_unverified {
                     "Profile 默认模型不在当前目录中；仍可使用，但尚未验证可用。".into()
                 } else if count == 0 {
-                    format!("{harness} 模型目录为空；仍可跟随 CLI 默认。")
+                    LocalizedText::new(
+                        "{harness} 模型目录为空；仍可跟随 CLI 默认。",
+                        &[("harness", (harness).to_string())],
+                    )
                 } else {
-                    format!("已加载 {count} 个 {harness} 模型。")
+                    LocalizedText::new(
+                        "已加载 {count} 个 {harness} 模型。",
+                        &[
+                            ("count", (count).to_string()),
+                            ("harness", (harness).to_string()),
+                        ],
+                    )
                 };
             }
             Event::ModelCatalogFailed {
@@ -83,22 +102,34 @@ impl Presenter {
                 && supports_model_catalog(harness)
                 && self.model.model_catalog.accepts(request_id) =>
             {
-                self.model.model_catalog = ModelCatalogState::Failed(message.clone());
-                self.model.status = format!("{harness} 模型目录加载失败：{message}");
+                self.model.model_catalog = ModelCatalogState::Failed(message.clone().into());
+                self.model.status = LocalizedText::new(
+                    "{harness} 模型目录加载失败：{message}",
+                    &[
+                        ("harness", (harness).to_string()),
+                        ("message", (message).to_string()),
+                    ],
+                );
             }
             Event::RunStarted { run_id, .. } if self.model.active_run == Some(run_id) => {
                 let harness = self
                     .model
                     .active_harness
                     .unwrap_or(self.model.selected_harness);
-                self.model.status = format!("{harness} 正在执行…");
+                self.model.status = LocalizedText::new(
+                    "{harness} 正在执行…",
+                    &[("harness", (harness).to_string())],
+                );
                 let _ = self.storage.update_run_status(run_id, RunStatus::Running);
             }
             Event::RunSessionStarted { run_id, session_id }
                 if self.model.active_run == Some(run_id) && !session_id.is_empty() =>
             {
                 if let Err(error) = self.storage.save_run_session(run_id, &session_id) {
-                    self.model.status = format!("无法保存会话，后续可能无法续聊：{error}");
+                    self.model.status = LocalizedText::new(
+                        "无法保存会话，后续可能无法续聊：{error}",
+                        &[("error", (error).to_string())],
+                    );
                 }
             }
             Event::RunOutputDelta { run_id, text } if self.model.active_run == Some(run_id) => {
@@ -134,7 +165,7 @@ impl Presenter {
                 && self.model.steering_message == Some(message_id) =>
             {
                 self.model.steering_message = None;
-                self.model.status = message;
+                self.model.status = message.into();
             }
             Event::RunMessageCompleted { run_id, text }
                 if self.model.active_run == Some(run_id) =>
@@ -199,13 +230,13 @@ impl Presenter {
             } if self.model.active_run == Some(run_id) => {
                 let _ = self.storage.update_run_status(run_id, status);
                 if let Some(message) = message {
-                    self.model.status = message;
+                    self.model.status = message.into();
                 }
             }
             Event::RunFailed {
                 run_id, message, ..
             } if self.model.active_run == Some(run_id) => {
-                self.model.status = message.clone();
+                self.model.status = message.clone().into();
                 self.persist_live_message(
                     run_id,
                     MessageRole::System,
@@ -234,7 +265,10 @@ impl Presenter {
                     RunStatus::Completed => "任务已完成".into(),
                     RunStatus::Cancelled => "任务已取消".into(),
                     RunStatus::Failed => "任务执行失败".into(),
-                    _ => format!("任务状态：{status}"),
+                    _ => LocalizedText::new(
+                        "任务状态：{status}",
+                        &[("status", (status).to_string())],
+                    ),
                 };
                 self.reload_tasks();
                 if status == RunStatus::Completed
@@ -371,7 +405,10 @@ impl Presenter {
         }
         let configured_executable = configured_executable.trim().to_owned();
         if configured_executable.is_empty() {
-            self.model.status = format!("{} 可执行文件不能为空。", self.model.selected_harness);
+            self.model.status = LocalizedText::new(
+                "{0} 可执行文件不能为空。",
+                &[("0", (self.model.selected_harness).to_string())],
+            );
             return false;
         }
         let profile_ready = self
@@ -383,9 +420,9 @@ impl Presenter {
             .selected_probe()
             .filter(|probe| probe.available && (probe.authenticated || profile_ready))
         else {
-            self.model.status = format!(
-                "{} 尚未就绪，请先完成探测和登录。",
-                self.model.selected_harness
+            self.model.status = LocalizedText::new(
+                "{0} 尚未就绪，请先完成探测和登录。",
+                &[("0", (self.model.selected_harness).to_string())],
             );
             return false;
         };
@@ -401,9 +438,9 @@ impl Presenter {
                 }
             };
             if config.harness != harness {
-                self.model.status = format!(
-                    "当前会话使用 {}，请切回该 Harness 继续对话，或新建任务。",
-                    config.harness
+                self.model.status = LocalizedText::new(
+                    "当前会话使用 {0}，请切回该 Harness 继续对话，或新建任务。",
+                    &[("0", (config.harness).to_string())],
                 );
                 return false;
             }
@@ -421,14 +458,19 @@ impl Presenter {
             None
         };
         if supports_model_catalog(harness) && !self.model.catalog_selection_is_valid() {
-            self.model.status =
-                format!("当前 {harness} 模型或 effort 未通过目录验证，请调整选择后重试。");
+            self.model.status = LocalizedText::new(
+                "当前 {harness} 模型或 effort 未通过目录验证，请调整选择后重试。",
+                &[("harness", (harness).to_string())],
+            );
             return false;
         }
         let (environment, profile_model) = match self.provider_launch_configuration() {
             Ok(configuration) => configuration,
             Err(error) => {
-                self.model.status = format!("无法读取 Provider Profile：{error}");
+                self.model.status = LocalizedText::new(
+                    "无法读取 Provider Profile：{error}",
+                    &[("error", (error).to_string())],
+                );
                 return false;
             }
         };
@@ -492,7 +534,16 @@ impl Presenter {
             self.model.codex_history_messages.clear();
             self.model.codex_thread_loading = false;
             self.model.messages = self.storage.messages(task_id).unwrap_or_default();
-            self.model.status = format!("正在启动 {harness} · {effort}");
+            self.model.status = LocalizedText::translated(|language| {
+                let effort_label = match language {
+                    Language::Chinese => effort.to_string(),
+                    Language::English => language.effort(effort).to_owned(),
+                };
+                language.format(
+                    "正在启动 {harness} · {effort}",
+                    &[("harness", harness.to_string()), ("effort", effort_label)],
+                )
+            });
             let _ = self
                 .storage
                 .set_setting(executable_setting_key(harness), &configured_executable);
@@ -528,7 +579,8 @@ impl Presenter {
             .model
             .active_harness
             .unwrap_or(self.model.selected_harness);
-        self.model.status = format!("正在停止 {harness}…");
+        self.model.status =
+            LocalizedText::new("正在停止 {harness}…", &[("harness", (harness).to_string())]);
         Ok(())
     }
 }

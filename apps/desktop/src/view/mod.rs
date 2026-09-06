@@ -7,6 +7,7 @@ mod timeline;
 mod tools;
 
 use crate::{
+    i18n::Language,
     model::{
         AppModel, AppearanceSettings, ModelCatalogState, ThemePreference, history::HistoryMessage,
     },
@@ -88,11 +89,11 @@ impl CatalogModelItem {
         }
     }
 
-    fn unavailable(model_id: &str, state: &ModelCatalogState) -> Self {
+    fn unavailable(model_id: &str, state: &ModelCatalogState, locale: Language) -> Self {
         let availability = match state {
-            ModelCatalogState::Loading { .. } => "验证中",
-            ModelCatalogState::Ready(_) | ModelCatalogState::Empty => "不可用",
-            ModelCatalogState::Idle | ModelCatalogState::Failed(_) => "未验证",
+            ModelCatalogState::Loading { .. } => locale.text("验证中"),
+            ModelCatalogState::Ready(_) | ModelCatalogState::Empty => locale.text("不可用"),
+            ModelCatalogState::Idle | ModelCatalogState::Failed(_) => locale.text("未验证"),
         };
         let title = format!("{model_id} · {availability}");
         Self {
@@ -157,13 +158,14 @@ type CatalogModelSelect = SearchableVec<SearchableGroup<CatalogModelItem>>;
 
 impl CatalogModelSelectContent {
     fn from_model(model: &AppModel) -> Self {
+        let locale = model.language;
         let selected = model
             .model_override
             .as_ref()
             .map(|model_id| CatalogModelChoice::Model(model_id.clone()))
             .unwrap_or(CatalogModelChoice::FollowDefault);
         let mut groups = vec![CatalogModelGroup {
-            title: "默认".into(),
+            title: locale.text("默认").into(),
             items: vec![catalog_follow_default_item(model)],
         }];
         let catalog_models = model.model_catalog.models().unwrap_or_default();
@@ -172,10 +174,11 @@ impl CatalogModelSelectContent {
             && !catalog_models.iter().any(|entry| entry.id == model_id)
         {
             groups.push(CatalogModelGroup {
-                title: "当前选择".into(),
+                title: locale.text("当前选择").into(),
                 items: vec![CatalogModelItem::unavailable(
                     model_id,
                     &model.model_catalog,
+                    locale,
                 )],
             });
         }
@@ -199,17 +202,20 @@ impl CatalogModelSelectContent {
 
         let status = match &model.model_catalog {
             ModelCatalogState::Idle if model.selected_project.is_none() => {
-                Some("选择项目后加载模型目录".into())
+                Some(locale.text("选择项目后加载模型目录").into())
             }
-            ModelCatalogState::Idle => Some("模型目录尚未加载".into()),
-            ModelCatalogState::Loading { .. } => Some("正在加载模型目录…".into()),
-            ModelCatalogState::Empty => Some("当前模型目录为空".into()),
-            ModelCatalogState::Failed(message) => Some(format!("模型目录加载失败：{message}")),
+            ModelCatalogState::Idle => Some(locale.text("模型目录尚未加载").into()),
+            ModelCatalogState::Loading { .. } => Some(locale.text("正在加载模型目录…").into()),
+            ModelCatalogState::Empty => Some(locale.text("当前模型目录为空").into()),
+            ModelCatalogState::Failed(message) => Some(locale.format(
+                "模型目录加载失败：{message}",
+                &[("message", message.render(locale).to_owned())],
+            )),
             ModelCatalogState::Ready(_) => None,
         };
         if let Some(status) = status {
             groups.push(CatalogModelGroup {
-                title: "状态".into(),
+                title: locale.text("状态").into(),
                 items: vec![CatalogModelItem::status(status)],
             });
         }
@@ -256,6 +262,7 @@ fn catalog_model_trigger_title(model: &ModelDescriptor) -> String {
 }
 
 fn catalog_follow_default_item(model: &AppModel) -> CatalogModelItem {
+    let locale = model.language;
     let profile_model = model
         .selected_provider_profile()
         .and_then(|profile| profile.model.as_deref());
@@ -266,11 +273,14 @@ fn catalog_follow_default_item(model: &AppModel) -> CatalogModelItem {
             .and_then(|models| models.iter().find(|entry| entry.id == model_id))
         {
             return CatalogModelItem::follow_default(
-                format!(
-                    "跟随 Profile 默认 · {}",
-                    catalog_model_row_title(descriptor)
+                locale.format(
+                    "跟随 Profile 默认 · {0}",
+                    &[("0", (catalog_model_row_title(descriptor)).to_string())],
                 ),
-                format!("默认 · {}", catalog_model_trigger_title(descriptor)),
+                locale.format(
+                    "默认 · {0}",
+                    &[("0", (catalog_model_trigger_title(descriptor)).to_string())],
+                ),
                 format!(
                     "default 默认 profile {} {}",
                     descriptor.display_name, descriptor.id
@@ -278,22 +288,40 @@ fn catalog_follow_default_item(model: &AppModel) -> CatalogModelItem {
             );
         }
         let verification = match &model.model_catalog {
-            ModelCatalogState::Loading { .. } => "验证中",
-            ModelCatalogState::Failed(_) => "目录加载失败",
-            ModelCatalogState::Ready(_) | ModelCatalogState::Empty => "目录未验证",
-            ModelCatalogState::Idle => "未验证",
+            ModelCatalogState::Loading { .. } => locale.text("验证中"),
+            ModelCatalogState::Failed(_) => locale.text("目录加载失败"),
+            ModelCatalogState::Ready(_) | ModelCatalogState::Empty => locale.text("目录未验证"),
+            ModelCatalogState::Idle => locale.text("未验证"),
         };
         return CatalogModelItem::follow_default(
-            format!("跟随 Profile 默认 · {model_id}（{verification}）"),
-            format!("默认 · {model_id} · {verification}"),
+            locale.format(
+                "跟随 Profile 默认 · {model_id}（{verification}）",
+                &[
+                    ("model_id", (model_id).to_string()),
+                    ("verification", (verification).to_string()),
+                ],
+            ),
+            locale.format(
+                "默认 · {model_id} · {verification}",
+                &[
+                    ("model_id", (model_id).to_string()),
+                    ("verification", (verification).to_string()),
+                ],
+            ),
             format!("default 默认 profile {model_id} {verification}"),
         );
     }
 
     if let Some(descriptor) = model.selected_catalog_model() {
         return CatalogModelItem::follow_default(
-            format!("跟随 CLI 默认 · {}", catalog_model_row_title(descriptor)),
-            format!("CLI 默认 · {}", catalog_model_trigger_title(descriptor)),
+            locale.format(
+                "跟随 CLI 默认 · {0}",
+                &[("0", (catalog_model_row_title(descriptor)).to_string())],
+            ),
+            locale.format(
+                "CLI 默认 · {0}",
+                &[("0", (catalog_model_trigger_title(descriptor)).to_string())],
+            ),
             format!(
                 "default 默认 cli {} {}",
                 descriptor.display_name, descriptor.id
@@ -302,14 +330,14 @@ fn catalog_follow_default_item(model: &AppModel) -> CatalogModelItem {
     }
 
     let suffix = match &model.model_catalog {
-        ModelCatalogState::Loading { .. } => " · 目录加载中",
-        ModelCatalogState::Failed(_) => " · 目录加载失败",
-        ModelCatalogState::Empty => " · 目录为空",
+        ModelCatalogState::Loading { .. } => locale.text(" · 目录加载中"),
+        ModelCatalogState::Failed(_) => locale.text(" · 目录加载失败"),
+        ModelCatalogState::Empty => locale.text(" · 目录为空"),
         ModelCatalogState::Idle | ModelCatalogState::Ready(_) => "",
     };
     CatalogModelItem::follow_default(
-        "跟随 CLI 默认模型".into(),
-        format!("CLI 默认模型{suffix}"),
+        locale.text("跟随 CLI 默认模型").into(),
+        locale.format("CLI 默认模型{suffix}", &[("suffix", (suffix).to_string())]),
         "default 默认 cli".into(),
     )
 }
@@ -346,6 +374,8 @@ pub(crate) struct NexusView {
 
 impl NexusView {
     pub(crate) fn new(presenter: Presenter, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let locale = presenter.model().language;
+        gpui_kit::component::set_locale(locale.as_str());
         cx.set_window_appearance(match presenter.model().appearance.theme {
             ThemePreference::System => None,
             ThemePreference::Light => Some(gpui::WindowAppearance::Light),
@@ -358,12 +388,12 @@ impl NexusView {
         let prompt_input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(2, 8)
-                .placeholder("描述一个目标，让 Agent 开始工作…")
+                .placeholder(locale.text("描述一个目标，让 Agent 开始工作…"))
         });
         let executable_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .default_value(presenter.model().executable.clone())
-                .placeholder("命令名或完整路径")
+                .placeholder(locale.text("命令名或完整路径"))
         });
         let ProviderProfileDraft {
             id: editing_provider_profile,
@@ -380,34 +410,35 @@ impl NexusView {
         let provider_name_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .default_value(name)
-                .placeholder("例如 DeepSeek Production")
+                .placeholder(locale.text("例如 DeepSeek Production"))
         });
         let provider_api_key_env_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .default_value(api_key_env)
-                .placeholder("例如 DEEPSEEK_API_KEY")
+                .placeholder(locale.text("例如 DEEPSEEK_API_KEY"))
         });
         let provider_api_key_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .masked(true)
-                .placeholder("新建时必填；编辑时留空保留")
+                .placeholder(locale.text("新建时必填；编辑时留空保留"))
         });
         let provider_base_url_env_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .default_value(base_url_env)
-                .placeholder("可选，例如 OPENAI_BASE_URL")
+                .placeholder(locale.text("可选，例如 OPENAI_BASE_URL"))
         });
         let provider_base_url_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .default_value(base_url)
-                .placeholder("可选，例如 https://api.example.com/v1")
+                .placeholder(locale.text("可选，例如 https://api.example.com/v1"))
         });
         let provider_model_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .default_value(model)
-                .placeholder("可选，例如 deepseek/deepseek-v4-pro")
+                .placeholder(locale.text("可选，例如 deepseek/deepseek-v4-pro"))
         });
-        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("搜索任务与历史…"));
+        let search_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(locale.text("搜索任务与历史…")));
         let catalog_model_select_content = CatalogModelSelectContent::from_model(presenter.model());
         let catalog_model_select = cx.new(|cx| {
             SelectState::new(
@@ -527,6 +558,45 @@ impl NexusView {
         cx.notify();
     }
 
+    fn set_language(&mut self, language: Language, window: &mut Window, cx: &mut Context<Self>) {
+        if self.presenter.set_language(language) {
+            gpui_kit::component::set_locale(language.as_str());
+            self.prompt_input.update(cx, |input, cx| {
+                input.set_placeholder(
+                    language.text("描述一个目标，让 Agent 开始工作…"),
+                    window,
+                    cx,
+                );
+            });
+            for (input, placeholder) in [
+                (&self.executable_input, "命令名或完整路径"),
+                (&self.provider_name_input, "例如 DeepSeek Production"),
+                (&self.provider_api_key_env_input, "例如 DEEPSEEK_API_KEY"),
+                (&self.provider_api_key_input, "新建时必填；编辑时留空保留"),
+                (
+                    &self.provider_base_url_env_input,
+                    "可选，例如 OPENAI_BASE_URL",
+                ),
+                (
+                    &self.provider_base_url_input,
+                    "可选，例如 https://api.example.com/v1",
+                ),
+                (
+                    &self.provider_model_input,
+                    "可选，例如 deepseek/deepseek-v4-pro",
+                ),
+                (&self.search_input, "搜索任务与历史…"),
+            ] {
+                input.update(cx, |input, cx| {
+                    input.set_placeholder(language.text(placeholder), window, cx);
+                });
+            }
+            self.sync_catalog_model_select(window, cx);
+            window.refresh();
+        }
+        cx.notify();
+    }
+
     fn start_event_pump(&self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             loop {
@@ -627,6 +697,7 @@ impl NexusView {
     }
 
     fn confirm_delete_task(&mut self, task_id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        let locale = self.presenter.model().language;
         let Some(title) = self
             .presenter
             .model()
@@ -638,12 +709,15 @@ impl NexusView {
         else {
             return;
         };
-        let message = format!("永久删除“{title}”？");
+        let message = locale.format("永久删除“{title}”？", &[("title", (title).to_string())]);
         let answer = window.prompt(
             PromptLevel::Critical,
             &message,
-            Some("此操作会删除该对话的全部消息和运行记录，且无法撤销。"),
-            &[PromptButton::ok("永久删除"), PromptButton::cancel("取消")],
+            Some(locale.text("此操作会删除该对话的全部消息和运行记录，且无法撤销。")),
+            &[
+                PromptButton::ok(locale.text("永久删除")),
+                PromptButton::cancel(locale.text("取消")),
+            ],
             cx,
         );
         cx.spawn_in(window, async move |this, cx| {
@@ -675,17 +749,27 @@ impl NexusView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let locale = self.presenter.model().language;
         let count = self.presenter.model().archived_tasks.len();
         if count == 0 || self.presenter.model().active_run.is_some() {
             return;
         }
-        let message = format!("永久删除 {count} 个归档对话？");
-        let detail = format!("此操作会删除这 {count} 个对话的全部消息和运行记录，且无法撤销。");
+        let message = locale.format(
+            "永久删除 {count} 个归档对话？",
+            &[("count", (count).to_string())],
+        );
+        let detail = locale.format(
+            "此操作会删除这 {count} 个对话的全部消息和运行记录，且无法撤销。",
+            &[("count", (count).to_string())],
+        );
         let answer = window.prompt(
             PromptLevel::Critical,
             &message,
             Some(&detail),
-            &[PromptButton::ok("全部删除"), PromptButton::cancel("取消")],
+            &[
+                PromptButton::ok(locale.text("全部删除")),
+                PromptButton::cancel(locale.text("取消")),
+            ],
             cx,
         );
         cx.spawn_in(window, async move |this, cx| {
@@ -1003,12 +1087,13 @@ impl NexusView {
         edit_on_select: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let locale = self.presenter.model().language;
         let model = self.presenter.model();
         let selected = model.selected_provider_profile().map(|profile| profile.id);
         let selected_name = model
             .selected_provider_profile()
             .map(|profile| profile.name.clone())
-            .unwrap_or_else(|| "CLI 凭据".into());
+            .unwrap_or_else(|| locale.text("CLI 凭据").into());
         let profiles = model
             .provider_profiles
             .iter()
@@ -1033,7 +1118,7 @@ impl NexusView {
                     let app_for_default = app.clone();
                     profiles.iter().cloned().fold(
                         menu.min_w(if compact { px(180.) } else { px(220.) }).item(
-                            PopupMenuItem::new("使用 CLI 当前凭据")
+                            PopupMenuItem::new(locale.text("使用 CLI 当前凭据"))
                                 .checked(selected.is_none())
                                 .on_click(move |_, window, cx| {
                                     app_for_default.update(cx, |app, cx| {
@@ -1070,6 +1155,7 @@ impl NexusView {
     }
 
     fn model_selector(&self, cx: &mut Context<Self>) -> AnyElement {
+        let locale = self.presenter.model().language;
         let model = self.presenter.model();
         if model.uses_model_catalog() {
             return self.catalog_model_selector(cx);
@@ -1081,9 +1167,9 @@ impl NexusView {
             .and_then(|profile| profile.model.clone());
         let label = profile_model.clone().unwrap_or_else(|| {
             if model.selected_harness == HarnessKind::Claude {
-                selected.to_string()
+                locale.claude_model(selected).to_owned()
             } else {
-                "CLI 默认模型".into()
+                locale.text("CLI 默认模型").into()
             }
         });
         let button_id = "composer-model";
@@ -1105,7 +1191,7 @@ impl NexusView {
                         .fold(menu.min_w(px(160.)), |menu, model| {
                             let app = app.clone();
                             menu.item(
-                                PopupMenuItem::new(model.to_string())
+                                PopupMenuItem::new(locale.claude_model(model))
                                     .checked(model == selected)
                                     .on_click(move |_, _, cx| {
                                         app.update(cx, |app, cx| app.select_model(model, cx));
@@ -1118,6 +1204,7 @@ impl NexusView {
     }
 
     fn catalog_model_selector(&self, cx: &mut Context<Self>) -> AnyElement {
+        let locale = self.presenter.model().language;
         let model = self.presenter.model();
         let active = model.active_run.is_some();
         div()
@@ -1129,8 +1216,8 @@ impl NexusView {
                     Select::new(&self.catalog_model_select)
                         .small()
                         .appearance(false)
-                        .accessibility_label("模型")
-                        .search_placeholder("按 Provider、名称或模型 ID 搜索")
+                        .accessibility_label(locale.text("模型"))
+                        .search_placeholder(locale.text("按 Provider、名称或模型 ID 搜索"))
                         .menu_width(px(360.))
                         .menu_max_h(px(360.))
                         .disabled(active)
@@ -1144,8 +1231,11 @@ impl NexusView {
                     .size(px(COMPACT_CONTROL_HEIGHT))
                     .p_0()
                     .icon(IconName::RotateCw)
-                    .accessibility_label("刷新模型目录")
-                    .tooltip(format!("刷新 {} 模型目录", model.selected_harness))
+                    .accessibility_label(locale.text("刷新模型目录"))
+                    .tooltip(locale.format(
+                        "刷新 {0} 模型目录",
+                        &[("0", (model.selected_harness).to_string())],
+                    ))
                     .disabled(active || model.selected_project.is_none())
                     .on_click(cx.listener(Self::refresh_model_catalog)),
             )
@@ -1154,6 +1244,7 @@ impl NexusView {
 
     fn effort_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let model = self.presenter.model();
+        let locale = model.language;
         let selected = model.effort;
         let efforts = if model.uses_model_catalog() {
             let mut efforts = vec![ThinkingEffort::Default];
@@ -1179,7 +1270,7 @@ impl NexusView {
             .small()
             .h(px(COMPACT_CONTROL_HEIGHT))
             .icon(IconName::Cpu)
-            .label(selected.to_string())
+            .label(locale.effort(selected))
             .disabled(model.active_run.is_some())
             .map(|button| {
                 AnimatedDropdown::new(button_id, button, self.reduced_motion, move |menu, _, _| {
@@ -1189,7 +1280,7 @@ impl NexusView {
                         .fold(menu.min_w(px(140.)), |menu, effort| {
                             let app = app.clone();
                             menu.item(
-                                PopupMenuItem::new(effort.to_string())
+                                PopupMenuItem::new(locale.effort(effort))
                                     .checked(effort == selected)
                                     .on_click(move |_, _, cx| {
                                         app.update(cx, |app, cx| app.select_effort(effort, cx));
@@ -1203,6 +1294,7 @@ impl NexusView {
 
 impl NexusView {
     fn render_message_queue(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let locale = self.presenter.model().language;
         let model = self.presenter.model();
         let colors = palette(cx);
         let queued = model
@@ -1217,7 +1309,9 @@ impl NexusView {
                     div()
                         .text_size(px(12.))
                         .text_color(rgb(colors.muted))
-                        .child(format!("排队消息 · {}", queued.len())),
+                        .child(
+                            locale.format("排队消息 · {0}", &[("0", (queued.len()).to_string())]),
+                        ),
                 )
                 .child(
                     div()
@@ -1244,7 +1338,7 @@ impl NexusView {
                                         Button::new((ElementId::from(id), "send-queued"))
                                             .ghost()
                                             .small()
-                                            .label("发送")
+                                            .label(locale.text("发送"))
                                             .on_click(cx.listener(move |app, _, _, cx| {
                                                 app.presenter.send_queued_message(id);
                                                 app.presenter.notify_remote_changed();
@@ -1259,11 +1353,11 @@ impl NexusView {
                                             .ghost()
                                             .small()
                                             .label(if model.steering_message == Some(id) {
-                                                "等待工具完成…"
+                                                locale.text("等待工具完成…")
                                             } else {
-                                                "Steer"
+                                                locale.text("介入")
                                             })
-                                            .tooltip("等待工具执行结束后介入当前对话")
+                                            .tooltip(locale.text("等待工具执行结束后介入当前对话"))
                                             .disabled(
                                                 !model.can_queue()
                                                     || model.steering_message.is_some(),
@@ -1280,7 +1374,7 @@ impl NexusView {
                                         .ghost()
                                         .small()
                                         .icon(IconName::Close)
-                                        .accessibility_label("移除排队消息")
+                                        .accessibility_label(locale.text("移除排队消息"))
                                         .disabled(model.steering_message == Some(id))
                                         .on_click(cx.listener(move |app, _, _, cx| {
                                             app.presenter.remove_queued_message(id);
@@ -1293,6 +1387,7 @@ impl NexusView {
     }
 
     fn render_workspace(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let locale = self.presenter.model().language;
         let colors = palette(cx);
         let material = materials(cx);
         let model = self.presenter.model();
@@ -1305,17 +1400,17 @@ impl NexusView {
             .focus_handle(cx)
             .is_focused(window);
         let composer_hint = if history {
-            "这是只读历史。选择项目并新建任务后即可开始。"
+            locale.text("这是只读历史。选择项目并新建任务后即可开始。")
         } else if model.selected_project.is_none() {
-            "先选择本地项目，再描述你希望完成的工作。"
+            locale.text("先选择本地项目，再描述你希望完成的工作。")
         } else if model.active_run.is_some() {
-            "Agent 正在执行 · 发送后排队，每轮结束后发送一条"
+            locale.text("Agent 正在执行 · 发送后排队，每轮结束后发送一条")
         } else if !model.can_submit() {
-            "Agent 尚未就绪 · 打开设置检查探测和登录状态"
+            locale.text("Agent 尚未就绪 · 打开设置检查探测和登录状态")
         } else if cfg!(target_os = "macos") {
-            "⌘ Enter 发送消息 · Enter 换行"
+            locale.text("⌘ Enter 发送消息 · Enter 换行")
         } else {
-            "Ctrl Enter 发送消息 · Enter 换行"
+            locale.text("Ctrl Enter 发送消息 · Enter 换行")
         };
         let header_status_color = if model.active_run.is_some() {
             rgb(colors.accent).into()
@@ -1339,18 +1434,18 @@ impl NexusView {
                     .iter()
                     .find(|thread| &thread.id == thread_id)
             })
-            .map(|thread| format!("Codex 历史 · {}", thread.title))
+            .map(|thread| locale.format("Codex 历史 · {0}", &[("0", (thread.title).to_string())]))
             .or_else(|| {
                 model
                     .selected_project
                     .as_ref()
                     .map(|project| project.display_name.clone())
             })
-            .unwrap_or_else(|| "未选择项目".into());
+            .unwrap_or_else(|| locale.text("未选择项目").into());
         let header_context = if model.selected_codex_thread.is_some() {
-            Some("Codex 原有会话")
+            Some(locale.text("Codex 原有会话"))
         } else if model.selected_task.is_some() {
-            Some("任务时间线")
+            Some(locale.text("任务时间线"))
         } else {
             None
         };
@@ -1430,7 +1525,7 @@ impl NexusView {
                                         div()
                                             .max_w(px(180.))
                                             .truncate()
-                                            .child(model.status.clone()),
+                                            .child(model.status_text().to_owned()),
                                     )
                                     .child(
                                         Button::new("open-settings")
@@ -1439,11 +1534,11 @@ impl NexusView {
                                             .small()
                                             .h(px(COMPACT_CONTROL_HEIGHT))
                                             .icon(IconName::Settings2)
-                                            .label("设置")
+                                            .label(locale.text("设置"))
                                             .tooltip(if cfg!(target_os = "macos") {
-                                                "打开设置 · ⌘ ,"
+                                                locale.text("打开设置 · ⌘ ,")
                                             } else {
-                                                "打开设置 · Ctrl ,"
+                                                locale.text("打开设置 · Ctrl ,")
                                             })
                                             .on_click(cx.listener(|app, _, window, cx| {
                                                 app.toggle_settings(window, cx)
@@ -1487,7 +1582,7 @@ impl NexusView {
                                             .disabled(history)
                                             .appearance(false)
                                             .bordered(false)
-                                            .aria_label("任务描述"),
+                                            .aria_label(locale.text("任务描述")),
                                     )
                                     .child(
                                         div()
@@ -1531,11 +1626,11 @@ impl NexusView {
                                                                 .small()
                                                                 .h(px(COMPACT_CONTROL_HEIGHT))
                                                                 .icon(IconName::Pause)
-                                                                .label("停止")
+                                                                .label(locale.text("停止"))
                                                                 .disabled(model.run_cancelling)
-                                                                .tooltip(
+                                                                .tooltip(locale.text(
                                                                     "停止当前运行，保留已有输出",
-                                                                )
+                                                                ))
                                                                 .on_click(
                                                                     cx.listener(Self::cancel),
                                                                 ),
@@ -1550,9 +1645,9 @@ impl NexusView {
                                                             .icon(IconName::ArrowUp)
                                                             .accessibility_label(
                                                                 if model.active_run.is_some() {
-                                                                    "加入消息队列"
+                                                                    locale.text("加入消息队列")
                                                                 } else {
-                                                                    "发送任务"
+                                                                    locale.text("发送任务")
                                                                 },
                                                             )
                                                             .tooltip(composer_hint)
@@ -1593,7 +1688,7 @@ impl NexusView {
                                                     .ghost()
                                                     .small()
                                                     .h(px(COMPACT_CONTROL_HEIGHT))
-                                                    .label("检查环境")
+                                                    .label(locale.text("检查环境"))
                                                     .on_click(cx.listener(|app, _, window, cx| {
                                                         app.toggle_settings(window, cx);
                                                     })),

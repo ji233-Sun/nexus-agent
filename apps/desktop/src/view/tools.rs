@@ -20,6 +20,7 @@ impl NexusView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let locale = self.presenter.model().language;
         let colors = palette(cx);
         let first = batch[0].call.id;
         let id: ElementId = (ElementId::from(first), "tool-batch").into();
@@ -27,7 +28,7 @@ impl NexusView {
         let active_run = self.presenter.model().active_run;
         let mut categories = Vec::new();
         for tool in batch {
-            let label = tool.category().label();
+            let label = tool.category().label(locale);
             if !categories.contains(&label) {
                 categories.push(label);
             }
@@ -37,12 +38,22 @@ impl NexusView {
             .iter()
             .filter(|tool| tool.is_running(active_run))
             .count();
-        let mut summary = format!("{} · {}", categories.join("、"), batch.len());
+        let separator = match locale {
+            Language::Chinese => "、",
+            Language::English => ", ",
+        };
+        let mut summary = format!("{} · {}", categories.join(separator), batch.len());
         if running > 0 {
-            summary.push_str(&format!(" · {running} 项进行中"));
+            summary.push_str(&locale.format(
+                " · {running} 项进行中",
+                &[("running", (running).to_string())],
+            ));
         }
         if failures > 0 {
-            summary.push_str(&format!(" · {failures} 项失败"));
+            summary.push_str(&locale.format(
+                " · {failures} 项失败",
+                &[("failures", (failures).to_string())],
+            ));
         }
         let toggle_id = id.clone();
         let height = if batch
@@ -74,9 +85,9 @@ impl NexusView {
                     .px_2()
                     .debug_selector(move || format!("tool-batch-{first}"))
                     .accessibility_label(if expanded {
-                        "收起工具调用批次"
+                        locale.text("收起工具调用批次")
                     } else {
-                        "展开工具调用批次"
+                        locale.text("展开工具调用批次")
                     })
                     .icon(if expanded {
                         IconName::ChevronDown
@@ -135,21 +146,22 @@ impl NexusView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let locale = self.presenter.model().language;
         let colors = palette(cx);
         let id = tool.call.id;
         let expanded = self.expanded_messages.contains(&id.into());
         let error = tool.is_error();
         let running = tool.is_running(self.presenter.model().active_run);
         let status = if error {
-            "失败"
+            locale.text("失败")
         } else if running {
-            "运行中"
+            locale.text("运行中")
         } else if tool.result.is_some() {
-            "完成"
+            locale.text("完成")
         } else if tool.call.tool.is_some() {
-            "未完成"
+            locale.text("未完成")
         } else {
-            "已记录"
+            locale.text("已记录")
         };
         let icon = match tool.category() {
             ToolCategory::Command => IconName::SquareTerminal,
@@ -158,10 +170,13 @@ impl NexusView {
             ToolCategory::Edit | ToolCategory::Create => IconName::FileText,
             ToolCategory::Other => IconName::Asterisk,
         };
-        let preview = window
-            .use_keyed_state((ElementId::from(id), "preview"), cx, |_, _| tool.preview())
-            .read(cx)
-            .clone();
+        let preview = window.use_keyed_state((ElementId::from(id), "preview"), cx, |_, _| {
+            (locale, tool.preview(locale))
+        });
+        if preview.read(cx).0 != locale {
+            preview.update(cx, |state, _| *state = (locale, tool.preview(locale)));
+        }
+        let preview = preview.read(cx).1.clone();
         div()
             .w_full()
             .min_w_0()
@@ -178,10 +193,24 @@ impl NexusView {
                     .justify_start()
                     .px_2()
                     .debug_selector(move || format!("tool-row-{id}"))
-                    .accessibility_label(format!(
-                        "{preview}，{status}，{}详情",
-                        if expanded { "收起" } else { "展开" }
-                    ))
+                    .accessibility_label(
+                        locale.format(
+                            "{preview}，{status}，{0}详情",
+                            &[
+                                ("preview", (preview).to_string()),
+                                ("status", (status).to_string()),
+                                (
+                                    "0",
+                                    (if expanded {
+                                        locale.text("收起")
+                                    } else {
+                                        locale.text("展开")
+                                    })
+                                    .to_string(),
+                                ),
+                            ],
+                        ),
+                    )
                     .icon(icon)
                     .child(
                         div()
@@ -217,12 +246,14 @@ impl NexusView {
                 let result_id = tool.result.map(|result| result.id);
                 let details =
                     window.use_keyed_state((ElementId::from(id), "details"), cx, |_, _| {
-                        (result_id, Rc::new(tool.details()))
+                        (result_id, locale, Rc::new(tool.details(locale)))
                     });
-                if details.read(cx).0 != result_id {
-                    details.update(cx, |state, _| *state = (result_id, Rc::new(tool.details())));
+                if details.read(cx).0 != result_id || details.read(cx).1 != locale {
+                    details.update(cx, |state, _| {
+                        *state = (result_id, locale, Rc::new(tool.details(locale)))
+                    });
                 }
-                let details = details.read(cx).1.clone();
+                let details = details.read(cx).2.clone();
                 element.child(
                     div()
                         .pl_6()
@@ -231,20 +262,18 @@ impl NexusView {
                         .flex()
                         .flex_col()
                         .gap_2()
-                        .children(
-                            details.iter().enumerate().map(|(index, detail)| {
-                                render_detail(id, index, detail, window, cx)
-                            }),
-                        )
+                        .children(details.iter().enumerate().map(|(index, detail)| {
+                            render_detail(id, index, detail, locale, window, cx)
+                        }))
                         .when(tool.result.is_none(), |element| {
                             element.child(
                                 div()
                                     .text_size(px(12.))
                                     .text_color(rgb(colors.muted))
                                     .child(if running {
-                                        "等待工具返回结果…"
+                                        locale.text("等待工具返回结果…")
                                     } else {
-                                        "未收到此工具的执行结果。"
+                                        locale.text("未收到此工具的执行结果。")
                                     }),
                             )
                         }),
@@ -258,6 +287,7 @@ fn render_detail(
     tool_id: Uuid,
     index: usize,
     detail: &ToolDetail,
+    locale: Language,
     window: &mut Window,
     cx: &mut gpui::App,
 ) -> AnyElement {
@@ -324,7 +354,7 @@ fn render_detail(
                         .ghost()
                         .small()
                         .h(px(24.))
-                        .label("复制")
+                        .label(locale.text("复制"))
                         .on_click(move |_, _, cx| {
                             cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))
                         }),
