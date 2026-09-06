@@ -492,6 +492,7 @@ mod tests {
             "prompt",
             None,
             ThinkingEffort::Default,
+            None,
         );
         assert!(!default_spec.args.iter().any(|arg| arg == "--thinking"));
 
@@ -501,6 +502,7 @@ mod tests {
             "prompt",
             None,
             ThinkingEffort::None,
+            None,
         );
         assert!(
             legacy_none_spec
