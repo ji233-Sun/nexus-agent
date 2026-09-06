@@ -1,8 +1,9 @@
 name: Release
 
 on:
+  schedule:
+    - cron: "0 */4 * * *"
   push:
-    branches: [main]
     tags: ["v*"]
 
 permissions:
@@ -26,6 +27,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       tag: ${{ steps.release.outputs.tag }}
+      should_release: ${{ steps.release.outputs.should_release }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -34,19 +36,39 @@ jobs:
       - name: Determine release tag
         id: release
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          should_release=true
           if [[ "$GITHUB_REF_TYPE" == "branch" ]]; then
             # Commit time keeps the tag stable across platforms and workflow retries.
             tag=$(TZ=UTC git show -s --date=format-local:%Y-%m-%d \
               --format="nightly-%cd-%ct-${GITHUB_SHA:0:12}" "$GITHUB_SHA")
+            release_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "Accept: application/vnd.github+json" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/tags/$tag")
+            case "$release_status" in
+              200)
+                should_release=false
+                echo "Nightly release $tag already exists; skipping build."
+                ;;
+              404) ;;
+              *)
+                echo "::error::Failed to check Nightly release $tag (HTTP $release_status)"
+                exit 1
+                ;;
+            esac
           else
             tag="$GITHUB_REF_NAME"
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "should_release=$should_release" >> "$GITHUB_OUTPUT"
 
   build:
     name: Package (${{ matrix.target }})
     needs: prepare
+    if: needs.prepare.outputs.should_release == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:

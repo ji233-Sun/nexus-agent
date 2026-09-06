@@ -98,7 +98,7 @@ Desktop 已内置 Runner，无需单独配置。Release 同时附带 `SHA256SUMS
 
 维护者发布时，先更新根目录 `Cargo.toml` 的 `workspace.package.version` 和 `Cargo.lock`，完成检查后再推送对应的 `v<版本>` 标签（例如 `v0.1.0-alpha.2`）。[Release 工作流](.github/workflows/release.yml) 会校验标签与应用版本一致，重新构建内嵌 Web Client，在四个目标上检查、测试、构建和打包；全部成功后才创建 GitHub Release，上传压缩包、校验和及自动生成的发布说明。含预发布标识的版本会标记为 Pre-release。
 
-每次向 `main` 推送新提交（包括合并 PR）也会执行同一套检查和四平台打包流程，全部成功后自动发布一个 Nightly 预发布版。标签及压缩包文件名使用 `nightly-YYYY-MM-DD-<Unix秒时间戳>-<12位提交SHA>`，例如 `nightly-2026-09-06-1788673923-6bbbdd981018`。日期与时间戳取自该提交的提交者时间，日期按 UTC 计算；同一提交重跑工作流时保持相同标签。Nightly 标签指向本次构建的完整提交 SHA，始终标记为 Pre-release，不占用 Latest；不同提交的发布独立执行。应用与 macOS bundle 的基础版本继续沿用 `Cargo.toml`，无需为每次 Nightly 修改版本文件。
+Nightly 每 4 小时定时检查默认分支 `main` 的最新提交（cron：`0 */4 * * *`，UTC 每天 00:00、04:00、08:00、12:00、16:00、20:00，北京时间也为这六个时刻）。若该提交尚未发布 Nightly，则执行同一套检查和四平台打包流程，全部成功后自动发布一个 Nightly 预发布版；已经发布过的提交会跳过构建和发布。向 `main` 推送新提交（包括合并 PR）仅触发 CI，Nightly 等待下一次定时运行。标签及压缩包文件名使用 `nightly-YYYY-MM-DD-<Unix秒时间戳>-<12位提交SHA>`，例如 `nightly-2026-09-06-1788673923-6bbbdd981018`。日期与时间戳取自该提交的提交者时间，日期按 UTC 计算；同一提交重跑工作流时保持相同标签。Nightly 标签指向本次构建的完整提交 SHA，始终标记为 Pre-release，不占用 Latest；不同提交的发布独立执行。应用与 macOS bundle 的基础版本继续沿用 `Cargo.toml`，无需为每次 Nightly 修改版本文件。
 
 ## Remote Control
 
