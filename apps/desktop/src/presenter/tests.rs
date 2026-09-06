@@ -626,7 +626,7 @@ fn catalog_model_with_provider(
 }
 
 fn current_catalog_request_id(presenter: &Presenter) -> Uuid {
-    let ModelCatalogState::Loading { request_id } = &presenter.model().model_catalog else {
+    let ModelCatalogState::Loading { request_id, .. } = &presenter.model().model_catalog else {
         panic!("expected a loading model catalog")
     };
     *request_id
@@ -739,7 +739,7 @@ fn catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
     assert!(presenter.drain_events());
     assert!(matches!(
         presenter.model().model_catalog,
-        ModelCatalogState::Loading { request_id } if request_id == failed_request_id
+        ModelCatalogState::Loading { request_id, .. } if request_id == failed_request_id
     ));
 
     runner.emit(Event::ModelCatalogFailed {
@@ -750,7 +750,7 @@ fn catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
     presenter.drain_events();
     assert!(matches!(
         &presenter.model().model_catalog,
-        ModelCatalogState::Failed(message) if message.render(Language::Chinese) == "model/list unavailable"
+        ModelCatalogState::Failed { message, .. } if message.render(Language::Chinese) == "model/list unavailable"
     ));
     assert!(
         presenter
@@ -903,9 +903,34 @@ fn invalid_submissions_never_create_tasks_or_send_commands() {
 #[test]
 fn expired_remote_start_does_not_change_selection_or_start_a_run() {
     let (mut presenter, runner, _directory) = fixture();
+    assert!(presenter.select_harness(HarnessKind::Codex, "claude"));
+    presenter
+        .model
+        .harnesses
+        .insert(HarnessKind::Codex, ready_probe(HarnessKind::Codex));
+    emit_current_catalog(
+        &presenter,
+        &runner,
+        vec![catalog_model(
+            "explicit-remote-model",
+            true,
+            &[ThinkingEffort::Low, ThinkingEffort::High],
+            ThinkingEffort::Low,
+        )],
+    );
+    presenter.drain_events();
+    presenter.select_catalog_model(Some("explicit-remote-model".into()));
+    presenter.select_effort(ThinkingEffort::High);
     let project_id = presenter.model.selected_project.as_ref().unwrap().id;
     let other_directory = tempfile::tempdir().unwrap();
     presenter.open_project(other_directory.path());
+    assert!(
+        !presenter
+            .model()
+            .selected_catalog_model()
+            .unwrap()
+            .is_default
+    );
     runner.0.borrow_mut().commands.clear();
     let selected_project_id = presenter.model.selected_project.as_ref().unwrap().id;
     let status = presenter.model.status.clone();
@@ -934,6 +959,18 @@ fn expired_remote_start_does_not_change_selection_or_start_a_run() {
         reply,
     }));
     assert_eq!(response.try_recv().unwrap(), Ok(()));
+    let request = last_start(&runner);
+    assert_eq!(request.model.as_deref(), Some("explicit-remote-model"));
+    assert_eq!(request.effort, ThinkingEffort::High);
+    assert_eq!(presenter.remote_state().model, request.model);
+    assert_eq!(presenter.remote_state().effort, request.effort);
+    let config = presenter
+        .storage
+        .conversation_config(request.task_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(config.model, "explicit-remote-model");
+    assert_eq!(config.effort, ThinkingEffort::High);
     assert_eq!(presenter.storage.tasks(project_id).unwrap().len(), 1);
     assert_eq!(
         runner
@@ -1988,6 +2025,10 @@ fn codex_preferences_are_isolated_per_profile_and_invalid_effort_resets() {
     presenter.drain_events();
     assert_eq!(presenter.model().effort, ThinkingEffort::High);
     assert_eq!(
+        presenter.model().resolved_model_selection().effort,
+        ThinkingEffort::High
+    );
+    assert_eq!(
         presenter
             .storage
             .setting(&catalog_effort_setting_key(
@@ -2018,6 +2059,7 @@ fn codex_preferences_are_isolated_per_profile_and_invalid_effort_resets() {
     presenter.select_effort(ThinkingEffort::Low);
 
     assert!(presenter.select_provider_profile(Some(first_profile_id)));
+    assert!(presenter.model().selected_catalog_model().is_none());
     assert_eq!(
         presenter.model().model_override.as_deref(),
         Some("model-alpha")
@@ -2351,6 +2393,7 @@ fn catalog_context_changes_ignore_late_responses_and_keep_missing_model_names() 
         presenter.drain_events();
         presenter.select_catalog_model(Some("chosen-id".into()));
         presenter.probe("/new/executable");
+        assert!(presenter.model().selected_catalog_model().is_none());
         let stale = current_catalog_request_id(&presenter);
         let other = directory.path().join("other-project");
         fs::create_dir(&other).unwrap();
@@ -2488,7 +2531,7 @@ fn omp_catalog_ignores_a_response_from_the_previous_profile() {
     presenter.drain_events();
     assert!(matches!(
         presenter.model().model_catalog,
-        ModelCatalogState::Loading { request_id } if request_id == current_request_id
+        ModelCatalogState::Loading { request_id, .. } if request_id == current_request_id
     ));
 
     emit_current_catalog(

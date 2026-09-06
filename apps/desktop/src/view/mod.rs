@@ -1530,12 +1530,16 @@ mod catalog_model_tests {
             (
                 ModelCatalogState::Loading {
                     request_id: Uuid::new_v4(),
+                    models: vec![],
                 },
                 "正在加载",
             ),
             (ModelCatalogState::Empty, "目录为空"),
             (
-                ModelCatalogState::Failed("test failure".into()),
+                ModelCatalogState::Failed {
+                    message: "test failure".into(),
+                    models: vec![],
+                },
                 "test failure",
             ),
             (
@@ -1578,7 +1582,7 @@ mod catalog_model_tests {
         cx.update(theme::configure_theme);
         let (mut presenter, runner, _directory) = fixture();
         presenter.select_harness(HarnessKind::Omp, "claude");
-        let ModelCatalogState::Loading { request_id } = presenter.model().model_catalog else {
+        let ModelCatalogState::Loading { request_id, .. } = presenter.model().model_catalog else {
             panic!("loading")
         };
         let mut long = omp_model("provider", "provider/needle-target");
@@ -1714,7 +1718,7 @@ mod catalog_model_tests {
         cx.update(theme::configure_theme);
         let (mut presenter, runner, _directory) = fixture();
         assert!(presenter.select_harness(HarnessKind::Omp, "claude"));
-        let ModelCatalogState::Loading { request_id } = presenter.model().model_catalog else {
+        let ModelCatalogState::Loading { request_id, .. } = presenter.model().model_catalog else {
             panic!("expected loading catalog")
         };
         let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));

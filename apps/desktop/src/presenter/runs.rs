@@ -116,7 +116,7 @@ impl Presenter {
                 && self.model.active_run.is_none()
                 && self.model.model_catalog.accepts(request_id) =>
             {
-                self.model.model_catalog = ModelCatalogState::Failed(message.clone().into());
+                self.model.model_catalog.fail(message.clone().into());
                 self.model.status = LocalizedText::new(
                     "{harness} 模型目录加载失败：{message}",
                     &[

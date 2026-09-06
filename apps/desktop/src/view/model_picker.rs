@@ -64,7 +64,7 @@ impl CatalogModelItem {
             ModelCatalogState::Ready(_) | ModelCatalogState::Empty => locale.text("不可用"),
             ModelCatalogState::Idle
             | ModelCatalogState::NotReady(_)
-            | ModelCatalogState::Failed(_) => locale.text("未验证"),
+            | ModelCatalogState::Failed { .. } => locale.text("未验证"),
         };
         let title = format!("{} · {availability}", name.unwrap_or(model_id));
         Self {
@@ -181,7 +181,7 @@ impl CatalogModelSelectContent {
             ModelCatalogState::Loading { .. } => Some(locale.text("正在加载模型目录…").into()),
             ModelCatalogState::Empty => Some(locale.text("当前模型目录为空").into()),
             ModelCatalogState::NotReady(message) => Some(message.render(locale).to_owned()),
-            ModelCatalogState::Failed(message) => Some(locale.format(
+            ModelCatalogState::Failed { message, .. } => Some(locale.format(
                 "模型目录加载失败：{message}",
                 &[("message", message.render(locale).to_owned())],
             )),
@@ -251,7 +251,7 @@ fn catalog_follow_default_item(model: &AppModel) -> CatalogModelItem {
         }
         let verification = match &model.model_catalog {
             ModelCatalogState::Loading { .. } => locale.text("验证中"),
-            ModelCatalogState::Failed(_) => locale.text("目录加载失败"),
+            ModelCatalogState::Failed { .. } => locale.text("目录加载失败"),
             ModelCatalogState::Ready(_) | ModelCatalogState::Empty => locale.text("目录未验证"),
             ModelCatalogState::Idle | ModelCatalogState::NotReady(_) => locale.text("未验证"),
         };
@@ -292,7 +292,7 @@ fn catalog_follow_default_item(model: &AppModel) -> CatalogModelItem {
 
     let suffix = match &model.model_catalog {
         ModelCatalogState::Loading { .. } => locale.text(" · 目录加载中"),
-        ModelCatalogState::Failed(_) => locale.text(" · 目录加载失败"),
+        ModelCatalogState::Failed { .. } => locale.text(" · 目录加载失败"),
         ModelCatalogState::Empty => locale.text(" · 目录为空"),
         ModelCatalogState::Idle | ModelCatalogState::Ready(_) => "",
         ModelCatalogState::NotReady(_) => locale.text(" · 未就绪"),

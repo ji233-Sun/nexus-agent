@@ -16,27 +16,34 @@ pub(crate) enum ModelCatalogState {
     Idle,
     Loading {
         request_id: Uuid,
+        models: Vec<ModelDescriptor>,
     },
     Ready(Vec<ModelDescriptor>),
     Empty,
     NotReady(LocalizedText),
-    Failed(LocalizedText),
+    Failed {
+        message: LocalizedText,
+        models: Vec<ModelDescriptor>,
+    },
 }
 
 impl ModelCatalogState {
     pub(crate) fn models(&self) -> Option<&[ModelDescriptor]> {
         match self {
-            Self::Ready(models) => Some(models),
-            Self::Idle
-            | Self::Loading { .. }
-            | Self::Empty
-            | Self::NotReady(_)
-            | Self::Failed(_) => None,
+            Self::Ready(models) | Self::Loading { models, .. } | Self::Failed { models, .. } => {
+                Some(models)
+            }
+            Self::Idle | Self::Empty | Self::NotReady(_) => None,
         }
     }
 
     pub(crate) fn accepts(&self, request_id: Uuid) -> bool {
-        matches!(self, Self::Loading { request_id: current } if *current == request_id)
+        matches!(self, Self::Loading { request_id: current, .. } if *current == request_id)
+    }
+
+    pub(crate) fn fail(&mut self, message: LocalizedText) {
+        let models = self.models().unwrap_or_default().to_vec();
+        *self = Self::Failed { message, models };
     }
 }
 

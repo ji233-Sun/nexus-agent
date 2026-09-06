@@ -365,6 +365,7 @@ impl Presenter {
             self.model.effort = normalize_effort_for_harness(config.harness, config.effort);
             self.model.model_override = (config.model != "default").then_some(config.model.clone());
             self.model.model_override_name = None;
+            self.model.model_catalog = ModelCatalogState::Idle;
             let executable = if config.executable.is_empty() {
                 self.storage
                     .setting(executable_setting_key(config.harness))
@@ -488,6 +489,9 @@ impl Presenter {
         }
         let executable = executable.trim().to_owned();
         let harness = self.model.selected_harness;
+        if self.model.executable != executable {
+            self.model.model_catalog = ModelCatalogState::Idle;
+        }
         self.model.executable = executable.clone();
         self.model.harnesses.remove(&harness);
         if let Some(runner) = &self.runner {
@@ -620,11 +624,13 @@ impl Presenter {
         if self.model.active_run.is_some() {
             return false;
         }
-        self.catalog_project = self
+        let project_id = self
             .model
             .selected_project
             .as_ref()
             .map(|project| project.id);
+        let project_changed = self.catalog_project != project_id;
+        self.catalog_project = project_id;
         let harness = self.model.selected_harness;
         let Some(project) = self.model.selected_project.as_ref() else {
             self.model.model_catalog = ModelCatalogState::Idle;
@@ -655,7 +661,7 @@ impl Presenter {
             }
         };
         let Some(runner) = &self.runner else {
-            self.model.model_catalog = ModelCatalogState::Failed("Runner 不可用。".into());
+            self.model.model_catalog.fail("Runner 不可用。".into());
             self.model.status = LocalizedText::new(
                 "Runner 不可用，无法加载 {harness} 模型目录。",
                 &[("harness", (harness).to_string())],
@@ -670,9 +676,22 @@ impl Presenter {
             cwd: project.canonical_path.clone(),
             environment,
         });
-        self.model.model_catalog = ModelCatalogState::Loading { request_id };
+        let mut models = self
+            .model
+            .model_catalog
+            .models()
+            .unwrap_or_default()
+            .to_vec();
+        if project_changed {
+            // Explicit model capabilities remain useful while refreshing, but the CLI
+            // default can differ between project configurations.
+            for model in &mut models {
+                model.is_default = false;
+            }
+        }
+        self.model.model_catalog = ModelCatalogState::Loading { request_id, models };
         if runner.send(command).is_err() {
-            self.model.model_catalog = ModelCatalogState::Failed("Runner 不可用。".into());
+            self.model.model_catalog.fail("Runner 不可用。".into());
             self.model.status = LocalizedText::new(
                 "Runner 不可用，无法加载 {harness} 模型目录。",
                 &[("harness", (harness).to_string())],
