@@ -1159,12 +1159,36 @@ impl NexusView {
                                             })),
                                     )
                                 })
+                                .when(model.active_run.is_some(), |element| {
+                                    element.child(
+                                        Button::new((ElementId::from(id), "steer-queued"))
+                                            .debug_selector(move || format!("steer-queued-{id}"))
+                                            .ghost()
+                                            .small()
+                                            .label(if model.steering_message == Some(id) {
+                                                "等待工具完成…"
+                                            } else {
+                                                "Steer"
+                                            })
+                                            .tooltip("等待工具执行结束后介入当前对话")
+                                            .disabled(
+                                                !model.can_queue()
+                                                    || model.steering_message.is_some(),
+                                            )
+                                            .on_click(cx.listener(move |app, _, _, cx| {
+                                                app.presenter.steer_queued_message(id);
+                                                app.presenter.notify_remote_changed();
+                                                cx.notify();
+                                            })),
+                                    )
+                                })
                                 .child(
                                     Button::new((ElementId::from(id), "remove-queued"))
                                         .ghost()
                                         .small()
                                         .icon(IconName::Close)
                                         .accessibility_label("移除排队消息")
+                                        .disabled(model.steering_message == Some(id))
                                         .on_click(cx.listener(move |app, _, _, cx| {
                                             app.presenter.remove_queued_message(id);
                                             cx.notify();
@@ -1658,6 +1682,47 @@ mod catalog_model_tests {
         );
         assert!(current.items[0].title.contains("不可用"));
         assert!(content.selected_index().is_some());
+    }
+
+    #[gpui::test]
+    fn queued_message_steer_button_targets_the_message_and_waits_for_receipt(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (mut presenter, runner, _directory) = fixture();
+        assert!(presenter.submit("first", "claude"));
+        assert!(presenter.submit("correction", "claude"));
+        let run_id = presenter.model().active_run.unwrap();
+        let message_id = presenter.model().queued_messages[0].id;
+        let selector = format!("steer-queued-{message_id}").leak();
+        let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            let _ = window.draw(cx);
+        });
+        let button = cx
+            .debug_bounds(selector)
+            .expect("queued message must expose Steer")
+            .center();
+        cx.simulate_click(button, Default::default());
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.presenter.model().steering_message, Some(message_id));
+            assert_eq!(view.presenter.model().queued_messages.len(), 1);
+        });
+        runner.emit(Event::RunInputAccepted { run_id, message_id });
+        view.update_in(cx, |view, _, cx| {
+            view.presenter.drain_events();
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            let _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds(selector).is_none());
+        assert!(view.read_with(cx, |view, _| {
+            view.presenter.model().queued_messages.is_empty()
+        }));
     }
 
     #[gpui::test]

@@ -28,9 +28,26 @@ pub struct LaunchSpec {
     pub stdin: String,
 }
 
+// Interactive frames may contain an API key during in-memory authentication.
+#[derive(Clone, PartialEq)]
+pub struct InputFrame(pub Value);
+
+impl std::fmt::Debug for InputFrame {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("InputFrame([REDACTED])")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum DecodedEvent {
+    WriteStdin(InputFrame),
     SessionStarted(String),
+    InputAccepted(String),
+    InputRejected {
+        id: String,
+        message: String,
+    },
+    TurnCompleted,
     TextDelta(String),
     MessageCompleted(String),
     ToolStarted {
@@ -49,6 +66,7 @@ pub enum DecodedEvent {
 
 pub trait LineDecoder: Send {
     fn decode_line(&mut self, line: &str) -> Result<Vec<DecodedEvent>, serde_json::Error>;
+    fn steer(&mut self, message_id: &str, prompt: &str) -> Option<InputFrame>;
 }
 
 pub fn resolve_executable(configured: &str) -> Option<PathBuf> {

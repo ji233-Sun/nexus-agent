@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandEnvelope {
@@ -44,6 +44,12 @@ pub enum Command {
     },
     #[serde(rename = "run.start")]
     RunStart(StartRun),
+    #[serde(rename = "run.steer")]
+    RunSteer {
+        run_id: Uuid,
+        message_id: Uuid,
+        prompt: String,
+    },
     #[serde(rename = "run.cancel")]
     RunCancel { run_id: Uuid },
     #[serde(rename = "runner.shutdown")]
@@ -138,6 +144,14 @@ pub enum Event {
     RunStarted { run_id: Uuid, pid: u32 },
     #[serde(rename = "run.session.started")]
     RunSessionStarted { run_id: Uuid, session_id: String },
+    #[serde(rename = "run.input.accepted")]
+    RunInputAccepted { run_id: Uuid, message_id: Uuid },
+    #[serde(rename = "run.input.rejected")]
+    RunInputRejected {
+        run_id: Uuid,
+        message_id: Uuid,
+        message: String,
+    },
     #[serde(rename = "run.output.delta")]
     RunOutputDelta { run_id: Uuid, text: String },
     #[serde(rename = "run.message.completed")]
@@ -206,6 +220,35 @@ pub enum ErrorCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn steer_round_trip_preserves_run_and_message_identity() {
+        let run_id = Uuid::new_v4();
+        let message_id = Uuid::new_v4();
+        let command = CommandEnvelope::new(Command::RunSteer {
+            run_id,
+            message_id,
+            prompt: "update\n指令".into(),
+        });
+        let encoded = serde_json::to_string(&command).unwrap();
+        let decoded: CommandEnvelope = serde_json::from_str(&encoded).unwrap();
+        assert!(
+            matches!(decoded.command, Command::RunSteer { run_id: run, message_id: message, prompt }
+            if run == run_id && message == message_id && prompt == "update\n指令")
+        );
+        for event in [
+            Event::RunInputAccepted { run_id, message_id },
+            Event::RunInputRejected {
+                run_id,
+                message_id,
+                message: "ended".into(),
+            },
+        ] {
+            let encoded = serde_json::to_value(&event).unwrap();
+            let decoded: Event = serde_json::from_value(encoded.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), encoded);
+        }
+    }
 
     #[test]
     fn protocol_round_trip_preserves_harness_model_and_effort() {

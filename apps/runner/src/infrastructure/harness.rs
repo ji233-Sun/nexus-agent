@@ -44,17 +44,10 @@ pub(crate) fn prepare(request: &StartRun, cwd: &Path) -> (LaunchSpec, Box<dyn Li
             ),
             Box::new(claude::EventDecoder),
         ),
-        HarnessKind::Codex => (
-            codex::build_launch_spec(
-                &request.executable,
-                cwd,
-                &request.prompt,
-                request.model.as_deref(),
-                request.effort,
-                request.session_id.as_deref(),
-            ),
-            Box::new(codex::EventDecoder),
-        ),
+        HarnessKind::Codex => {
+            let (spec, decoder) = codex::prepare_run(request, cwd);
+            (spec, Box::new(decoder))
+        }
         HarnessKind::Omp => (
             omp::build_launch_spec(
                 &request.executable,

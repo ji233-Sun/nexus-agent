@@ -80,6 +80,7 @@ pub(crate) struct AppModel {
     pub(crate) active_run: Option<Uuid>,
     pub(crate) run_cancelling: bool,
     pub(crate) queued_messages: VecDeque<QueuedMessage>,
+    pub(crate) steering_message: Option<Uuid>,
     pub(crate) active_run_elapsed_seconds: Option<u64>,
     pub(crate) active_task: Option<Uuid>,
     pub(crate) active_harness: Option<HarnessKind>,

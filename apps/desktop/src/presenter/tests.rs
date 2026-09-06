@@ -709,6 +709,140 @@ fn queued_message_survives_missing_session_and_runner_send_failure() {
 }
 
 #[test]
+fn steer_uses_the_active_run_and_dequeues_only_after_a_matching_receipt() {
+    let (mut presenter, runner, _directory) = fixture();
+    assert!(presenter.submit("first", "claude"));
+    let run_id = presenter.model().active_run.unwrap();
+    assert!(presenter.submit("ordinary queue", "claude"));
+    assert!(presenter.submit("urgent correction", "claude"));
+    let message_id = presenter.model().queued_messages[1].id;
+    assert!(presenter.steer_queued_message(message_id));
+    assert_eq!(presenter.model().queued_messages[0].id, message_id);
+    assert_eq!(presenter.model().messages.len(), 1);
+    assert_eq!(presenter.model().steering_message, Some(message_id));
+    assert!(!presenter.steer_queued_message(message_id));
+    presenter.remove_queued_message(message_id);
+    assert_eq!(presenter.model().queued_messages.len(), 2);
+    assert!(
+        matches!(&runner.0.borrow().commands.last().unwrap().command,
+        Command::RunSteer { run_id: id, message_id: received, prompt }
+            if *id == run_id && *received == message_id && prompt == "urgent correction")
+    );
+    for event in [
+        Event::RunInputAccepted {
+            run_id: Uuid::new_v4(),
+            message_id,
+        },
+        Event::RunInputAccepted {
+            run_id,
+            message_id: Uuid::new_v4(),
+        },
+    ] {
+        runner.emit(event);
+    }
+    presenter.drain_events();
+    assert_eq!(presenter.model().queued_messages.len(), 2);
+    for _ in 0..2 {
+        runner.emit(Event::RunInputAccepted { run_id, message_id });
+    }
+    presenter.drain_events();
+    assert!(presenter.model().steering_message.is_none());
+    assert_eq!(presenter.model().queued_messages.len(), 1);
+    let user_messages = presenter
+        .model()
+        .messages
+        .iter()
+        .filter(|message| message.role == MessageRole::User)
+        .collect::<Vec<_>>();
+    assert_eq!(user_messages.len(), 2);
+    assert_eq!(user_messages[1].content, "urgent correction");
+    assert_eq!(user_messages[1].run_id, run_id);
+    assert_eq!(
+        runner
+            .0
+            .borrow()
+            .commands
+            .iter()
+            .filter(|command| matches!(command.command, Command::RunStart(_)))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn rejected_steer_falls_back_to_the_next_turn_and_survives_cancellation() {
+    for cancelled in [false, true] {
+        let (mut presenter, runner, _directory) = fixture();
+        assert!(presenter.submit("first", "claude"));
+        let run_id = presenter.model().active_run.unwrap();
+        assert!(presenter.submit("ordinary queue", "claude"));
+        assert!(presenter.submit("correction", "claude"));
+        let message_id = presenter.model().queued_messages[1].id;
+        assert!(presenter.steer_queued_message(message_id));
+        runner.emit(Event::RunSessionStarted {
+            run_id,
+            session_id: "saved-session".into(),
+        });
+        if cancelled {
+            presenter.cancel();
+        }
+        runner.emit(Event::RunInputRejected {
+            run_id,
+            message_id,
+            message: "turn ended".into(),
+        });
+        presenter.drain_events();
+        assert_eq!(presenter.model().queued_messages.len(), 2);
+        assert!(presenter.model().steering_message.is_none());
+        runner.emit(Event::RunExited {
+            run_id,
+            status: if cancelled {
+                RunStatus::Cancelled
+            } else {
+                RunStatus::Completed
+            },
+            exit_code: None,
+        });
+        presenter.drain_events();
+        if cancelled {
+            assert_eq!(presenter.model().queued_messages.len(), 2);
+            assert!(presenter.model().active_run.is_none());
+        } else {
+            let next = last_start(&runner);
+            assert_ne!(next.run_id, run_id);
+            assert_eq!(next.prompt, "correction");
+            assert_eq!(next.session_id.as_deref(), Some("saved-session"));
+            assert_eq!(
+                presenter.model().queued_messages[0].prompt,
+                "ordinary queue"
+            );
+        }
+        runner.emit(Event::RunInputAccepted { run_id, message_id });
+        presenter.drain_events();
+        assert_eq!(
+            presenter.model().queued_messages.len(),
+            if cancelled { 2 } else { 1 }
+        );
+    }
+}
+
+#[test]
+fn steer_send_failure_preserves_queue_order_and_stopping_blocks_steer() {
+    let (mut presenter, runner, _directory) = fixture();
+    assert!(presenter.submit("first", "claude"));
+    assert!(presenter.submit("second", "claude"));
+    assert!(presenter.submit("third", "claude"));
+    let message_id = presenter.model().queued_messages[1].id;
+    runner.0.borrow_mut().fail_send = true;
+    assert!(!presenter.steer_queued_message(message_id));
+    assert_eq!(presenter.model().queued_messages[0].prompt, "second");
+    assert!(presenter.model().steering_message.is_none());
+    runner.0.borrow_mut().fail_send = false;
+    presenter.cancel();
+    assert!(!presenter.steer_queued_message(message_id));
+}
+
+#[test]
 fn follow_up_resumes_the_saved_session_after_reopening_and_new_task_starts_fresh() {
     for harness in HarnessKind::ALL {
         let directory = tempfile::tempdir().unwrap();

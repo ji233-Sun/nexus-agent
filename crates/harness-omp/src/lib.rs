@@ -7,9 +7,11 @@ use std::{
 
 use nexus_domain::{HarnessKind, ModelDescriptor, ModelReasoningEffort, ThinkingEffort};
 pub use nexus_harness_core::{DecodedEvent, LaunchSpec, ModelCatalogError};
-use nexus_harness_core::{LineDecoder, resolve_executable, summarize_text, tool_content};
+use nexus_harness_core::{
+    InputFrame, LineDecoder, resolve_executable, summarize_text, tool_content,
+};
 use nexus_protocol::{EnvironmentVariable, HarnessProbe};
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::{io::AsyncReadExt as _, process::Command, sync::watch, time::sleep};
 
 const MODEL_CATALOG_TIMEOUT: Duration = Duration::from_secs(15);
@@ -23,9 +25,8 @@ pub fn build_launch_spec(
     session_id: Option<&str>,
 ) -> LaunchSpec {
     let mut args = vec![
-        "--print".into(),
         "--mode".into(),
-        "json".into(),
+        "rpc".into(),
         "--no-title".into(),
         "--approval-mode".into(),
         "write".into(),
@@ -47,7 +48,11 @@ pub fn build_launch_spec(
         executable: PathBuf::from(executable),
         args,
         cwd: cwd.to_path_buf(),
-        stdin: prompt.to_owned(),
+        stdin: format!(
+            "{}\n{}\n",
+            json!({"type": "get_state", "id": "nexus-session"}),
+            json!({"type": "prompt", "id": "nexus-prompt", "message": prompt})
+        ),
     }
 }
 
@@ -286,16 +291,70 @@ impl LineDecoder for EventDecoder {
         let frame: Value = serde_json::from_str(line)?;
         Ok(decode_frame(&frame))
     }
+
+    fn steer(&mut self, message_id: &str, prompt: &str) -> Option<InputFrame> {
+        Some(InputFrame(
+            json!({"type": "steer", "id": message_id, "message": prompt}),
+        ))
+    }
 }
 
 fn decode_frame(frame: &Value) -> Vec<DecodedEvent> {
     match frame.get("type").and_then(Value::as_str) {
-        Some("session") => frame
-            .get("id")
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
-            .map(|id| vec![DecodedEvent::SessionStarted(id.to_owned())])
-            .unwrap_or_default(),
+        Some("response") => {
+            let id = frame.get("id").and_then(Value::as_str).unwrap_or_default();
+            let command = frame
+                .get("command")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if frame.get("success").and_then(Value::as_bool) != Some(true) {
+                let message = frame
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Oh My Pi 请求失败。")
+                    .to_owned();
+                return if command == "steer" {
+                    vec![DecodedEvent::InputRejected {
+                        id: id.into(),
+                        message,
+                    }]
+                } else {
+                    vec![DecodedEvent::Error(message), DecodedEvent::TurnCompleted]
+                };
+            }
+            match (command, id) {
+                ("get_state", "nexus-session") => match frame
+                    .pointer("/data/sessionId")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                {
+                    Some(id) => vec![DecodedEvent::SessionStarted(id.into())],
+                    None => vec![
+                        DecodedEvent::Error("Oh My Pi 未返回会话 ID。".into()),
+                        DecodedEvent::TurnCompleted,
+                    ],
+                },
+                ("steer", _) => vec![DecodedEvent::InputAccepted(id.into())],
+                ("prompt", _)
+                    if frame.pointer("/data/agentInvoked").and_then(Value::as_bool)
+                        == Some(false) =>
+                {
+                    vec![DecodedEvent::TurnCompleted]
+                }
+                _ => Vec::new(),
+            }
+        }
+        Some("prompt_result")
+            if frame.get("agentInvoked").and_then(Value::as_bool) == Some(false) =>
+        {
+            vec![DecodedEvent::TurnCompleted]
+        }
+        Some("agent_end") if frame.get("isTerminal").and_then(Value::as_bool) != Some(false) => {
+            vec![DecodedEvent::TurnCompleted]
+        }
+        Some("extension_ui_request") => vec![DecodedEvent::WriteStdin(InputFrame(json!({
+            "type": "extension_ui_response", "id": frame["id"], "cancelled": true
+        })))],
         Some("agent_start") => vec![DecodedEvent::Status("Oh My Pi 会话已启动".into())],
         Some("turn_start") => vec![DecodedEvent::Status("Oh My Pi 正在处理任务…".into())],
         Some("message_update") => frame
@@ -409,7 +468,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn launch_spec_uses_json_print_mode_without_prompt_in_argv() {
+    fn launch_spec_uses_rpc_without_prompt_in_argv() {
         let spec = build_launch_spec(
             "/usr/local/bin/omp",
             Path::new("/tmp/project"),
@@ -418,7 +477,8 @@ mod tests {
             ThinkingEffort::High,
             None,
         );
-        assert!(spec.args.windows(2).any(|pair| pair == ["--mode", "json"]));
+        assert!(spec.args.windows(2).any(|pair| pair == ["--mode", "rpc"]));
+        assert!(!spec.args.iter().any(|arg| arg == "--print"));
         assert!(
             spec.args
                 .windows(2)
@@ -435,7 +495,13 @@ mod tests {
                 .any(|pair| pair == ["--model", "deepseek/deepseek-v4-pro"])
         );
         assert!(!spec.args.iter().any(|arg| arg.contains("secret prompt")));
-        assert_eq!(spec.stdin, "secret prompt");
+        let frames: Vec<Value> = spec
+            .stdin
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(frames[0]["type"], "get_state");
+        assert_eq!(frames[1]["message"], "secret prompt");
         assert!(
             !spec
                 .args
@@ -468,7 +534,10 @@ mod tests {
                 .iter()
                 .any(|arg| arg == "--no-session" || arg == "--continue")
         );
-        assert_eq!(resumed.stdin, "follow-up");
+        assert_eq!(
+            serde_json::from_str::<Value>(resumed.stdin.lines().nth(1).unwrap()).unwrap()["message"],
+            "follow-up"
+        );
 
         let max_spec = build_launch_spec(
             "omp",
@@ -603,7 +672,7 @@ mod tests {
         let mut decoder = EventDecoder;
         assert_eq!(
             decoder
-                .decode_line(r#"{"type":"session","id":"existing-session","version":3}"#)
+                .decode_line(r#"{"type":"response","command":"get_state","id":"nexus-session","success":true,"data":{"sessionId":"existing-session"}}"#)
                 .unwrap(),
             vec![DecodedEvent::SessionStarted("existing-session".into())]
         );
@@ -660,6 +729,50 @@ mod tests {
             })),
             code
         );
+    }
+
+    #[test]
+    fn steering_receipts_and_terminal_events_are_distinct() {
+        let mut decoder = EventDecoder;
+        let frame = decoder.steer("message-1", "update\n第二行").unwrap();
+        assert_eq!(
+            frame.0,
+            json!({"type": "steer", "id": "message-1", "message": "update\n第二行"})
+        );
+        assert_eq!(
+            decoder
+                .decode_line(
+                    r#"{"type":"response","command":"steer","id":"message-1","success":true}"#
+                )
+                .unwrap(),
+            vec![DecodedEvent::InputAccepted("message-1".into())]
+        );
+        assert_eq!(decoder.decode_line(r#"{"type":"response","command":"steer","id":"message-1","success":false,"error":"ended"}"#).unwrap(),
+            vec![DecodedEvent::InputRejected { id: "message-1".into(), message: "ended".into() }]);
+        assert!(
+            decoder
+                .decode_line(r#"{"type":"agent_end","isTerminal":false}"#)
+                .unwrap()
+                .is_empty()
+        );
+        for terminal in [
+            r#"{"type":"agent_end","isTerminal":true}"#,
+            r#"{"type":"prompt_result","agentInvoked":false}"#,
+        ] {
+            assert_eq!(
+                decoder.decode_line(terminal).unwrap(),
+                vec![DecodedEvent::TurnCompleted]
+            );
+        }
+        assert!(matches!(
+            decoder
+                .decode_line(
+                    r#"{"type":"response","command":"prompt","success":false,"error":"denied"}"#
+                )
+                .unwrap()
+                .as_slice(),
+            [DecodedEvent::Error(_), DecodedEvent::TurnCompleted]
+        ));
     }
 
     #[test]

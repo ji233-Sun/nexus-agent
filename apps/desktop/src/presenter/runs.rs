@@ -104,6 +104,38 @@ impl Presenter {
             Event::RunOutputDelta { run_id, text } if self.model.active_run == Some(run_id) => {
                 self.model.streaming_text.push_str(&text);
             }
+            Event::RunInputAccepted { run_id, message_id }
+                if self.model.active_run == Some(run_id)
+                    && self.model.steering_message == Some(message_id) =>
+            {
+                self.model.steering_message = None;
+                if let Some(index) = self
+                    .model
+                    .queued_messages
+                    .iter()
+                    .position(|message| message.id == message_id)
+                    && let Some(message) = self.model.queued_messages.remove(index)
+                {
+                    self.persist_live_message(
+                        run_id,
+                        MessageRole::User,
+                        MessageKind::Text,
+                        &message.prompt,
+                        None,
+                    );
+                    self.model.status = "Steer 已送达当前轮次。".into();
+                }
+            }
+            Event::RunInputRejected {
+                run_id,
+                message_id,
+                message,
+            } if self.model.active_run == Some(run_id)
+                && self.model.steering_message == Some(message_id) =>
+            {
+                self.model.steering_message = None;
+                self.model.status = message;
+            }
             Event::RunMessageCompleted { run_id, text }
                 if self.model.active_run == Some(run_id) =>
             {
@@ -193,6 +225,7 @@ impl Presenter {
                 self.model.streaming_text.clear();
                 self.model.active_run = None;
                 self.model.run_cancelling = false;
+                self.model.steering_message = None;
                 self.active_run_started_at = None;
                 self.model.active_run_elapsed_seconds = None;
                 self.model.active_task = None;
@@ -278,9 +311,43 @@ impl Presenter {
     }
 
     pub(crate) fn remove_queued_message(&mut self, message_id: Uuid) {
+        if self.model.steering_message == Some(message_id) {
+            return;
+        }
         self.model
             .queued_messages
             .retain(|message| message.id != message_id);
+    }
+
+    pub(crate) fn steer_queued_message(&mut self, message_id: Uuid) -> bool {
+        if !self.model.can_queue() || self.model.steering_message.is_some() {
+            return false;
+        }
+        let Some(index) = self.model.queued_messages.iter().position(|message| {
+            message.id == message_id && Some(message.task_id) == self.model.active_task
+        }) else {
+            return false;
+        };
+        let run_id = self.model.active_run.unwrap();
+        let command = CommandEnvelope::new(Command::RunSteer {
+            run_id,
+            message_id,
+            prompt: self.model.queued_messages[index].prompt.clone(),
+        });
+        if !self
+            .runner
+            .as_ref()
+            .is_some_and(|runner| runner.send(command).is_ok())
+        {
+            self.model.status = "Runner 不可用，消息仍保留在队列中。".into();
+            return false;
+        }
+        // A Steer that races with turn completion becomes the next queued message.
+        let message = self.model.queued_messages.remove(index).unwrap();
+        self.model.queued_messages.push_front(message);
+        self.model.steering_message = Some(message_id);
+        self.model.status = "等待工具执行结束后介入…".into();
+        true
     }
 
     pub(super) fn start_run(
