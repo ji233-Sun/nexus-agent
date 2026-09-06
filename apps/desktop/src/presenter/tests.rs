@@ -1526,6 +1526,10 @@ fn provider_profile_keeps_secret_out_of_storage_and_injects_only_the_selected_ru
     );
     assert!(presenter.submit("use the selected provider", "omp"));
     let state = runner.0.borrow();
+    assert!(matches!(
+        &state.commands[0].command,
+        Command::ModelCatalogRefresh { .. }
+    ));
     let request = state
         .commands
         .iter()
@@ -1539,7 +1543,10 @@ fn provider_profile_keeps_secret_out_of_storage_and_injects_only_the_selected_ru
     assert_eq!(request.environment.len(), 1);
     assert_eq!(request.environment[0].name, "DEEPSEEK_API_KEY");
     assert_eq!(request.environment[0].value, "super-secret");
-    assert!(!format!("{:?}", state.commands[0]).contains("super-secret"));
+    assert_eq!(
+        format!("{:?}", request.environment[0]),
+        r#"EnvironmentVariable { name: "DEEPSEEK_API_KEY", value: "[REDACTED]" }"#
+    );
 }
 
 #[test]
