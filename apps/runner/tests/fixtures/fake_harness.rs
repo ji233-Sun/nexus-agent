@@ -13,6 +13,10 @@ fn main() {
             thread::sleep(Duration::from_secs(1));
         }
     }
+    if args.first().map(String::as_str) == Some("app-server") {
+        run_app_server();
+        return;
+    }
     let codex = args.first().map(String::as_str) == Some("exec");
     let omp = args
         .windows(2)
@@ -79,4 +83,44 @@ fn main() {
             r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"hello"}}]}}}}"#
         );
     }
+}
+
+fn run_app_server() {
+    let mut line = String::new();
+    while io::stdin().read_line(&mut line).unwrap() != 0 {
+        let id = request_id(&line);
+        if line.contains(r#""method":"initialize""#) {
+            println!(r#"{{"id":{id},"result":{{"codexHome":"/tmp/.codex"}}}}"#);
+        } else if line.contains(r#""method":"model/list""#) {
+            if env::var_os("TEST_CATALOG_BLOCK").is_some() {
+                loop {
+                    thread::sleep(Duration::from_secs(1));
+                }
+            }
+            if env::var_os("TEST_CATALOG_ERROR").is_some() {
+                println!(
+                    r#"{{"id":{id},"error":{{"code":-32601,"message":"model/list unavailable"}}}}"#
+                );
+            } else if line.contains(r#""cursor":"page-2""#) {
+                println!(
+                    r#"{{"id":{id},"result":{{"data":[{{"id":"gpt-second","displayName":"GPT Second","hidden":false,"isDefault":false,"defaultReasoningEffort":"ultra","supportedReasoningEfforts":[{{"reasoningEffort":"high","description":"High"}},{{"reasoningEffort":"ultra","description":"Ultra"}}]}}],"nextCursor":null}}}}"#
+                );
+            } else {
+                println!(
+                    r#"{{"id":{id},"result":{{"data":[{{"id":"gpt-first","displayName":"GPT First","hidden":false,"isDefault":true,"defaultReasoningEffort":"low","supportedReasoningEfforts":[{{"reasoningEffort":"low","description":"Low"}}]}}],"nextCursor":"page-2"}}}}"#
+                );
+            }
+        }
+        io::stdout().flush().unwrap();
+        line.clear();
+    }
+    fs::write("catalog-stopped.txt", "stopped").unwrap();
+}
+
+fn request_id(line: &str) -> &str {
+    line.split(r#""id":"#)
+        .nth(1)
+        .and_then(|value| value.split(|character: char| !character.is_ascii_digit()).next())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("0")
 }

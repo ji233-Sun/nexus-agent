@@ -205,6 +205,111 @@ async fn runner_streams_fake_codex_and_uses_non_interactive_mode() {
 }
 
 #[tokio::test]
+async fn runner_loads_all_codex_model_pages_and_reaps_the_app_server() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = fake_harness(directory.path());
+    let request_id = Uuid::new_v4();
+    let mut runner = TestRunner::spawn();
+    runner
+        .send(Command::ModelCatalogRefresh {
+            request_id,
+            harness: HarnessKind::Codex,
+            executable: executable.to_string_lossy().into_owned(),
+            cwd: directory.path().to_string_lossy().into_owned(),
+            environment: Vec::new(),
+        })
+        .await;
+
+    let Event::ModelCatalogLoaded {
+        request_id: received_id,
+        harness,
+        models,
+    } = runner.next().await
+    else {
+        panic!("expected model catalog")
+    };
+
+    assert_eq!(received_id, request_id);
+    assert_eq!(harness, HarnessKind::Codex);
+    assert_eq!(
+        models
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect::<Vec<_>>(),
+        ["gpt-first", "gpt-second"]
+    );
+    assert!(models[0].is_default);
+    assert_eq!(
+        models[1].default_reasoning_effort,
+        Some(ThinkingEffort::Ultra)
+    );
+    assert_eq!(
+        fs::read_to_string(directory.path().join("catalog-stopped.txt")).unwrap(),
+        "stopped"
+    );
+    runner.shutdown().await;
+}
+
+#[tokio::test]
+async fn newer_catalog_requests_cancel_older_app_servers_without_stale_events() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = fake_harness(directory.path());
+    let stale_id = Uuid::new_v4();
+    let current_id = Uuid::new_v4();
+    let command = |request_id, environment| Command::ModelCatalogRefresh {
+        request_id,
+        harness: HarnessKind::Codex,
+        executable: executable.to_string_lossy().into_owned(),
+        cwd: directory.path().to_string_lossy().into_owned(),
+        environment,
+    };
+    let mut runner = TestRunner::spawn();
+    runner
+        .send(command(
+            stale_id,
+            vec![EnvironmentVariable {
+                name: "TEST_CATALOG_BLOCK".into(),
+                value: "1".into(),
+            }],
+        ))
+        .await;
+    runner.send(command(current_id, Vec::new())).await;
+
+    assert!(matches!(
+        runner.next().await,
+        Event::ModelCatalogLoaded { request_id, .. } if request_id == current_id
+    ));
+    runner.shutdown().await;
+}
+
+#[tokio::test]
+async fn catalog_request_errors_are_explicit_and_retriable() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = fake_harness(directory.path());
+    let request_id = Uuid::new_v4();
+    let mut runner = TestRunner::spawn();
+    runner
+        .send(Command::ModelCatalogRefresh {
+            request_id,
+            harness: HarnessKind::Codex,
+            executable: executable.to_string_lossy().into_owned(),
+            cwd: directory.path().to_string_lossy().into_owned(),
+            environment: vec![EnvironmentVariable {
+                name: "TEST_CATALOG_ERROR".into(),
+                value: "1".into(),
+            }],
+        })
+        .await;
+
+    assert!(matches!(
+        runner.next().await,
+        Event::ModelCatalogFailed { request_id: id, message, .. }
+            if id == request_id && message.contains("model/list unavailable")
+    ));
+    runner.shutdown().await;
+}
+
+#[tokio::test]
 async fn runner_streams_fake_omp_and_uses_guarded_json_mode() {
     let directory = tempfile::tempdir().unwrap();
     let mut request = request(

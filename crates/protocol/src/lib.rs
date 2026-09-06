@@ -1,9 +1,9 @@
-use nexus_domain::{HarnessKind, RunStatus, ThinkingEffort};
+use nexus_domain::{HarnessKind, ModelDescriptor, RunStatus, ThinkingEffort};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandEnvelope {
@@ -32,6 +32,15 @@ pub enum Command {
     HarnessProbe {
         harness: HarnessKind,
         executable: String,
+    },
+    #[serde(rename = "model.catalog.refresh")]
+    ModelCatalogRefresh {
+        request_id: Uuid,
+        harness: HarnessKind,
+        executable: String,
+        cwd: String,
+        #[serde(default)]
+        environment: Vec<EnvironmentVariable>,
     },
     #[serde(rename = "run.start")]
     RunStart(StartRun),
@@ -112,6 +121,18 @@ pub enum Event {
     RunnerReady,
     #[serde(rename = "harness.detected")]
     HarnessDetected(HarnessProbe),
+    #[serde(rename = "model.catalog.loaded")]
+    ModelCatalogLoaded {
+        request_id: Uuid,
+        harness: HarnessKind,
+        models: Vec<ModelDescriptor>,
+    },
+    #[serde(rename = "model.catalog.failed")]
+    ModelCatalogFailed {
+        request_id: Uuid,
+        harness: HarnessKind,
+        message: String,
+    },
     #[serde(rename = "run.started")]
     RunStarted { run_id: Uuid, pid: u32 },
     #[serde(rename = "run.output.delta")]
@@ -211,6 +232,41 @@ mod tests {
         assert_eq!(request.effort, ThinkingEffort::XHigh);
         assert_eq!(request.environment[0].name, "OPENAI_API_KEY");
         assert_eq!(request.environment[0].value, "secret-value");
+    }
+
+    #[test]
+    fn protocol_round_trip_preserves_model_catalog_request_context() {
+        let request_id = Uuid::new_v4();
+        let command = CommandEnvelope::new(Command::ModelCatalogRefresh {
+            request_id,
+            harness: HarnessKind::Codex,
+            executable: "/usr/local/bin/codex".into(),
+            cwd: "/tmp/project".into(),
+            environment: vec![EnvironmentVariable {
+                name: "CODEX_API_KEY".into(),
+                value: "secret-value".into(),
+            }],
+        });
+
+        let json = serde_json::to_string(&command).unwrap();
+        assert!(json.contains(r#""kind":"model.catalog.refresh""#));
+        assert!(!format!("{command:?}").contains("secret-value"));
+        let decoded: CommandEnvelope = serde_json::from_str(&json).unwrap();
+        let Command::ModelCatalogRefresh {
+            request_id: decoded_id,
+            harness,
+            executable,
+            cwd,
+            environment,
+        } = decoded.command
+        else {
+            panic!("expected model.catalog.refresh")
+        };
+        assert_eq!(decoded_id, request_id);
+        assert_eq!(harness, HarnessKind::Codex);
+        assert_eq!(executable, "/usr/local/bin/codex");
+        assert_eq!(cwd, "/tmp/project");
+        assert_eq!(environment[0].value, "secret-value");
     }
 
     #[test]

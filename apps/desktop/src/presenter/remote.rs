@@ -86,14 +86,18 @@ impl Presenter {
             streaming_text: self.model.streaming_text.clone(),
             status: self.model.status.clone(),
             harness: self.model.selected_harness,
-            model: self
-                .model
-                .selected_provider_profile()
-                .and_then(|profile| profile.model.clone())
-                .or_else(|| {
-                    (self.model.selected_harness == HarnessKind::Claude)
-                        .then(|| self.model.claude_model.to_string())
-                }),
+            model: match self.model.selected_harness {
+                HarnessKind::Claude => self
+                    .model
+                    .selected_provider_profile()
+                    .and_then(|profile| profile.model.clone())
+                    .or_else(|| Some(self.model.claude_model.to_string())),
+                HarnessKind::Codex => self.model.configured_codex_model().map(str::to_owned),
+                HarnessKind::Omp => self
+                    .model
+                    .selected_provider_profile()
+                    .and_then(|profile| profile.model.clone()),
+            },
             effort: self.model.effort,
             harness_ready: self.model.selected_probe().is_some_and(|probe| {
                 let profile_ready = self

@@ -1,5 +1,6 @@
 use super::{Presenter, executable_setting_key};
 use crate::infrastructure::storage::NewTaskRun;
+use crate::model::ModelCatalogState;
 use nexus_domain::{HarnessKind, MessageKind, MessageRole, RunStatus, ToolMetadata};
 use nexus_protocol::{Command, CommandEnvelope, Event, StartRun};
 use std::time::Instant;
@@ -35,6 +36,52 @@ impl Presenter {
                 if let Some(executable) = history_executable {
                     self.connect_codex_history(executable);
                 }
+            }
+            Event::ModelCatalogLoaded {
+                request_id,
+                harness: HarnessKind::Codex,
+                models,
+            } if self.model.codex_model_catalog.accepts(request_id) => {
+                let count = models.len();
+                self.model.codex_model_catalog = if models.is_empty() {
+                    ModelCatalogState::Empty
+                } else {
+                    ModelCatalogState::Ready(models)
+                };
+                let selected_unavailable = self.model.codex_model_override_is_unavailable();
+                let effort_reset = !selected_unavailable && self.normalize_codex_effort();
+                let profile_model_unverified = self.model.codex_model_override.is_none()
+                    && self
+                        .model
+                        .selected_provider_profile()
+                        .and_then(|profile| profile.model.as_deref())
+                        .is_some()
+                    && self.model.selected_codex_catalog_model().is_none();
+                self.model.status = if selected_unavailable {
+                    format!(
+                        "当前 Codex 模型 {} 不在目录中，请重新选择或跟随默认。",
+                        self.model
+                            .codex_model_override
+                            .as_deref()
+                            .unwrap_or_default()
+                    )
+                } else if effort_reset {
+                    "当前模型不支持原 effort，已恢复为模型默认。".into()
+                } else if profile_model_unverified {
+                    "Profile 默认模型不在当前目录中；仍可使用，但尚未验证可用。".into()
+                } else if count == 0 {
+                    "Codex 模型目录为空；仍可跟随 CLI 默认。".into()
+                } else {
+                    format!("已加载 {count} 个 Codex 模型。")
+                };
+            }
+            Event::ModelCatalogFailed {
+                request_id,
+                harness: HarnessKind::Codex,
+                message,
+            } if self.model.codex_model_catalog.accepts(request_id) => {
+                self.model.codex_model_catalog = ModelCatalogState::Failed(message.clone());
+                self.model.status = format!("Codex 模型目录加载失败：{message}");
             }
             Event::RunStarted { run_id, .. } if self.model.active_run == Some(run_id) => {
                 let harness = self
@@ -204,6 +251,11 @@ impl Presenter {
         let executable = probe.executable.clone();
         let harness_version = probe.version.clone();
         let harness = self.model.selected_harness;
+        if harness == HarnessKind::Codex && !self.model.codex_selection_is_valid() {
+            self.model.status =
+                "当前 Codex 模型或 effort 未通过目录验证，请调整选择后重试。".into();
+            return false;
+        }
         let (environment, profile_model) = match self.provider_launch_configuration() {
             Ok(configuration) => configuration,
             Err(error) => {
@@ -211,10 +263,18 @@ impl Presenter {
                 return false;
             }
         };
-        let model = profile_model.or_else(|| match harness {
-            HarnessKind::Claude => self.model.claude_model.cli_value().map(str::to_owned),
-            HarnessKind::Codex | HarnessKind::Omp => None,
-        });
+        let model = match harness {
+            HarnessKind::Claude => {
+                profile_model.or_else(|| self.model.claude_model.cli_value().map(str::to_owned))
+            }
+            HarnessKind::Codex => self.model.codex_model_override.clone().or(profile_model),
+            HarnessKind::Omp => profile_model,
+        };
+        let effort = if harness == HarnessKind::Codex {
+            self.resolved_codex_effort(model.as_deref())
+        } else {
+            self.model.effort
+        };
         let title: String = prompt.chars().take(48).collect();
         let created = self.storage.create_task_run(NewTaskRun {
             project_id: project.id,
@@ -223,7 +283,7 @@ impl Presenter {
             harness,
             executable: &executable,
             model: model.as_deref(),
-            effort: self.model.effort,
+            effort,
             harness_version: harness_version.as_deref(),
         });
         let Ok((task_id, run_id)) = created else {
@@ -238,7 +298,7 @@ impl Presenter {
             harness,
             executable: executable.clone(),
             model,
-            effort: self.model.effort,
+            effort,
             environment,
         }));
         if let Some(runner) = &self.runner
@@ -254,7 +314,7 @@ impl Presenter {
             self.model.codex_history_messages.clear();
             self.model.codex_thread_loading = false;
             self.model.messages = self.storage.messages(task_id).unwrap_or_default();
-            self.model.status = format!("正在启动 {harness} · {}", self.model.effort);
+            self.model.status = format!("正在启动 {harness} · {effort}");
             let _ = self
                 .storage
                 .set_setting(executable_setting_key(harness), &configured_executable);

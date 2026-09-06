@@ -7,7 +7,7 @@ mod timeline;
 mod tools;
 
 use crate::{
-    model::{AppearanceSettings, ThemePreference, history::HistoryMessage},
+    model::{AppearanceSettings, ModelCatalogState, ThemePreference, history::HistoryMessage},
     presenter::{Presenter, ProviderProfileDraft},
 };
 use components::*;
@@ -420,6 +420,23 @@ impl NexusView {
         cx.notify();
     }
 
+    fn select_codex_model(&mut self, model_id: Option<String>, cx: &mut Context<Self>) {
+        self.presenter.select_codex_model(model_id);
+        self.presenter.notify_remote_changed();
+        cx.notify();
+    }
+
+    fn refresh_model_catalog(
+        &mut self,
+        _: &gpui::ClickEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.presenter.refresh_model_catalog();
+        self.presenter.notify_remote_changed();
+        cx.notify();
+    }
+
     fn select_effort(&mut self, effort: ThinkingEffort, cx: &mut Context<Self>) {
         self.presenter.select_effort(effort);
         self.presenter.notify_remote_changed();
@@ -645,8 +662,11 @@ impl NexusView {
             })
     }
 
-    fn model_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn model_selector(&self, cx: &mut Context<Self>) -> AnyElement {
         let model = self.presenter.model();
+        if model.selected_harness == HarnessKind::Codex {
+            return self.codex_model_selector(cx);
+        }
         let selected = model.claude_model;
         let app = cx.entity().clone();
         let profile_model = model
@@ -687,11 +707,179 @@ impl NexusView {
                         })
                 })
             })
+            .into_any_element()
+    }
+
+    fn codex_model_selector(&self, cx: &mut Context<Self>) -> AnyElement {
+        let model = self.presenter.model();
+        let selected = model.codex_model_override.clone();
+        let models = model
+            .codex_model_catalog
+            .models()
+            .unwrap_or_default()
+            .to_vec();
+        let profile_model = model
+            .selected_provider_profile()
+            .and_then(|profile| profile.model.clone());
+        let selected_catalog_model = model.selected_codex_catalog_model();
+        let label = if let Some(model_id) = model.codex_model_override.as_deref() {
+            selected_catalog_model
+                .map(|model| model.display_name.clone())
+                .unwrap_or_else(|| match &model.codex_model_catalog {
+                    ModelCatalogState::Loading { .. } => format!("{model_id} · 验证中"),
+                    ModelCatalogState::Idle | ModelCatalogState::Failed(_) => {
+                        format!("{model_id} · 未验证")
+                    }
+                    ModelCatalogState::Ready(_) | ModelCatalogState::Empty => {
+                        format!("{model_id} · 不可用")
+                    }
+                })
+        } else if let Some(model_id) = profile_model.as_deref() {
+            selected_catalog_model
+                .map(|model| format!("默认 · {}", model.display_name))
+                .unwrap_or_else(|| format!("默认 · {model_id}"))
+        } else if let Some(default_model) = selected_catalog_model {
+            format!("CLI 默认 · {}", default_model.display_name)
+        } else {
+            match &model.codex_model_catalog {
+                ModelCatalogState::Loading { .. } => "模型目录加载中".into(),
+                ModelCatalogState::Failed(_) => "CLI 默认 · 加载失败".into(),
+                ModelCatalogState::Empty => "CLI 默认 · 目录为空".into(),
+                ModelCatalogState::Idle | ModelCatalogState::Ready(_) => "CLI 默认模型".into(),
+            }
+        };
+        let tooltip = model
+            .configured_codex_model()
+            .map(|model| format!("Codex 模型：{model}"))
+            .unwrap_or_else(|| match &model.codex_model_catalog {
+                ModelCatalogState::Failed(message) => format!("模型目录加载失败：{message}"),
+                _ => "跟随 Codex CLI 默认模型".into(),
+            });
+        let profile_unverified = selected.is_none()
+            && profile_model.as_deref().is_some()
+            && matches!(
+                model.codex_model_catalog,
+                ModelCatalogState::Ready(_) | ModelCatalogState::Empty
+            )
+            && selected_catalog_model.is_none();
+        let follow_default_label = profile_model
+            .as_deref()
+            .map(|model| {
+                format!(
+                    "跟随默认 · {model}{}",
+                    if profile_unverified {
+                        "（目录未验证）"
+                    } else {
+                        ""
+                    }
+                )
+            })
+            .unwrap_or_else(|| "跟随默认 · CLI 默认模型".into());
+        let state = model.codex_model_catalog.clone();
+        let selected_unavailable = model.codex_model_override_is_unavailable();
+        let active = model.active_run.is_some();
+        let app = cx.entity().clone();
+        let button_id = "composer-model";
+        Button::new(button_id)
+            .ghost()
+            .small()
+            .h(px(COMPACT_CONTROL_HEIGHT))
+            .max_w(px(220.))
+            .label(label)
+            .tooltip(tooltip)
+            .disabled(active)
+            .map(|button| {
+                AnimatedDropdown::new(button_id, button, self.reduced_motion, move |menu, _, _| {
+                    let app_for_default = app.clone();
+                    let mut menu = menu.min_w(px(280.)).item(
+                        PopupMenuItem::new(follow_default_label.clone())
+                            .checked(selected.is_none())
+                            .on_click(move |_, _, cx| {
+                                app_for_default
+                                    .update(cx, |app, cx| app.select_codex_model(None, cx));
+                            }),
+                    );
+                    if selected_unavailable {
+                        menu = menu.item(
+                            PopupMenuItem::new(format!(
+                                "当前选择不可用 · {}",
+                                selected.as_deref().unwrap_or_default()
+                            ))
+                            .disabled(true),
+                        );
+                    }
+                    match &state {
+                        ModelCatalogState::Idle => {
+                            menu = menu
+                                .item(PopupMenuItem::new("选择项目后加载模型目录").disabled(true));
+                        }
+                        ModelCatalogState::Loading { .. } => {
+                            menu =
+                                menu.item(PopupMenuItem::new("正在加载模型目录…").disabled(true));
+                        }
+                        ModelCatalogState::Empty => {
+                            menu = menu.item(PopupMenuItem::new("当前模型目录为空").disabled(true));
+                        }
+                        ModelCatalogState::Failed(_) => {
+                            menu = menu.item(PopupMenuItem::new("模型目录加载失败").disabled(true));
+                        }
+                        ModelCatalogState::Ready(_) => {
+                            for catalog_model in &models {
+                                let app = app.clone();
+                                let model_id = catalog_model.id.clone();
+                                let item_label = if catalog_model.display_name == catalog_model.id {
+                                    catalog_model.id.clone()
+                                } else {
+                                    format!("{} · {}", catalog_model.display_name, catalog_model.id)
+                                };
+                                menu = menu.item(
+                                    PopupMenuItem::new(item_label)
+                                        .checked(selected.as_deref() == Some(&catalog_model.id))
+                                        .on_click(move |_, _, cx| {
+                                            let model_id = model_id.clone();
+                                            app.update(cx, |app, cx| {
+                                                app.select_codex_model(Some(model_id), cx)
+                                            });
+                                        }),
+                                );
+                            }
+                        }
+                    }
+                    let app_for_refresh = app.clone();
+                    menu.item(PopupMenuItem::separator()).item(
+                        PopupMenuItem::new("刷新模型目录")
+                            .icon(IconName::RotateCw)
+                            .on_click(move |event, window, cx| {
+                                app_for_refresh.update(cx, |app, cx| {
+                                    app.refresh_model_catalog(event, window, cx)
+                                });
+                            }),
+                    )
+                })
+            })
+            .into_any_element()
     }
 
     fn effort_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let model = self.presenter.model();
         let selected = model.effort;
+        let efforts = if model.selected_harness == HarnessKind::Codex {
+            let mut efforts = vec![ThinkingEffort::Default];
+            if let Some(catalog_model) = model.selected_codex_catalog_model() {
+                efforts.extend(
+                    catalog_model
+                        .supported_reasoning_efforts
+                        .iter()
+                        .map(|option| option.effort),
+                );
+            }
+            if !efforts.contains(&selected) {
+                efforts.push(selected);
+            }
+            efforts
+        } else {
+            ThinkingEffort::ALL.to_vec()
+        };
         let app = cx.entity().clone();
         let button_id = "composer-effort";
         Button::new(button_id)
@@ -703,8 +891,9 @@ impl NexusView {
             .disabled(model.active_run.is_some())
             .map(|button| {
                 AnimatedDropdown::new(button_id, button, self.reduced_motion, move |menu, _, _| {
-                    ThinkingEffort::ALL
-                        .into_iter()
+                    efforts
+                        .iter()
+                        .copied()
                         .fold(menu.min_w(px(140.)), |menu, effort| {
                             let app = app.clone();
                             menu.item(
