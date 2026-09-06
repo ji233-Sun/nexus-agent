@@ -68,6 +68,10 @@ pub(crate) async fn emit_decoded(run_id: Uuid, decoded: DecodedEvent, emitter: &
             status: RunStatus::Running,
             message: Some(message),
         },
+        DecodedEvent::WriteStdin(_)
+        | DecodedEvent::InputAccepted(_)
+        | DecodedEvent::InputRejected { .. }
+        | DecodedEvent::TurnCompleted => return,
     };
     emitter.send(event).await;
 }

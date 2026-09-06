@@ -6,7 +6,7 @@ use nexus_domain::{
     HarnessKind, Message, MessageKind, MessageRole, Project, ProviderProfile, RunStatus,
     TaskSummary, ThinkingEffort, ToolMetadata,
 };
-use rusqlite::{Connection, OptionalExtension as _, params};
+use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
 use uuid::Uuid;
 
 pub struct Storage {
@@ -31,6 +31,19 @@ pub struct NewTaskRun<'a> {
     pub model: Option<&'a str>,
     pub effort: ThinkingEffort,
     pub harness_version: Option<&'a str>,
+}
+
+pub struct PendingTaskRun<'a> {
+    pub task_id: Uuid,
+    pub run_id: Uuid,
+    transaction: Transaction<'a>,
+}
+
+impl PendingTaskRun<'_> {
+    pub fn commit(self) -> Result<(Uuid, Uuid)> {
+        self.transaction.commit()?;
+        Ok((self.task_id, self.run_id))
+    }
 }
 
 impl Storage {
@@ -306,7 +319,14 @@ impl Storage {
         Ok(count as usize)
     }
 
+    #[cfg(test)]
     pub fn create_task_run(&mut self, request: NewTaskRun<'_>) -> Result<(Uuid, Uuid)> {
+        self.prepare_task_run(request)?.commit()
+    }
+
+    // Keep creation uncommitted until the runner accepts the start command.
+    // Dropping the pending run rolls back its message and task status as well.
+    pub fn prepare_task_run(&mut self, request: NewTaskRun<'_>) -> Result<PendingTaskRun<'_>> {
         let NewTaskRun {
             task_id,
             project_id,
@@ -369,8 +389,11 @@ impl Storage {
                 now
             ],
         )?;
-        transaction.commit()?;
-        Ok((task_id, run_id))
+        Ok(PendingTaskRun {
+            task_id,
+            run_id,
+            transaction,
+        })
     }
 
     pub fn conversation_config(&self, task_id: Uuid) -> Result<Option<ConversationConfig>> {

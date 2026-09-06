@@ -7,7 +7,7 @@ use nexus_domain::{
     ThinkingEffort,
 };
 use nexus_protocol::HarnessProbe;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Default)]
@@ -62,6 +62,13 @@ impl Default for AppearanceSettings {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct QueuedMessage {
+    pub(crate) id: Uuid,
+    pub(crate) task_id: Uuid,
+    pub(crate) prompt: String,
+}
+
 #[derive(Default)]
 pub(crate) struct AppModel {
     pub(crate) appearance: AppearanceSettings,
@@ -72,6 +79,9 @@ pub(crate) struct AppModel {
     pub(crate) selected_task: Option<Uuid>,
     pub(crate) messages: Vec<Message>,
     pub(crate) active_run: Option<Uuid>,
+    pub(crate) run_cancelling: bool,
+    pub(crate) queued_messages: VecDeque<QueuedMessage>,
+    pub(crate) steering_message: Option<Uuid>,
     pub(crate) active_run_elapsed_seconds: Option<u64>,
     pub(crate) active_task: Option<Uuid>,
     pub(crate) active_harness: Option<HarnessKind>,
@@ -110,6 +120,14 @@ impl AppModel {
                 .selected_probe()
                 .is_some_and(|probe| probe.available && (probe.authenticated || profile_ready))
             && self.catalog_selection_is_valid()
+    }
+
+    pub(crate) fn can_queue(&self) -> bool {
+        self.active_run.is_some()
+            && !self.run_cancelling
+            && self.active_task.is_some()
+            && self.active_task == self.selected_task
+            && self.selected_codex_thread.is_none()
     }
 
     pub(crate) fn selected_provider_profile(&self) -> Option<&ProviderProfile> {

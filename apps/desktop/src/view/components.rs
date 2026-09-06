@@ -226,7 +226,9 @@ pub(super) fn matches_search(text: &str, query: &str) -> bool {
 }
 
 pub(super) fn can_send_prompt(model: &crate::model::AppModel, prompt: &str) -> bool {
-    model.can_submit() && model.selected_codex_thread.is_none() && !prompt.trim().is_empty()
+    (model.can_submit() || model.can_queue())
+        && model.selected_codex_thread.is_none()
+        && !prompt.trim().is_empty()
 }
 
 impl NexusView {
@@ -808,7 +810,7 @@ mod tests {
     }
 
     #[test]
-    fn composer_rejects_blank_prompts_read_only_history_and_busy_or_unready_agents() {
+    fn composer_allows_queueing_only_for_the_active_task_and_rejects_invalid_input() {
         let directory = tempfile::tempdir().unwrap();
         let storage = Storage::open(Path::new(":memory:")).unwrap();
         let mut model = AppModel {
@@ -834,6 +836,11 @@ mod tests {
         assert!(!can_send_prompt(&model, "检查当前项目"));
         model.selected_codex_thread = None;
         model.active_run = Some(Uuid::new_v4());
+        assert!(!can_send_prompt(&model, "检查当前项目"));
+        model.active_task = Some(Uuid::new_v4());
+        model.selected_task = model.active_task;
+        assert!(can_send_prompt(&model, "检查当前项目"));
+        model.run_cancelling = true;
         assert!(!can_send_prompt(&model, "检查当前项目"));
         model.active_run = None;
         model.harnesses.clear();

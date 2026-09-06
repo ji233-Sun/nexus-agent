@@ -123,6 +123,25 @@ fn request(directory: &Path, executable: PathBuf, harness: HarnessKind, prompt: 
 }
 
 #[tokio::test]
+async fn exited_run_releases_the_slot_before_the_next_message_starts() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = fake_harness(directory.path());
+    let mut runner = TestRunner::spawn();
+    for _ in 0..10 {
+        let request = request(
+            directory.path(),
+            executable.clone(),
+            HarnessKind::Claude,
+            "next message",
+        );
+        let run_id = request.run_id;
+        runner.send(Command::RunStart(request)).await;
+        runner.collect_run(run_id, RunStatus::Completed).await;
+    }
+    runner.shutdown().await;
+}
+
+#[tokio::test]
 async fn runner_resumes_each_harness_session_across_processes() {
     let directory = tempfile::tempdir().unwrap();
     let executable = fake_harness(directory.path());
@@ -173,7 +192,16 @@ async fn runner_resumes_each_harness_session_across_processes() {
             HarnessKind::Omp => "omp-args.txt",
         };
         let args = fs::read_to_string(directory.path().join(args_file)).unwrap();
-        assert!(args.lines().any(|arg| arg == session_id));
+        if harness == HarnessKind::Codex {
+            let frame: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(directory.path().join("thread-params.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(frame["method"], "thread/resume");
+            assert_eq!(frame["params"]["threadId"], session_id);
+        } else {
+            assert!(args.lines().any(|arg| arg == session_id));
+        }
         assert!(!args.lines().any(|arg| matches!(
             arg,
             "--ephemeral" | "--no-session" | "--no-session-persistence" | "--last" | "--continue"
@@ -220,7 +248,7 @@ async fn runner_streams_fake_claude_and_forwards_model_configuration() {
 }
 
 #[tokio::test]
-async fn runner_streams_fake_codex_and_uses_non_interactive_mode() {
+async fn runner_streams_fake_codex_and_preserves_non_interactive_permissions() {
     let directory = tempfile::tempdir().unwrap();
     let request = request(
         directory.path(),
@@ -251,16 +279,18 @@ async fn runner_streams_fake_codex_and_uses_non_interactive_mode() {
     );
     let args = fs::read_to_string(directory.path().join("codex-args.txt")).unwrap();
     let args = args.lines().collect::<Vec<_>>();
-    assert_eq!(args.first().copied(), Some("exec"));
-    assert!(
-        args.windows(2)
-            .any(|pair| pair == ["--sandbox", "workspace-write"])
-    );
-    assert!(
-        args.windows(2)
-            .any(|pair| pair == ["--config", "model_reasoning_effort=\"high\""])
-    );
-    assert_eq!(args.last().copied(), Some("-"));
+    assert_eq!(args.first().copied(), Some("app-server"));
+    let thread: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(directory.path().join("thread-params.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(thread["params"]["sandbox"], "workspace-write");
+    assert_eq!(thread["params"]["approvalPolicy"], "never");
+    let turn: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(directory.path().join("turn-params.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(turn["params"]["effort"], "high");
     assert!(!args.contains(&"test prompt"));
 }
 
@@ -510,7 +540,7 @@ async fn catalog_request_errors_are_explicit_and_retriable() {
 }
 
 #[tokio::test]
-async fn runner_streams_fake_omp_and_uses_guarded_json_mode() {
+async fn runner_streams_fake_omp_and_uses_guarded_rpc_mode() {
     let directory = tempfile::tempdir().unwrap();
     let mut request = request(
         directory.path(),
@@ -546,7 +576,7 @@ async fn runner_streams_fake_omp_and_uses_guarded_json_mode() {
     );
     let args = fs::read_to_string(directory.path().join("omp-args.txt")).unwrap();
     let args = args.lines().collect::<Vec<_>>();
-    assert!(args.windows(2).any(|pair| pair == ["--mode", "json"]));
+    assert!(args.windows(2).any(|pair| pair == ["--mode", "rpc"]));
     assert!(
         args.windows(2)
             .any(|pair| pair == ["--approval-mode", "write"])
@@ -560,6 +590,153 @@ async fn runner_streams_fake_omp_and_uses_guarded_json_mode() {
         fs::read_to_string(directory.path().join("provider-env.txt")).unwrap(),
         "test-secret"
     );
+}
+
+#[tokio::test]
+async fn steer_waits_for_all_tools_and_uses_native_receipts_in_the_same_run() {
+    let binaries = tempfile::tempdir().unwrap();
+    let executable = fake_harness(binaries.path());
+    for harness in HarnessKind::ALL {
+        for scenario in ["steer-tools", "steer-rejected", "steer-unconfirmed"] {
+            if harness == HarnessKind::Claude && scenario == "steer-rejected" {
+                continue;
+            }
+            let directory = tempfile::tempdir().unwrap();
+            let request = request(directory.path(), executable.clone(), harness, scenario);
+            let run_id = request.run_id;
+            let message_id = Uuid::new_v4();
+            let prompt = "corrected\n指令 \"quoted\"";
+            let mut runner = TestRunner::spawn();
+            runner.send(Command::RunStart(request)).await;
+            loop {
+                if matches!(runner.next().await, Event::RunToolStarted { tool_id, .. } if tool_id == "tool-2")
+                {
+                    break;
+                }
+            }
+            runner
+                .send(Command::RunSteer {
+                    run_id,
+                    message_id,
+                    prompt: prompt.into(),
+                })
+                .await;
+            runner.send(Command::RunnerHello).await;
+            assert!(matches!(runner.next().await, Event::RunnerReady));
+            fs::write(directory.path().join("finish-first"), "ready").unwrap();
+            loop {
+                match runner.next().await {
+                    Event::RunMessageCompleted { text, .. } if text == "first-tool-done" => break,
+                    Event::RunInputAccepted { .. } | Event::RunExited { .. } => {
+                        panic!("Steer must wait for the whole batch")
+                    }
+                    _ => {}
+                }
+            }
+            assert!(
+                timeout(Duration::from_millis(100), runner.events.next_line())
+                    .await
+                    .is_err()
+            );
+            assert!(!directory.path().join("steer-input.json").exists());
+            fs::write(directory.path().join("finish-second"), "ready").unwrap();
+            let expected = if scenario == "steer-unconfirmed" {
+                RunStatus::Failed
+            } else {
+                RunStatus::Completed
+            };
+            let events = runner.collect_run(run_id, expected).await;
+            assert!(
+                events.iter().any(|event| match event {
+                    Event::RunInputAccepted {
+                        run_id: id,
+                        message_id: received,
+                    } => scenario == "steer-tools" && *id == run_id && *received == message_id,
+                    Event::RunInputRejected {
+                        run_id: id,
+                        message_id: received,
+                        ..
+                    } => scenario != "steer-tools" && *id == run_id && *received == message_id,
+                    _ => false,
+                }),
+                "missing native receipt for {harness} / {scenario}"
+            );
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, Event::RunStarted { .. }))
+            );
+            let frame: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(directory.path().join("steer-input.json")).unwrap(),
+            )
+            .unwrap();
+            match harness {
+                HarnessKind::Codex => {
+                    assert_eq!(frame["method"], "turn/steer");
+                    assert_eq!(frame["params"]["expectedTurnId"], "turn-1");
+                    assert_eq!(frame["params"]["input"][0]["text"], prompt);
+                }
+                HarnessKind::Claude => assert_eq!(frame["message"]["content"], prompt),
+                HarnessKind::Omp => {
+                    assert_eq!(frame["type"], "steer");
+                    assert_eq!(frame["message"], prompt);
+                }
+            }
+            runner.shutdown().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn unsent_steer_is_rejected_on_completion_or_cancellation() {
+    let binaries = tempfile::tempdir().unwrap();
+    let executable = fake_harness(binaries.path());
+    for harness in HarnessKind::ALL {
+        for cancel in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let request = request(
+                directory.path(),
+                executable.clone(),
+                harness,
+                "steer-no-tools",
+            );
+            let run_id = request.run_id;
+            let message_id = Uuid::new_v4();
+            let mut runner = TestRunner::spawn();
+            runner.send(Command::RunStart(request)).await;
+            loop {
+                if matches!(runner.next().await, Event::RunMessageCompleted { text, .. } if text == "ready")
+                {
+                    break;
+                }
+            }
+            runner
+                .send(Command::RunSteer {
+                    run_id,
+                    message_id,
+                    prompt: "keep queued".into(),
+                })
+                .await;
+            runner.send(Command::RunnerHello).await;
+            assert!(matches!(runner.next().await, Event::RunnerReady));
+            let expected = if cancel {
+                runner.send(Command::RunCancel { run_id }).await;
+                RunStatus::Cancelled
+            } else {
+                fs::write(directory.path().join("finish-turn"), "ready").unwrap();
+                RunStatus::Completed
+            };
+            let events = runner.collect_run(run_id, expected).await;
+            assert!(events.iter().any(|event| matches!(event,
+                Event::RunInputRejected { run_id: id, message_id: received, .. } if *id == run_id && *received == message_id)));
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, Event::RunInputAccepted { .. }))
+            );
+            runner.shutdown().await;
+        }
+    }
 }
 
 #[tokio::test]

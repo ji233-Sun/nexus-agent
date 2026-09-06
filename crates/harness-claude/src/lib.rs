@@ -2,9 +2,9 @@ use std::path::{Path, PathBuf};
 
 use nexus_domain::{HarnessKind, ThinkingEffort};
 pub use nexus_harness_core::{DecodedEvent, LaunchSpec};
-use nexus_harness_core::{LineDecoder, resolve_executable, tool_content};
+use nexus_harness_core::{InputFrame, LineDecoder, resolve_executable, tool_content};
 use nexus_protocol::HarnessProbe;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::process::Command;
 
 pub fn build_launch_spec(
@@ -18,11 +18,12 @@ pub fn build_launch_spec(
     let mut args = vec![
         "--print".into(),
         "--input-format".into(),
-        "text".into(),
+        "stream-json".into(),
         "--output-format".into(),
         "stream-json".into(),
         "--verbose".into(),
         "--include-partial-messages".into(),
+        "--replay-user-messages".into(),
         "--permission-mode".into(),
         "acceptEdits".into(),
         "--effort".into(),
@@ -41,8 +42,19 @@ pub fn build_launch_spec(
         executable: PathBuf::from(executable),
         args,
         cwd: cwd.to_path_buf(),
-        stdin: prompt.to_owned(),
+        stdin: format!("{}\n", user_input(prompt, None)),
     }
+}
+
+fn user_input(prompt: &str, message_id: Option<&str>) -> Value {
+    let mut frame = json!({
+        "type": "user", "session_id": "", "parent_tool_use_id": null,
+        "message": { "role": "user", "content": prompt }
+    });
+    if let Some(id) = message_id {
+        frame["uuid"] = id.into();
+    }
+    frame
 }
 
 pub async fn probe(configured_executable: &str) -> HarnessProbe {
@@ -114,13 +126,25 @@ impl LineDecoder for EventDecoder {
         let frame: Value = serde_json::from_str(line)?;
         Ok(decode_frame(&frame))
     }
+
+    fn steer(&mut self, message_id: &str, prompt: &str) -> Option<InputFrame> {
+        Some(InputFrame(user_input(prompt, Some(message_id))))
+    }
 }
 
 fn decode_frame(frame: &Value) -> Vec<DecodedEvent> {
     match frame.get("type").and_then(Value::as_str) {
         Some("stream_event") => decode_stream_event(frame),
         Some("assistant") => decode_assistant(frame),
-        Some("user") => decode_tool_results(frame),
+        Some("user") => {
+            let mut events = decode_tool_results(frame);
+            if events.is_empty()
+                && let Some(id) = frame.get("uuid").and_then(Value::as_str)
+            {
+                events.push(DecodedEvent::InputAccepted(id.into()));
+            }
+            events
+        }
         Some("system") => {
             let mut events = Vec::new();
             if let Some(subtype) = frame.get("subtype").and_then(Value::as_str) {
@@ -134,7 +158,33 @@ fn decode_frame(frame: &Value) -> Vec<DecodedEvent> {
             }
             events
         }
-        Some("result") => Vec::new(),
+        Some("result") => {
+            let mut events = Vec::new();
+            if frame.get("is_error").and_then(Value::as_bool) == Some(true) {
+                events.push(DecodedEvent::Error(
+                    frame
+                        .get("errors")
+                        .map(tool_content)
+                        .unwrap_or_else(|| "Claude 轮次执行失败。".into()),
+                ));
+            }
+            events.push(DecodedEvent::TurnCompleted);
+            events
+        }
+        Some("control_request") => {
+            let request_id = &frame["request_id"];
+            let response = if frame.pointer("/request/subtype").and_then(Value::as_str)
+                == Some("can_use_tool")
+            {
+                json!({"subtype": "success", "request_id": request_id,
+                    "response": {"behavior": "deny", "message": "Nexus 暂不支持交互式工具审批。"}})
+            } else {
+                json!({"subtype": "error", "request_id": request_id, "error": "Nexus 不支持此控制请求。"})
+            };
+            vec![DecodedEvent::WriteStdin(InputFrame(
+                json!({"type": "control_response", "response": response}),
+            ))]
+        }
         _ => Vec::new(),
     }
 }
@@ -239,7 +289,16 @@ mod tests {
                 .any(|pair| pair == ["--effort", "xhigh"])
         );
         assert!(!spec.args.iter().any(|arg| arg.contains("secret prompt")));
-        assert_eq!(spec.stdin, "secret prompt");
+        assert!(
+            spec.args
+                .windows(2)
+                .any(|pair| pair == ["--input-format", "stream-json"])
+        );
+        assert!(spec.args.iter().any(|arg| arg == "--replay-user-messages"));
+        assert_eq!(
+            serde_json::from_str::<Value>(&spec.stdin).unwrap()["message"]["content"],
+            "secret prompt"
+        );
         assert!(
             !spec
                 .args
@@ -272,7 +331,10 @@ mod tests {
                 .iter()
                 .any(|arg| arg == "--no-session-persistence" || arg == "--fork-session")
         );
-        assert_eq!(resumed.stdin, "follow-up");
+        assert_eq!(
+            serde_json::from_str::<Value>(&resumed.stdin).unwrap()["message"]["content"],
+            "follow-up"
+        );
     }
 
     #[test]
@@ -329,7 +391,25 @@ mod tests {
             decoder
                 .decode_line(r#"{"type":"result","result":"done"}"#)
                 .unwrap(),
-            Vec::<DecodedEvent>::new()
+            vec![DecodedEvent::TurnCompleted]
+        );
+    }
+
+    #[test]
+    fn steering_replays_the_message_id_and_reports_failed_turns() {
+        let mut decoder = EventDecoder;
+        let frame = decoder
+            .steer("message-id", "new instruction\n第二行")
+            .unwrap();
+        assert_eq!(frame.0["uuid"], "message-id");
+        assert_eq!(frame.0["message"]["content"], "new instruction\n第二行");
+        assert_eq!(
+            decoder.decode_line(&frame.0.to_string()).unwrap(),
+            vec![DecodedEvent::InputAccepted("message-id".into())]
+        );
+        assert!(
+            matches!(decoder.decode_line(r#"{"type":"result","is_error":true,"errors":["denied"]}"#).unwrap().as_slice(),
+            [DecodedEvent::Error(message), DecodedEvent::TurnCompleted] if message.contains("denied"))
         );
     }
 }

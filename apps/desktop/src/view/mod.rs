@@ -1202,6 +1202,96 @@ impl NexusView {
 }
 
 impl NexusView {
+    fn render_message_queue(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let model = self.presenter.model();
+        let colors = palette(cx);
+        let queued = model
+            .queued_messages
+            .iter()
+            .filter(|message| Some(message.task_id) == model.selected_task)
+            .collect::<Vec<_>>();
+        div().when(!queued.is_empty(), |element| {
+            element
+                .pb_2()
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(rgb(colors.muted))
+                        .child(format!("排队消息 · {}", queued.len())),
+                )
+                .child(
+                    div()
+                        .id("message-queue")
+                        .max_h(px(160.))
+                        .overflow_y_scroll()
+                        .children(queued.into_iter().map(|message| {
+                            let id = message.id;
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .py_1()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_size(px(13.))
+                                        .child(message.prompt.clone()),
+                                )
+                                .when(model.active_run.is_none(), |element| {
+                                    element.child(
+                                        Button::new((ElementId::from(id), "send-queued"))
+                                            .ghost()
+                                            .small()
+                                            .label("发送")
+                                            .on_click(cx.listener(move |app, _, _, cx| {
+                                                app.presenter.send_queued_message(id);
+                                                app.presenter.notify_remote_changed();
+                                                cx.notify();
+                                            })),
+                                    )
+                                })
+                                .when(model.active_run.is_some(), |element| {
+                                    element.child(
+                                        Button::new((ElementId::from(id), "steer-queued"))
+                                            .debug_selector(move || format!("steer-queued-{id}"))
+                                            .ghost()
+                                            .small()
+                                            .label(if model.steering_message == Some(id) {
+                                                "等待工具完成…"
+                                            } else {
+                                                "Steer"
+                                            })
+                                            .tooltip("等待工具执行结束后介入当前对话")
+                                            .disabled(
+                                                !model.can_queue()
+                                                    || model.steering_message.is_some(),
+                                            )
+                                            .on_click(cx.listener(move |app, _, _, cx| {
+                                                app.presenter.steer_queued_message(id);
+                                                app.presenter.notify_remote_changed();
+                                                cx.notify();
+                                            })),
+                                    )
+                                })
+                                .child(
+                                    Button::new((ElementId::from(id), "remove-queued"))
+                                        .ghost()
+                                        .small()
+                                        .icon(IconName::Close)
+                                        .accessibility_label("移除排队消息")
+                                        .disabled(model.steering_message == Some(id))
+                                        .on_click(cx.listener(move |app, _, _, cx| {
+                                            app.presenter.remove_queued_message(id);
+                                            cx.notify();
+                                        })),
+                                )
+                        })),
+                )
+        })
+    }
+
     fn render_workspace(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = palette(cx);
         let material = materials(cx);
@@ -1219,7 +1309,7 @@ impl NexusView {
         } else if model.selected_project.is_none() {
             "先选择本地项目，再描述你希望完成的工作。"
         } else if model.active_run.is_some() {
-            "Agent 正在执行 · 可以提前起草下一条消息"
+            "Agent 正在执行 · 发送后排队，每轮结束后发送一条"
         } else if !model.can_submit() {
             "Agent 尚未就绪 · 打开设置检查探测和登录状态"
         } else if cfg!(target_os = "macos") {
@@ -1391,6 +1481,7 @@ impl NexusView {
                                     .p_3()
                                     .flex()
                                     .flex_col()
+                                    .child(self.render_message_queue(cx))
                                     .child(
                                         Textarea::new(&self.prompt_input)
                                             .disabled(history)
@@ -1427,36 +1518,51 @@ impl NexusView {
                                                     .child(self.model_selector(cx))
                                                     .child(self.effort_selector(cx)),
                                             )
-                                            .when(model.active_run.is_some(), |element| {
-                                                element.child(
-                                                    Button::new("composer-cancel")
-                                                        .danger()
-                                                        .outline()
-                                                        .small()
-                                                        .h(px(COMPACT_CONTROL_HEIGHT))
-                                                        .icon(IconName::Pause)
-                                                        .label("停止")
-                                                        .tooltip("停止当前运行，保留已有输出")
-                                                        .on_click(cx.listener(Self::cancel)),
-                                                )
-                                            })
-                                            .when(model.active_run.is_none(), |element| {
-                                                element.child(
-                                                    Button::new("submit")
-                                                        .primary()
-                                                        .small()
-                                                        .size(px(COMPACT_CONTROL_HEIGHT))
-                                                        .p_0()
-                                                        .icon(IconName::ArrowUp)
-                                                        .accessibility_label("发送任务")
-                                                        .tooltip(composer_hint)
-                                                        .when(!can_submit, |button| {
-                                                            button.opacity(0.42)
-                                                        })
-                                                        .disabled(!can_submit)
-                                                        .on_click(cx.listener(Self::submit)),
-                                                )
-                                            }),
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_2()
+                                                    .when(model.active_run.is_some(), |element| {
+                                                        element.child(
+                                                            Button::new("composer-cancel")
+                                                                .danger()
+                                                                .outline()
+                                                                .small()
+                                                                .h(px(COMPACT_CONTROL_HEIGHT))
+                                                                .icon(IconName::Pause)
+                                                                .label("停止")
+                                                                .disabled(model.run_cancelling)
+                                                                .tooltip(
+                                                                    "停止当前运行，保留已有输出",
+                                                                )
+                                                                .on_click(
+                                                                    cx.listener(Self::cancel),
+                                                                ),
+                                                        )
+                                                    })
+                                                    .child(
+                                                        Button::new("submit")
+                                                            .primary()
+                                                            .small()
+                                                            .size(px(COMPACT_CONTROL_HEIGHT))
+                                                            .p_0()
+                                                            .icon(IconName::ArrowUp)
+                                                            .accessibility_label(
+                                                                if model.active_run.is_some() {
+                                                                    "加入消息队列"
+                                                                } else {
+                                                                    "发送任务"
+                                                                },
+                                                            )
+                                                            .tooltip(composer_hint)
+                                                            .when(!can_submit, |button| {
+                                                                button.opacity(0.42)
+                                                            })
+                                                            .disabled(!can_submit)
+                                                            .on_click(cx.listener(Self::submit)),
+                                                    ),
+                                            ),
                                     )
                                     .map(|element| {
                                         entrance(element, "composer-enter", !self.reduced_motion)
@@ -1669,6 +1775,47 @@ mod catalog_model_tests {
         );
         assert!(current.items[0].title.contains("不可用"));
         assert!(content.selected_index().is_some());
+    }
+
+    #[gpui::test]
+    fn queued_message_steer_button_targets_the_message_and_waits_for_receipt(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (mut presenter, runner, _directory) = fixture();
+        assert!(presenter.submit("first", "claude"));
+        assert!(presenter.submit("correction", "claude"));
+        let run_id = presenter.model().active_run.unwrap();
+        let message_id = presenter.model().queued_messages[0].id;
+        let selector = format!("steer-queued-{message_id}").leak();
+        let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            let _ = window.draw(cx);
+        });
+        let button = cx
+            .debug_bounds(selector)
+            .expect("queued message must expose Steer")
+            .center();
+        cx.simulate_click(button, Default::default());
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.presenter.model().steering_message, Some(message_id));
+            assert_eq!(view.presenter.model().queued_messages.len(), 1);
+        });
+        runner.emit(Event::RunInputAccepted { run_id, message_id });
+        view.update_in(cx, |view, _, cx| {
+            view.presenter.drain_events();
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            let _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds(selector).is_none());
+        assert!(view.read_with(cx, |view, _| {
+            view.presenter.model().queued_messages.is_empty()
+        }));
     }
 
     #[gpui::test]
