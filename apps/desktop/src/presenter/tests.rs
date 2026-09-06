@@ -705,7 +705,7 @@ fn startup_restores_preferences_and_probes_all_harnesses() {
 }
 
 #[test]
-fn codex_catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
+fn catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
     let (mut presenter, runner, _directory) = fixture();
     assert!(presenter.select_harness(HarnessKind::Codex, "claude"));
     let stale_request_id = current_catalog_request_id(&presenter);
@@ -789,15 +789,16 @@ fn codex_catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
         "已加载 1 个 Codex CLI 模型。"
     );
 
-    assert!(presenter.refresh_model_catalog());
+    // Claude exercises the shared readiness state without starting a Codex history client.
+    assert!(presenter.select_harness(HarnessKind::Claude, "codex"));
     let request_id = current_catalog_request_id(&presenter);
     runner.emit(Event::HarnessDetected(HarnessProbe {
         available: false,
-        ..ready_probe(HarnessKind::Codex)
+        ..ready_probe(HarnessKind::Claude)
     }));
     runner.emit(Event::ModelCatalogFailed {
         request_id,
-        harness: HarnessKind::Codex,
+        harness: HarnessKind::Claude,
         message: "late catalog failure".into(),
     });
     presenter.drain_events();
@@ -805,7 +806,7 @@ fn codex_catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
         presenter.model().model_catalog,
         ModelCatalogState::NotReady(_)
     ));
-    runner.emit(Event::HarnessDetected(ready_probe(HarnessKind::Codex)));
+    runner.emit(Event::HarnessDetected(ready_probe(HarnessKind::Claude)));
     presenter.drain_events();
     assert_ne!(current_catalog_request_id(&presenter), request_id);
 }
