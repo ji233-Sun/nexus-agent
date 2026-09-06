@@ -446,7 +446,7 @@ impl Presenter {
             self.model.effort
         };
         let title: String = prompt.chars().take(48).collect();
-        let created = self.storage.create_task_run(NewTaskRun {
+        let Ok(pending_run) = self.storage.prepare_task_run(NewTaskRun {
             task_id,
             project_id: project.id,
             title: &title,
@@ -456,11 +456,12 @@ impl Presenter {
             model: model.as_deref(),
             effort,
             harness_version: harness_version.as_deref(),
-        });
-        let Ok((task_id, run_id)) = created else {
+        }) else {
             self.model.status = "无法保存任务运行。".into();
             return false;
         };
+        let task_id = pending_run.task_id;
+        let run_id = pending_run.run_id;
         let command = CommandEnvelope::new(Command::RunStart(StartRun {
             run_id,
             task_id,
@@ -476,6 +477,11 @@ impl Presenter {
         if let Some(runner) = &self.runner
             && runner.send(command).is_ok()
         {
+            if pending_run.commit().is_err() {
+                let _ = runner.send(CommandEnvelope::new(Command::RunCancel { run_id }));
+                self.model.status = "无法保存任务运行，已请求停止 Runner。".into();
+                return false;
+            }
             self.model.active_run = Some(run_id);
             self.active_run_started_at = Some(Instant::now());
             self.model.active_run_elapsed_seconds = Some(0);
@@ -494,7 +500,6 @@ impl Presenter {
             self.reload_tasks();
             true
         } else {
-            let _ = self.storage.finish_run(run_id, RunStatus::Failed, None);
             self.model.status = "Runner 不可用，任务未启动。".into();
             false
         }

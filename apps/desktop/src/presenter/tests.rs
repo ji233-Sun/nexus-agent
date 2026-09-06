@@ -932,6 +932,56 @@ fn queued_message_survives_missing_session_and_runner_send_failure() {
         } else {
             "Runner 不可用"
         }));
+        if !missing_session {
+            let task_id = presenter.model().selected_task.unwrap();
+            let message_id = presenter.model().queued_messages[0].id;
+            for _ in 0..2 {
+                let stored = presenter.storage.messages(task_id).unwrap();
+                assert_eq!(
+                    stored.len(),
+                    1,
+                    "failed queue attempts must not add user messages"
+                );
+                assert_eq!(stored[0].content, "first");
+                assert_eq!(
+                    presenter
+                        .storage
+                        .tasks(presenter.model().selected_project.as_ref().unwrap().id)
+                        .unwrap()[0]
+                        .status,
+                    RunStatus::Completed
+                );
+                assert!(!presenter.send_queued_message(message_id));
+                assert_eq!(presenter.model().queued_messages[0].id, message_id);
+            }
+            runner.0.borrow_mut().fail_send = false;
+            assert!(presenter.send_queued_message(message_id));
+            let request = last_start(&runner);
+            assert_eq!(request.task_id, task_id);
+            assert_eq!(request.session_id.as_deref(), Some("saved-session"));
+            assert!(presenter.model().queued_messages.is_empty());
+            presenter.select_task(task_id);
+            assert_eq!(
+                presenter
+                    .model()
+                    .messages
+                    .iter()
+                    .map(|message| message.content.as_str())
+                    .collect::<Vec<_>>(),
+                ["first", "keep me"]
+            );
+            assert_eq!(presenter.model().messages[1].sequence, 2);
+            assert_eq!(
+                runner
+                    .0
+                    .borrow()
+                    .commands
+                    .iter()
+                    .filter(|command| matches!(command.command, Command::RunStart(_)))
+                    .count(),
+                2
+            );
+        }
     }
 }
 
@@ -1312,7 +1362,7 @@ fn follow_up_does_not_silently_restart_when_the_session_is_missing_or_harness_ch
 }
 
 #[test]
-fn send_failure_finishes_saved_run_without_entering_busy_state() {
+fn send_failure_rolls_back_a_new_task_without_entering_busy_state() {
     let (mut presenter, runner, _directory) = fixture();
     runner.0.borrow_mut().fail_send = true;
     assert!(!presenter.submit("hello", "claude"));
@@ -1321,9 +1371,12 @@ fn send_failure_finishes_saved_run_without_entering_busy_state() {
     assert!(presenter.model().active_run_elapsed_seconds.is_none());
     assert_eq!(presenter.model().status, "Runner 不可用，任务未启动。");
     let project_id = presenter.model().selected_project.as_ref().unwrap().id;
-    let tasks = presenter.storage.tasks(project_id).unwrap();
-    assert_eq!(tasks.len(), 1);
-    assert_eq!(tasks[0].status, RunStatus::Failed);
+    assert!(presenter.storage.tasks(project_id).unwrap().is_empty());
+    runner.0.borrow_mut().fail_send = false;
+    assert!(presenter.submit("hello", "claude"));
+    assert_eq!(presenter.storage.tasks(project_id).unwrap().len(), 1);
+    assert_eq!(presenter.model().messages.len(), 1);
+    assert_eq!(presenter.model().messages[0].content, "hello");
 }
 
 #[test]
