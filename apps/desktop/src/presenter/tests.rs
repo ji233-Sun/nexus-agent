@@ -588,11 +588,48 @@ fn follow_up_resumes_the_saved_session_after_reopening_and_new_task_starts_fresh
             None,
         );
         presenter.open_project(directory.path());
-        presenter.select_task(task_id);
+        let saved_probe = ready_probe(harness);
+        let other_probe = HarnessProbe {
+            executable: format!("/other/{harness}"),
+            ..saved_probe.clone()
+        };
         presenter
             .model
             .harnesses
-            .insert(harness, ready_probe(harness));
+            .insert(harness, other_probe.clone());
+        runner.0.borrow_mut().commands.clear();
+        presenter.select_task(task_id);
+        assert!(!presenter.submit("follow-up before probe", &saved_probe.executable));
+        assert!(!presenter.model().can_submit());
+        assert_eq!(presenter.model().executable, saved_probe.executable);
+        assert!(runner.0.borrow().commands.iter().any(|command| matches!(
+            &command.command, Command::HarnessProbe { harness: probed_harness, executable }
+                if *probed_harness == harness && executable == &saved_probe.executable
+        )));
+        if harness == HarnessKind::Codex {
+            assert!(runner.0.borrow().commands.iter().any(|command| matches!(
+                &command.command, Command::ModelCatalogRefresh { executable, .. }
+                    if executable == &saved_probe.executable
+            )));
+        }
+        // A late result for another executable must not authorize this session.
+        runner.emit(Event::HarnessDetected(other_probe));
+        presenter.drain_events();
+        assert!(!presenter.submit("follow-up with stale probe", &saved_probe.executable));
+        assert!(presenter.model().status.contains("可执行文件不一致"));
+        assert!(
+            runner
+                .0
+                .borrow()
+                .commands
+                .iter()
+                .all(|command| !matches!(command.command, Command::RunStart(_)))
+        );
+        assert_eq!(presenter.model().messages.len(), 2);
+
+        runner.emit(Event::HarnessDetected(saved_probe.clone()));
+        presenter.drain_events();
+        assert!(presenter.model().can_submit());
         assert!(presenter.submit("  follow-up  ", harness.default_executable()));
         let second_run = presenter.model().active_run.unwrap();
         assert_ne!(first_run, second_run);
@@ -622,6 +659,7 @@ fn follow_up_resumes_the_saved_session_after_reopening_and_new_task_starts_fresh
             assert_eq!(request.session_id.as_deref(), Some("saved-session"));
             assert_eq!(request.prompt, "follow-up");
             assert_eq!(request.harness, harness);
+            assert_eq!(request.executable, saved_probe.executable);
         }
         // A failed continuation must not lose the saved session.
         runner.emit(Event::RunExited {

@@ -327,7 +327,26 @@ impl Presenter {
             } else {
                 config.executable
             };
-            self.model.executable = executable;
+            self.model.executable = executable.clone();
+            if !self
+                .model
+                .selected_probe()
+                .is_some_and(|probe| probe.executable == executable)
+            {
+                self.model.harnesses.remove(&config.harness);
+                self.model.status = if let Some(runner) = &self.runner
+                    && runner
+                        .send(CommandEnvelope::new(Command::HarnessProbe {
+                            harness: config.harness,
+                            executable,
+                        }))
+                        .is_ok()
+                {
+                    format!("正在探测 {}…", config.harness)
+                } else {
+                    "Runner 不可用，无法探测任务使用的可执行文件。".into()
+                };
+            }
             self.refresh_model_catalog();
         }
     }

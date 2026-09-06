@@ -286,6 +286,11 @@ impl Presenter {
                 self.model.status = "当前任务未保存可恢复的会话，无法继续对话；请新建任务。".into();
                 return false;
             };
+            if config.executable != executable {
+                self.model.status =
+                    "当前探测结果与任务保存的可执行文件不一致，请重新选择任务并完成探测。".into();
+                return false;
+            }
             Some(session_id)
         } else {
             None
