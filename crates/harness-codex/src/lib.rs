@@ -7,7 +7,7 @@ use std::{
 };
 
 use nexus_domain::{HarnessKind, ModelDescriptor, ModelReasoningEffort, ThinkingEffort};
-pub use nexus_harness_core::{DecodedEvent, LaunchSpec};
+pub use nexus_harness_core::{DecodedEvent, LaunchSpec, ModelCatalogError};
 use nexus_harness_core::{LineDecoder, resolve_executable, summarize_text, tool_content};
 use nexus_protocol::{EnvironmentVariable, HarnessProbe};
 use serde_json::{Map, Value, json};
@@ -58,21 +58,6 @@ pub fn build_launch_spec(
         args,
         cwd: cwd.to_path_buf(),
         stdin: prompt.to_owned(),
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ModelCatalogError {
-    Cancelled,
-    Failed(String),
-}
-
-impl std::fmt::Display for ModelCatalogError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Cancelled => formatter.write_str("模型目录探测已取消"),
-            Self::Failed(message) => formatter.write_str(message),
-        }
     }
 }
 
@@ -336,6 +321,7 @@ fn parse_model_page(
         models.push(ModelDescriptor {
             id,
             display_name,
+            provider: None,
             is_default: item
                 .get("isDefault")
                 .and_then(Value::as_bool)
@@ -736,6 +722,7 @@ mod tests {
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "gpt-visible");
         assert_eq!(models[0].display_name, "GPT Visible");
+        assert_eq!(models[0].provider, None);
         assert!(models[0].is_default);
         assert_eq!(
             models[0].default_reasoning_effort,

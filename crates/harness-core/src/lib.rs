@@ -6,6 +6,21 @@ use std::{
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelCatalogError {
+    Cancelled,
+    Failed(String),
+}
+
+impl std::fmt::Display for ModelCatalogError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cancelled => formatter.write_str("模型目录探测已取消"),
+            Self::Failed(message) => formatter.write_str(message),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchSpec {
     pub executable: PathBuf,
     pub args: Vec<String>,

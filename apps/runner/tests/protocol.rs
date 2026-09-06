@@ -311,6 +311,144 @@ async fn runner_loads_all_codex_model_pages_and_reaps_the_app_server() {
 }
 
 #[tokio::test]
+async fn runner_loads_omp_catalog_with_provider_context_and_reaps_the_command() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = fake_harness(directory.path());
+    let request_id = Uuid::new_v4();
+    let mut runner = TestRunner::spawn();
+    runner
+        .send(Command::ModelCatalogRefresh {
+            request_id,
+            harness: HarnessKind::Omp,
+            executable: executable.to_string_lossy().into_owned(),
+            cwd: directory.path().to_string_lossy().into_owned(),
+            environment: vec![EnvironmentVariable {
+                name: "TEST_PROVIDER_API_KEY".into(),
+                value: "catalog-secret".into(),
+            }],
+        })
+        .await;
+
+    let Event::ModelCatalogLoaded {
+        request_id: received_id,
+        harness,
+        models,
+    } = runner.next().await
+    else {
+        panic!("expected OMP model catalog")
+    };
+
+    assert_eq!(received_id, request_id);
+    assert_eq!(harness, HarnessKind::Omp);
+    assert_eq!(models.len(), 2);
+    assert_eq!(models[0].id, "alpha/shared-model");
+    assert_eq!(models[0].provider.as_deref(), Some("alpha"));
+    assert_eq!(models[1].id, "beta/shared-model");
+    assert_eq!(models[1].provider.as_deref(), Some("beta"));
+    assert_eq!(models[0].display_name, models[1].display_name);
+    assert!(models[0].supports_effort(&ThinkingEffort::Off));
+    assert!(models[0].supports_effort(&ThinkingEffort::Auto));
+    assert_eq!(
+        PathBuf::from(fs::read_to_string(directory.path().join("omp-catalog-cwd.txt")).unwrap()),
+        directory.path().canonicalize().unwrap()
+    );
+    assert_eq!(
+        fs::read_to_string(directory.path().join("omp-catalog-env.txt")).unwrap(),
+        "catalog-secret"
+    );
+    assert_eq!(
+        fs::read_to_string(directory.path().join("omp-catalog-stopped.txt")).unwrap(),
+        "stopped"
+    );
+    runner.shutdown().await;
+}
+
+#[tokio::test]
+async fn omp_catalog_reports_command_json_and_empty_states_without_leaking_stderr() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = fake_harness(directory.path());
+    let mut runner = TestRunner::spawn();
+    for (name, expected) in [
+        ("TEST_OMP_CATALOG_ERROR", "命令执行失败"),
+        ("TEST_OMP_CATALOG_MALFORMED", "无效 JSON"),
+    ] {
+        let request_id = Uuid::new_v4();
+        runner
+            .send(Command::ModelCatalogRefresh {
+                request_id,
+                harness: HarnessKind::Omp,
+                executable: executable.to_string_lossy().into_owned(),
+                cwd: directory.path().to_string_lossy().into_owned(),
+                environment: vec![EnvironmentVariable {
+                    name: name.into(),
+                    value: "1".into(),
+                }],
+            })
+            .await;
+        assert!(matches!(
+            runner.next().await,
+            Event::ModelCatalogFailed { request_id: id, message, .. }
+                if id == request_id
+                    && message.contains(expected)
+                    && !message.contains("test-secret-must-not-leak")
+        ));
+    }
+
+    let request_id = Uuid::new_v4();
+    runner
+        .send(Command::ModelCatalogRefresh {
+            request_id,
+            harness: HarnessKind::Omp,
+            executable: executable.to_string_lossy().into_owned(),
+            cwd: directory.path().to_string_lossy().into_owned(),
+            environment: vec![EnvironmentVariable {
+                name: "TEST_OMP_CATALOG_EMPTY".into(),
+                value: "1".into(),
+            }],
+        })
+        .await;
+    assert!(matches!(
+        runner.next().await,
+        Event::ModelCatalogLoaded { request_id: id, models, .. }
+            if id == request_id && models.is_empty()
+    ));
+    runner.shutdown().await;
+}
+
+#[tokio::test]
+async fn newer_omp_catalog_request_cancels_and_reaps_the_previous_command() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = fake_harness(directory.path());
+    let stale_id = Uuid::new_v4();
+    let current_id = Uuid::new_v4();
+    let command = |request_id, environment| Command::ModelCatalogRefresh {
+        request_id,
+        harness: HarnessKind::Omp,
+        executable: executable.to_string_lossy().into_owned(),
+        cwd: directory.path().to_string_lossy().into_owned(),
+        environment,
+    };
+    let mut runner = TestRunner::spawn();
+    runner
+        .send(command(
+            stale_id,
+            vec![EnvironmentVariable {
+                name: "TEST_OMP_CATALOG_BLOCK".into(),
+                value: "1".into(),
+            }],
+        ))
+        .await;
+    runner.send(command(current_id, Vec::new())).await;
+
+    assert!(matches!(
+        runner.next().await,
+        Event::ModelCatalogLoaded { request_id, harness: HarnessKind::Omp, .. }
+            if request_id == current_id
+    ));
+    runner.shutdown().await;
+}
+
+#[tokio::test]
 async fn newer_catalog_requests_cancel_older_app_servers_without_stale_events() {
     let directory = tempfile::tempdir().unwrap();
     let executable = fake_harness(directory.path());
