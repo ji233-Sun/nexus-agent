@@ -258,6 +258,7 @@ mod tests {
         StartRun {
             run_id: Uuid::new_v4(),
             task_id: Uuid::new_v4(),
+            session_id: None,
             cwd,
             prompt: "test".into(),
             harness: HarnessKind::Claude,

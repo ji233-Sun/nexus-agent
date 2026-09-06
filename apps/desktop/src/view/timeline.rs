@@ -307,6 +307,7 @@ mod tests {
             exit_code: Some(0),
         });
         presenter.drain_events();
+        presenter.new_task();
         assert!(presenter.submit(&"Long prompt for scrolling.\n\n".repeat(80), "claude"));
         let run_id = presenter.model().active_run.unwrap();
         let active_task = presenter.model().selected_task.unwrap();

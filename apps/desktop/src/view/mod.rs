@@ -927,13 +927,13 @@ impl NexusView {
         } else if model.selected_project.is_none() {
             "先选择本地项目，再描述你希望完成的工作。"
         } else if model.active_run.is_some() {
-            "Agent 正在执行 · 可以提前起草下一项任务"
+            "Agent 正在执行 · 可以提前起草下一条消息"
         } else if !model.can_submit() {
             "Agent 尚未就绪 · 打开设置检查探测和登录状态"
         } else if cfg!(target_os = "macos") {
-            "⌘ Enter 发送新任务 · Enter 换行"
+            "⌘ Enter 发送消息 · Enter 换行"
         } else {
-            "Ctrl Enter 发送新任务 · Enter 换行"
+            "Ctrl Enter 发送消息 · Enter 换行"
         };
         let header_status_color = if model.active_run.is_some() {
             rgb(colors.accent).into()

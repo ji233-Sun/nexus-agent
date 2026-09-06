@@ -13,6 +13,7 @@ pub fn build_launch_spec(
     prompt: &str,
     model: Option<&str>,
     effort: ThinkingEffort,
+    session_id: Option<&str>,
 ) -> LaunchSpec {
     let mut args = vec![
         "--print".into(),
@@ -24,13 +25,16 @@ pub fn build_launch_spec(
         "--include-partial-messages".into(),
         "--permission-mode".into(),
         "acceptEdits".into(),
-        "--no-session-persistence".into(),
         "--effort".into(),
         effort.as_str().into(),
     ];
     if let Some(model) = model {
         args.push("--model".into());
         args.push(model.into());
+    }
+    if let Some(session_id) = session_id {
+        args.push("--resume".into());
+        args.push(session_id.into());
     }
 
     LaunchSpec {
@@ -117,11 +121,19 @@ fn decode_frame(frame: &Value) -> Vec<DecodedEvent> {
         Some("stream_event") => decode_stream_event(frame),
         Some("assistant") => decode_assistant(frame),
         Some("user") => decode_tool_results(frame),
-        Some("system") => frame
-            .get("subtype")
-            .and_then(Value::as_str)
-            .map(|subtype| vec![DecodedEvent::Status(format!("Claude: {subtype}"))])
-            .unwrap_or_default(),
+        Some("system") => {
+            let mut events = Vec::new();
+            if let Some(subtype) = frame.get("subtype").and_then(Value::as_str) {
+                if subtype == "init"
+                    && let Some(session_id) = frame.get("session_id").and_then(Value::as_str)
+                    && !session_id.is_empty()
+                {
+                    events.push(DecodedEvent::SessionStarted(session_id.to_owned()));
+                }
+                events.push(DecodedEvent::Status(format!("Claude: {subtype}")));
+            }
+            events
+        }
         Some("result") => Vec::new(),
         _ => Vec::new(),
     }
@@ -218,6 +230,7 @@ mod tests {
             "secret prompt",
             Some("opus"),
             ThinkingEffort::XHigh,
+            None,
         );
         assert!(spec.args.windows(2).any(|pair| pair == ["--model", "opus"]));
         assert!(
@@ -227,11 +240,55 @@ mod tests {
         );
         assert!(!spec.args.iter().any(|arg| arg.contains("secret prompt")));
         assert_eq!(spec.stdin, "secret prompt");
+        assert!(
+            !spec
+                .args
+                .iter()
+                .any(|arg| arg == "--no-session-persistence" || arg == "--resume")
+        );
+        let resumed = build_launch_spec(
+            "claude",
+            Path::new("/tmp/project"),
+            "follow-up",
+            None,
+            ThinkingEffort::High,
+            Some("existing-session"),
+        );
+        assert!(
+            resumed
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--resume", "existing-session"])
+        );
+        assert!(
+            resumed
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--permission-mode", "acceptEdits"])
+        );
+        assert!(
+            !resumed
+                .args
+                .iter()
+                .any(|arg| arg == "--no-session-persistence" || arg == "--fork-session")
+        );
+        assert_eq!(resumed.stdin, "follow-up");
     }
 
     #[test]
     fn decoder_maps_text_and_tool_events() {
         let mut decoder = EventDecoder;
+        assert_eq!(
+            decoder
+                .decode_line(
+                    r#"{"type":"system","subtype":"init","session_id":"existing-session"}"#
+                )
+                .unwrap(),
+            vec![
+                DecodedEvent::SessionStarted("existing-session".into()),
+                DecodedEvent::Status("Claude: init".into())
+            ]
+        );
         let delta = r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"你好"}}}"#;
         assert_eq!(
             decoder.decode_line(delta).unwrap(),

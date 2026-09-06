@@ -111,6 +111,7 @@ fn request(directory: &Path, executable: PathBuf, harness: HarnessKind, prompt: 
     StartRun {
         run_id: Uuid::new_v4(),
         task_id: Uuid::new_v4(),
+        session_id: None,
         cwd: directory.to_string_lossy().into_owned(),
         prompt: prompt.into(),
         harness,
@@ -118,6 +119,65 @@ fn request(directory: &Path, executable: PathBuf, harness: HarnessKind, prompt: 
         model: None,
         effort: ThinkingEffort::High,
         environment: Vec::new(),
+    }
+}
+
+#[tokio::test]
+async fn runner_resumes_each_harness_session_across_processes() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = fake_harness(directory.path());
+    for harness in HarnessKind::ALL {
+        let mut request = request(
+            directory.path(),
+            executable.clone(),
+            harness,
+            "remember this",
+        );
+        let mut runner = TestRunner::spawn();
+        runner.send(Command::RunStart(request.clone())).await;
+        let events = runner
+            .collect_run(request.run_id, RunStatus::Completed)
+            .await;
+        let session_id = events
+            .iter()
+            .find_map(|event| match event {
+                Event::RunSessionStarted { run_id, session_id } if *run_id == request.run_id => {
+                    Some(session_id.clone())
+                }
+                _ => None,
+            })
+            .expect("the harness must report its session ID");
+        runner.shutdown().await;
+
+        // Restart the runner as well as the harness to require native persistence.
+        let mut runner = TestRunner::spawn();
+        request.run_id = Uuid::new_v4();
+        request.prompt = "follow-up".into();
+        request.session_id = Some(session_id.clone());
+        runner.send(Command::RunStart(request.clone())).await;
+        let events = runner
+            .collect_run(request.run_id, RunStatus::Completed)
+            .await;
+        runner.shutdown().await;
+        assert!(events.iter().any(|event| matches!(event,
+            Event::RunSessionStarted { session_id: id, .. } if id == &session_id)));
+        assert!(events.iter().any(|event| matches!(event,
+            Event::RunMessageCompleted { text, .. } if text == "remember this")));
+        assert_eq!(
+            fs::read_to_string(directory.path().join("stdin.txt")).unwrap(),
+            "follow-up"
+        );
+        let args_file = match harness {
+            HarnessKind::Claude => "args.txt",
+            HarnessKind::Codex => "codex-args.txt",
+            HarnessKind::Omp => "omp-args.txt",
+        };
+        let args = fs::read_to_string(directory.path().join(args_file)).unwrap();
+        assert!(args.lines().any(|arg| arg == session_id));
+        assert!(!args.lines().any(|arg| matches!(
+            arg,
+            "--ephemeral" | "--no-session" | "--no-session-persistence" | "--last" | "--continue"
+        )));
     }
 }
 
