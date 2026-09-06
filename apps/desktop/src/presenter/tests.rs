@@ -997,6 +997,57 @@ fn steer_uses_the_active_run_and_dequeues_only_after_a_matching_receipt() {
 }
 
 #[test]
+fn accepted_steer_is_saved_without_changing_another_tasks_timeline() {
+    let (mut presenter, runner, _directory) = fixture();
+    assert!(presenter.submit("other conversation", "claude"));
+    let other_task = presenter.model().active_task.unwrap();
+    runner.emit(Event::RunExited {
+        run_id: presenter.model().active_run.unwrap(),
+        status: RunStatus::Completed,
+        exit_code: Some(0),
+    });
+    presenter.drain_events();
+    presenter.new_task();
+
+    assert!(presenter.submit("active conversation", "claude"));
+    let task_id = presenter.model().active_task.unwrap();
+    let run_id = presenter.model().active_run.unwrap();
+    assert!(presenter.submit("correction for active conversation", "claude"));
+    let message_id = presenter.model().queued_messages[0].id;
+    assert!(presenter.steer_queued_message(message_id));
+    presenter.select_task(other_task);
+    let visible_message_ids = presenter
+        .model()
+        .messages
+        .iter()
+        .map(|message| message.id)
+        .collect::<Vec<_>>();
+
+    runner.emit(Event::RunInputAccepted { run_id, message_id });
+    presenter.drain_events();
+
+    assert!(presenter.model().queued_messages.is_empty());
+    assert!(presenter.model().steering_message.is_none());
+    assert_eq!(presenter.model().selected_task, Some(other_task));
+    assert_eq!(
+        presenter
+            .model()
+            .messages
+            .iter()
+            .map(|message| message.id)
+            .collect::<Vec<_>>(),
+        visible_message_ids
+    );
+    assert_eq!(presenter.storage.messages(other_task).unwrap().len(), 1);
+    presenter.select_task(task_id);
+    let messages = &presenter.model().messages;
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[1].content, "correction for active conversation");
+    assert_eq!(messages[1].task_id, task_id);
+    assert_eq!(messages[1].run_id, run_id);
+}
+
+#[test]
 fn rejected_steer_falls_back_to_the_next_turn_and_survives_cancellation() {
     for cancelled in [false, true] {
         let (mut presenter, runner, _directory) = fixture();

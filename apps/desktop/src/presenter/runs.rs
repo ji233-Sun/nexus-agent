@@ -266,6 +266,7 @@ impl Presenter {
         if let Ok(message) = self
             .storage
             .append_message(task_id, run_id, role, kind, content, tool)
+            && self.model.selected_task == Some(task_id)
         {
             self.model.messages.push(message);
         }
