@@ -349,7 +349,9 @@ async fn runner_loads_omp_catalog_with_provider_context_and_reaps_the_command() 
     assert!(models[0].supports_effort(&ThinkingEffort::Off));
     assert!(models[0].supports_effort(&ThinkingEffort::Auto));
     assert_eq!(
-        PathBuf::from(fs::read_to_string(directory.path().join("omp-catalog-cwd.txt")).unwrap()),
+        PathBuf::from(fs::read_to_string(directory.path().join("omp-catalog-cwd.txt")).unwrap())
+            .canonicalize()
+            .unwrap(),
         directory.path().canonicalize().unwrap()
     );
     assert_eq!(
