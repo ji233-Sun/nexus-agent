@@ -5,6 +5,29 @@ use gpui_kit::{
     component::menu::PopupMenu,
 };
 
+pub(super) fn harness_icon(harness: HarnessKind, colors: Palette, size: f32) -> gpui::Svg {
+    // Brand SVGs from LobeHub Icons; see assets/harness/LICENSE.
+    let (icon, color): (&[u8], _) = match harness {
+        HarnessKind::Claude => (
+            include_bytes!("../../assets/harness/claude.svg"),
+            rgb(0xd97757),
+        ),
+        HarnessKind::Codex => (
+            include_bytes!("../../assets/harness/codex.svg"),
+            rgb(colors.text),
+        ),
+        HarnessKind::Omp => (
+            include_bytes!("../../assets/harness/omp.svg"),
+            rgb(0xf97316),
+        ),
+    };
+    gpui::svg()
+        .data(icon)
+        .size(px(size))
+        .flex_none()
+        .text_color(color)
+}
+
 fn control_transition(reduced_motion: bool) -> Transition {
     Transition::new(if reduced_motion {
         Duration::ZERO

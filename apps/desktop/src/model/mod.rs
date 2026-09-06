@@ -4,8 +4,7 @@ pub(crate) mod tools;
 use crate::i18n::{Language, LocalizedText};
 use history::{HistoryMessage, ThreadSummary};
 use nexus_domain::{
-    ClaudeModel, HarnessKind, Message, ModelDescriptor, Project, ProviderProfile, TaskSummary,
-    ThinkingEffort,
+    HarnessKind, Message, ModelDescriptor, Project, ProviderProfile, TaskSummary, ThinkingEffort,
 };
 use nexus_protocol::HarnessProbe;
 use std::collections::{BTreeMap, VecDeque};
@@ -20,6 +19,7 @@ pub(crate) enum ModelCatalogState {
     },
     Ready(Vec<ModelDescriptor>),
     Empty,
+    NotReady(LocalizedText),
     Failed(LocalizedText),
 }
 
@@ -27,7 +27,11 @@ impl ModelCatalogState {
     pub(crate) fn models(&self) -> Option<&[ModelDescriptor]> {
         match self {
             Self::Ready(models) => Some(models),
-            Self::Idle | Self::Loading { .. } | Self::Empty | Self::Failed(_) => None,
+            Self::Idle
+            | Self::Loading { .. }
+            | Self::Empty
+            | Self::NotReady(_)
+            | Self::Failed(_) => None,
         }
     }
 
@@ -70,6 +74,12 @@ pub(crate) struct QueuedMessage {
     pub(crate) prompt: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedModelSelection {
+    pub(crate) model: Option<String>,
+    pub(crate) effort: ThinkingEffort,
+}
+
 #[derive(Default)]
 pub(crate) struct AppModel {
     pub(crate) language: Language,
@@ -98,8 +108,8 @@ pub(crate) struct AppModel {
     pub(crate) codex_history_error: Option<LocalizedText>,
     pub(crate) selected_harness: HarnessKind,
     pub(crate) project_dirty: bool,
-    pub(crate) claude_model: ClaudeModel,
     pub(crate) model_override: Option<String>,
+    pub(crate) model_override_name: Option<String>,
     pub(crate) model_catalog: ModelCatalogState,
     pub(crate) effort: ThinkingEffort,
     pub(crate) executable: String,
@@ -143,10 +153,6 @@ impl AppModel {
             .find(|profile| profile.id == *profile_id && profile.harness == self.selected_harness)
     }
 
-    pub(crate) fn uses_model_catalog(&self) -> bool {
-        matches!(self.selected_harness, HarnessKind::Codex | HarnessKind::Omp)
-    }
-
     pub(crate) fn configured_catalog_model(&self) -> Option<&str> {
         self.model_override.as_deref().or_else(|| {
             self.selected_provider_profile()
@@ -165,23 +171,38 @@ impl AppModel {
 
     pub(crate) fn model_override_is_unavailable(&self) -> bool {
         self.model_override.is_some()
-            && matches!(
-                self.model_catalog,
-                ModelCatalogState::Ready(_) | ModelCatalogState::Empty
-            )
-            && self.selected_catalog_model().is_none()
+            && self
+                .selected_catalog_model()
+                .is_none_or(|model| !model.availability.is_selectable())
     }
 
     pub(crate) fn catalog_selection_is_valid(&self) -> bool {
-        if !self.uses_model_catalog() {
-            return true;
-        }
         if self.model_override_is_unavailable() {
             return false;
         }
-        self.effort.is_default()
-            || self
-                .selected_catalog_model()
-                .is_none_or(|model| model.supports_effort(&self.effort))
+        self.selected_catalog_model().is_none_or(|model| {
+            model.availability.is_selectable()
+                && (self.effort.is_default() || model.supports_effort(&self.effort))
+        })
+    }
+
+    // One resolution path for the composer, Remote API, StartRun and persisted requests.
+    pub(crate) fn resolved_model_selection(&self) -> ResolvedModelSelection {
+        let model = self.configured_catalog_model().map(str::to_owned);
+        let descriptor = self.selected_catalog_model();
+        let effort = if descriptor.is_some_and(|model| model.supports_effort(&self.effort)) {
+            self.effort
+        } else if model.is_some() && self.effort.is_default() {
+            descriptor
+                .and_then(|model| {
+                    model
+                        .default_reasoning_effort
+                        .filter(|effort| model.supports_effort(effort))
+                })
+                .unwrap_or(ThinkingEffort::Default)
+        } else {
+            ThinkingEffort::Default
+        };
+        ResolvedModelSelection { model, effort }
     }
 }

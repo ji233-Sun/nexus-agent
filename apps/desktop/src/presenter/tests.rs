@@ -71,6 +71,7 @@ pub(crate) fn fixture() -> (Presenter, FakeRunner, tempfile::TempDir) {
     let runner = FakeRunner::default();
     let mut presenter = Presenter::new(storage, Ok(Box::new(runner.clone())), None);
     presenter.open_project(directory.path());
+    presenter.model.model_catalog = ModelCatalogState::Ready(claude_aliases());
     presenter
         .model
         .harnesses
@@ -557,8 +558,25 @@ fn provider_fixture() -> (
         Box::new(credentials.clone()),
     );
     presenter.open_project(directory.path());
+    presenter.model.model_catalog = ModelCatalogState::Ready(claude_aliases());
     runner.0.borrow_mut().commands.clear();
     (presenter, runner, credentials, directory)
+}
+
+fn claude_aliases() -> Vec<ModelDescriptor> {
+    ["sonnet", "opus", "haiku"]
+        .into_iter()
+        .map(|id| ModelDescriptor {
+            id: id.into(),
+            display_name: id.into(),
+            source: nexus_domain::ModelSource::ClaudeAliases,
+            availability: nexus_domain::ModelAvailability::Unknown,
+            provider: None,
+            is_default: false,
+            supported_reasoning_efforts: Vec::new(),
+            default_reasoning_effort: None,
+        })
+        .collect()
 }
 
 fn catalog_model(
@@ -614,7 +632,18 @@ fn current_catalog_request_id(presenter: &Presenter) -> Uuid {
     *request_id
 }
 
-fn emit_current_catalog(presenter: &Presenter, runner: &FakeRunner, models: Vec<ModelDescriptor>) {
+fn emit_current_catalog(
+    presenter: &Presenter,
+    runner: &FakeRunner,
+    mut models: Vec<ModelDescriptor>,
+) {
+    for model in &mut models {
+        model.source = match presenter.model().selected_harness {
+            HarnessKind::Claude => nexus_domain::ModelSource::ClaudeAliases,
+            HarnessKind::Codex => nexus_domain::ModelSource::CodexAppServer,
+            HarnessKind::Omp => nexus_domain::ModelSource::OmpCli,
+        };
+    }
     runner.emit(Event::ModelCatalogLoaded {
         request_id: current_catalog_request_id(presenter),
         harness: presenter.model().selected_harness,
@@ -664,7 +693,7 @@ fn startup_restores_preferences_and_probes_all_harnesses() {
     let presenter = Presenter::new(storage, Ok(Box::new(runner.clone())), None);
 
     assert_eq!(presenter.model().selected_harness, HarnessKind::Codex);
-    assert_eq!(presenter.model().claude_model, ClaudeModel::Opus);
+    assert!(presenter.model().model_override.is_none());
     assert_eq!(presenter.model().effort, ThinkingEffort::High);
     assert_eq!(presenter.model().executable, "/custom/codex");
     let state = runner.0.borrow();
@@ -684,6 +713,19 @@ fn codex_catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
     assert!(presenter.refresh_model_catalog());
     let failed_request_id = current_catalog_request_id(&presenter);
     assert_ne!(stale_request_id, failed_request_id);
+    runner.0.borrow_mut().events.push(EventEnvelope {
+        protocol_version: PROTOCOL_VERSION - 1,
+        id: Uuid::new_v4(),
+        sequence: 1,
+        event: Event::ModelCatalogLoaded {
+            request_id: failed_request_id,
+            harness: HarnessKind::Codex,
+            models: vec![],
+        },
+    });
+    presenter.drain_events();
+    assert_eq!(current_catalog_request_id(&presenter), failed_request_id);
+    assert!(presenter.model().status_text().contains("协议版本不匹配"));
     runner.emit(Event::ModelCatalogLoaded {
         request_id: stale_request_id,
         harness: HarnessKind::Codex,
@@ -746,6 +788,26 @@ fn codex_catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
         presenter.model().status_text(),
         "已加载 1 个 Codex CLI 模型。"
     );
+
+    assert!(presenter.refresh_model_catalog());
+    let request_id = current_catalog_request_id(&presenter);
+    runner.emit(Event::HarnessDetected(HarnessProbe {
+        available: false,
+        ..ready_probe(HarnessKind::Codex)
+    }));
+    runner.emit(Event::ModelCatalogFailed {
+        request_id,
+        harness: HarnessKind::Codex,
+        message: "late catalog failure".into(),
+    });
+    presenter.drain_events();
+    assert!(matches!(
+        presenter.model().model_catalog,
+        ModelCatalogState::NotReady(_)
+    ));
+    runner.emit(Event::HarnessDetected(ready_probe(HarnessKind::Codex)));
+    presenter.drain_events();
+    assert_ne!(current_catalog_request_id(&presenter), request_id);
 }
 
 #[test]
@@ -843,6 +905,7 @@ fn expired_remote_start_does_not_change_selection_or_start_a_run() {
     let project_id = presenter.model.selected_project.as_ref().unwrap().id;
     let other_directory = tempfile::tempdir().unwrap();
     presenter.open_project(other_directory.path());
+    runner.0.borrow_mut().commands.clear();
     let selected_project_id = presenter.model.selected_project.as_ref().unwrap().id;
     let status = presenter.model.status.clone();
     let (reply, response) = tokio::sync::oneshot::channel();
@@ -871,7 +934,16 @@ fn expired_remote_start_does_not_change_selection_or_start_a_run() {
     }));
     assert_eq!(response.try_recv().unwrap(), Ok(()));
     assert_eq!(presenter.storage.tasks(project_id).unwrap().len(), 1);
-    assert_eq!(runner.0.borrow().commands.len(), 1);
+    assert_eq!(
+        runner
+            .0
+            .borrow()
+            .commands
+            .iter()
+            .filter(|envelope| matches!(envelope.command, Command::RunStart(_)))
+            .count(),
+        1
+    );
     let task_id = presenter.model().selected_task.unwrap();
     let run_id = presenter.model().active_run.unwrap();
     runner.emit(Event::RunSessionStarted {
@@ -913,7 +985,7 @@ fn expired_remote_start_does_not_change_selection_or_start_a_run() {
 #[test]
 fn submit_persists_configuration_and_queues_without_starting_concurrent_runs() {
     let (mut presenter, runner, _directory) = fixture();
-    presenter.select_model(ClaudeModel::Opus);
+    presenter.select_catalog_model(Some("opus".into()));
     presenter.select_effort(ThinkingEffort::XHigh);
     assert!(presenter.model().can_submit());
     assert!(presenter.submit("  explain this project\n", "claude-custom"));
@@ -929,7 +1001,7 @@ fn submit_persists_configuration_and_queues_without_starting_concurrent_runs() {
     assert_eq!(request.prompt, "explain this project");
     assert!(request.session_id.is_none());
     assert_eq!(request.model.as_deref(), Some("opus"));
-    assert_eq!(request.effort, ThinkingEffort::XHigh);
+    assert_eq!(request.effort, ThinkingEffort::Default);
     assert_eq!(
         request.executable,
         ready_probe(HarnessKind::Claude).executable
@@ -1680,13 +1752,13 @@ fn active_run_locks_configuration_and_cancels_the_matching_run() {
     assert!(presenter.submit("hello", "claude"));
     let task_id = presenter.model().active_task;
     let run_id = presenter.model().active_run.unwrap();
-    presenter.select_model(ClaudeModel::Opus);
+    presenter.select_catalog_model(Some("opus".into()));
     presenter.select_effort(ThinkingEffort::Max);
     assert!(!presenter.select_harness(HarnessKind::Codex, "claude"));
     presenter.new_task();
     presenter.select_codex_thread("history".into());
-    assert_eq!(presenter.model().claude_model, ClaudeModel::Default);
-    assert_eq!(presenter.model().effort, ThinkingEffort::Medium);
+    assert!(presenter.model().model_override.is_none());
+    assert_eq!(presenter.model().effort, ThinkingEffort::Default);
     assert_eq!(presenter.model().selected_task, task_id);
     assert!(presenter.model().selected_codex_thread.is_none());
     presenter.cancel();
@@ -1702,7 +1774,7 @@ fn active_run_locks_configuration_and_cancels_the_matching_run() {
 #[test]
 fn switching_harnesses_restores_each_executable_and_codex_uses_default_model() {
     let (mut presenter, runner, _directory) = fixture();
-    presenter.select_model(ClaudeModel::Opus);
+    presenter.select_catalog_model(Some("opus".into()));
     presenter
         .storage
         .set_setting("codex_executable", "/custom/codex")
@@ -1740,23 +1812,27 @@ fn switching_harnesses_restores_each_executable_and_codex_uses_default_model() {
 }
 
 #[test]
-fn codex_selection_priority_follow_default_and_run_configuration_match() {
-    let (mut presenter, runner, _credentials, _directory) = provider_fixture();
-    assert!(presenter.select_harness(HarnessKind::Codex, "claude"));
-    presenter
-        .model
-        .harnesses
-        .insert(HarnessKind::Codex, ready_probe(HarnessKind::Codex));
-    let mut draft = profile_draft(None, "Codex Profile", "profile-secret");
-    draft.model = "profile-model".into();
-    let profile_id = presenter.save_provider_profile(draft).unwrap();
-    emit_current_catalog(
-        &presenter,
-        &runner,
-        vec![
+fn all_harnesses_share_selection_priority_and_run_configuration() {
+    for harness in HarnessKind::ALL {
+        let (mut presenter, runner, _credentials, _directory) = provider_fixture();
+        presenter.select_harness(harness, "claude");
+        presenter
+            .model
+            .harnesses
+            .insert(harness, ready_probe(harness));
+        let mut draft = profile_draft(None, "Provider Profile", "profile-secret");
+        draft.model = "profile-model".into();
+        let profile_id = presenter.save_provider_profile(draft).unwrap();
+        let models = vec![
+            catalog_model(
+                "cli-model",
+                true,
+                &[ThinkingEffort::Low],
+                ThinkingEffort::Low,
+            ),
             catalog_model(
                 "profile-model",
-                true,
+                false,
                 &[ThinkingEffort::Medium],
                 ThinkingEffort::Medium,
             ),
@@ -1766,70 +1842,113 @@ fn codex_selection_priority_follow_default_and_run_configuration_match() {
                 &[ThinkingEffort::Low, ThinkingEffort::High],
                 ThinkingEffort::High,
             ),
-        ],
-    );
-    presenter.drain_events();
-    assert_eq!(
-        presenter.model().configured_catalog_model(),
-        Some("profile-model")
-    );
+        ];
+        emit_current_catalog(&presenter, &runner, models.clone());
+        presenter.drain_events();
+        assert_eq!(
+            presenter.model().configured_catalog_model(),
+            Some("profile-model")
+        );
 
-    presenter.select_catalog_model(Some("explicit-model".into()));
-    assert_eq!(
-        presenter.model().configured_catalog_model(),
-        Some("explicit-model")
-    );
-    assert_eq!(
-        presenter
+        presenter.select_catalog_model(Some("explicit-model".into()));
+        assert_eq!(
+            presenter.model().configured_catalog_model(),
+            Some("explicit-model")
+        );
+        assert_eq!(
+            presenter
+                .storage
+                .setting(&catalog_model_setting_key(harness, Some(profile_id),))
+                .unwrap()
+                .as_deref(),
+            Some("explicit-model")
+        );
+
+        presenter.select_catalog_model(None);
+        assert_eq!(
+            presenter.model().configured_catalog_model(),
+            Some("profile-model")
+        );
+        assert_eq!(
+            presenter
+                .storage
+                .setting(&catalog_model_setting_key(harness, Some(profile_id),))
+                .unwrap()
+                .as_deref(),
+            Some("")
+        );
+
+        presenter.select_catalog_model(Some("explicit-model".into()));
+        assert!(presenter.model().can_submit());
+        assert!(presenter.submit("use catalog selection", harness.default_executable()));
+        let resolved = presenter.model().resolved_model_selection();
+        let remote = presenter.remote_state();
+        assert_eq!(remote.model, resolved.model);
+        assert_eq!(remote.effort, resolved.effort);
+        assert!(
+            !serde_json::to_string(&remote)
+                .unwrap()
+                .contains("profile-secret")
+        );
+        assert_eq!(
+            presenter
+                .model()
+                .selected_provider_profile()
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("profile-model")
+        );
+        let mut request = last_start(&runner);
+        assert_eq!(request.harness, harness);
+        assert_eq!(request.model.as_deref(), Some("explicit-model"));
+        assert_eq!(request.effort, ThinkingEffort::High);
+        let config = presenter
             .storage
-            .setting(&catalog_model_setting_key(
-                HarnessKind::Codex,
-                Some(profile_id),
-            ))
+            .conversation_config(request.task_id)
             .unwrap()
-            .as_deref(),
-        Some("explicit-model")
-    );
+            .unwrap();
+        assert_eq!(config.model, "explicit-model");
+        assert_eq!(config.effort, ThinkingEffort::High);
 
-    presenter.select_catalog_model(None);
-    assert_eq!(
-        presenter.model().configured_catalog_model(),
-        Some("profile-model")
-    );
-    assert_eq!(
-        presenter
-            .storage
-            .setting(&catalog_model_setting_key(
-                HarnessKind::Codex,
+        for (profile, expected_model, expected_effort) in [
+            (
                 Some(profile_id),
-            ))
-            .unwrap()
-            .as_deref(),
-        Some("")
-    );
-
-    presenter.select_catalog_model(Some("explicit-model".into()));
-    assert!(presenter.model().can_submit());
-    assert!(presenter.submit("use catalog selection", "codex"));
-    let state = runner.0.borrow();
-    let request = state
-        .commands
-        .iter()
-        .rev()
-        .find_map(|envelope| match &envelope.command {
-            Command::RunStart(request) => Some(request),
-            _ => None,
-        })
-        .expect("expected start");
-    assert_eq!(request.model.as_deref(), Some("explicit-model"));
-    assert_eq!(request.effort, ThinkingEffort::High);
-    let config = presenter
-        .storage
-        .conversation_config(request.task_id)
-        .unwrap()
-        .unwrap();
-    assert_eq!(config.model, "explicit-model");
-    assert_eq!(config.effort, ThinkingEffort::High);
+                Some("profile-model"),
+                ThinkingEffort::Medium,
+            ),
+            (None, None, ThinkingEffort::Default),
+        ] {
+            runner.emit(Event::RunExited {
+                run_id: request.run_id,
+                status: RunStatus::Completed,
+                exit_code: Some(0),
+            });
+            presenter.drain_events();
+            presenter.new_task();
+            presenter.select_catalog_model(None);
+            if profile.is_none() {
+                presenter.select_provider_profile(None);
+                emit_current_catalog(&presenter, &runner, models.clone());
+                presenter.drain_events();
+            }
+            assert_eq!(presenter.model().configured_catalog_model(), expected_model);
+            assert!(presenter.submit("follow default", harness.default_executable()));
+            request = last_start(&runner);
+            assert_eq!(request.model.as_deref(), expected_model);
+            assert_eq!(request.effort, expected_effort);
+            let remote = presenter.remote_state();
+            assert_eq!(remote.model, request.model);
+            assert_eq!(remote.effort, request.effort);
+            let config = presenter
+                .storage
+                .conversation_config(request.task_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(config.model, expected_model.unwrap_or("default"));
+            assert_eq!(config.effort, request.effort);
+        }
+    }
 }
 
 #[test]
@@ -2079,6 +2198,212 @@ fn catalog_preferences_are_isolated_by_harness_and_profile() {
         Some("bigmodel/omp-model")
     );
     assert_eq!(presenter.model().effort, ThinkingEffort::XHigh);
+}
+
+#[test]
+fn all_harnesses_restore_each_profile_and_cli_selection_after_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("preferences.db");
+    let credentials = FakeCredentialStore::default();
+    let runner = FakeRunner::default();
+    let mut presenter = Presenter::new_with_credentials(
+        Storage::open(&database).unwrap(),
+        Ok(Box::new(runner.clone())),
+        None,
+        Box::new(credentials.clone()),
+    );
+    presenter.open_project(directory.path());
+    let mut expected = Vec::new();
+    for harness in HarnessKind::ALL {
+        let executable = presenter.model().executable.clone();
+        presenter.select_harness(harness, &executable);
+        for (index, name) in ["cli", "first", "second"].into_iter().enumerate() {
+            let profile = if index == 0 {
+                presenter.select_provider_profile(None);
+                None
+            } else {
+                Some(
+                    presenter
+                        .save_provider_profile(profile_draft(None, name, "profile-secret"))
+                        .unwrap(),
+                )
+            };
+            let id = format!("{harness}/{name}/model");
+            let mut model = catalog_model(
+                &id,
+                false,
+                &[ThinkingEffort::Low, ThinkingEffort::High],
+                ThinkingEffort::High,
+            );
+            model.display_name = format!("{name} model");
+            emit_current_catalog(&presenter, &runner, vec![model.clone()]);
+            presenter.drain_events();
+            presenter.select_catalog_model(Some(id.clone()));
+            let effort = if index == 1 {
+                ThinkingEffort::High
+            } else {
+                ThinkingEffort::Low
+            };
+            presenter.select_effort(effort);
+            expected.push((harness, profile, model, effort));
+        }
+    }
+    drop(presenter);
+    let mut presenter = Presenter::new_with_credentials(
+        Storage::open(&database).unwrap(),
+        Ok(Box::new(runner.clone())),
+        None,
+        Box::new(credentials),
+    );
+    presenter.open_project(directory.path());
+    for (harness, profile, model, effort) in expected.into_iter().rev() {
+        let executable = presenter.model().executable.clone();
+        presenter.select_harness(harness, &executable);
+        presenter.select_provider_profile(profile);
+        assert_eq!(
+            presenter.model().model_override.as_deref(),
+            Some(model.id.as_str())
+        );
+        assert_eq!(
+            presenter.model().model_override_name.as_deref(),
+            Some(model.display_name.as_str())
+        );
+        assert_eq!(presenter.model().effort, effort);
+        emit_current_catalog(&presenter, &runner, vec![model.clone()]);
+        presenter.drain_events();
+        assert_eq!(
+            presenter.model().resolved_model_selection().model,
+            Some(model.id)
+        );
+        assert_eq!(presenter.model().resolved_model_selection().effort, effort);
+    }
+}
+
+#[test]
+fn claude_legacy_preferences_migrate_once_without_leaking_to_profiles() {
+    let storage = Storage::open(Path::new(":memory:")).unwrap();
+    storage.set_setting("claude_model", "opus").unwrap();
+    let (model, effort) =
+        load_catalog_preferences(&storage, HarnessKind::Claude, None, ThinkingEffort::High);
+    assert_eq!(model.as_deref(), Some("opus"));
+    assert_eq!(effort, ThinkingEffort::High);
+    let (model, effort) = load_catalog_preferences(
+        &storage,
+        HarnessKind::Claude,
+        Some(Uuid::new_v4()),
+        ThinkingEffort::High,
+    );
+    assert!(model.is_none());
+    assert_eq!(effort, ThinkingEffort::Default);
+    storage
+        .set_setting("claude_model_override_cli", "")
+        .unwrap();
+    assert!(
+        load_catalog_preferences(&storage, HarnessKind::Claude, None, ThinkingEffort::High)
+            .0
+            .is_none()
+    );
+}
+
+#[test]
+fn catalog_context_changes_ignore_late_responses_and_keep_missing_model_names() {
+    for harness in HarnessKind::ALL {
+        let (mut presenter, runner, _credentials, directory) = provider_fixture();
+        presenter.select_harness(harness, "claude");
+        presenter.refresh_model_catalog();
+        let mut model = catalog_model(
+            "chosen-id",
+            false,
+            &[ThinkingEffort::High],
+            ThinkingEffort::High,
+        );
+        model.display_name = "Recognizable name".into();
+        emit_current_catalog(&presenter, &runner, vec![model]);
+        presenter.drain_events();
+        presenter.select_catalog_model(Some("chosen-id".into()));
+        presenter.probe("/new/executable");
+        let stale = current_catalog_request_id(&presenter);
+        let other = directory.path().join("other-project");
+        fs::create_dir(&other).unwrap();
+        presenter.open_project(&other);
+        let current = current_catalog_request_id(&presenter);
+        assert_ne!(stale, current);
+        for event in [
+            Event::ModelCatalogLoaded {
+                request_id: stale,
+                harness,
+                models: vec![],
+            },
+            Event::ModelCatalogFailed {
+                request_id: stale,
+                harness,
+                message: "stale failure".into(),
+            },
+        ] {
+            runner.emit(event);
+        }
+        presenter.drain_events();
+        assert_eq!(current_catalog_request_id(&presenter), current);
+        assert!(runner.0.borrow().commands.iter().any(|command| matches!(&command.command,
+            Command::ModelCatalogRefresh { request_id, executable, cwd, .. }
+            if *request_id == current && executable == "/new/executable" && Path::new(cwd) == other.canonicalize().unwrap())));
+        emit_current_catalog(&presenter, &runner, vec![]);
+        presenter.drain_events();
+        assert!(!presenter.model().catalog_selection_is_valid());
+        assert_eq!(
+            presenter.model().model_override_name.as_deref(),
+            Some("Recognizable name")
+        );
+        presenter.select_catalog_model(None);
+        assert!(presenter.model().catalog_selection_is_valid());
+    }
+}
+
+#[test]
+fn unavailable_models_and_unknown_efforts_cannot_change_the_requested_configuration() {
+    let (mut presenter, runner, _directory) = fixture();
+    presenter.select_catalog_model(Some("opus".into()));
+    presenter.select_effort(ThinkingEffort::Max);
+    assert_eq!(presenter.model().effort, ThinkingEffort::Default);
+    assert!(presenter.model().status_text().contains("不支持"));
+    assert!(presenter.refresh_model_catalog());
+    let mut unavailable = claude_aliases().remove(1);
+    unavailable.availability = nexus_domain::ModelAvailability::Unavailable {
+        reason: "disabled by provider".into(),
+    };
+    emit_current_catalog(&presenter, &runner, vec![unavailable]);
+    presenter.drain_events();
+    assert!(!presenter.model().can_submit());
+    assert!(!presenter.submit("must not start", "claude"));
+    assert_eq!(presenter.model().model_override.as_deref(), Some("opus"));
+    presenter.select_catalog_model(None);
+    assert!(presenter.model().can_submit());
+    assert!(presenter.refresh_model_catalog());
+    let request_id = current_catalog_request_id(&presenter);
+    assert!(presenter.submit("use defaults", "claude"));
+    let request = last_start(&runner);
+    presenter.probe("other");
+    presenter.select_effort(ThinkingEffort::High);
+    runner.emit(Event::ModelCatalogLoaded {
+        request_id,
+        harness: HarnessKind::Claude,
+        models: claude_aliases(),
+    });
+    presenter.drain_events();
+    assert!(matches!(
+        presenter.model().model_catalog,
+        ModelCatalogState::Loading { .. }
+    ));
+    let remote = presenter.remote_state();
+    assert_eq!(remote.model, request.model);
+    assert_eq!(remote.effort, request.effort);
+    assert_eq!(presenter.model().executable, "claude");
+    let recorded = presenter
+        .storage
+        .conversation_config(request.task_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(recorded.effort, request.effort);
 }
 
 #[test]
@@ -2416,7 +2741,7 @@ fn provider_profiles_bound_visible_name_and_model_lengths() {
 #[test]
 fn selecting_a_saved_task_restores_its_configuration_and_messages() {
     let (mut presenter, runner, _directory) = fixture();
-    presenter.select_model(ClaudeModel::Sonnet);
+    presenter.select_catalog_model(Some("sonnet".into()));
     presenter.select_effort(ThinkingEffort::High);
     assert!(presenter.submit("hello", "claude"));
     let run_id = presenter.model().active_run.unwrap();
@@ -2433,8 +2758,8 @@ fn selecting_a_saved_task_restores_its_configuration_and_messages() {
     presenter.select_effort(ThinkingEffort::Low);
     presenter.select_task(task_id);
     assert_eq!(presenter.model().selected_harness, HarnessKind::Claude);
-    assert_eq!(presenter.model().claude_model, ClaudeModel::Sonnet);
-    assert_eq!(presenter.model().effort, ThinkingEffort::High);
+    assert_eq!(presenter.model().model_override.as_deref(), Some("sonnet"));
+    assert_eq!(presenter.model().effort, ThinkingEffort::Default);
     assert_eq!(
         presenter.model().executable,
         ready_probe(HarnessKind::Claude).executable
