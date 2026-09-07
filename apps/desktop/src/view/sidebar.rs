@@ -1231,6 +1231,12 @@ mod tests {
                 .update(cx, |input, cx| input.set_value("Keep my draft", window, cx));
             view.toggle_settings(window, cx);
         });
+        cx.run_until_parked();
+        let appearance_tab = cx.debug_bounds("settings-nav-appearance").unwrap().center();
+        cx.simulate_click(appearance_tab, Default::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("settings-content-appearance").is_some());
+        assert!(cx.debug_bounds("settings-content-general").is_none());
         for size in [
             gpui::size(px(1040.), px(680.)),
             gpui::size(px(1280.), px(800.)),
@@ -1362,6 +1368,7 @@ mod tests {
         for (selector, section) in [
             ("settings-nav-providers", SettingsSection::Providers),
             ("settings-nav-remote", SettingsSection::Remote),
+            ("settings-nav-appearance", SettingsSection::Appearance),
             ("settings-nav-general", SettingsSection::General),
             ("settings-nav-providers", SettingsSection::Providers),
         ] {
