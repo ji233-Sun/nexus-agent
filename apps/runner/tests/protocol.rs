@@ -757,11 +757,17 @@ async fn steer_waits_for_all_tools_and_uses_native_receipts_in_the_same_run() {
                     _ => {}
                 }
             }
-            assert!(
-                timeout(Duration::from_millis(100), runner.events.next_line())
-                    .await
-                    .is_err()
-            );
+            let quiet_period = tokio::time::sleep(Duration::from_millis(100));
+            tokio::pin!(quiet_period);
+            loop {
+                tokio::select! {
+                    _ = &mut quiet_period => break,
+                    event = runner.next() => assert!(
+                        matches!(event, Event::TaskTitleGenerated { .. }),
+                        "Steer must wait for the whole tool batch, got {event:?}"
+                    ),
+                }
+            }
             assert!(!directory.path().join("steer-input.json").exists());
             fs::write(directory.path().join("finish-second"), "ready").unwrap();
             let expected = if scenario == "steer-unconfirmed" {
