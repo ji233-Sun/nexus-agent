@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandEnvelope {
@@ -188,6 +188,8 @@ pub enum Event {
         status: RunStatus,
         exit_code: Option<i32>,
     },
+    #[serde(rename = "task.title.generated")]
+    TaskTitleGenerated { task_id: Uuid, title: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -379,5 +381,28 @@ mod tests {
                 .has_safe_name()
             );
         }
+    }
+
+    #[test]
+    fn protocol_round_trip_preserves_generated_task_title() {
+        let task_id = Uuid::new_v4();
+        let envelope = EventEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            id: Uuid::new_v4(),
+            sequence: 1,
+            event: Event::TaskTitleGenerated {
+                task_id,
+                title: "修复登录流程".into(),
+            },
+        };
+
+        let json = serde_json::to_string(&envelope).unwrap();
+        assert!(json.contains(r#""kind":"task.title.generated""#));
+        let decoded: EventEnvelope = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            decoded.event,
+            Event::TaskTitleGenerated { task_id: id, title }
+                if id == task_id && title == "修复登录流程"
+        ));
     }
 }

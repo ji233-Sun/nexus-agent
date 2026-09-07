@@ -2,7 +2,11 @@ pub(crate) mod events;
 
 use nexus_domain::RunStatus;
 use nexus_protocol::{Command, EnvironmentVariable, ErrorCode, Event, StartRun};
-use std::{collections::HashSet, path::Path, sync::Arc};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tokio::{
     sync::{Mutex, mpsc, watch},
     task::JoinHandle,
@@ -11,7 +15,7 @@ use uuid::Uuid;
 
 use crate::infrastructure::{
     harness,
-    process::{SteerInput, run_harness},
+    process::{SteerInput, generate_title, run_harness},
 };
 use events::Emitter;
 
@@ -22,14 +26,15 @@ struct ActiveRun {
     input: mpsc::UnboundedSender<SteerInput>,
 }
 
-struct CatalogTask {
+struct BackgroundTask {
     cancel: watch::Sender<bool>,
     task: JoinHandle<()>,
 }
 
 pub(crate) struct Runner {
     active: Arc<Mutex<Option<ActiveRun>>>,
-    catalog_task: Option<CatalogTask>,
+    catalog_task: Option<BackgroundTask>,
+    title_tasks: Vec<BackgroundTask>,
     emitter: Emitter,
 }
 
@@ -38,11 +43,13 @@ impl Runner {
         Self {
             active: Arc::new(Mutex::new(None)),
             catalog_task: None,
+            title_tasks: Vec::new(),
             emitter,
         }
     }
 
     pub(crate) async fn handle(&mut self, command: Command) -> bool {
+        self.reap_title_tasks().await;
         match command {
             Command::RunnerHello => self.emitter.send(Event::RunnerReady).await,
             Command::HarnessProbe {
@@ -108,7 +115,7 @@ impl Runner {
                                     }
                                 }
                             });
-                            self.catalog_task = Some(CatalogTask { cancel, task });
+                            self.catalog_task = Some(BackgroundTask { cancel, task });
                         }
                         _ => {
                             self.emitter
@@ -123,7 +130,14 @@ impl Runner {
                 }
             }
             Command::RunStart(request) => {
-                start_run(request, self.active.clone(), self.emitter.clone()).await;
+                let should_generate_title = request.session_id.is_none();
+                let title_request = request.clone();
+                if let Some(cwd) =
+                    start_run(request, self.active.clone(), self.emitter.clone()).await
+                    && should_generate_title
+                {
+                    self.spawn_title_generation(title_request, cwd);
+                }
             }
             Command::RunSteer {
                 run_id,
@@ -163,15 +177,51 @@ impl Runner {
         }
     }
 
+    fn spawn_title_generation(&mut self, request: StartRun, cwd: PathBuf) {
+        let task_id = request.task_id;
+        let (cancel, cancel_rx) = watch::channel(false);
+        let emitter = self.emitter.clone();
+        let task = tokio::spawn(async move {
+            if let Some(title) = generate_title(request, cwd, cancel_rx).await {
+                emitter
+                    .send(Event::TaskTitleGenerated { task_id, title })
+                    .await;
+            }
+        });
+        self.title_tasks.push(BackgroundTask { cancel, task });
+    }
+
+    async fn reap_title_tasks(&mut self) {
+        let mut index = 0;
+        while index < self.title_tasks.len() {
+            if self.title_tasks[index].task.is_finished() {
+                let task = self.title_tasks.swap_remove(index);
+                let _ = task.task.await;
+            } else {
+                index += 1;
+            }
+        }
+    }
+
     pub(crate) async fn shutdown(&mut self) {
         self.cancel_catalog_task().await;
         if let Some(run) = self.active.lock().await.as_ref() {
             let _ = run.cancel.send(true);
         }
+        for task in &self.title_tasks {
+            let _ = task.cancel.send(true);
+        }
+        while let Some(task) = self.title_tasks.pop() {
+            let _ = task.task.await;
+        }
     }
 }
 
-async fn start_run(request: StartRun, active: Arc<Mutex<Option<ActiveRun>>>, emitter: Emitter) {
+async fn start_run(
+    request: StartRun,
+    active: Arc<Mutex<Option<ActiveRun>>>,
+    emitter: Emitter,
+) -> Option<PathBuf> {
     let mut guard = active.lock().await;
     if guard.is_some() {
         emitter
@@ -188,7 +238,7 @@ async fn start_run(request: StartRun, active: Arc<Mutex<Option<ActiveRun>>>, emi
                 exit_code: None,
             })
             .await;
-        return;
+        return None;
     }
 
     if !environment_is_valid(&request.environment) {
@@ -206,7 +256,7 @@ async fn start_run(request: StartRun, active: Arc<Mutex<Option<ActiveRun>>>, emi
                 exit_code: None,
             })
             .await;
-        return;
+        return None;
     }
 
     let cwd = match Path::new(&request.cwd).canonicalize() {
@@ -226,7 +276,7 @@ async fn start_run(request: StartRun, active: Arc<Mutex<Option<ActiveRun>>>, emi
                     exit_code: None,
                 })
                 .await;
-            return;
+            return None;
         }
     };
 
@@ -241,6 +291,7 @@ async fn start_run(request: StartRun, active: Arc<Mutex<Option<ActiveRun>>>, emi
 
     let run_id = request.run_id;
     let active_for_task = active.clone();
+    let title_cwd = cwd.clone();
     tokio::spawn(async move {
         let (status, exit_code) =
             run_harness(request, cwd, cancel_rx, input_rx, emitter.clone()).await;
@@ -257,6 +308,7 @@ async fn start_run(request: StartRun, active: Arc<Mutex<Option<ActiveRun>>>, emi
             })
             .await;
     });
+    Some(title_cwd)
 }
 
 fn environment_is_valid(environment: &[EnvironmentVariable]) -> bool {
@@ -346,6 +398,20 @@ mod tests {
         assert!(matches!(events.recv().await.unwrap().event,
             Event::RunExited { run_id: id, status: RunStatus::Failed, .. } if id == run_id));
         assert!(runner.active.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn resumed_runs_do_not_regenerate_task_titles() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut request = request(directory.path().to_string_lossy().into_owned());
+        request.session_id = Some("existing-session".into());
+        let (emitter, _) = Emitter::channel();
+        let mut runner = Runner::new(emitter);
+
+        runner.handle(Command::RunStart(request)).await;
+
+        assert!(runner.title_tasks.is_empty());
+        runner.shutdown().await;
     }
 
     #[tokio::test]

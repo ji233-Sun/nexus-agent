@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use nexus_domain::{HarnessKind, ModelDescriptor, ModelReasoningEffort};
+use nexus_domain::{HarnessKind, ModelDescriptor, ModelReasoningEffort, ThinkingEffort};
 pub use nexus_harness_core::{DecodedEvent, LaunchSpec, ModelCatalogError};
 use nexus_harness_core::{
     InputFrame, LineDecoder, resolve_executable, summarize_text, tool_content,
@@ -67,6 +67,80 @@ pub fn prepare_run(request: &StartRun, cwd: &Path) -> (LaunchSpec, EventDecoder)
             turn_id: None,
         },
     )
+}
+
+pub fn build_title_launch_spec(
+    executable: &str,
+    cwd: &Path,
+    prompt: &str,
+    model: Option<&str>,
+    effort: ThinkingEffort,
+) -> LaunchSpec {
+    let mut args = vec![
+        "exec".into(),
+        "--ignore-rules".into(),
+        "--skip-git-repo-check".into(),
+        "--json".into(),
+        "--sandbox".into(),
+        "read-only".into(),
+        "--ephemeral".into(),
+        "--color".into(),
+        "never".into(),
+    ];
+    if !effort.is_default() {
+        args.extend([
+            "--config".into(),
+            format!("model_reasoning_effort=\"{}\"", effort.as_str()),
+        ]);
+    }
+    if let Some(model) = model {
+        args.extend(["--model".into(), model.into()]);
+    }
+    args.push("-".into());
+
+    LaunchSpec {
+        executable: PathBuf::from(executable),
+        args,
+        cwd: cwd.to_path_buf(),
+        stdin: prompt.to_owned(),
+    }
+}
+
+#[derive(Default)]
+pub struct TitleEventDecoder;
+
+impl LineDecoder for TitleEventDecoder {
+    fn decode_line(&mut self, line: &str) -> Result<Vec<DecodedEvent>, serde_json::Error> {
+        let frame: Value = serde_json::from_str(line)?;
+        let events = match frame.get("type").and_then(Value::as_str) {
+            Some("item.completed")
+                if frame.pointer("/item/type").and_then(Value::as_str) == Some("agent_message") =>
+            {
+                frame
+                    .pointer("/item/text")
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.is_empty())
+                    .map(|text| vec![DecodedEvent::MessageCompleted(text.into())])
+                    .unwrap_or_default()
+            }
+            Some("turn.failed") => frame
+                .pointer("/error/message")
+                .and_then(Value::as_str)
+                .map(|message| vec![DecodedEvent::Error(summarize_text(message))])
+                .unwrap_or_default(),
+            Some("error") => frame
+                .get("message")
+                .and_then(Value::as_str)
+                .map(|message| vec![DecodedEvent::Error(summarize_text(message))])
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        Ok(events)
+    }
+
+    fn steer(&mut self, _message_id: &str, _prompt: &str) -> Option<InputFrame> {
+        None
+    }
 }
 
 pub async fn discover_models(
@@ -806,6 +880,26 @@ mod tests {
             assert_eq!(frame["params"]["input"][0]["text"], request.prompt);
             assert_eq!(frame["params"]["effort"], "xhigh");
         }
+    }
+
+    #[test]
+    fn title_launch_spec_uses_read_only_sandbox() {
+        let spec = build_title_launch_spec(
+            "/usr/local/bin/codex",
+            Path::new("/tmp/project"),
+            "title prompt",
+            Some("gpt-test"),
+            ThinkingEffort::Low,
+        );
+
+        assert!(
+            spec.args
+                .windows(2)
+                .any(|pair| pair == ["--sandbox", "read-only"])
+        );
+        assert!(spec.args.iter().any(|arg| arg == "--ignore-rules"));
+        assert!(!spec.args.iter().any(|arg| arg == "workspace-write"));
+        assert!(!spec.args.iter().any(|arg| arg.contains("title prompt")));
     }
 
     #[test]

@@ -56,6 +56,24 @@ pub fn build_launch_spec(
     }
 }
 
+pub fn build_title_launch_spec(
+    executable: &str,
+    cwd: &Path,
+    prompt: &str,
+    model: Option<&str>,
+    effort: ThinkingEffort,
+) -> LaunchSpec {
+    let mut spec = build_launch_spec(executable, cwd, prompt, model, effort, None);
+    spec.args.extend([
+        "--no-tools".into(),
+        "--no-lsp".into(),
+        "--no-extensions".into(),
+        "--no-skills".into(),
+        "--no-rules".into(),
+    ]);
+    spec
+}
+
 fn omp_thinking_value(effort: ThinkingEffort) -> Option<&'static str> {
     match effort {
         ThinkingEffort::Default => None,
@@ -667,6 +685,28 @@ mod tests {
             ]}"#),
             Err(ModelCatalogError::Failed(message)) if message.contains("重复标识")
         ));
+    }
+
+    #[test]
+    fn title_launch_spec_disables_tools_and_project_extensions() {
+        let spec = build_title_launch_spec(
+            "/usr/local/bin/omp",
+            Path::new("/tmp/project"),
+            "title prompt",
+            Some("openai/gpt-test"),
+            ThinkingEffort::Low,
+        );
+
+        for flag in [
+            "--no-tools",
+            "--no-lsp",
+            "--no-extensions",
+            "--no-skills",
+            "--no-rules",
+        ] {
+            assert!(spec.args.iter().any(|arg| arg == flag));
+        }
+        assert!(!spec.args.iter().any(|arg| arg.contains("title prompt")));
     }
 
     #[test]

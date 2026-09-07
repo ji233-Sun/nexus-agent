@@ -74,6 +74,16 @@ impl TestRunner {
         serde_json::from_str::<EventEnvelope>(&line).unwrap().event
     }
 
+    async fn expect_runner_ready(&mut self) {
+        loop {
+            match self.next().await {
+                Event::RunnerReady => return,
+                Event::TaskTitleGenerated { .. } => {}
+                event => panic!("expected runner.ready, got {event:?}"),
+            }
+        }
+    }
+
     async fn collect_run(&mut self, run_id: Uuid, expected: RunStatus) -> Vec<Event> {
         let mut events = Vec::new();
         loop {
@@ -88,6 +98,35 @@ impl TestRunner {
             }
             events.push(event);
         }
+    }
+
+    async fn collect_run_and_title(
+        &mut self,
+        run_id: Uuid,
+        task_id: Uuid,
+        expected: RunStatus,
+    ) -> (Vec<Event>, String) {
+        let mut events = Vec::new();
+        let mut run_finished = false;
+        let mut title = None;
+        while !run_finished || title.is_none() {
+            let event = self.next().await;
+            match &event {
+                Event::RunExited {
+                    run_id: id, status, ..
+                } if *id == run_id => {
+                    assert_eq!(*status, expected);
+                    run_finished = true;
+                }
+                Event::TaskTitleGenerated {
+                    task_id: id,
+                    title: generated,
+                } if *id == task_id => title = Some(generated.clone()),
+                _ => {}
+            }
+            events.push(event);
+        }
+        (events, title.unwrap())
     }
 
     async fn shutdown(mut self) {
@@ -320,7 +359,7 @@ async fn runner_routes_claude_alias_catalog_without_starting_a_run() {
             model.source.harness() == HarnessKind::Claude && model.supported_reasoning_efforts.is_empty()))
     );
     runner.send(Command::RunnerHello).await;
-    assert!(matches!(runner.next().await, Event::RunnerReady));
+    runner.expect_runner_ready().await;
     runner.shutdown().await;
 }
 
@@ -623,6 +662,61 @@ async fn runner_streams_fake_omp_and_uses_guarded_rpc_mode() {
 }
 
 #[tokio::test]
+async fn runner_generates_titles_with_each_harness_in_a_safe_background_process() {
+    for harness in HarnessKind::ALL {
+        let directory = tempfile::tempdir().unwrap();
+        let mut request = request(
+            directory.path(),
+            fake_harness(directory.path()),
+            harness,
+            "Please fix the authentication flow and add regression tests",
+        );
+        request.environment.push(EnvironmentVariable {
+            name: "TEST_PROVIDER_API_KEY".into(),
+            value: "title-secret".into(),
+        });
+        let run_id = request.run_id;
+        let task_id = request.task_id;
+        let mut runner = TestRunner::spawn();
+        runner.send(Command::RunStart(request)).await;
+
+        let (_, title) = runner
+            .collect_run_and_title(run_id, task_id, RunStatus::Completed)
+            .await;
+        runner.shutdown().await;
+
+        assert_eq!(title, "Fix authentication flow");
+        let args = fs::read_to_string(directory.path().join("title-args.txt")).unwrap();
+        assert!(!args.contains("Please fix the authentication flow"));
+        match harness {
+            HarnessKind::Claude => {
+                assert!(args.contains("--permission-mode\ndontAsk"));
+                assert!(args.ends_with("--tools\n"));
+            }
+            HarnessKind::Codex => {
+                assert!(args.contains("--sandbox\nread-only"));
+                assert!(args.contains("--ignore-rules"));
+                assert!(!args.contains("workspace-write"));
+            }
+            HarnessKind::Omp => {
+                assert!(args.contains("--no-tools"));
+                assert!(args.contains("--no-extensions"));
+                assert!(args.contains("--no-rules"));
+            }
+        }
+        assert!(
+            fs::read_to_string(directory.path().join("title-prompt.txt"))
+                .unwrap()
+                .contains("Please fix the authentication flow")
+        );
+        assert_eq!(
+            fs::read_to_string(directory.path().join("title-provider-env.txt")).unwrap(),
+            "title-secret"
+        );
+    }
+}
+
+#[tokio::test]
 async fn steer_waits_for_all_tools_and_uses_native_receipts_in_the_same_run() {
     let binaries = tempfile::tempdir().unwrap();
     let executable = fake_harness(binaries.path());
@@ -652,7 +746,7 @@ async fn steer_waits_for_all_tools_and_uses_native_receipts_in_the_same_run() {
                 })
                 .await;
             runner.send(Command::RunnerHello).await;
-            assert!(matches!(runner.next().await, Event::RunnerReady));
+            runner.expect_runner_ready().await;
             fs::write(directory.path().join("finish-first"), "ready").unwrap();
             loop {
                 match runner.next().await {
@@ -663,11 +757,17 @@ async fn steer_waits_for_all_tools_and_uses_native_receipts_in_the_same_run() {
                     _ => {}
                 }
             }
-            assert!(
-                timeout(Duration::from_millis(100), runner.events.next_line())
-                    .await
-                    .is_err()
-            );
+            let quiet_period = tokio::time::sleep(Duration::from_millis(100));
+            tokio::pin!(quiet_period);
+            loop {
+                tokio::select! {
+                    _ = &mut quiet_period => break,
+                    event = runner.next() => assert!(
+                        matches!(event, Event::TaskTitleGenerated { .. }),
+                        "Steer must wait for the whole tool batch, got {event:?}"
+                    ),
+                }
+            }
             assert!(!directory.path().join("steer-input.json").exists());
             fs::write(directory.path().join("finish-second"), "ready").unwrap();
             let expected = if scenario == "steer-unconfirmed" {
@@ -718,6 +818,34 @@ async fn steer_waits_for_all_tools_and_uses_native_receipts_in_the_same_run() {
 }
 
 #[tokio::test]
+async fn shutdown_reaps_a_blocked_title_process_tree() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut request = request(
+        directory.path(),
+        fake_harness(directory.path()),
+        HarnessKind::Codex,
+        "generate a title",
+    );
+    request.environment.push(EnvironmentVariable {
+        name: "TEST_TITLE_BLOCK".into(),
+        value: "1".into(),
+    });
+    let run_id = request.run_id;
+    let mut runner = TestRunner::spawn();
+    runner.send(Command::RunStart(request)).await;
+    runner.collect_run(run_id, RunStatus::Completed).await;
+
+    timeout(Duration::from_secs(5), async {
+        while !directory.path().join("title-prompt.txt").is_file() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    runner.shutdown().await;
+}
+
+#[tokio::test]
 async fn unsent_steer_is_rejected_on_completion_or_cancellation() {
     let binaries = tempfile::tempdir().unwrap();
     let executable = fake_harness(binaries.path());
@@ -748,7 +876,7 @@ async fn unsent_steer_is_rejected_on_completion_or_cancellation() {
                 })
                 .await;
             runner.send(Command::RunnerHello).await;
-            assert!(matches!(runner.next().await, Event::RunnerReady));
+            runner.expect_runner_ready().await;
             let expected = if cancel {
                 runner.send(Command::RunCancel { run_id }).await;
                 RunStatus::Cancelled

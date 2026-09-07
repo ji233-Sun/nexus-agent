@@ -377,6 +377,28 @@ pub struct TaskSummary {
     pub created_at: DateTime<Utc>,
 }
 
+pub const MAX_TASK_TITLE_CHARS: usize = 40;
+
+pub fn compact_task_title(value: &str) -> Option<String> {
+    let collapsed = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let without_markup = collapsed.replace("**", "").replace('`', "");
+    let title = without_markup
+        .trim_matches(|character: char| matches!(character, '#' | '\'' | '"' | '-' | ' '))
+        .chars()
+        .take(MAX_TASK_TITLE_CHARS)
+        .collect::<String>();
+    let title = title
+        .trim_end_matches(|character: char| {
+            matches!(
+                character,
+                '.' | '。' | '!' | '！' | '?' | '？' | ':' | '：' | ';' | '；' | ',' | '，'
+            )
+        })
+        .trim()
+        .to_owned();
+    (!title.is_empty()).then_some(title)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageRole {
@@ -456,5 +478,25 @@ mod tests {
         );
         assert!(ThinkingEffort::from_str("provider-specific").is_err());
         assert!(ThinkingEffort::from_str("").is_err());
+    }
+
+    #[test]
+    fn task_titles_are_single_line_bounded_and_unicode_safe() {
+        assert_eq!(
+            compact_task_title("  **修复登录流程。**\n并补充测试  ").as_deref(),
+            Some("修复登录流程。 并补充测试")
+        );
+        assert_eq!(compact_task_title("```  "), None);
+        assert_eq!(
+            compact_task_title("Fix `__init__`").as_deref(),
+            Some("Fix __init__")
+        );
+        assert_eq!(
+            compact_task_title(&"界".repeat(MAX_TASK_TITLE_CHARS + 5))
+                .unwrap()
+                .chars()
+                .count(),
+            MAX_TASK_TITLE_CHARS
+        );
     }
 }

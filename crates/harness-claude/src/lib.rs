@@ -85,6 +85,21 @@ pub fn build_launch_spec(
     }
 }
 
+pub fn build_title_launch_spec(
+    executable: &str,
+    cwd: &Path,
+    prompt: &str,
+    model: Option<&str>,
+    effort: ThinkingEffort,
+) -> LaunchSpec {
+    let mut spec = build_launch_spec(executable, cwd, prompt, model, effort, None);
+    if let Some(permission_mode) = spec.args.iter_mut().find(|arg| *arg == "acceptEdits") {
+        *permission_mode = "dontAsk".into();
+    }
+    spec.args.extend(["--tools".into(), String::new()]);
+    spec
+}
+
 fn user_input(prompt: &str, message_id: Option<&str>) -> Value {
     let mut frame = json!({
         "type": "user", "session_id": "", "parent_tool_use_id": null,
@@ -430,6 +445,26 @@ mod tests {
             serde_json::from_str::<Value>(&resumed.stdin).unwrap()["message"]["content"],
             "follow-up"
         );
+    }
+
+    #[test]
+    fn title_launch_spec_disables_tools_and_edit_approval() {
+        let spec = build_title_launch_spec(
+            "/usr/local/bin/claude",
+            Path::new("/tmp/project"),
+            "title prompt",
+            Some("sonnet"),
+            ThinkingEffort::Low,
+        );
+
+        assert!(
+            spec.args
+                .windows(2)
+                .any(|pair| pair == ["--permission-mode", "dontAsk"])
+        );
+        assert!(spec.args.windows(2).any(|pair| pair == ["--tools", ""]));
+        assert!(!spec.args.iter().any(|arg| arg == "acceptEdits"));
+        assert!(!spec.args.iter().any(|arg| arg.contains("title prompt")));
     }
 
     #[test]

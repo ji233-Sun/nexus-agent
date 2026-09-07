@@ -59,3 +59,42 @@ pub(crate) fn prepare(request: &StartRun, cwd: &Path) -> (LaunchSpec, Box<dyn Li
         ),
     }
 }
+
+pub(crate) fn prepare_title(
+    request: &StartRun,
+    cwd: &Path,
+    prompt: &str,
+) -> (LaunchSpec, Box<dyn LineDecoder>) {
+    match request.harness {
+        HarnessKind::Claude => (
+            claude::build_title_launch_spec(
+                &request.executable,
+                cwd,
+                prompt,
+                request.model.as_deref(),
+                request.effort,
+            ),
+            Box::new(claude::EventDecoder),
+        ),
+        HarnessKind::Codex => (
+            codex::build_title_launch_spec(
+                &request.executable,
+                cwd,
+                prompt,
+                request.model.as_deref(),
+                request.effort,
+            ),
+            Box::new(codex::TitleEventDecoder),
+        ),
+        HarnessKind::Omp => (
+            omp::build_title_launch_spec(
+                &request.executable,
+                cwd,
+                prompt,
+                request.model.as_deref(),
+                request.effort,
+            ),
+            Box::new(omp::EventDecoder),
+        ),
+    }
+}

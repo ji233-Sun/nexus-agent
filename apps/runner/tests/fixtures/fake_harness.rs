@@ -1,6 +1,6 @@
 use std::{
     env, fs,
-    io::{self, BufRead as _, Write as _},
+    io::{self, BufRead as _, Read as _, Write as _},
     process::{Command, Stdio},
     sync::mpsc::{self, Receiver},
     thread,
@@ -25,24 +25,76 @@ fn main() {
         run_omp_catalog();
         return;
     }
-    let harness = if args.first().map(String::as_str) == Some("app-server") {
+    let harness = if matches!(
+        args.first().map(String::as_str),
+        Some("app-server" | "exec")
+    ) {
         Harness::Codex
     } else if args.windows(2).any(|pair| pair == ["--mode", "rpc"]) {
         Harness::Omp
     } else {
         Harness::Claude
     };
+    let title = match harness {
+        Harness::Codex => args
+            .windows(2)
+            .any(|pair| pair == ["--sandbox", "read-only"]),
+        Harness::Omp => args.iter().any(|arg| arg == "--no-tools"),
+        Harness::Claude => args
+            .windows(2)
+            .any(|pair| pair[0] == "--tools" && pair[1].is_empty()),
+    };
     fs::write(
-        match harness {
-            Harness::Codex => "codex-args.txt",
-            Harness::Omp => "omp-args.txt",
-            Harness::Claude => "args.txt",
+        if title {
+            "title-args.txt"
+        } else {
+            match harness {
+                Harness::Codex => "codex-args.txt",
+                Harness::Omp => "omp-args.txt",
+                Harness::Claude => "args.txt",
+            }
         },
         args.join("\n"),
     )
     .unwrap();
     if let Ok(value) = env::var("TEST_PROVIDER_API_KEY") {
-        fs::write("provider-env.txt", value).unwrap();
+        fs::write(
+            if title {
+                "title-provider-env.txt"
+            } else {
+                "provider-env.txt"
+            },
+            value,
+        )
+        .unwrap();
+    }
+    if title {
+        let mut prompt = String::new();
+        io::stdin().read_to_string(&mut prompt).unwrap();
+        fs::write("title-prompt.txt", &prompt).unwrap();
+        if env::var_os("TEST_TITLE_BLOCK").is_some() {
+            let _child = Command::new(env::current_exe().unwrap())
+                .arg("--child")
+                .stdin(Stdio::null())
+                .spawn()
+                .unwrap();
+            loop {
+                thread::sleep(Duration::from_secs(1));
+            }
+        }
+        match harness {
+            Harness::Codex => println!(
+                r#"{{"type":"item.completed","item":{{"id":"title","type":"agent_message","text":"**Fix authentication flow.**"}}}}"#
+            ),
+            Harness::Omp => println!(
+                r#"{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"**Fix authentication flow.**"}}],"stopReason":"stop"}}}}"#
+            ),
+            Harness::Claude => println!(
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"**Fix authentication flow.**"}}]}}}}"#
+            ),
+        }
+        io::stdout().flush().unwrap();
+        return;
     }
     let (send, input) = mpsc::channel();
     thread::spawn(move || {

@@ -2,7 +2,9 @@ use super::{Presenter, executable_setting_key};
 use crate::i18n::{Language, LocalizedText, probe_status};
 use crate::infrastructure::storage::NewTaskRun;
 use crate::model::{ModelCatalogState, QueuedMessage, ResolvedModelSelection};
-use nexus_domain::{HarnessKind, MessageKind, MessageRole, RunStatus, ToolMetadata};
+use nexus_domain::{
+    HarnessKind, MessageKind, MessageRole, RunStatus, ToolMetadata, compact_task_title,
+};
 use nexus_protocol::{Command, CommandEnvelope, Event, StartRun};
 use std::time::Instant;
 use uuid::Uuid;
@@ -124,6 +126,16 @@ impl Presenter {
                         ("message", (message).to_string()),
                     ],
                 );
+            }
+            Event::TaskTitleGenerated { task_id, title } => {
+                if let Some(title) = compact_task_title(&title)
+                    && self
+                        .storage
+                        .update_task_title(task_id, &title)
+                        .unwrap_or(false)
+                {
+                    self.reload_tasks();
+                }
             }
             Event::RunStarted { run_id, .. } if self.model.active_run == Some(run_id) => {
                 let harness = self
@@ -513,7 +525,7 @@ impl Presenter {
             }
         };
         let ResolvedModelSelection { model, effort } = self.model.resolved_model_selection();
-        let title: String = prompt.chars().take(48).collect();
+        let title = compact_task_title(&prompt).unwrap_or_else(|| "新任务".into());
         let Ok(pending_run) = self.storage.prepare_task_run(NewTaskRun {
             task_id,
             project_id: project.id,
