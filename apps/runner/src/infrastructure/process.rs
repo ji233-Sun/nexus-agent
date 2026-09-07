@@ -1,5 +1,9 @@
-use crate::application::events::{Emitter, emit_decoded};
-use nexus_domain::{RunStatus, compact_task_title};
+use crate::application::{
+    events::{Emitter, emit_decoded},
+    finish_user_asks,
+    user_ask::{PendingUserAsks, UserAskInput},
+};
+use nexus_domain::{RunStatus, UserAskStatus, compact_task_title};
 use nexus_harness_core::{ApprovalPrompt, DecodedEvent, InputFrame, LaunchSpec, LineDecoder};
 use nexus_protocol::{ApprovalRequest, EnvironmentVariable, ErrorCode, Event, StartRun};
 use serde_json::Value;
@@ -17,6 +21,8 @@ use uuid::Uuid;
 
 use super::process_tree;
 
+const USER_ASK_WRITE_TIMEOUT: Duration = Duration::from_secs(3);
+
 pub(crate) struct SteerInput {
     pub(crate) message_id: Uuid,
     pub(crate) prompt: String,
@@ -24,10 +30,19 @@ pub(crate) struct SteerInput {
 
 pub(crate) enum RunInput {
     Steer(SteerInput),
+    UserAsk(UserAskInput),
     Approval {
         request_id: Uuid,
         option: Option<usize>,
     },
+}
+
+struct StreamContext {
+    run_id: Uuid,
+    harness: nexus_domain::HarnessKind,
+    user_asks: PendingUserAsks,
+    cancel: watch::Receiver<bool>,
+    emitter: Emitter,
 }
 
 struct PendingApproval {
@@ -44,12 +59,25 @@ struct SessionOutput {
 pub(crate) async fn run_harness(
     request: StartRun,
     cwd: std::path::PathBuf,
+    cancel: watch::Receiver<bool>,
+    input: mpsc::UnboundedReceiver<RunInput>,
+    user_asks: PendingUserAsks,
+    emitter: Emitter,
+) -> (RunStatus, Option<i32>) {
+    let (spec, decoder) = super::harness::prepare(&request, &cwd);
+    run_prepared_harness(request, spec, decoder, cancel, input, user_asks, emitter).await
+}
+
+async fn run_prepared_harness(
+    request: StartRun,
+    spec: LaunchSpec,
+    decoder: Box<dyn LineDecoder>,
     mut cancel: watch::Receiver<bool>,
     input: mpsc::UnboundedReceiver<RunInput>,
+    user_asks: PendingUserAsks,
     emitter: Emitter,
 ) -> (RunStatus, Option<i32>) {
     let harness = request.harness;
-    let (spec, decoder) = super::harness::prepare(&request, &cwd);
     let mut command = process_command(&spec, &request.environment);
 
     let mut child = match command.spawn() {
@@ -91,11 +119,15 @@ pub(crate) async fn run_harness(
     let mut stdout_task = tokio::spawn(read_stdout(
         stdout,
         stdin,
-        request.clone(),
         decoder,
         input,
-        cancel.clone(),
-        emitter.clone(),
+        StreamContext {
+            run_id: request.run_id,
+            harness,
+            user_asks: user_asks.clone(),
+            cancel: cancel.clone(),
+            emitter: emitter.clone(),
+        },
     ));
     let mut stderr_task = tokio::spawn(async move {
         if let Some(stderr) = stderr {
@@ -114,6 +146,22 @@ pub(crate) async fn run_harness(
             (output, true)
         }
     };
+    let was_cancelled = was_cancelled || *cancel.borrow();
+    let (ask_status, ask_message) = if was_cancelled {
+        (UserAskStatus::Cancelled, None)
+    } else if let Some(message) = &output.provider_error {
+        (UserAskStatus::Failed, Some(message.clone()))
+    } else {
+        (UserAskStatus::Expired, None)
+    };
+    finish_user_asks(
+        request.run_id,
+        &user_asks,
+        ask_status,
+        ask_message,
+        &emitter,
+    )
+    .await;
     // Interactive CLIs exit on stdin EOF. Bound cleanup after the terminal frame.
     let status = match timeout(Duration::from_secs(3), child.wait()).await {
         Ok(status) => status,
@@ -126,7 +174,7 @@ pub(crate) async fn run_harness(
         stderr_task.abort();
     }
     let exit_code = status.as_ref().ok().and_then(|status| status.code());
-    let final_status = if was_cancelled || *cancel.borrow() {
+    let final_status = if was_cancelled {
         RunStatus::Cancelled
     } else if output.completed && output.provider_error.is_none() {
         RunStatus::Completed
@@ -289,14 +337,17 @@ fn sanitize_generated_title(output: &str) -> Option<String> {
 async fn read_stdout(
     stdout: ChildStdout,
     mut stdin: ChildStdin,
-    request: StartRun,
     mut decoder: Box<dyn LineDecoder>,
     mut input: mpsc::UnboundedReceiver<RunInput>,
-    mut cancel: watch::Receiver<bool>,
-    emitter: Emitter,
+    context: StreamContext,
 ) -> SessionOutput {
-    let run_id = request.run_id;
-    let harness = request.harness;
+    let StreamContext {
+        run_id,
+        harness,
+        user_asks,
+        mut cancel,
+        emitter,
+    } = context;
     let mut lines = BufReader::new(stdout).lines();
     let mut output = SessionOutput::default();
     let mut tools = HashSet::new();
@@ -329,6 +380,57 @@ async fn read_stdout(
             message = input.recv(), if input_open => {
                 match message {
                     Some(RunInput::Steer(message)) => queued.push_back(message),
+                    Some(RunInput::UserAsk(answer)) => {
+                        if !user_asks.is_answer_queued(answer.request_id) {
+                            continue;
+                        }
+                        let Some(frame) = decoder
+                            .answer_user_ask(&answer.native_request_id, &answer.answers)
+                        else {
+                            let message = format!("{harness} 无法编码 User Ask 回答。");
+                            if user_asks.finish(answer.request_id) {
+                                emitter
+                                    .send(Event::RunUserAskFinished {
+                                        run_id,
+                                        request_id: answer.request_id,
+                                        status: UserAskStatus::Failed,
+                                        message: Some(message.clone()),
+                                    })
+                                    .await;
+                            }
+                            output.provider_error = Some(message);
+                            break 'stream;
+                        };
+                        if *cancel.borrow() || !user_asks.is_answer_queued(answer.request_id) {
+                            continue;
+                        }
+                        if !matches!(
+                            timeout(USER_ASK_WRITE_TIMEOUT, write_frame(&mut stdin, &frame)).await,
+                            Ok(Ok(()))
+                        ) {
+                            let message = format!("无法向 {harness} 写入 User Ask 回答。");
+                            if user_asks.finish(answer.request_id) {
+                                emitter
+                                    .send(Event::RunUserAskFinished {
+                                        run_id,
+                                        request_id: answer.request_id,
+                                        status: UserAskStatus::Failed,
+                                        message: Some(message.clone()),
+                                    })
+                                    .await;
+                            }
+                            output.provider_error = Some(message);
+                            break 'stream;
+                        }
+                        if user_asks.mark_answer_sent(answer.request_id) {
+                            emitter
+                                .send(Event::RunUserAskAnswerSent {
+                                    run_id,
+                                    request_id: answer.request_id,
+                                })
+                                .await;
+                        }
+                    }
                     Some(RunInput::Approval { request_id, option }) => {
                         let response = approvals.get(&request_id).and_then(|pending| {
                             if *cancel.borrow() { return None; }
@@ -420,6 +522,46 @@ async fn read_stdout(
                             }
                             continue;
                         }
+                        DecodedEvent::UserAskRequested(request) => {
+                            let questions = request.questions.clone();
+                            match user_asks
+                                .register(request.native_request_id.clone(), questions.clone())
+                            {
+                                Ok(request_id) => {
+                                    emitter
+                                        .send(Event::RunUserAskRequested {
+                                            run_id,
+                                            request_id,
+                                            questions,
+                                        })
+                                        .await;
+                                }
+                                Err(message) => {
+                                    output.provider_error = Some(message);
+                                    break 'stream;
+                                }
+                            }
+                            continue;
+                        }
+                        DecodedEvent::UserAskFinished {
+                            native_request_id,
+                            status,
+                            message,
+                        } => {
+                            if let Some(request_id) =
+                                user_asks.finish_native(native_request_id, *status)
+                            {
+                                emitter
+                                    .send(Event::RunUserAskFinished {
+                                        run_id,
+                                        request_id,
+                                        status: *status,
+                                        message: message.clone(),
+                                    })
+                                    .await;
+                            }
+                            continue;
+                        }
                         DecodedEvent::SessionStarted(_) => session_started = true,
                         DecodedEvent::ToolStarted { id, .. } => {
                             tools.insert(id.clone());
@@ -495,6 +637,7 @@ async fn read_stdout(
     while let Ok(message) = input.try_recv() {
         match message {
             RunInput::Steer(message) => queued.push_back(message),
+            RunInput::UserAsk(_) => {}
             RunInput::Approval { request_id, .. } => {
                 emitter
                     .send(Event::RunApprovalRejected {
@@ -544,6 +687,432 @@ async fn write_frame(stdin: &mut ChildStdin, frame: &InputFrame) -> std::io::Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nexus_domain::{
+        HarnessKind, ThinkingEffort, UserAskAnswer, UserAskAnswerMode, UserAskAnswerValue,
+        UserAskQuestion,
+    };
+    use nexus_harness_core::UserAskRequest;
+    use nexus_protocol::EventEnvelope;
+    use serde_json::json;
+    use std::{path::Path, process::Command as StdCommand};
+
+    struct FakeUserAskDecoder {
+        omp: nexus_harness_omp::EventDecoder,
+        requests: HashSet<String>,
+        supports_answers: bool,
+    }
+
+    impl Default for FakeUserAskDecoder {
+        fn default() -> Self {
+            Self {
+                omp: nexus_harness_omp::EventDecoder,
+                requests: HashSet::new(),
+                supports_answers: true,
+            }
+        }
+    }
+
+    impl LineDecoder for FakeUserAskDecoder {
+        fn decode_line(&mut self, line: &str) -> Result<Vec<DecodedEvent>, serde_json::Error> {
+            let frame: Value = serde_json::from_str(line)?;
+            match frame.get("type").and_then(Value::as_str) {
+                Some("nexus_test.user_ask.requested") => {
+                    let native_request_id = frame
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned();
+                    let questions = serde_json::from_value(frame["questions"].clone())?;
+                    self.requests.insert(native_request_id.clone());
+                    Ok(vec![DecodedEvent::UserAskRequested(UserAskRequest {
+                        native_request_id,
+                        questions,
+                    })])
+                }
+                Some("nexus_test.user_ask.finished") => {
+                    let native_request_id = frame
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned();
+                    self.requests.remove(&native_request_id);
+                    Ok(vec![DecodedEvent::UserAskFinished {
+                        native_request_id,
+                        status: serde_json::from_value(frame["status"].clone())?,
+                        message: frame
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                    }])
+                }
+                _ => self.omp.decode_line(line),
+            }
+        }
+
+        fn steer(&mut self, message_id: &str, prompt: &str) -> Option<InputFrame> {
+            self.omp.steer(message_id, prompt)
+        }
+
+        fn answer_user_ask(
+            &mut self,
+            native_request_id: &str,
+            answers: &[UserAskAnswer],
+        ) -> Option<InputFrame> {
+            (self.supports_answers && self.requests.contains(native_request_id)).then(|| {
+                InputFrame(json!({
+                    "type": "nexus_test.user_ask.answer",
+                    "id": native_request_id,
+                    "answers": answers,
+                }))
+            })
+        }
+    }
+
+    fn compile_fake_harness(directory: &Path) -> std::path::PathBuf {
+        let executable = directory.join(format!("fake-harness{}", std::env::consts::EXE_SUFFIX));
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_harness.rs");
+        let output = StdCommand::new("rustc")
+            .args(["--edition=2024", "-D", "warnings"])
+            .arg(fixture)
+            .arg("-o")
+            .arg(&executable)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        executable
+    }
+
+    fn prepared_user_ask_run(
+        directory: &Path,
+        executable: &Path,
+        prompt: &str,
+    ) -> (StartRun, LaunchSpec) {
+        let executable = executable.to_string_lossy().into_owned();
+        let request = StartRun {
+            permission_mode: nexus_domain::PermissionMode::AutoEdit,
+            run_id: Uuid::new_v4(),
+            task_id: Uuid::new_v4(),
+            session_id: None,
+            cwd: directory.to_string_lossy().into_owned(),
+            prompt: prompt.into(),
+            harness: HarnessKind::Omp,
+            executable: executable.clone(),
+            model: None,
+            effort: ThinkingEffort::Medium,
+            environment: Vec::new(),
+        };
+        let spec = nexus_harness_omp::build_launch_spec(
+            &executable,
+            directory,
+            prompt,
+            None,
+            ThinkingEffort::Medium,
+            None,
+            nexus_domain::PermissionMode::AutoEdit,
+        );
+        (request, spec)
+    }
+
+    async fn receive_user_ask(
+        events: &mut mpsc::Receiver<EventEnvelope>,
+    ) -> (Uuid, Vec<UserAskQuestion>, Vec<Event>) {
+        let mut received = Vec::new();
+        loop {
+            let envelope = timeout(Duration::from_secs(10), events.recv())
+                .await
+                .expect("runner event timeout")
+                .expect("runner event channel closed");
+            if let Event::RunUserAskRequested {
+                request_id,
+                questions,
+                ..
+            } = &envelope.event
+            {
+                let result = (*request_id, questions.clone(), received);
+                return result;
+            }
+            received.push(envelope.event);
+        }
+    }
+
+    async fn collect_remaining_events(mut events: mpsc::Receiver<EventEnvelope>) -> Vec<Event> {
+        let mut received = Vec::new();
+        while let Some(envelope) = events.recv().await {
+            received.push(envelope.event);
+        }
+        received
+    }
+
+    fn user_ask_answers() -> Vec<UserAskAnswer> {
+        vec![
+            UserAskAnswer {
+                question_id: "note".into(),
+                value: UserAskAnswerValue::Text("Keep compatibility".into()),
+            },
+            UserAskAnswer {
+                question_id: "checks".into(),
+                value: UserAskAnswerValue::Selected(vec!["tests".into(), "build".into()]),
+            },
+            UserAskAnswer {
+                question_id: "target".into(),
+                value: UserAskAnswerValue::Selected(vec!["workspace".into()]),
+            },
+        ]
+    }
+
+    #[tokio::test]
+    async fn fake_user_ask_round_trip_keeps_the_run_and_answer_mapping() {
+        let binaries = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let executable = compile_fake_harness(binaries.path());
+        let (request, spec) = prepared_user_ask_run(directory.path(), &executable, "user-ask");
+        let run_id = request.run_id;
+        let (_cancel, cancel) = watch::channel(false);
+        let (input, input_rx) = mpsc::unbounded_channel();
+        let user_asks = PendingUserAsks::default();
+        let (emitter, mut events) = Emitter::channel();
+        let task = tokio::spawn(run_prepared_harness(
+            request,
+            spec,
+            Box::new(FakeUserAskDecoder::default()),
+            cancel,
+            input_rx,
+            user_asks.clone(),
+            emitter,
+        ));
+
+        let (request_id, questions, mut received) = receive_user_ask(&mut events).await;
+        assert_eq!(
+            questions
+                .iter()
+                .map(|question| question.id.as_str())
+                .collect::<Vec<_>>(),
+            ["target", "checks", "note"]
+        );
+        assert!(matches!(
+            questions[0].answer_mode,
+            UserAskAnswerMode::Choice {
+                multiple: false,
+                allow_custom: false
+            }
+        ));
+        assert!(matches!(
+            questions[1].answer_mode,
+            UserAskAnswerMode::Choice { multiple: true, .. }
+        ));
+        assert_eq!(
+            questions[0].options[0].description.as_deref(),
+            Some("Core packages")
+        );
+
+        let answer = user_asks
+            .claim_answer(request_id, user_ask_answers())
+            .unwrap();
+        assert!(
+            user_asks
+                .claim_answer(request_id, user_ask_answers())
+                .is_err()
+        );
+        input.send(RunInput::UserAsk(answer)).unwrap();
+
+        let result = timeout(Duration::from_secs(10), task)
+            .await
+            .expect("run timeout")
+            .unwrap();
+        received.extend(collect_remaining_events(events).await);
+        assert_eq!(result, (RunStatus::Completed, Some(0)));
+        assert!(received.iter().any(|event| matches!(event,
+            Event::RunStarted { run_id: id, .. } if *id == run_id)));
+        assert!(received.iter().any(|event| matches!(event,
+            Event::RunUserAskAnswerSent { run_id: id, request_id: request }
+                if *id == run_id && *request == request_id)));
+        assert!(received.iter().any(|event| matches!(event,
+            Event::RunUserAskFinished {
+                run_id: id,
+                request_id: request,
+                status: UserAskStatus::Answered,
+                ..
+            } if *id == run_id && *request == request_id)));
+        assert!(received.iter().any(|event| matches!(event,
+            Event::RunMessageCompleted { run_id: id, text }
+                if *id == run_id && text == "answered")));
+
+        let frame: Value = serde_json::from_str(
+            &std::fs::read_to_string(directory.path().join("user-ask-input.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(frame["type"], "nexus_test.user_ask.answer");
+        assert_eq!(frame["id"], "native-ask-42");
+        assert_eq!(frame["answers"][0]["question_id"], "target");
+        assert_eq!(frame["answers"][0]["value"]["value"][0], "workspace");
+        assert_eq!(frame["answers"][1]["question_id"], "checks");
+        assert_eq!(frame["answers"][1]["value"]["value"][0], "tests");
+        assert_eq!(frame["answers"][1]["value"]["value"][1], "build");
+        assert_eq!(frame["answers"][2]["question_id"], "note");
+        assert_eq!(frame["answers"][2]["value"]["value"], "Keep compatibility");
+    }
+
+    #[tokio::test]
+    async fn unsupported_user_ask_encoding_fails_without_claiming_delivery() {
+        let binaries = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let executable = compile_fake_harness(binaries.path());
+        let (request, spec) = prepared_user_ask_run(directory.path(), &executable, "user-ask");
+        let (_cancel, cancel) = watch::channel(false);
+        let (input, input_rx) = mpsc::unbounded_channel();
+        let user_asks = PendingUserAsks::default();
+        let (emitter, mut events) = Emitter::channel();
+        let task = tokio::spawn(run_prepared_harness(
+            request,
+            spec,
+            Box::new(FakeUserAskDecoder {
+                supports_answers: false,
+                ..FakeUserAskDecoder::default()
+            }),
+            cancel,
+            input_rx,
+            user_asks.clone(),
+            emitter,
+        ));
+
+        let (request_id, _, mut received) = receive_user_ask(&mut events).await;
+        let answer = user_asks
+            .claim_answer(request_id, user_ask_answers())
+            .unwrap();
+        input.send(RunInput::UserAsk(answer)).unwrap();
+
+        let result = timeout(Duration::from_secs(10), task)
+            .await
+            .expect("run timeout")
+            .unwrap();
+        received.extend(collect_remaining_events(events).await);
+        assert_eq!(result.0, RunStatus::Failed);
+        assert!(received.iter().any(|event| matches!(event,
+            Event::RunUserAskFinished {
+                request_id: id,
+                status: UserAskStatus::Failed,
+                ..
+            } if *id == request_id)));
+        assert!(!received.iter().any(|event| matches!(event,
+            Event::RunUserAskAnswerSent { request_id: id, .. } if *id == request_id)));
+    }
+
+    #[tokio::test]
+    async fn user_ask_cleanup_covers_cancellation_and_harness_exit() {
+        let binaries = tempfile::tempdir().unwrap();
+        let executable = compile_fake_harness(binaries.path());
+        for (prompt, expected_ask, expected_run) in [
+            (
+                "user-ask-cancel",
+                UserAskStatus::Cancelled,
+                RunStatus::Cancelled,
+            ),
+            (
+                "user-ask-exit",
+                UserAskStatus::Expired,
+                RunStatus::Completed,
+            ),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let (request, spec) = prepared_user_ask_run(directory.path(), &executable, prompt);
+            let (cancel, cancel_rx) = watch::channel(false);
+            let (_input, input_rx) = mpsc::unbounded_channel();
+            let user_asks = PendingUserAsks::default();
+            let (emitter, mut events) = Emitter::channel();
+            let task = tokio::spawn(run_prepared_harness(
+                request,
+                spec,
+                Box::new(FakeUserAskDecoder::default()),
+                cancel_rx,
+                input_rx,
+                user_asks.clone(),
+                emitter,
+            ));
+
+            let (request_id, _, mut received) = receive_user_ask(&mut events).await;
+            if expected_run == RunStatus::Cancelled {
+                cancel.send_replace(true);
+            }
+            let result = timeout(Duration::from_secs(10), task)
+                .await
+                .expect("run timeout")
+                .unwrap();
+            received.extend(collect_remaining_events(events).await);
+            assert_eq!(result.0, expected_run);
+            assert!(received.iter().any(|event| matches!(event,
+                Event::RunUserAskFinished { request_id: id, status, .. }
+                    if *id == request_id && *status == expected_ask)));
+            assert!(
+                user_asks
+                    .claim_answer(request_id, user_ask_answers())
+                    .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_user_ask_answer_loses_cleanly_to_cancellation() {
+        let binaries = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let executable = compile_fake_harness(binaries.path());
+        let (request, spec) = prepared_user_ask_run(directory.path(), &executable, "user-ask");
+        let run_id = request.run_id;
+        let (cancel, cancel_rx) = watch::channel(false);
+        let (input, input_rx) = mpsc::unbounded_channel();
+        let user_asks = PendingUserAsks::default();
+        let (emitter, mut events) = Emitter::channel();
+        let cancellation_emitter = emitter.clone();
+        let task = tokio::spawn(run_prepared_harness(
+            request,
+            spec,
+            Box::new(FakeUserAskDecoder::default()),
+            cancel_rx,
+            input_rx,
+            user_asks.clone(),
+            emitter,
+        ));
+
+        let (request_id, _, mut received) = receive_user_ask(&mut events).await;
+        let answer = user_asks
+            .claim_answer(request_id, user_ask_answers())
+            .unwrap();
+        input.send(RunInput::UserAsk(answer)).unwrap();
+        finish_user_asks(
+            run_id,
+            &user_asks,
+            UserAskStatus::Cancelled,
+            None,
+            &cancellation_emitter,
+        )
+        .await;
+        cancel.send_replace(true);
+        drop(cancellation_emitter);
+
+        let result = timeout(Duration::from_secs(10), task)
+            .await
+            .expect("run timeout")
+            .unwrap();
+        received.extend(collect_remaining_events(events).await);
+        assert_eq!(result.0, RunStatus::Cancelled);
+        assert_eq!(
+            received
+                .iter()
+                .filter(|event| matches!(event,
+                    Event::RunUserAskFinished { request_id: id, .. } if *id == request_id))
+                .count(),
+            1
+        );
+        assert!(received.iter().any(|event| matches!(event,
+            Event::RunUserAskFinished {
+                request_id: id,
+                status: UserAskStatus::Cancelled,
+                ..
+            } if *id == request_id)));
+    }
 
     #[test]
     fn title_prompt_limits_untrusted_source_and_repeats_output_constraint() {

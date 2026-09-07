@@ -180,6 +180,35 @@ fn run_turn(
         return;
     }
     fs::write(session_file, prompt).unwrap();
+    if prompt.starts_with("user-ask") {
+        emit_user_ask();
+        if prompt == "user-ask-exit" {
+            terminal(harness);
+            return;
+        }
+        if prompt == "user-ask-cancel" {
+            loop {
+                thread::sleep(Duration::from_secs(1));
+            }
+        }
+        let answer = input
+            .recv_timeout(Duration::from_secs(5))
+            .expect("missing User Ask answer");
+        fs::write("user-ask-input.json", &answer).unwrap();
+        let id = request_id(&answer);
+        if prompt == "user-ask-native-failure" {
+            println!(
+                r#"{{"type":"nexus_test.user_ask.finished","id":{id},"status":"failed","message":"request expired"}}"#
+            );
+        } else {
+            println!(
+                r#"{{"type":"nexus_test.user_ask.finished","id":{id},"status":"answered"}}"#
+            );
+            message(harness, "answered");
+        }
+        terminal(harness);
+        return;
+    }
     if prompt.starts_with("approval-") {
         match harness {
             Harness::Claude => println!(r#"{{"type":"control_request","request_id":"approval-1","request":{{"subtype":"can_use_tool","tool_name":"Bash","input":{{"command":"echo approved"}}}}}}"#),
@@ -288,6 +317,14 @@ fn run_turn(
         message(harness, "done");
     }
     terminal(harness);
+}
+
+fn emit_user_ask() {
+    println!(
+        "{}",
+        r#"{"type":"nexus_test.user_ask.requested","id":"native-ask-42","questions":[{"id":"target","prompt":"Which target?","answer_mode":{"kind":"choice","multiple":false,"allow_custom":false},"options":[{"id":"library","label":"Library","description":"Core packages"},{"id":"workspace","label":"Workspace"}]},{"id":"checks","prompt":"Which checks?","answer_mode":{"kind":"choice","multiple":true,"allow_custom":false},"options":[{"id":"tests","label":"Tests"},{"id":"clippy","label":"Clippy"},{"id":"build","label":"Build"}]},{"id":"note","prompt":"Any note?","answer_mode":{"kind":"choice","multiple":false,"allow_custom":true},"options":[{"id":"none","label":"None"},{"id":"document","label":"Document"}]}]}"#
+    );
+    io::stdout().flush().unwrap();
 }
 
 fn wait_for_marker(path: &str, input: &Receiver<String>) {

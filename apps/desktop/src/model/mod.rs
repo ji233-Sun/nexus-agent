@@ -5,7 +5,7 @@ use crate::i18n::{Language, LocalizedText};
 use history::{HistoryMessage, ThreadSummary};
 use nexus_domain::{
     HarnessKind, Message, ModelDescriptor, PermissionMode, Project, ProviderProfile, TaskSummary,
-    ThinkingEffort,
+    ThinkingEffort, UserAskAnswer, UserAskAnswerMode, UserAskAnswerValue, UserAskQuestion,
 };
 use nexus_protocol::{ApprovalRequest, HarnessProbe};
 use std::collections::{BTreeMap, VecDeque};
@@ -83,6 +83,93 @@ pub(crate) struct QueuedMessage {
     pub(crate) permission_mode: PermissionMode,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) enum UserAskSubmissionState {
+    Pending,
+    Submitting,
+    Sent,
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct PendingUserAsk {
+    pub(crate) request_id: Uuid,
+    pub(crate) questions: Vec<UserAskQuestion>,
+    pub(crate) submission: UserAskSubmissionState,
+    pub(crate) error: Option<String>,
+    pub(crate) active_question: usize,
+    pub(crate) collapsed: bool,
+    pub(crate) drafts: BTreeMap<String, UserAskAnswerValue>,
+    pub(crate) submitted_answers: Option<Vec<UserAskAnswer>>,
+}
+
+impl PendingUserAsk {
+    pub(crate) fn new(request_id: Uuid, questions: Vec<UserAskQuestion>) -> Self {
+        let drafts = questions
+            .iter()
+            .map(|question| {
+                let value = match question.answer_mode {
+                    UserAskAnswerMode::Text => UserAskAnswerValue::Text(String::new()),
+                    UserAskAnswerMode::Choice { .. } => UserAskAnswerValue::Selected(Vec::new()),
+                };
+                (question.id.clone(), value)
+            })
+            .collect();
+        Self {
+            request_id,
+            questions,
+            submission: UserAskSubmissionState::Pending,
+            error: None,
+            active_question: 0,
+            collapsed: false,
+            drafts,
+            submitted_answers: None,
+        }
+    }
+
+    pub(crate) fn answers(&self) -> Option<Vec<UserAskAnswer>> {
+        if self.questions.is_empty() {
+            return None;
+        }
+        self.questions
+            .iter()
+            .map(|question| {
+                let value = self.drafts.get(&question.id)?.clone();
+                let valid = match (&question.answer_mode, &value) {
+                    (UserAskAnswerMode::Text, UserAskAnswerValue::Text(text)) => {
+                        !text.trim().is_empty()
+                    }
+                    (
+                        UserAskAnswerMode::Choice { multiple, .. },
+                        UserAskAnswerValue::Selected(option_ids),
+                    ) => {
+                        !option_ids.is_empty()
+                            && (*multiple || option_ids.len() == 1)
+                            && option_ids.iter().all(|option_id| {
+                                question
+                                    .options
+                                    .iter()
+                                    .any(|option| option.id == *option_id)
+                            })
+                    }
+                    (
+                        UserAskAnswerMode::Choice {
+                            allow_custom: true, ..
+                        },
+                        UserAskAnswerValue::Text(text),
+                    ) => !text.trim().is_empty(),
+                    _ => false,
+                };
+                valid.then_some(UserAskAnswer {
+                    question_id: question.id.clone(),
+                    value,
+                })
+            })
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedModelSelection {
     pub(crate) model: Option<String>,
@@ -103,6 +190,7 @@ pub(crate) struct AppModel {
     pub(crate) run_cancelling: bool,
     pub(crate) queued_messages: VecDeque<QueuedMessage>,
     pub(crate) steering_message: Option<Uuid>,
+    pub(crate) pending_user_asks: Vec<PendingUserAsk>,
     pub(crate) active_run_elapsed_seconds: Option<u64>,
     pub(crate) active_task: Option<Uuid>,
     pub(crate) active_harness: Option<HarnessKind>,

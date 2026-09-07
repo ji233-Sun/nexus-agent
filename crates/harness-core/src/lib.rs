@@ -3,6 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use nexus_domain::{UserAskAnswer, UserAskQuestion};
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +39,12 @@ impl std::fmt::Debug for InputFrame {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserAskRequest {
+    pub native_request_id: String,
+    pub questions: Vec<UserAskQuestion>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ApprovalOption {
     pub label: String,
@@ -58,6 +65,12 @@ pub struct ApprovalPrompt {
 #[derive(Debug, Clone, PartialEq)]
 pub enum DecodedEvent {
     WriteStdin(InputFrame),
+    UserAskRequested(UserAskRequest),
+    UserAskFinished {
+        native_request_id: String,
+        status: nexus_domain::UserAskStatus,
+        message: Option<String>,
+    },
     ApprovalRequested(ApprovalPrompt),
     ApprovalResolved(String),
     SessionStarted(String),
@@ -86,6 +99,13 @@ pub enum DecodedEvent {
 pub trait LineDecoder: Send {
     fn decode_line(&mut self, line: &str) -> Result<Vec<DecodedEvent>, serde_json::Error>;
     fn steer(&mut self, message_id: &str, prompt: &str) -> Option<InputFrame>;
+    fn answer_user_ask(
+        &mut self,
+        _native_request_id: &str,
+        _answers: &[UserAskAnswer],
+    ) -> Option<InputFrame> {
+        None
+    }
 }
 
 pub fn resolve_executable(configured: &str) -> Option<PathBuf> {

@@ -6,11 +6,13 @@ mod sidebar;
 pub(crate) mod theme;
 mod timeline;
 mod tools;
+mod user_ask;
 
 use crate::{
     i18n::Language,
     model::{
-        AppModel, AppearanceSettings, ModelCatalogState, ThemePreference, history::HistoryMessage,
+        AppModel, AppearanceSettings, ModelCatalogState, PendingUserAsk, ThemePreference,
+        UserAskSubmissionState, history::HistoryMessage,
     },
     presenter::{Presenter, ProviderProfileDraft},
 };
@@ -28,10 +30,12 @@ use gpui_kit::component::{
     Sizable as _, WindowExt as _,
     alert::Alert,
     button::{Button, ButtonVariants as _},
+    checkbox::Checkbox,
     input::{Enter, Input, InputEvent, InputState, Textarea, TextareaState},
     list::{List, ListDelegate, ListEvent, ListItem, ListState},
     menu::PopupMenuItem,
     popover::Popover,
+    radio::Radio,
     searchable_list::SearchableListItem,
     switch::Switch,
     text::{TextView, TextViewStyle},
@@ -40,7 +44,7 @@ use gpui_kit::component::{
 use model_picker::{CatalogModelChoice, CatalogModelSelectContent, ModelPickerList};
 use nexus_domain::{
     HarnessKind, Message, MessageKind, MessageRole, ModelDescriptor, PermissionMode, Project,
-    ProviderProfile, RunStatus, ThinkingEffort,
+    ProviderProfile, RunStatus, ThinkingEffort, UserAskAnswerMode, UserAskAnswerValue,
 };
 use pane::{PaneKind, WorkspacePane};
 use settings::SettingsSection;
@@ -68,6 +72,7 @@ impl Render for ApprovalLayer {
 pub(crate) struct NexusView {
     presenter: Presenter,
     prompt_input: Entity<TextareaState>,
+    user_ask_inputs: BTreeMap<(Uuid, String), Entity<TextareaState>>,
     catalog_model_select: Entity<ListState<ModelPickerList>>,
     catalog_model_select_content: CatalogModelSelectContent,
     model_picker_open: bool,
@@ -240,6 +245,7 @@ impl NexusView {
         let mut view = Self {
             presenter,
             prompt_input,
+            user_ask_inputs: BTreeMap::new(),
             catalog_model_select,
             catalog_model_select_content,
             model_picker_open: false,
@@ -341,10 +347,69 @@ impl NexusView {
                     input.set_placeholder(language.text(placeholder), window, cx);
                 });
             }
+            for input in self.user_ask_inputs.values() {
+                input.update(cx, |input, cx| {
+                    input.set_placeholder(language.text("输入回答…"), window, cx);
+                });
+            }
             self.sync_catalog_model_select(window, cx);
             window.refresh();
         }
         cx.notify();
+    }
+
+    fn sync_user_ask_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let desired = self
+            .presenter
+            .model()
+            .pending_user_asks
+            .iter()
+            .flat_map(|request| {
+                request.questions.iter().filter_map(move |question| {
+                    let accepts_text = matches!(
+                        question.answer_mode,
+                        UserAskAnswerMode::Text
+                            | UserAskAnswerMode::Choice {
+                                allow_custom: true,
+                                ..
+                            }
+                    );
+                    accepts_text.then(|| {
+                        let value = match request.drafts.get(&question.id) {
+                            Some(UserAskAnswerValue::Text(value)) => value.clone(),
+                            _ => String::new(),
+                        };
+                        ((request.request_id, question.id.clone()), value)
+                    })
+                })
+            })
+            .collect::<BTreeMap<_, _>>();
+        self.user_ask_inputs
+            .retain(|key, _| desired.contains_key(key));
+        let placeholder = self.presenter.model().language.text("输入回答…");
+        for (key, value) in desired {
+            if self.user_ask_inputs.contains_key(&key) {
+                continue;
+            }
+            let input = cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .auto_grow(2, 4)
+                    .default_value(value)
+                    .placeholder(placeholder)
+            });
+            let request_id = key.0;
+            let question_id = key.1.clone();
+            cx.subscribe(&input, move |app, input, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let value = input.read(cx).value().to_string();
+                    app.presenter
+                        .set_user_ask_text(request_id, &question_id, value);
+                }
+                cx.notify();
+            })
+            .detach();
+            self.user_ask_inputs.insert(key, input);
+        }
     }
 
     fn start_event_pump(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -704,6 +769,50 @@ impl NexusView {
         self.presenter.cancel();
         self.presenter.notify_remote_changed();
         cx.notify();
+    }
+
+    fn select_user_ask_question(&mut self, request_id: Uuid, index: usize, cx: &mut Context<Self>) {
+        if self.presenter.set_user_ask_question(request_id, index) {
+            cx.notify();
+        }
+    }
+
+    fn toggle_user_ask(&mut self, request_id: Uuid, cx: &mut Context<Self>) {
+        if self.presenter.toggle_user_ask_collapsed(request_id) {
+            cx.notify();
+        }
+    }
+
+    fn select_user_ask_option(
+        &mut self,
+        request_id: Uuid,
+        question_id: &str,
+        option_id: &str,
+        checked: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self
+            .presenter
+            .set_user_ask_option(request_id, question_id, option_id, checked)
+        {
+            return;
+        }
+        if checked
+            && let Some(input) = self
+                .user_ask_inputs
+                .get(&(request_id, question_id.to_owned()))
+        {
+            input.update(cx, |input, cx| input.set_value("", window, cx));
+        }
+        cx.notify();
+    }
+
+    fn submit_user_ask(&mut self, request_id: Uuid, cx: &mut Context<Self>) {
+        if self.presenter.submit_user_ask(request_id) {
+            self.presenter.notify_remote_changed();
+            cx.notify();
+        }
     }
 
     fn copy_remote_link(&mut self, _: &gpui::ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -1454,6 +1563,7 @@ impl NexusView {
                             .px(px(24.))
                             .pt_3()
                             .pb_4()
+                            .child(self.render_user_asks(window, cx))
                             .child(
                                 div()
                                     .debug_selector(|| "composer-surface".into())
@@ -1507,6 +1617,9 @@ impl NexusView {
                                                     .when(model.active_run.is_some(), |element| {
                                                         element.child(
                                                             Button::new("composer-cancel")
+                                                                .debug_selector(|| {
+                                                                    "composer-cancel".into()
+                                                                })
                                                                 .danger()
                                                                 .outline()
                                                                 .small()
@@ -1589,6 +1702,7 @@ impl NexusView {
 
 impl Render for NexusView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_user_ask_inputs(window, cx);
         if self.model_picker_open && self.presenter.model().active_run.is_some() {
             self.model_picker_open = false;
             self.prompt_input
@@ -1689,7 +1803,7 @@ fn profile_form_draft(
 mod catalog_model_tests {
     use super::*;
     use crate::presenter::tests::fixture;
-    use nexus_domain::ModelReasoningEffort;
+    use nexus_domain::{ModelReasoningEffort, UserAskOption, UserAskQuestion};
     use nexus_protocol::Event;
 
     fn omp_model(provider: &str, id: &str) -> ModelDescriptor {
@@ -1706,6 +1820,75 @@ mod catalog_model_tests {
             }],
             default_reasoning_effort: None,
         }
+    }
+
+    fn user_ask_ui_questions() -> Vec<UserAskQuestion> {
+        vec![
+            UserAskQuestion {
+                id: "target".into(),
+                prompt: "选择修改范围".into(),
+                answer_mode: UserAskAnswerMode::Choice {
+                    multiple: false,
+                    allow_custom: false,
+                },
+                options: vec![
+                    UserAskOption {
+                        id: "library".into(),
+                        label: "核心库".into(),
+                        description: Some("只修改共享 crate".into()),
+                    },
+                    UserAskOption {
+                        id: "workspace".into(),
+                        label: "整个工作区".into(),
+                        description: None,
+                    },
+                ],
+            },
+            UserAskQuestion {
+                id: "checks".into(),
+                prompt: "选择需要执行的检查".into(),
+                answer_mode: UserAskAnswerMode::Choice {
+                    multiple: true,
+                    allow_custom: false,
+                },
+                options: vec![
+                    UserAskOption {
+                        id: "tests".into(),
+                        label: "测试".into(),
+                        description: None,
+                    },
+                    UserAskOption {
+                        id: "clippy".into(),
+                        label: "Clippy".into(),
+                        description: None,
+                    },
+                ],
+            },
+            UserAskQuestion {
+                id: "scope".into(),
+                prompt: "选择预设或填写其他范围".into(),
+                answer_mode: UserAskAnswerMode::Choice {
+                    multiple: false,
+                    allow_custom: true,
+                },
+                options: vec![UserAskOption {
+                    id: "focused".into(),
+                    label: "当前模块".into(),
+                    description: None,
+                }],
+            },
+            UserAskQuestion {
+                id: "note".into(),
+                prompt: "补充说明".into(),
+                answer_mode: UserAskAnswerMode::Text,
+                options: Vec::new(),
+            },
+        ]
+    }
+
+    fn click_debug(cx: &mut gpui::VisualTestContext, selector: &'static str) {
+        let point = cx.debug_bounds(selector).unwrap().center();
+        cx.simulate_click(point, Default::default());
     }
 
     #[test]
@@ -1928,6 +2111,270 @@ mod catalog_model_tests {
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         assert!(cx.debug_bounds("model-picker-surface").is_none());
+    }
+
+    #[gpui::test]
+    fn user_ask_panel_keeps_drafts_scoped_and_submits_each_answer_once(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (mut presenter, runner, _directory) = fixture();
+
+        assert!(presenter.submit("other task", "claude"));
+        let other_task = presenter.model().active_task.unwrap();
+        let other_run = presenter.model().active_run.unwrap();
+        runner.emit(Event::RunExited {
+            run_id: other_run,
+            status: RunStatus::Completed,
+            exit_code: Some(0),
+        });
+        presenter.drain_events();
+        presenter.new_task();
+        assert!(presenter.submit("active task", "claude"));
+        let active_task = presenter.model().active_task.unwrap();
+        let run_id = presenter.model().active_run.unwrap();
+        let request_id = Uuid::new_v4();
+        let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
+        cx.simulate_resize(gpui::size(px(1040.), px(680.)));
+        view.update_in(cx, |view, window, cx| {
+            view.prompt_input
+                .update(cx, |input, cx| input.set_value("普通消息草稿", window, cx));
+        });
+        runner.emit(Event::RunUserAskRequested {
+            run_id,
+            request_id,
+            questions: user_ask_ui_questions(),
+        });
+        view.update_in(cx, |view, _, cx| {
+            view.poll_events(Instant::now(), cx);
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            let _ = window.draw(cx);
+        });
+
+        let stack = cx.debug_bounds("user-ask-stack").unwrap();
+        let composer = cx.debug_bounds("composer-surface").unwrap();
+        assert!(stack.bottom() <= composer.top());
+        assert!(stack.size.height <= px(680. * 0.36 + 1.));
+
+        let option = format!("user-ask-option-{request_id}-target-workspace").leak();
+        click_debug(cx, option);
+        let next = format!("user-ask-next-{request_id}").leak();
+        click_debug(cx, next);
+        cx.run_until_parked();
+        for option_id in ["tests", "clippy"] {
+            let option = format!("user-ask-option-{request_id}-checks-{option_id}").leak();
+            click_debug(cx, option);
+        }
+        click_debug(cx, next);
+        cx.run_until_parked();
+        let focused = format!("user-ask-option-{request_id}-scope-focused").leak();
+        click_debug(cx, focused);
+        view.update_in(cx, |view, window, cx| {
+            view.user_ask_inputs
+                .get(&(request_id, "scope".into()))
+                .unwrap()
+                .update(cx, |input, cx| input.focus(window, cx));
+        });
+        cx.simulate_input("整个工作区");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(runner.submitted_user_ask_answers().is_empty());
+        view.update_in(cx, |view, _, cx| {
+            view.select_user_ask_question(request_id, 3, cx)
+        });
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            let _ = window.draw(cx);
+        });
+        view.update_in(cx, |view, window, cx| {
+            view.user_ask_inputs
+                .get(&(request_id, "note".into()))
+                .unwrap()
+                .update(cx, |input, cx| input.focus(window, cx));
+        });
+        cx.simulate_input("保持精简");
+        cx.run_until_parked();
+
+        view.update_in(cx, |view, window, cx| view.toggle_settings(window, cx));
+        view.update_in(cx, |view, window, cx| view.toggle_settings(window, cx));
+        view.update_in(cx, |view, window, cx| {
+            view.select_task(other_task, window, cx)
+        });
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            let _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds("user-ask-stack").is_none());
+        view.update_in(cx, |view, window, cx| {
+            view.select_task(active_task, window, cx)
+        });
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            let _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds("user-ask-stack").is_some());
+        view.read_with(cx, |view, cx| {
+            assert_eq!(view.prompt_input.read(cx).value(), "普通消息草稿");
+            let request = &view.presenter.model().pending_user_asks[0];
+            assert_eq!(
+                request.drafts.get("scope"),
+                Some(&UserAskAnswerValue::Text("整个工作区\n".into()))
+            );
+            assert_eq!(
+                request.drafts.get("note"),
+                Some(&UserAskAnswerValue::Text("保持精简".into()))
+            );
+        });
+
+        let collapse = format!("user-ask-collapse-{request_id}").leak();
+        click_debug(cx, collapse);
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds(&*format!("user-ask-question-{request_id}-note").leak())
+                .is_none()
+        );
+        click_debug(cx, collapse);
+        cx.run_until_parked();
+
+        let submit = format!("user-ask-submit-{request_id}").leak();
+        let submit_center = cx.debug_bounds(submit).unwrap().center();
+        cx.simulate_click(submit_center, Default::default());
+        cx.simulate_click(submit_center, Default::default());
+        cx.run_until_parked();
+        let submissions = runner.submitted_user_ask_answers();
+        assert_eq!(submissions.len(), 1);
+        assert_eq!(
+            submissions[0]
+                .iter()
+                .map(|answer| (answer.question_id.as_str(), answer.value.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "target",
+                    UserAskAnswerValue::Selected(vec!["workspace".into()])
+                ),
+                (
+                    "checks",
+                    UserAskAnswerValue::Selected(vec!["tests".into(), "clippy".into()])
+                ),
+                ("scope", UserAskAnswerValue::Text("整个工作区\n".into())),
+                ("note", UserAskAnswerValue::Text("保持精简".into())),
+            ]
+        );
+
+        runner.emit(Event::RunUserAskAnswerRejected {
+            run_id,
+            request_id,
+            message: "原生请求暂不可用".into(),
+        });
+        view.update_in(cx, |view, _, cx| {
+            view.poll_events(Instant::now(), cx);
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds(&*format!("user-ask-error-{request_id}").leak())
+                .is_some()
+        );
+        view.update_in(cx, |view, _, cx| view.submit_user_ask(request_id, cx));
+        assert_eq!(runner.submitted_user_ask_answers().len(), 2);
+
+        runner.emit(Event::RunUserAskAnswerSent { run_id, request_id });
+        view.update_in(cx, |view, _, cx| {
+            view.poll_events(Instant::now(), cx);
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            let _ = window.draw(cx);
+        });
+        view.update_in(cx, |view, _, cx| view.submit_user_ask(request_id, cx));
+        assert_eq!(runner.submitted_user_ask_answers().len(), 2);
+        runner.emit(Event::RunUserAskFinished {
+            run_id,
+            request_id,
+            status: nexus_domain::UserAskStatus::Answered,
+            message: None,
+        });
+        view.update_in(cx, |view, _, cx| {
+            view.poll_events(Instant::now(), cx);
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            let _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds("user-ask-stack").is_none());
+        assert!(view.read_with(cx, |view, _| view.user_ask_inputs.is_empty()));
+    }
+
+    #[gpui::test]
+    fn user_ask_panel_clamps_long_content_above_the_composer(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (mut presenter, runner, _directory) = fixture();
+        assert!(presenter.submit("long question", "claude"));
+        let run_id = presenter.model().active_run.unwrap();
+        let request_id = Uuid::new_v4();
+        runner.emit(Event::RunUserAskRequested {
+            run_id,
+            request_id,
+            questions: vec![UserAskQuestion {
+                id: "long".into(),
+                prompt: "这是一个用于验证最小窗口布局的很长问题。".repeat(18),
+                answer_mode: UserAskAnswerMode::Choice {
+                    multiple: false,
+                    allow_custom: false,
+                },
+                options: vec![UserAskOption {
+                    id: "long-option".into(),
+                    label: "这个选项同样很长，需要在面板内完整换行并保持可滚动。".repeat(14),
+                    description: Some("补充说明不能越过面板边界或覆盖输入区。".repeat(12)),
+                }],
+            }],
+        });
+        presenter.drain_events();
+        let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
+        for (width, height, theme, glass) in [
+            (1040., 680., ThemePreference::Light, true),
+            (1280., 800., ThemePreference::Dark, false),
+        ] {
+            cx.simulate_resize(gpui::size(px(width), px(height)));
+            view.update_in(cx, |view, window, cx| {
+                view.set_appearance(
+                    AppearanceSettings {
+                        theme,
+                        glass,
+                        reduced_motion: true,
+                    },
+                    window,
+                    cx,
+                );
+            });
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                let _ = window.draw(cx);
+            });
+            let stack = cx.debug_bounds("user-ask-stack").unwrap();
+            let composer = cx.debug_bounds("composer-surface").unwrap();
+            let stop = cx.debug_bounds("composer-cancel").unwrap();
+            let question = cx
+                .debug_bounds(&*format!("user-ask-question-{request_id}-long").leak())
+                .unwrap();
+            assert!(stack.left() >= px(0.) && stack.right() <= px(width));
+            assert!(stack.size.height <= px(height * 0.36 + 1.));
+            assert!(stack.bottom() <= composer.top());
+            assert!(composer.bottom() <= px(height));
+            assert!(stop.bottom() <= composer.bottom());
+            assert!(question.left() >= stack.left() && question.right() <= stack.right());
+        }
     }
 
     #[gpui::test]

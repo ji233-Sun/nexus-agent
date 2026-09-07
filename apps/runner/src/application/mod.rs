@@ -1,6 +1,7 @@
 pub(crate) mod events;
+pub(crate) mod user_ask;
 
-use nexus_domain::RunStatus;
+use nexus_domain::{RunStatus, UserAskAnswer, UserAskStatus};
 use nexus_protocol::{Command, EnvironmentVariable, ErrorCode, Event, StartRun};
 use std::{
     collections::HashSet,
@@ -18,12 +19,14 @@ use crate::infrastructure::{
     process::{RunInput, SteerInput, generate_title, run_harness},
 };
 use events::Emitter;
+use user_ask::PendingUserAsks;
 
 #[derive(Clone)]
 struct ActiveRun {
     id: Uuid,
     cancel: watch::Sender<bool>,
     input: mpsc::UnboundedSender<RunInput>,
+    user_asks: PendingUserAsks,
 }
 
 struct BackgroundTask {
@@ -164,6 +167,13 @@ impl Runner {
                         .await;
                 }
             }
+            Command::RunUserAskAnswer {
+                run_id,
+                request_id,
+                answers,
+            } => {
+                answer_user_ask(run_id, request_id, answers, &self.active, &self.emitter).await;
+            }
             Command::RunApprovalRespond {
                 run_id,
                 request_id,
@@ -231,8 +241,17 @@ impl Runner {
 
     pub(crate) async fn shutdown(&mut self) {
         self.cancel_catalog_task().await;
-        if let Some(run) = self.active.lock().await.as_ref() {
+        let active_run = self.active.lock().await.clone();
+        if let Some(run) = active_run {
             let _ = run.cancel.send(true);
+            finish_user_asks(
+                run.id,
+                &run.user_asks,
+                UserAskStatus::Cancelled,
+                None,
+                &self.emitter,
+            )
+            .await;
         }
         for task in &self.title_tasks {
             let _ = task.cancel.send(true);
@@ -308,10 +327,12 @@ async fn start_run(
 
     let (cancel, cancel_rx) = watch::channel(false);
     let (input, input_rx) = mpsc::unbounded_channel();
+    let user_asks = PendingUserAsks::default();
     *guard = Some(ActiveRun {
         id: request.run_id,
         cancel,
         input,
+        user_asks: user_asks.clone(),
     });
     drop(guard);
 
@@ -319,8 +340,15 @@ async fn start_run(
     let active_for_task = active.clone();
     let title_cwd = cwd.clone();
     tokio::spawn(async move {
-        let (status, exit_code) =
-            run_harness(request, cwd, cancel_rx, input_rx, emitter.clone()).await;
+        let (status, exit_code) = run_harness(
+            request,
+            cwd,
+            cancel_rx,
+            input_rx,
+            user_asks,
+            emitter.clone(),
+        )
+        .await;
         let mut guard = active_for_task.lock().await;
         if guard.as_ref().is_some_and(|run| run.id == run_id) {
             *guard = None;
@@ -351,7 +379,10 @@ async fn cancel_run(run_id: Uuid, active: &Mutex<Option<ActiveRun>>, emitter: &E
     };
     let first_request = !*run.cancel.borrow();
     let _ = run.cancel.send(true);
+    let user_asks = run.user_asks.clone();
+    drop(guard);
     if first_request {
+        finish_user_asks(run_id, &user_asks, UserAskStatus::Cancelled, None, emitter).await;
         emitter
             .send(Event::RunStatusChanged {
                 run_id,
@@ -362,10 +393,102 @@ async fn cancel_run(run_id: Uuid, active: &Mutex<Option<ActiveRun>>, emitter: &E
     }
 }
 
+async fn answer_user_ask(
+    run_id: Uuid,
+    request_id: Uuid,
+    answers: Vec<UserAskAnswer>,
+    active: &Mutex<Option<ActiveRun>>,
+    emitter: &Emitter,
+) {
+    enum Route {
+        Sent,
+        Rejected(String),
+        Failed(PendingUserAsks, String),
+    }
+
+    let route = {
+        let guard = active.lock().await;
+        let Some(run) = guard
+            .as_ref()
+            .filter(|run| run.id == run_id && !*run.cancel.borrow())
+        else {
+            drop(guard);
+            emitter
+                .send(Event::RunUserAskAnswerRejected {
+                    run_id,
+                    request_id,
+                    message: "当前 Run 无法接收 User Ask 回答。".into(),
+                })
+                .await;
+            return;
+        };
+        match run.user_asks.claim_answer(request_id, answers) {
+            Ok(input) => {
+                if run.input.send(RunInput::UserAsk(input)).is_ok() {
+                    Route::Sent
+                } else {
+                    Route::Failed(
+                        run.user_asks.clone(),
+                        "Harness 回复通道已关闭，无法提交 User Ask 回答。".into(),
+                    )
+                }
+            }
+            Err(message) => Route::Rejected(message),
+        }
+    };
+
+    match route {
+        Route::Sent => {}
+        Route::Rejected(message) => {
+            emitter
+                .send(Event::RunUserAskAnswerRejected {
+                    run_id,
+                    request_id,
+                    message,
+                })
+                .await;
+        }
+        Route::Failed(user_asks, message) => {
+            if user_asks.finish(request_id) {
+                emitter
+                    .send(Event::RunUserAskFinished {
+                        run_id,
+                        request_id,
+                        status: UserAskStatus::Failed,
+                        message: Some(message),
+                    })
+                    .await;
+            }
+        }
+    }
+}
+
+pub(crate) async fn finish_user_asks(
+    run_id: Uuid,
+    user_asks: &PendingUserAsks,
+    status: UserAskStatus,
+    message: Option<String>,
+    emitter: &Emitter,
+) {
+    for request_id in user_asks.finish_all() {
+        emitter
+            .send(Event::RunUserAskFinished {
+                run_id,
+                request_id,
+                status,
+                message: message.clone(),
+            })
+            .await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nexus_domain::{HarnessKind, ThinkingEffort};
+    use nexus_domain::{
+        HarnessKind, ThinkingEffort, UserAskAnswerMode, UserAskAnswerValue, UserAskOption,
+        UserAskQuestion,
+    };
     use nexus_protocol::EnvironmentVariable;
 
     fn request(cwd: String) -> StartRun {
@@ -382,6 +505,29 @@ mod tests {
             effort: ThinkingEffort::Medium,
             environment: Vec::new(),
         }
+    }
+
+    fn user_ask_questions() -> Vec<UserAskQuestion> {
+        vec![UserAskQuestion {
+            id: "scope".into(),
+            prompt: "Which scope?".into(),
+            answer_mode: UserAskAnswerMode::Choice {
+                multiple: false,
+                allow_custom: false,
+            },
+            options: vec![UserAskOption {
+                id: "workspace".into(),
+                label: "Workspace".into(),
+                description: None,
+            }],
+        }]
+    }
+
+    fn user_ask_answers() -> Vec<UserAskAnswer> {
+        vec![UserAskAnswer {
+            question_id: "scope".into(),
+            value: UserAskAnswerValue::Selected(vec!["workspace".into()]),
+        }]
     }
 
     #[tokio::test]
@@ -451,6 +597,7 @@ mod tests {
             id: active_id,
             cancel,
             input: mpsc::unbounded_channel().0,
+            user_asks: PendingUserAsks::default(),
         });
         let request = request("unused".into());
         let rejected_id = request.run_id;
@@ -474,6 +621,7 @@ mod tests {
             id: run_id,
             cancel,
             input: mpsc::unbounded_channel().0,
+            user_asks: PendingUserAsks::default(),
         });
 
         runner
@@ -492,6 +640,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancellation_finishes_pending_user_ask_once_and_rejects_late_answers() {
+        let (emitter, mut events) = Emitter::channel();
+        let mut runner = Runner::new(emitter);
+        let run_id = Uuid::new_v4();
+        let (cancel, _cancel_receiver) = watch::channel(false);
+        let (input, mut received) = mpsc::unbounded_channel();
+        let user_asks = PendingUserAsks::default();
+        let request_id = user_asks
+            .register("native-ask".into(), user_ask_questions())
+            .unwrap();
+        *runner.active.lock().await = Some(ActiveRun {
+            id: run_id,
+            cancel,
+            input,
+            user_asks,
+        });
+
+        runner.handle(Command::RunCancel { run_id }).await;
+        runner.handle(Command::RunCancel { run_id }).await;
+        assert!(matches!(
+            events.recv().await.unwrap().event,
+            Event::RunUserAskFinished {
+                request_id: id,
+                status: UserAskStatus::Cancelled,
+                ..
+            } if id == request_id
+        ));
+        assert!(matches!(
+            events.recv().await.unwrap().event,
+            Event::RunStatusChanged { run_id: id, status: RunStatus::Cancelling, .. }
+                if id == run_id
+        ));
+        assert!(events.try_recv().is_err());
+
+        runner
+            .handle(Command::RunUserAskAnswer {
+                run_id,
+                request_id,
+                answers: user_ask_answers(),
+            })
+            .await;
+        assert!(matches!(
+            events.recv().await.unwrap().event,
+            Event::RunUserAskAnswerRejected { request_id: id, .. } if id == request_id
+        ));
+        assert!(received.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn steer_routes_only_to_the_matching_live_run() {
         let (emitter, mut events) = Emitter::channel();
         let mut runner = Runner::new(emitter);
@@ -502,6 +699,7 @@ mod tests {
             id: run_id,
             cancel: cancel.clone(),
             input,
+            user_asks: PendingUserAsks::default(),
         });
         let message_id = Uuid::new_v4();
         runner
@@ -512,7 +710,7 @@ mod tests {
             })
             .await;
         let RunInput::Steer(message) = received.recv().await.unwrap() else {
-            panic!("expected steer")
+            panic!("expected Steer input")
         };
         assert_eq!(message.message_id, message_id);
         assert_eq!(message.prompt, "correction");
@@ -550,18 +748,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn user_ask_answer_routes_once_to_the_matching_live_run() {
+        let (emitter, mut events) = Emitter::channel();
+        let mut runner = Runner::new(emitter);
+        let run_id = Uuid::new_v4();
+        let user_asks = PendingUserAsks::default();
+        let request_id = user_asks
+            .register("native-ask".into(), user_ask_questions())
+            .unwrap();
+        let (cancel, _) = watch::channel(false);
+        let (input, mut received) = mpsc::unbounded_channel();
+        *runner.active.lock().await = Some(ActiveRun {
+            id: run_id,
+            cancel,
+            input,
+            user_asks,
+        });
+
+        for (wrong_run, wrong_request) in [(Uuid::new_v4(), request_id), (run_id, Uuid::new_v4())] {
+            runner
+                .handle(Command::RunUserAskAnswer {
+                    run_id: wrong_run,
+                    request_id: wrong_request,
+                    answers: user_ask_answers(),
+                })
+                .await;
+            assert!(matches!(
+                events.recv().await.unwrap().event,
+                Event::RunUserAskAnswerRejected { run_id: id, request_id: request, .. }
+                    if id == wrong_run && request == wrong_request
+            ));
+            assert!(received.try_recv().is_err());
+        }
+
+        runner
+            .handle(Command::RunUserAskAnswer {
+                run_id,
+                request_id,
+                answers: user_ask_answers(),
+            })
+            .await;
+        let RunInput::UserAsk(answer) = received.recv().await.unwrap() else {
+            panic!("expected User Ask input")
+        };
+        assert_eq!(answer.request_id, request_id);
+        assert_eq!(answer.native_request_id, "native-ask");
+        assert!(events.try_recv().is_err());
+
+        runner
+            .handle(Command::RunUserAskAnswer {
+                run_id,
+                request_id,
+                answers: user_ask_answers(),
+            })
+            .await;
+        assert!(matches!(
+            events.recv().await.unwrap().event,
+            Event::RunUserAskAnswerRejected { request_id: id, .. } if id == request_id
+        ));
+        assert!(received.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn shutdown_cancels_active_run() {
-        let (emitter, _) = Emitter::channel();
+        let (emitter, mut events) = Emitter::channel();
         let mut runner = Runner::new(emitter);
         let (cancel, receiver) = watch::channel(false);
+        let user_asks = PendingUserAsks::default();
+        let request_id = user_asks
+            .register("native-ask".into(), user_ask_questions())
+            .unwrap();
         *runner.active.lock().await = Some(ActiveRun {
             id: Uuid::new_v4(),
             cancel,
             input: mpsc::unbounded_channel().0,
+            user_asks,
         });
 
         assert!(!runner.handle(Command::RunnerShutdown).await);
         runner.shutdown().await;
         assert!(*receiver.borrow());
+        assert!(matches!(
+            events.recv().await.unwrap().event,
+            Event::RunUserAskFinished {
+                request_id: id,
+                status: UserAskStatus::Cancelled,
+                ..
+            } if id == request_id
+        ));
     }
 }

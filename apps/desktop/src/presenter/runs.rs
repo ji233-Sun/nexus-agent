@@ -1,10 +1,13 @@
 use super::{Presenter, executable_setting_key};
 use crate::i18n::{Language, LocalizedText, probe_status};
 use crate::infrastructure::storage::NewTaskRun;
-use crate::model::{ModelCatalogState, QueuedMessage, ResolvedModelSelection};
+use crate::model::{
+    ModelCatalogState, PendingUserAsk, QueuedMessage, ResolvedModelSelection,
+    UserAskSubmissionState,
+};
 use nexus_domain::{
-    HarnessKind, MessageKind, MessageRole, PermissionMode, RunStatus, ToolMetadata,
-    compact_task_title,
+    HarnessKind, MessageKind, MessageRole, PermissionMode, RunStatus, ToolMetadata, UserAskAnswer,
+    UserAskAnswerMode, UserAskAnswerValue, UserAskQuestion, UserAskStatus, compact_task_title,
 };
 use nexus_protocol::{Command, CommandEnvelope, Event, StartRun};
 use std::time::Instant;
@@ -232,6 +235,95 @@ impl Presenter {
                 self.model.steering_message = None;
                 self.model.status = message.into();
             }
+            Event::RunUserAskRequested {
+                run_id,
+                request_id,
+                questions,
+            } if self.model.active_run == Some(run_id)
+                && !self.model.run_cancelling
+                && !self
+                    .model
+                    .pending_user_asks
+                    .iter()
+                    .any(|request| request.request_id == request_id) =>
+            {
+                let history = format_user_ask_request(self.model.language, &questions);
+                self.persist_live_message(
+                    run_id,
+                    MessageRole::System,
+                    MessageKind::Status,
+                    &history,
+                    None,
+                );
+                self.model
+                    .pending_user_asks
+                    .push(PendingUserAsk::new(request_id, questions));
+                self.model.status = "Agent 正在等待你的回答。".into();
+            }
+            Event::RunUserAskAnswerRejected {
+                run_id,
+                request_id,
+                message,
+            } if self.model.active_run == Some(run_id) => {
+                if let Some(request) = self.model.pending_user_asks.iter_mut().find(|request| {
+                    request.request_id == request_id
+                        && request.submission == UserAskSubmissionState::Submitting
+                }) {
+                    request.submission = UserAskSubmissionState::Pending;
+                    request.error = Some(message.clone());
+                    request.submitted_answers = None;
+                    self.model.status = message.into();
+                }
+            }
+            Event::RunUserAskAnswerSent { run_id, request_id }
+                if self.model.active_run == Some(run_id) =>
+            {
+                if let Some(request) = self.model.pending_user_asks.iter_mut().find(|request| {
+                    request.request_id == request_id
+                        && request.submission == UserAskSubmissionState::Submitting
+                }) {
+                    request.submission = UserAskSubmissionState::Sent;
+                    request.error = None;
+                    self.model.status = "回答已发送，等待 Agent 继续…".into();
+                }
+            }
+            Event::RunUserAskFinished {
+                run_id,
+                request_id,
+                status,
+                message,
+            } if self.model.active_run == Some(run_id) => {
+                let request = self
+                    .model
+                    .pending_user_asks
+                    .iter()
+                    .position(|request| request.request_id == request_id)
+                    .map(|index| self.model.pending_user_asks.remove(index));
+                if let Some(request) = request {
+                    let history = format_user_ask_result(
+                        self.model.language,
+                        &request,
+                        status,
+                        message.as_deref(),
+                    );
+                    self.persist_live_message(
+                        run_id,
+                        MessageRole::System,
+                        MessageKind::Status,
+                        &history,
+                        None,
+                    );
+                    self.model.status = if self.model.pending_user_asks.is_empty() {
+                        message
+                            .unwrap_or_else(|| {
+                                user_ask_status_text(self.model.language, status).into()
+                            })
+                            .into()
+                    } else {
+                        "Agent 正在等待你的回答。".into()
+                    };
+                }
+            }
             Event::RunMessageCompleted { run_id, text }
                 if self.model.active_run == Some(run_id) =>
             {
@@ -319,9 +411,26 @@ impl Presenter {
                     ModelCatalogState::Loading { request_id, .. } => Some(request_id),
                     _ => None,
                 };
-                let _ = self.storage.finish_run(run_id, status, exit_code);
                 let task_id = self.model.active_task;
                 let cancelled = self.model.run_cancelling;
+                let stale_user_asks = std::mem::take(&mut self.model.pending_user_asks);
+                let stale_status = if cancelled || status == RunStatus::Cancelled {
+                    UserAskStatus::Cancelled
+                } else {
+                    UserAskStatus::Expired
+                };
+                for request in stale_user_asks {
+                    let history =
+                        format_user_ask_result(self.model.language, &request, stale_status, None);
+                    self.persist_live_message(
+                        run_id,
+                        MessageRole::System,
+                        MessageKind::Status,
+                        &history,
+                        None,
+                    );
+                }
+                let _ = self.storage.finish_run(run_id, status, exit_code);
                 self.model.streaming_text.clear();
                 self.model.active_run = None;
                 self.model.run_cancelling = false;
@@ -492,6 +601,198 @@ impl Presenter {
         self.model.steering_message = Some(message_id);
         self.model.status = "等待工具执行结束后介入…".into();
         true
+    }
+
+    pub(crate) fn set_user_ask_question(&mut self, request_id: Uuid, index: usize) -> bool {
+        let Some(request) = self
+            .model
+            .pending_user_asks
+            .iter_mut()
+            .find(|request| request.request_id == request_id)
+        else {
+            return false;
+        };
+        if index >= request.questions.len() {
+            return false;
+        }
+        request.active_question = index;
+        true
+    }
+
+    pub(crate) fn toggle_user_ask_collapsed(&mut self, request_id: Uuid) -> bool {
+        let Some(request) = self
+            .model
+            .pending_user_asks
+            .iter_mut()
+            .find(|request| request.request_id == request_id)
+        else {
+            return false;
+        };
+        request.collapsed = !request.collapsed;
+        true
+    }
+
+    pub(crate) fn set_user_ask_text(
+        &mut self,
+        request_id: Uuid,
+        question_id: &str,
+        text: String,
+    ) -> bool {
+        let Some(request) = self.model.pending_user_asks.iter_mut().find(|request| {
+            request.request_id == request_id
+                && request.submission == UserAskSubmissionState::Pending
+        }) else {
+            return false;
+        };
+        let Some(question) = request
+            .questions
+            .iter()
+            .find(|question| question.id == question_id)
+        else {
+            return false;
+        };
+        match question.answer_mode {
+            UserAskAnswerMode::Text => {
+                request
+                    .drafts
+                    .insert(question.id.clone(), UserAskAnswerValue::Text(text));
+            }
+            UserAskAnswerMode::Choice {
+                allow_custom: true, ..
+            } => {
+                if text.trim().is_empty()
+                    && matches!(
+                        request.drafts.get(question_id),
+                        Some(UserAskAnswerValue::Selected(_))
+                    )
+                {
+                    return true;
+                }
+                let value = if text.trim().is_empty() {
+                    UserAskAnswerValue::Selected(Vec::new())
+                } else {
+                    UserAskAnswerValue::Text(text)
+                };
+                request.drafts.insert(question.id.clone(), value);
+            }
+            UserAskAnswerMode::Choice {
+                allow_custom: false,
+                ..
+            } => return false,
+        }
+        request.error = None;
+        true
+    }
+
+    pub(crate) fn set_user_ask_option(
+        &mut self,
+        request_id: Uuid,
+        question_id: &str,
+        option_id: &str,
+        checked: bool,
+    ) -> bool {
+        let Some(request) = self.model.pending_user_asks.iter_mut().find(|request| {
+            request.request_id == request_id
+                && request.submission == UserAskSubmissionState::Pending
+        }) else {
+            return false;
+        };
+        let Some(question) = request
+            .questions
+            .iter()
+            .find(|question| question.id == question_id)
+        else {
+            return false;
+        };
+        let UserAskAnswerMode::Choice { multiple, .. } = question.answer_mode else {
+            return false;
+        };
+        if !question.options.iter().any(|option| option.id == option_id) {
+            return false;
+        }
+        let selected = request
+            .drafts
+            .entry(question.id.clone())
+            .or_insert_with(|| UserAskAnswerValue::Selected(Vec::new()));
+        if !matches!(selected, UserAskAnswerValue::Selected(_)) {
+            *selected = UserAskAnswerValue::Selected(Vec::new());
+        }
+        let UserAskAnswerValue::Selected(selected) = selected else {
+            unreachable!()
+        };
+        if multiple {
+            if checked && !selected.iter().any(|id| id == option_id) {
+                selected.push(option_id.to_owned());
+            } else if !checked {
+                selected.retain(|id| id != option_id);
+            }
+        } else if checked {
+            selected.clear();
+            selected.push(option_id.to_owned());
+        }
+        request.error = None;
+        true
+    }
+
+    pub(crate) fn can_submit_user_ask(&self, request_id: Uuid) -> bool {
+        self.model.active_run.is_some()
+            && !self.model.run_cancelling
+            && self.model.pending_user_asks.iter().any(|request| {
+                request.request_id == request_id
+                    && request.submission == UserAskSubmissionState::Pending
+                    && request.answers().is_some()
+            })
+    }
+
+    pub(crate) fn submit_user_ask(&mut self, request_id: Uuid) -> bool {
+        let Some(answers) = self
+            .model
+            .pending_user_asks
+            .iter()
+            .find(|request| request.request_id == request_id)
+            .and_then(PendingUserAsk::answers)
+        else {
+            return false;
+        };
+        self.answer_user_ask(request_id, answers)
+    }
+
+    pub(crate) fn answer_user_ask(
+        &mut self,
+        request_id: Uuid,
+        answers: Vec<UserAskAnswer>,
+    ) -> bool {
+        let Some(run_id) = self.model.active_run.filter(|_| !self.model.run_cancelling) else {
+            return false;
+        };
+        let Some(index) = self.model.pending_user_asks.iter().position(|request| {
+            request.request_id == request_id
+                && request.submission == UserAskSubmissionState::Pending
+        }) else {
+            return false;
+        };
+        let submitted_answers = answers.clone();
+        let result = self
+            .runner
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Runner 不可用"))
+            .and_then(|runner| runner.answer_user_ask(run_id, request_id, answers));
+        match result {
+            Ok(()) => {
+                let request = &mut self.model.pending_user_asks[index];
+                request.submission = UserAskSubmissionState::Submitting;
+                request.error = None;
+                request.submitted_answers = Some(submitted_answers);
+                self.model.status = "正在提交回答…".into();
+                true
+            }
+            Err(error) => {
+                let message = format!("无法提交 User Ask 回答：{error}");
+                self.model.pending_user_asks[index].error = Some(message.clone());
+                self.model.status = message.into();
+                false
+            }
+        }
     }
 
     pub(super) fn start_run(
@@ -720,4 +1021,74 @@ impl Presenter {
             LocalizedText::new("正在停止 {harness}…", &[("harness", (harness).to_string())]);
         Ok(())
     }
+}
+
+fn format_user_ask_request(language: Language, questions: &[UserAskQuestion]) -> String {
+    let mut lines = vec![language.text("Agent 提问").to_owned()];
+    for (index, question) in questions.iter().enumerate() {
+        lines.push(format!("{}. {}", index + 1, question.prompt));
+        for option in &question.options {
+            let mut line = format!("   - {}", option.label);
+            if let Some(description) = option
+                .description
+                .as_deref()
+                .filter(|text| !text.is_empty())
+            {
+                line.push_str(": ");
+                line.push_str(description);
+            }
+            lines.push(line);
+        }
+    }
+    lines.join("\n")
+}
+
+fn format_user_ask_result(
+    language: Language,
+    request: &PendingUserAsk,
+    status: UserAskStatus,
+    message: Option<&str>,
+) -> String {
+    let mut lines = vec![user_ask_status_text(language, status).to_owned()];
+    for (index, question) in request.questions.iter().enumerate() {
+        let answer = request
+            .submitted_answers
+            .as_deref()
+            .and_then(|answers| {
+                answers
+                    .iter()
+                    .find(|answer| answer.question_id == question.id)
+            })
+            .map(|answer| match &answer.value {
+                UserAskAnswerValue::Text(text) => text.clone(),
+                UserAskAnswerValue::Selected(option_ids) => option_ids
+                    .iter()
+                    .map(|option_id| {
+                        question
+                            .options
+                            .iter()
+                            .find(|option| option.id == *option_id)
+                            .map(|option| option.label.clone())
+                            .unwrap_or_else(|| option_id.clone())
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            })
+            .unwrap_or_else(|| language.text("未记录回答").to_owned());
+        lines.push(format!("{}. {}", index + 1, question.prompt));
+        lines.push(format!("   {}", answer));
+    }
+    if let Some(message) = message.filter(|message| !message.trim().is_empty()) {
+        lines.push(message.to_owned());
+    }
+    lines.join("\n")
+}
+
+fn user_ask_status_text(language: Language, status: UserAskStatus) -> &'static str {
+    language.text(match status {
+        UserAskStatus::Answered => "User Ask 已回答",
+        UserAskStatus::Cancelled => "User Ask 已取消",
+        UserAskStatus::Expired => "User Ask 已失效",
+        UserAskStatus::Failed => "User Ask 回答失败",
+    })
 }

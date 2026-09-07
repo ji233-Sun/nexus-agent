@@ -472,6 +472,52 @@ pub struct ToolMetadata {
     pub is_error: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserAskQuestion {
+    pub id: String,
+    pub prompt: String,
+    pub answer_mode: UserAskAnswerMode,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<UserAskOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UserAskAnswerMode {
+    Text,
+    Choice { multiple: bool, allow_custom: bool },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserAskOption {
+    pub id: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserAskAnswer {
+    pub question_id: String,
+    pub value: UserAskAnswerValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum UserAskAnswerValue {
+    Text(String),
+    Selected(Vec<String>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UserAskStatus {
+    Answered,
+    Cancelled,
+    Expired,
+    Failed,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,6 +577,41 @@ mod tests {
                 .chars()
                 .count(),
             MAX_TASK_TITLE_CHARS
+        );
+    }
+
+    #[test]
+    fn user_ask_types_preserve_choice_capabilities_and_answer_mapping() {
+        let question = UserAskQuestion {
+            id: "targets".into(),
+            prompt: "Select targets".into(),
+            answer_mode: UserAskAnswerMode::Choice {
+                multiple: true,
+                allow_custom: false,
+            },
+            options: vec![UserAskOption {
+                id: "tests".into(),
+                label: "Tests".into(),
+                description: Some("Run the focused suite".into()),
+            }],
+        };
+        assert!(matches!(
+            question.answer_mode,
+            UserAskAnswerMode::Choice {
+                multiple: true,
+                allow_custom: false
+            }
+        ));
+        assert_eq!(question.options[0].id, "tests");
+
+        let answer = UserAskAnswer {
+            question_id: "targets".into(),
+            value: UserAskAnswerValue::Selected(vec!["tests".into()]),
+        };
+        assert_eq!(answer.question_id, "targets");
+        assert_eq!(
+            answer.value,
+            UserAskAnswerValue::Selected(vec!["tests".into()])
         );
     }
 }
