@@ -5,6 +5,7 @@ use crate::i18n::{Language, LocalizedText};
 use history::{HistoryMessage, ThreadSummary};
 use nexus_domain::{
     HarnessKind, Message, ModelDescriptor, Project, ProviderProfile, TaskSummary, ThinkingEffort,
+    UserAskQuestion,
 };
 use nexus_protocol::HarnessProbe;
 use std::collections::{BTreeMap, VecDeque};
@@ -81,6 +82,23 @@ pub(crate) struct QueuedMessage {
     pub(crate) prompt: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) enum UserAskSubmissionState {
+    Pending,
+    Submitting,
+    Sent,
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct PendingUserAsk {
+    pub(crate) request_id: Uuid,
+    pub(crate) questions: Vec<UserAskQuestion>,
+    pub(crate) submission: UserAskSubmissionState,
+    pub(crate) error: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedModelSelection {
     pub(crate) model: Option<String>,
@@ -101,6 +119,7 @@ pub(crate) struct AppModel {
     pub(crate) run_cancelling: bool,
     pub(crate) queued_messages: VecDeque<QueuedMessage>,
     pub(crate) steering_message: Option<Uuid>,
+    pub(crate) pending_user_asks: Vec<PendingUserAsk>,
     pub(crate) active_run_elapsed_seconds: Option<u64>,
     pub(crate) active_task: Option<Uuid>,
     pub(crate) active_harness: Option<HarnessKind>,

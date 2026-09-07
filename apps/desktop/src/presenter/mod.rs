@@ -17,7 +17,9 @@ use crate::{
     remote_control::{RemoteCommand, RemoteControl, TOKEN_SETTING_KEY},
 };
 use anyhow::{Result, bail};
-use nexus_domain::{ClaudeModel, HarnessKind, Project, ProviderProfile, ThinkingEffort};
+use nexus_domain::{
+    ClaudeModel, HarnessKind, Project, ProviderProfile, ThinkingEffort, UserAskAnswer,
+};
 use nexus_protocol::{Command, CommandEnvelope, EnvironmentVariable, EventEnvelope};
 use std::{collections::BTreeMap, path::Path, str::FromStr as _, time::Instant};
 use uuid::Uuid;
@@ -28,6 +30,20 @@ const PROVIDER_MODEL_MAX_CHARS: usize = 128;
 pub(crate) trait RunnerPort {
     fn send(&self, command: CommandEnvelope) -> Result<()>;
     fn drain_events(&self) -> Vec<EventEnvelope>;
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn answer_user_ask(
+        &self,
+        run_id: Uuid,
+        request_id: Uuid,
+        answers: Vec<UserAskAnswer>,
+    ) -> Result<()> {
+        self.send(CommandEnvelope::new(Command::RunUserAskAnswer {
+            run_id,
+            request_id,
+            answers,
+        }))
+    }
 }
 
 pub(crate) struct Presenter {

@@ -5,9 +5,12 @@ use crate::{
     infrastructure::{
         codex_history::Event as HistoryEvent, credentials::CredentialStore, storage::NewTaskRun,
     },
-    model::history::HistoryMessage,
+    model::{UserAskSubmissionState, history::HistoryMessage},
 };
-use nexus_domain::{MessageKind, MessageRole, ModelDescriptor, ModelReasoningEffort, RunStatus};
+use nexus_domain::{
+    MessageKind, MessageRole, ModelDescriptor, ModelReasoningEffort, RunStatus, UserAskAnswer,
+    UserAskAnswerMode, UserAskAnswerValue, UserAskOption, UserAskQuestion, UserAskStatus,
+};
 use nexus_protocol::{ErrorCode, Event, HarnessProbe, PROTOCOL_VERSION, StartRun};
 
 #[derive(Clone, Default)]
@@ -1386,6 +1389,164 @@ fn accepted_steer_is_saved_without_changing_another_tasks_timeline() {
     assert_eq!(messages[1].content, "correction for active conversation");
     assert_eq!(messages[1].task_id, task_id);
     assert_eq!(messages[1].run_id, run_id);
+}
+
+#[test]
+fn user_ask_reply_uses_the_active_run_without_creating_a_prompt_or_run() {
+    let (mut presenter, runner, _directory) = fixture();
+    assert!(presenter.submit("ask me", "claude"));
+    let run_id = presenter.model().active_run.unwrap();
+    let request_id = Uuid::new_v4();
+    runner.emit(Event::RunUserAskRequested {
+        run_id: Uuid::new_v4(),
+        request_id,
+        questions: user_ask_questions(),
+    });
+    runner.emit(Event::RunUserAskRequested {
+        run_id,
+        request_id,
+        questions: user_ask_questions(),
+    });
+    presenter.drain_events();
+    assert_eq!(presenter.model().pending_user_asks.len(), 1);
+    assert_eq!(presenter.model().pending_user_asks[0].questions.len(), 2);
+
+    let answers = user_ask_answers();
+    assert!(presenter.answer_user_ask(request_id, answers.clone()));
+    assert_eq!(
+        presenter.model().pending_user_asks[0].submission,
+        UserAskSubmissionState::Submitting
+    );
+    assert!(!presenter.answer_user_ask(request_id, answers.clone()));
+    assert!(matches!(
+        &runner.0.borrow().commands.last().unwrap().command,
+        Command::RunUserAskAnswer {
+            run_id: id,
+            request_id: request,
+            answers: sent,
+        } if *id == run_id && *request == request_id && *sent == answers
+    ));
+
+    runner.emit(Event::RunUserAskAnswerRejected {
+        run_id,
+        request_id,
+        message: "invalid".into(),
+    });
+    presenter.drain_events();
+    assert_eq!(
+        presenter.model().pending_user_asks[0].submission,
+        UserAskSubmissionState::Pending
+    );
+    assert_eq!(
+        presenter.model().pending_user_asks[0].error.as_deref(),
+        Some("invalid")
+    );
+    assert!(presenter.answer_user_ask(request_id, answers));
+    runner.emit(Event::RunUserAskAnswerSent { run_id, request_id });
+    presenter.drain_events();
+    assert_eq!(
+        presenter.model().pending_user_asks[0].submission,
+        UserAskSubmissionState::Sent
+    );
+    runner.emit(Event::RunUserAskAnswerRejected {
+        run_id,
+        request_id,
+        message: "duplicate".into(),
+    });
+    presenter.drain_events();
+    assert_eq!(
+        presenter.model().pending_user_asks[0].submission,
+        UserAskSubmissionState::Sent
+    );
+    runner.emit(Event::RunUserAskFinished {
+        run_id,
+        request_id,
+        status: UserAskStatus::Answered,
+        message: None,
+    });
+    presenter.drain_events();
+    assert!(presenter.model().pending_user_asks.is_empty());
+    assert_eq!(presenter.model().messages.len(), 1);
+    assert_eq!(
+        runner
+            .0
+            .borrow()
+            .commands
+            .iter()
+            .filter(|command| matches!(command.command, Command::RunStart(_)))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn user_ask_send_failure_and_run_exit_leave_no_stale_desktop_state() {
+    let (mut presenter, runner, _directory) = fixture();
+    assert!(presenter.submit("ask me", "claude"));
+    let run_id = presenter.model().active_run.unwrap();
+    let request_id = Uuid::new_v4();
+    runner.emit(Event::RunUserAskRequested {
+        run_id,
+        request_id,
+        questions: user_ask_questions(),
+    });
+    presenter.drain_events();
+
+    runner.0.borrow_mut().fail_send = true;
+    assert!(!presenter.answer_user_ask(request_id, user_ask_answers()));
+    assert_eq!(
+        presenter.model().pending_user_asks[0].submission,
+        UserAskSubmissionState::Pending
+    );
+    assert!(presenter.model().pending_user_asks[0].error.is_some());
+    runner.0.borrow_mut().fail_send = false;
+
+    runner.emit(Event::RunExited {
+        run_id,
+        status: RunStatus::Failed,
+        exit_code: Some(1),
+    });
+    presenter.drain_events();
+    assert!(presenter.model().pending_user_asks.is_empty());
+    assert!(presenter.model().active_run.is_none());
+    assert!(!presenter.answer_user_ask(request_id, user_ask_answers()));
+}
+
+fn user_ask_questions() -> Vec<UserAskQuestion> {
+    vec![
+        UserAskQuestion {
+            id: "target".into(),
+            prompt: "Target?".into(),
+            answer_mode: UserAskAnswerMode::Choice {
+                multiple: false,
+                allow_custom: false,
+            },
+            options: vec![UserAskOption {
+                id: "workspace".into(),
+                label: "Workspace".into(),
+                description: None,
+            }],
+        },
+        UserAskQuestion {
+            id: "note".into(),
+            prompt: "Note?".into(),
+            answer_mode: UserAskAnswerMode::Text,
+            options: Vec::new(),
+        },
+    ]
+}
+
+fn user_ask_answers() -> Vec<UserAskAnswer> {
+    vec![
+        UserAskAnswer {
+            question_id: "target".into(),
+            value: UserAskAnswerValue::Selected(vec!["workspace".into()]),
+        },
+        UserAskAnswer {
+            question_id: "note".into(),
+            value: UserAskAnswerValue::Text("Keep it focused".into()),
+        },
+    ]
 }
 
 #[test]
