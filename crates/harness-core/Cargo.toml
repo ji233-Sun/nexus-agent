@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+nexus-domain = { path = "../domain" }
 serde_json.workspace = true
 
 [dev-dependencies]

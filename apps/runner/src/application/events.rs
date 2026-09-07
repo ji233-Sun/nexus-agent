@@ -69,6 +69,8 @@ pub(crate) async fn emit_decoded(run_id: Uuid, decoded: DecodedEvent, emitter: &
             message: Some(message),
         },
         DecodedEvent::WriteStdin(_)
+        | DecodedEvent::UserAskRequested(_)
+        | DecodedEvent::UserAskFinished { .. }
         | DecodedEvent::InputAccepted(_)
         | DecodedEvent::InputRejected { .. }
         | DecodedEvent::TurnCompleted => return,

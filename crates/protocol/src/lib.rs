@@ -1,9 +1,12 @@
-use nexus_domain::{HarnessKind, ModelDescriptor, RunStatus, ThinkingEffort};
+use nexus_domain::{
+    HarnessKind, ModelDescriptor, RunStatus, ThinkingEffort, UserAskAnswer, UserAskQuestion,
+    UserAskStatus,
+};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandEnvelope {
@@ -49,6 +52,12 @@ pub enum Command {
         run_id: Uuid,
         message_id: Uuid,
         prompt: String,
+    },
+    #[serde(rename = "run.user_ask.answer")]
+    RunUserAskAnswer {
+        run_id: Uuid,
+        request_id: Uuid,
+        answers: Vec<UserAskAnswer>,
     },
     #[serde(rename = "run.cancel")]
     RunCancel { run_id: Uuid },
@@ -152,6 +161,28 @@ pub enum Event {
         message_id: Uuid,
         message: String,
     },
+    #[serde(rename = "run.user_ask.requested")]
+    RunUserAskRequested {
+        run_id: Uuid,
+        request_id: Uuid,
+        questions: Vec<UserAskQuestion>,
+    },
+    #[serde(rename = "run.user_ask.answer_rejected")]
+    RunUserAskAnswerRejected {
+        run_id: Uuid,
+        request_id: Uuid,
+        message: String,
+    },
+    #[serde(rename = "run.user_ask.answer_sent")]
+    RunUserAskAnswerSent { run_id: Uuid, request_id: Uuid },
+    #[serde(rename = "run.user_ask.finished")]
+    RunUserAskFinished {
+        run_id: Uuid,
+        request_id: Uuid,
+        status: UserAskStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
     #[serde(rename = "run.output.delta")]
     RunOutputDelta { run_id: Uuid, text: String },
     #[serde(rename = "run.message.completed")]
@@ -250,6 +281,65 @@ mod tests {
             let decoded: Event = serde_json::from_value(encoded.clone()).unwrap();
             assert_eq!(serde_json::to_value(decoded).unwrap(), encoded);
         }
+    }
+
+    #[test]
+    fn user_ask_round_trip_preserves_questions_answers_and_terminal_status() {
+        let run_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        let questions = vec![UserAskQuestion {
+            id: "scope".into(),
+            prompt: "Which scope?".into(),
+            answer_mode: nexus_domain::UserAskAnswerMode::Choice {
+                multiple: false,
+                allow_custom: true,
+            },
+            options: vec![nexus_domain::UserAskOption {
+                id: "focused".into(),
+                label: "Focused".into(),
+                description: None,
+            }],
+        }];
+        let requested = Event::RunUserAskRequested {
+            run_id,
+            request_id,
+            questions: questions.clone(),
+        };
+        let answers = vec![UserAskAnswer {
+            question_id: "scope".into(),
+            value: nexus_domain::UserAskAnswerValue::Text("workspace".into()),
+        }];
+        let command = CommandEnvelope::new(Command::RunUserAskAnswer {
+            run_id,
+            request_id,
+            answers: answers.clone(),
+        });
+
+        let decoded: CommandEnvelope =
+            serde_json::from_str(&serde_json::to_string(&command).unwrap()).unwrap();
+        assert!(matches!(decoded.command,
+            Command::RunUserAskAnswer { run_id: run, request_id: request, answers: values }
+                if run == run_id && request == request_id && values == answers));
+        for event in [
+            requested,
+            Event::RunUserAskAnswerRejected {
+                run_id,
+                request_id,
+                message: "invalid answer".into(),
+            },
+            Event::RunUserAskAnswerSent { run_id, request_id },
+            Event::RunUserAskFinished {
+                run_id,
+                request_id,
+                status: UserAskStatus::Failed,
+                message: Some("write failed".into()),
+            },
+        ] {
+            let encoded = serde_json::to_value(&event).unwrap();
+            let decoded: Event = serde_json::from_value(encoded.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), encoded);
+        }
+        assert_eq!(questions[0].id, "scope");
     }
 
     #[test]

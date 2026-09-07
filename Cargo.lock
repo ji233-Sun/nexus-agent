@@ -4446,6 +4446,7 @@ dependencies = [
 name = "nexus-harness-core"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "nexus-domain",
  "serde_json",
  "tempfile",
 ]
