@@ -2,9 +2,11 @@ pub(crate) mod events;
 pub(crate) mod user_ask;
 
 use nexus_domain::{RunStatus, UserAskAnswer, UserAskStatus};
-use nexus_protocol::{Command, EnvironmentVariable, ErrorCode, Event, StartRun};
+use nexus_protocol::{
+    Command, EnvironmentVariable, ErrorCode, Event, ModelCatalogPurpose, StartRun,
+};
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -36,7 +38,7 @@ struct BackgroundTask {
 
 pub(crate) struct Runner {
     active: Arc<Mutex<Option<ActiveRun>>>,
-    catalog_task: Option<BackgroundTask>,
+    catalog_tasks: BTreeMap<ModelCatalogPurpose, BackgroundTask>,
     title_tasks: Vec<BackgroundTask>,
     emitter: Emitter,
 }
@@ -45,7 +47,7 @@ impl Runner {
     pub(crate) fn new(emitter: Emitter) -> Self {
         Self {
             active: Arc::new(Mutex::new(None)),
-            catalog_task: None,
+            catalog_tasks: BTreeMap::new(),
             title_tasks: Vec::new(),
             emitter,
         }
@@ -67,12 +69,16 @@ impl Runner {
             }
             Command::ModelCatalogRefresh {
                 request_id,
+                purpose,
                 harness: kind,
                 executable,
                 cwd,
                 environment,
             } => {
-                self.cancel_catalog_task().await;
+                if let Some(task) = self.catalog_tasks.remove(&purpose) {
+                    let _ = task.cancel.send(true);
+                    let _ = task.task.await;
+                }
                 if !environment_is_valid(&environment) {
                     self.emitter
                         .send(Event::ModelCatalogFailed {
@@ -118,7 +124,8 @@ impl Runner {
                                     }
                                 }
                             });
-                            self.catalog_task = Some(BackgroundTask { cancel, task });
+                            self.catalog_tasks
+                                .insert(purpose, BackgroundTask { cancel, task });
                         }
                         _ => {
                             self.emitter
@@ -132,13 +139,21 @@ impl Runner {
                     }
                 }
             }
-            Command::RunStart(request) => {
+            Command::RunStart(mut request) => {
                 let should_generate_title = request.session_id.is_none();
-                let title_request = request.clone();
+                let title_config = request.title_generation.take();
+                let mut title_request = request.clone();
                 if let Some(cwd) =
                     start_run(request, self.active.clone(), self.emitter.clone()).await
                     && should_generate_title
+                    && let Some(config) = title_config
+                    && environment_is_valid(&config.environment)
                 {
+                    title_request.harness = config.harness;
+                    title_request.executable = config.executable;
+                    title_request.model = config.model;
+                    title_request.environment = config.environment;
+                    title_request.effort = nexus_domain::ThinkingEffort::Default;
                     self.spawn_title_generation(title_request, cwd);
                 }
             }
@@ -207,7 +222,7 @@ impl Runner {
     }
 
     async fn cancel_catalog_task(&mut self) {
-        if let Some(task) = self.catalog_task.take() {
+        for (_, task) in std::mem::take(&mut self.catalog_tasks) {
             let _ = task.cancel.send(true);
             let _ = task.task.await;
         }
@@ -493,6 +508,12 @@ mod tests {
 
     fn request(cwd: String) -> StartRun {
         StartRun {
+            title_generation: Some(nexus_protocol::TitleGenerationConfig {
+                harness: HarnessKind::Claude,
+                executable: "unused".into(),
+                model: None,
+                environment: Vec::new(),
+            }),
             permission_mode: nexus_domain::PermissionMode::AutoEdit,
             run_id: Uuid::new_v4(),
             task_id: Uuid::new_v4(),
@@ -574,6 +595,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn title_catalog_requests_do_not_cancel_conversation_catalogs() {
+        let directory = tempfile::tempdir().unwrap();
+        let (emitter, _events) = Emitter::channel();
+        let mut runner = Runner::new(emitter);
+        let command = |purpose| Command::ModelCatalogRefresh {
+            request_id: Uuid::new_v4(),
+            purpose,
+            harness: HarnessKind::Omp,
+            executable: "unused".into(),
+            cwd: directory.path().to_string_lossy().into_owned(),
+            environment: Vec::new(),
+        };
+        runner
+            .handle(command(ModelCatalogPurpose::Conversation))
+            .await;
+        let conversation_cancel = runner.catalog_tasks[&ModelCatalogPurpose::Conversation]
+            .cancel
+            .subscribe();
+        runner
+            .handle(command(ModelCatalogPurpose::TitleGeneration))
+            .await;
+        let title_cancel = runner.catalog_tasks[&ModelCatalogPurpose::TitleGeneration]
+            .cancel
+            .subscribe();
+        assert!(!*conversation_cancel.borrow());
+        runner
+            .handle(command(ModelCatalogPurpose::Conversation))
+            .await;
+        assert!(*conversation_cancel.borrow());
+        assert!(!*title_cancel.borrow());
+        runner.shutdown().await;
+        assert!(*title_cancel.borrow());
+    }
+
+    #[tokio::test]
     async fn resumed_runs_do_not_regenerate_task_titles() {
         let directory = tempfile::tempdir().unwrap();
         let mut request = request(directory.path().to_string_lossy().into_owned());
@@ -585,6 +641,33 @@ mod tests {
 
         assert!(runner.title_tasks.is_empty());
         runner.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn invalid_title_environment_does_not_start_a_background_task() {
+        let directory = tempfile::tempdir().unwrap();
+        for environment in [
+            vec![EnvironmentVariable {
+                name: "LD_PRELOAD".into(),
+                value: "unsafe".into(),
+            }],
+            vec![
+                EnvironmentVariable {
+                    name: "API_KEY".into(),
+                    value: "first".into()
+                };
+                2
+            ],
+        ] {
+            let mut request = request(directory.path().to_string_lossy().into_owned());
+            request.title_generation.as_mut().unwrap().environment = environment;
+            let (emitter, _events) = Emitter::channel();
+            let mut runner = Runner::new(emitter);
+            runner.handle(Command::RunStart(request)).await;
+            assert!(runner.title_tasks.is_empty());
+            assert!(runner.active.lock().await.is_some());
+            runner.shutdown().await;
+        }
     }
 
     #[tokio::test]

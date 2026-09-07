@@ -130,28 +130,59 @@ pub(super) struct CatalogModelSelectContent {
 
 impl CatalogModelSelectContent {
     pub(super) fn from_model(model: &AppModel) -> Self {
-        let locale = model.language;
-        let selected = model
-            .model_override
-            .as_ref()
-            .map(|model_id| CatalogModelChoice::Model(model_id.clone()))
+        Self::from_catalog(
+            model.selected_harness,
+            &model.model_catalog,
+            model.model_override.as_deref(),
+            model.model_override_name.as_deref(),
+            model
+                .selected_provider_profile()
+                .and_then(|profile| profile.model.as_deref()),
+            model.language,
+            model.selected_project.is_some(),
+        )
+    }
+
+    pub(super) fn from_title_settings(model: &AppModel) -> Self {
+        let settings = &model.title_generation;
+        Self::from_catalog(
+            settings.harness,
+            &model.title_model_catalog,
+            settings.model.as_deref(),
+            None,
+            model
+                .provider_profile_for(settings.harness)
+                .and_then(|profile| profile.model.as_deref()),
+            model.language,
+            model.selected_project.is_some(),
+        )
+    }
+
+    fn from_catalog(
+        harness: HarnessKind,
+        catalog: &ModelCatalogState,
+        model_id: Option<&str>,
+        model_name: Option<&str>,
+        profile_model: Option<&str>,
+        locale: Language,
+        has_project: bool,
+    ) -> Self {
+        let selected = model_id
+            .map(|model_id| CatalogModelChoice::Model(model_id.to_owned()))
             .unwrap_or(CatalogModelChoice::FollowDefault);
         let mut groups = vec![CatalogModelGroup {
             title: locale.text("默认").into(),
-            items: vec![catalog_follow_default_item(model)],
+            items: vec![catalog_follow_default_item(catalog, profile_model, locale)],
         }];
-        let catalog_models = model.model_catalog.models().unwrap_or_default();
+        let catalog_models = catalog.models().unwrap_or_default();
 
-        if let Some(model_id) = model.model_override.as_deref()
+        if let Some(model_id) = model_id
             && !catalog_models.iter().any(|entry| entry.id == model_id)
         {
             groups.push(CatalogModelGroup {
                 title: locale.text("当前选择").into(),
                 items: vec![CatalogModelItem::unavailable(
-                    model_id,
-                    model.model_override_name.as_deref(),
-                    &model.model_catalog,
-                    locale,
+                    model_id, model_name, catalog, locale,
                 )],
             });
         }
@@ -161,7 +192,7 @@ impl CatalogModelSelectContent {
             let provider = descriptor
                 .provider
                 .clone()
-                .unwrap_or_else(|| model.selected_harness.to_string());
+                .unwrap_or_else(|| harness.to_string());
             provider_groups
                 .entry(provider)
                 .or_default()
@@ -173,8 +204,8 @@ impl CatalogModelSelectContent {
                 .map(|(title, items)| CatalogModelGroup { title, items }),
         );
 
-        let status = match &model.model_catalog {
-            ModelCatalogState::Idle if model.selected_project.is_none() => {
+        let status = match catalog {
+            ModelCatalogState::Idle if !has_project => {
                 Some(locale.text("选择项目后加载模型目录").into())
             }
             ModelCatalogState::Idle => Some(locale.text("模型目录尚未加载").into()),
@@ -228,14 +259,13 @@ fn catalog_model_trigger_title(model: &ModelDescriptor) -> String {
         .unwrap_or_else(|| model.display_name.clone())
 }
 
-fn catalog_follow_default_item(model: &AppModel) -> CatalogModelItem {
-    let locale = model.language;
-    let profile_model = model
-        .selected_provider_profile()
-        .and_then(|profile| profile.model.as_deref());
+fn catalog_follow_default_item(
+    catalog: &ModelCatalogState,
+    profile_model: Option<&str>,
+    locale: Language,
+) -> CatalogModelItem {
     if let Some(model_id) = profile_model {
-        if let Some(descriptor) = model
-            .model_catalog
+        if let Some(descriptor) = catalog
             .models()
             .and_then(|models| models.iter().find(|entry| entry.id == model_id))
         {
@@ -249,7 +279,7 @@ fn catalog_follow_default_item(model: &AppModel) -> CatalogModelItem {
                 ),
             );
         }
-        let verification = match &model.model_catalog {
+        let verification = match catalog {
             ModelCatalogState::Loading { .. } => locale.text("验证中"),
             ModelCatalogState::Failed { .. } => locale.text("目录加载失败"),
             ModelCatalogState::Ready(_) | ModelCatalogState::Empty => locale.text("目录未验证"),
@@ -274,8 +304,7 @@ fn catalog_follow_default_item(model: &AppModel) -> CatalogModelItem {
         );
     }
 
-    if let Some(descriptor) = model
-        .model_catalog
+    if let Some(descriptor) = catalog
         .models()
         .and_then(|models| models.iter().find(|model| model.is_default))
     {
@@ -290,7 +319,7 @@ fn catalog_follow_default_item(model: &AppModel) -> CatalogModelItem {
         );
     }
 
-    let suffix = match &model.model_catalog {
+    let suffix = match catalog {
         ModelCatalogState::Loading { .. } => locale.text(" · 目录加载中"),
         ModelCatalogState::Failed { .. } => locale.text(" · 目录加载失败"),
         ModelCatalogState::Empty => locale.text(" · 目录为空"),

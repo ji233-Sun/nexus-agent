@@ -929,6 +929,7 @@ mod tests {
 
     fn request() -> StartRun {
         StartRun {
+            title_generation: None,
             permission_mode: nexus_domain::PermissionMode::AutoEdit,
             run_id: Default::default(),
             task_id: Default::default(),

@@ -1345,6 +1345,164 @@ fn generated_title_replaces_fallback_and_is_persisted() {
 }
 
 #[test]
+fn title_generation_settings_persist_independently_of_conversation_selection() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("title-settings.sqlite");
+    let mut presenter = Presenter::new(
+        Storage::open(&path).unwrap(),
+        Err(anyhow::anyhow!("test")),
+        None,
+    );
+    assert!(presenter.select_title_harness(HarnessKind::Omp));
+    assert!(!presenter.select_title_model(Some("missing".into())));
+    presenter.model.title_model_catalog = ModelCatalogState::Ready(vec![catalog_model(
+        "provider/title-model",
+        false,
+        &[],
+        ThinkingEffort::Default,
+    )]);
+    assert!(presenter.select_title_model(Some("provider/title-model".into())));
+    assert!(presenter.select_harness(HarnessKind::Codex, "claude"));
+    let expected = presenter.model.title_generation.clone();
+    drop(presenter);
+    let mut presenter = Presenter::new(
+        Storage::open(&path).unwrap(),
+        Err(anyhow::anyhow!("test")),
+        None,
+    );
+    assert_eq!(presenter.model.title_generation, expected);
+    assert_eq!(presenter.model.selected_harness, HarnessKind::Codex);
+    assert!(presenter.select_title_harness(HarnessKind::Claude));
+    assert!(presenter.model.title_generation.model.is_none());
+    assert_eq!(presenter.model.selected_harness, HarnessKind::Codex);
+}
+
+#[test]
+fn title_generation_uses_separate_configuration_and_skips_resumed_runs() {
+    let (mut presenter, runner, credentials, _directory) = provider_fixture();
+    presenter.select_harness(HarnessKind::Omp, "claude");
+    let title_profile = presenter
+        .save_provider_profile(profile_draft(None, "Title", "title-secret"))
+        .unwrap();
+    presenter.select_title_harness(HarnessKind::Omp);
+    presenter.model.title_model_catalog = ModelCatalogState::Ready(vec![catalog_model(
+        "provider/title-model",
+        false,
+        &[],
+        ThinkingEffort::Default,
+    )]);
+    assert!(presenter.select_title_model(Some("provider/title-model".into())));
+    presenter.select_harness(HarnessKind::Claude, "/custom/omp");
+    presenter
+        .save_provider_profile(profile_draft(None, "Conversation", "conversation-secret"))
+        .unwrap();
+    presenter
+        .model
+        .harnesses
+        .insert(HarnessKind::Claude, ready_probe(HarnessKind::Claude));
+    emit_current_catalog(&presenter, &runner, claude_aliases());
+    presenter.drain_events();
+    presenter.select_catalog_model(Some("opus".into()));
+
+    assert!(presenter.submit("first", "claude"));
+    let first = last_start(&runner);
+    assert_eq!(first.harness, HarnessKind::Claude);
+    assert_eq!(first.model.as_deref(), Some("opus"));
+    assert_eq!(first.environment[0].value, "conversation-secret");
+    let title = first.title_generation.as_ref().unwrap();
+    assert_eq!(title.harness, HarnessKind::Omp);
+    assert_eq!(title.executable, "/custom/omp");
+    assert_eq!(title.model.as_deref(), Some("provider/title-model"));
+    assert_eq!(title.environment[0].value, "title-secret");
+    assert!(!format!("{first:?}").contains("title-secret"));
+
+    runner.emit(Event::RunSessionStarted {
+        run_id: first.run_id,
+        session_id: "session".into(),
+    });
+    runner.emit(Event::RunExited {
+        run_id: first.run_id,
+        status: RunStatus::Completed,
+        exit_code: Some(0),
+    });
+    presenter.drain_events();
+    assert!(presenter.submit("continue", "claude"));
+    let resumed = last_start(&runner);
+    assert!(resumed.title_generation.is_none());
+    runner.emit(Event::RunExited {
+        run_id: resumed.run_id,
+        status: RunStatus::Completed,
+        exit_code: Some(0),
+    });
+    presenter.drain_events();
+    presenter.new_task();
+    credentials.delete_api_key(title_profile).unwrap();
+    assert!(presenter.submit("missing title credentials", "claude"));
+    assert!(last_start(&runner).title_generation.is_none());
+    assert_eq!(presenter.model.tasks[0].title, "missing title credentials");
+}
+
+#[test]
+fn title_model_catalog_is_independent_and_ignores_stale_results() {
+    let (mut presenter, runner, _directory) = fixture();
+    presenter.refresh_model_catalog();
+    let conversation_request = current_catalog_request_id(&presenter);
+    assert!(presenter.refresh_title_model_catalog());
+    let ModelCatalogState::Loading {
+        request_id: stale_request,
+        ..
+    } = presenter.model.title_model_catalog
+    else {
+        panic!("loading")
+    };
+    assert!(presenter.select_title_harness(HarnessKind::Omp));
+    assert!(presenter.refresh_title_model_catalog());
+    let ModelCatalogState::Loading { request_id, .. } = presenter.model.title_model_catalog else {
+        panic!("loading")
+    };
+    let status = presenter.model.status.clone();
+    for (id, harness) in [
+        (stale_request, HarnessKind::Claude),
+        (request_id, HarnessKind::Claude),
+    ] {
+        runner.emit(Event::ModelCatalogLoaded {
+            request_id: id,
+            harness,
+            models: claude_aliases(),
+        });
+    }
+    presenter.drain_events();
+    assert!(presenter.model.title_model_catalog.accepts(request_id));
+    assert_eq!(current_catalog_request_id(&presenter), conversation_request);
+    runner.emit(Event::ModelCatalogLoaded {
+        request_id,
+        harness: HarnessKind::Omp,
+        models: vec![catalog_model(
+            "provider/title-model",
+            false,
+            &[],
+            ThinkingEffort::Default,
+        )],
+    });
+    presenter.drain_events();
+    assert_eq!(presenter.model.status, status);
+    assert!(presenter.select_title_model(Some("provider/title-model".into())));
+    assert!(!presenter.select_title_model(Some("not-in-catalog".into())));
+    emit_current_catalog(&presenter, &runner, claude_aliases());
+    presenter.drain_events();
+    assert_eq!(presenter.model.selected_harness, HarnessKind::Claude);
+    assert!(presenter.model.model_override.is_none());
+    assert_eq!(
+        presenter.model.title_generation.model.as_deref(),
+        Some("provider/title-model")
+    );
+    assert_eq!(
+        presenter.model.title_model_catalog.models().unwrap()[0].id,
+        "provider/title-model"
+    );
+}
+
+#[test]
 fn queued_messages_start_one_at_a_time_and_resume_the_same_session() {
     for harness in HarnessKind::ALL {
         let (mut presenter, runner, _directory) = fixture();

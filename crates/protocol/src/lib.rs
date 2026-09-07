@@ -6,7 +6,15 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelCatalogPurpose {
+    #[default]
+    Conversation,
+    TitleGeneration,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandEnvelope {
@@ -39,6 +47,8 @@ pub enum Command {
     #[serde(rename = "model.catalog.refresh")]
     ModelCatalogRefresh {
         request_id: Uuid,
+        #[serde(default)]
+        purpose: ModelCatalogPurpose,
         harness: HarnessKind,
         executable: String,
         cwd: String,
@@ -83,6 +93,17 @@ pub struct StartRun {
     pub model: Option<String>,
     pub effort: ThinkingEffort,
     pub permission_mode: PermissionMode,
+    #[serde(default)]
+    pub environment: Vec<EnvironmentVariable>,
+    #[serde(default)]
+    pub title_generation: Option<TitleGenerationConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TitleGenerationConfig {
+    pub harness: HarnessKind,
+    pub executable: String,
+    pub model: Option<String>,
     #[serde(default)]
     pub environment: Vec<EnvironmentVariable>,
 }
@@ -372,7 +393,17 @@ mod tests {
 
     #[test]
     fn protocol_round_trip_preserves_harness_model_and_effort() {
+        let title_generation = TitleGenerationConfig {
+            harness: HarnessKind::Claude,
+            executable: "/opt/bin/claude".into(),
+            model: Some("haiku".into()),
+            environment: vec![EnvironmentVariable {
+                name: "ANTHROPIC_API_KEY".into(),
+                value: "title-secret-value".into(),
+            }],
+        };
         let command = CommandEnvelope::new(Command::RunStart(StartRun {
+            title_generation: Some(title_generation.clone()),
             permission_mode: PermissionMode::Yolo,
             run_id: Uuid::new_v4(),
             task_id: Uuid::new_v4(),
@@ -402,6 +433,7 @@ mod tests {
         assert_eq!(request.permission_mode, PermissionMode::Yolo);
         assert_eq!(request.environment[0].name, "OPENAI_API_KEY");
         assert_eq!(request.environment[0].value, "secret-value");
+        assert_eq!(request.title_generation, Some(title_generation));
     }
 
     #[test]
@@ -444,6 +476,7 @@ mod tests {
         let request_id = Uuid::new_v4();
         let command = CommandEnvelope::new(Command::ModelCatalogRefresh {
             request_id,
+            purpose: ModelCatalogPurpose::TitleGeneration,
             harness: HarnessKind::Codex,
             executable: "/usr/local/bin/codex".into(),
             cwd: "/tmp/project".into(),
@@ -459,6 +492,7 @@ mod tests {
         let decoded: CommandEnvelope = serde_json::from_str(&json).unwrap();
         let Command::ModelCatalogRefresh {
             request_id: decoded_id,
+            purpose,
             harness,
             executable,
             cwd,
@@ -468,6 +502,7 @@ mod tests {
             panic!("expected model.catalog.refresh")
         };
         assert_eq!(decoded_id, request_id);
+        assert_eq!(purpose, ModelCatalogPurpose::TitleGeneration);
         assert_eq!(harness, HarnessKind::Codex);
         assert_eq!(executable, "/usr/local/bin/codex");
         assert_eq!(cwd, "/tmp/project");

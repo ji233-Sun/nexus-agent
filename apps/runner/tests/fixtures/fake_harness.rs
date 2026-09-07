@@ -69,6 +69,11 @@ fn main() {
         .unwrap();
     }
     if title {
+        fs::write(
+            "title-executable.txt",
+            env::current_exe().unwrap().to_string_lossy().as_bytes(),
+        )
+        .unwrap();
         let mut prompt = String::new();
         io::stdin().read_to_string(&mut prompt).unwrap();
         fs::write("title-prompt.txt", &prompt).unwrap();
