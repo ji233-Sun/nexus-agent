@@ -1,6 +1,6 @@
 use super::*;
 use crate::model::history::ThreadSummary;
-use gpui_kit::component::{list::ListItem, scroll::ScrollableElement as _, spinner::Spinner};
+use gpui_kit::component::{list::ListItem, scroll::Scrollbar, spinner::Spinner};
 
 const SIDEBAR_ROW_HEIGHT: f32 = 32.;
 pub(super) const HISTORY_PAGE_SIZE: usize = 10;
@@ -405,9 +405,7 @@ impl NexusView {
             .child(
                 div()
                     .id("sidebar-navigation")
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
+                    .size_full()
                     .overflow_y_scroll()
                     .lock_scroll_axis()
                     .track_scroll(&self.sidebar_scroll)
@@ -512,7 +510,16 @@ impl NexusView {
                                     ),
                             ),
                     )
-                    .vertical_scrollbar(&self.sidebar_scroll),
+                    .map(|navigation| {
+                        div()
+                            .relative()
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_hidden()
+                            .child(navigation)
+                            // Keep the scrollbar outside the content measured by the scroll handle.
+                            .child(Scrollbar::vertical(&self.sidebar_scroll))
+                    }),
             )
             .child(
                 div().flex_none().px(px(12.)).pb(px(12.)).child(
@@ -1203,6 +1210,157 @@ mod tests {
                 samples[samples.len() * 95 / 100],
                 renders,
             );
+        }
+    }
+
+    #[gpui::test]
+    fn sidebar_scrollbar_tracks_scrolling_and_dragging(cx: &mut TestAppContext) {
+        let (view, cx) = scroll_test_view(cx);
+        cx.update(|window, cx| {
+            gpui_kit::component::Theme::set_scrollbar_mode(
+                gpui_kit::component::scroll::ScrollbarMode::Always,
+                cx,
+            );
+            window.refresh();
+            let _ = window.draw(cx);
+        });
+        let scroll = view.read_with(cx, |view, _| view.sidebar_scroll.clone());
+        let viewport = scroll.bounds();
+        let content_height = scroll.bounds_for_item(0).unwrap().size.height;
+        let max_offset = (content_height - viewport.size.height).max(px(0.));
+        assert_eq!(
+            scroll.max_offset().y,
+            max_offset,
+            "only navigation content may contribute to the scroll range"
+        );
+        let painted_thumbs = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, _| {
+                window
+                    .painted_quads()
+                    .into_iter()
+                    .map(|quad| quad.bounds.map(|value| px(value.0 / window.scale_factor())))
+                    .filter(|bounds| {
+                        bounds.left() >= viewport.right() - px(16.)
+                            && bounds.right() <= viewport.right()
+                            && bounds.size.width > px(0.)
+                            && bounds.size.width < px(16.)
+                            && bounds.size.height > px(32.)
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        let thumb_bounds = |cx: &mut gpui::VisualTestContext| {
+            let thumbs = painted_thumbs(cx);
+            assert_eq!(thumbs.len(), 1, "expected one painted sidebar thumb");
+            thumbs[0]
+        };
+        let initial_thumb = thumb_bounds(cx);
+        assert!((initial_thumb.top() - viewport.top()).abs() < px(8.));
+        for delta in [
+            ScrollDelta::Pixels(point(px(0.), px(-80.))),
+            ScrollDelta::Lines(point(0., -3.)),
+        ] {
+            let before = thumb_bounds(cx);
+            cx.simulate_event(ScrollWheelEvent {
+                position: viewport.center(),
+                delta,
+                ..Default::default()
+            });
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let after = thumb_bounds(cx);
+            assert!(
+                after.top() > before.top(),
+                "thumb must follow downward scrolling"
+            );
+            assert_eq!(after.size.height, initial_thumb.size.height);
+            assert_eq!(scroll.bounds(), viewport);
+        }
+
+        let thumb = thumb_bounds(cx);
+        let before_drag = scroll.offset().y;
+        let destination = thumb.center() + point(px(0.), px(40.));
+        cx.simulate_mouse_down(thumb.center(), gpui::MouseButton::Left, Default::default());
+        cx.simulate_mouse_move(destination, gpui::MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(destination, gpui::MouseButton::Left, Default::default());
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            scroll.offset().y < before_drag,
+            "dragging must scroll the sidebar"
+        );
+        assert!(thumb_bounds(cx).top() > thumb.top());
+
+        scroll.scroll_to_bottom();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            let _ = window.draw(cx);
+        });
+        let bottom_thumb = thumb_bounds(cx);
+        assert!(bottom_thumb.top() > initial_thumb.top());
+        assert!((bottom_thumb.bottom() - viewport.bottom()).abs() < px(8.));
+        assert_eq!(scroll.offset().y, -max_offset);
+        assert_eq!(
+            scroll.bounds_for_item(0).unwrap().bottom() + scroll.offset().y,
+            viewport.bottom(),
+            "the last content edge must meet the viewport bottom without blank overscroll"
+        );
+
+        for (destination_y, expected_offset, delta_y) in [
+            (viewport.top() - px(500.), px(0.), 10_000.),
+            (viewport.bottom() + px(500.), -max_offset, -10_000.),
+        ] {
+            let thumb = thumb_bounds(cx);
+            let destination = point(thumb.center().x, destination_y);
+            cx.simulate_mouse_down(thumb.center(), gpui::MouseButton::Left, Default::default());
+            cx.simulate_mouse_move(destination, gpui::MouseButton::Left, Default::default());
+            cx.simulate_mouse_up(destination, gpui::MouseButton::Left, Default::default());
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            assert_eq!(scroll.offset().y, expected_offset);
+            for delta in [
+                ScrollDelta::Pixels(point(px(0.), px(delta_y))),
+                ScrollDelta::Lines(point(0., delta_y)),
+            ] {
+                cx.simulate_event(ScrollWheelEvent {
+                    position: viewport.center(),
+                    delta,
+                    ..Default::default()
+                });
+                cx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                });
+                assert_eq!(scroll.offset().y, expected_offset);
+                assert_eq!(scroll.max_offset().y, max_offset);
+                let thumb = thumb_bounds(cx);
+                assert!(thumb.top() >= viewport.top());
+                assert!(thumb.bottom() <= viewport.bottom());
+            }
+        }
+
+        view.update(cx, |view, cx| {
+            let project_id = view.presenter.model().selected_project.as_ref().unwrap().id;
+            view.collapsed_projects.insert(project_id);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(scroll.bounds_for_item(0).unwrap().size.height < viewport.size.height);
+        assert_eq!(scroll.max_offset().y, px(0.));
+        assert_eq!(scroll.offset().y, px(0.));
+        assert!(painted_thumbs(cx).is_empty());
+        for delta_y in [-10_000., 10_000.] {
+            cx.simulate_event(ScrollWheelEvent {
+                position: viewport.center(),
+                delta: ScrollDelta::Pixels(point(px(0.), px(delta_y))),
+                ..Default::default()
+            });
+            assert_eq!(scroll.offset().y, px(0.));
         }
     }
 
