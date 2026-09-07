@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandEnvelope {
@@ -44,6 +44,12 @@ pub enum Command {
     },
     #[serde(rename = "run.start")]
     RunStart(StartRun),
+    #[serde(rename = "run.steer")]
+    RunSteer {
+        run_id: Uuid,
+        message_id: Uuid,
+        prompt: String,
+    },
     #[serde(rename = "run.cancel")]
     RunCancel { run_id: Uuid },
     #[serde(rename = "runner.shutdown")]
@@ -54,6 +60,7 @@ pub enum Command {
 pub struct StartRun {
     pub run_id: Uuid,
     pub task_id: Uuid,
+    pub session_id: Option<String>,
     pub cwd: String,
     pub prompt: String,
     pub harness: HarnessKind,
@@ -135,6 +142,16 @@ pub enum Event {
     },
     #[serde(rename = "run.started")]
     RunStarted { run_id: Uuid, pid: u32 },
+    #[serde(rename = "run.session.started")]
+    RunSessionStarted { run_id: Uuid, session_id: String },
+    #[serde(rename = "run.input.accepted")]
+    RunInputAccepted { run_id: Uuid, message_id: Uuid },
+    #[serde(rename = "run.input.rejected")]
+    RunInputRejected {
+        run_id: Uuid,
+        message_id: Uuid,
+        message: String,
+    },
     #[serde(rename = "run.output.delta")]
     RunOutputDelta { run_id: Uuid, text: String },
     #[serde(rename = "run.message.completed")]
@@ -207,10 +224,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn steer_round_trip_preserves_run_and_message_identity() {
+        let run_id = Uuid::new_v4();
+        let message_id = Uuid::new_v4();
+        let command = CommandEnvelope::new(Command::RunSteer {
+            run_id,
+            message_id,
+            prompt: "update\n指令".into(),
+        });
+        let encoded = serde_json::to_string(&command).unwrap();
+        let decoded: CommandEnvelope = serde_json::from_str(&encoded).unwrap();
+        assert!(
+            matches!(decoded.command, Command::RunSteer { run_id: run, message_id: message, prompt }
+            if run == run_id && message == message_id && prompt == "update\n指令")
+        );
+        for event in [
+            Event::RunInputAccepted { run_id, message_id },
+            Event::RunInputRejected {
+                run_id,
+                message_id,
+                message: "ended".into(),
+            },
+        ] {
+            let encoded = serde_json::to_value(&event).unwrap();
+            let decoded: Event = serde_json::from_value(encoded.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), encoded);
+        }
+    }
+
+    #[test]
     fn protocol_round_trip_preserves_harness_model_and_effort() {
         let command = CommandEnvelope::new(Command::RunStart(StartRun {
             run_id: Uuid::new_v4(),
             task_id: Uuid::new_v4(),
+            session_id: Some("existing-session".into()),
             cwd: "/tmp/project".into(),
             prompt: "fix it".into(),
             harness: HarnessKind::Codex,
@@ -230,6 +277,7 @@ mod tests {
             panic!("expected run.start")
         };
         assert_eq!(request.harness, HarnessKind::Codex);
+        assert_eq!(request.session_id.as_deref(), Some("existing-session"));
         assert_eq!(request.model.as_deref(), Some("gpt-test"));
         assert_eq!(request.effort, ThinkingEffort::XHigh);
         assert_eq!(request.environment[0].name, "OPENAI_API_KEY");
@@ -269,6 +317,48 @@ mod tests {
         assert_eq!(executable, "/usr/local/bin/codex");
         assert_eq!(cwd, "/tmp/project");
         assert_eq!(environment[0].value, "secret-value");
+    }
+
+    #[test]
+    fn protocol_round_trip_preserves_model_provider_metadata() {
+        let request_id = Uuid::new_v4();
+        let event = EventEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            id: Uuid::new_v4(),
+            sequence: 1,
+            event: Event::ModelCatalogLoaded {
+                request_id,
+                harness: HarnessKind::Omp,
+                models: vec![ModelDescriptor {
+                    id: "provider/model".into(),
+                    display_name: "Model".into(),
+                    source: nexus_domain::ModelSource::OmpCli,
+                    availability: nexus_domain::ModelAvailability::Unavailable {
+                        reason: "Provider disabled".into(),
+                    },
+                    provider: Some("provider".into()),
+                    is_default: false,
+                    supported_reasoning_efforts: Vec::new(),
+                    default_reasoning_effort: None,
+                }],
+            },
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        let decoded: EventEnvelope = serde_json::from_str(&json).unwrap();
+        let Event::ModelCatalogLoaded { models, .. } = decoded.event else {
+            panic!("expected model catalog")
+        };
+        assert_eq!(models[0].provider.as_deref(), Some("provider"));
+        assert_eq!(models[0].id, "provider/model");
+        assert_eq!(models[0].source.harness(), HarnessKind::Omp);
+        assert_eq!(
+            models[0].availability,
+            nexus_domain::ModelAvailability::Unavailable {
+                reason: "Provider disabled".into()
+            }
+        );
+        assert!(!models[0].availability.is_selectable());
     }
 
     #[test]

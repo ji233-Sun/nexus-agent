@@ -6,7 +6,7 @@ use nexus_domain::{
     HarnessKind, Message, MessageKind, MessageRole, Project, ProviderProfile, RunStatus,
     TaskSummary, ThinkingEffort, ToolMetadata,
 };
-use rusqlite::{Connection, OptionalExtension as _, params};
+use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
 use uuid::Uuid;
 
 pub struct Storage {
@@ -15,12 +15,14 @@ pub struct Storage {
 
 pub struct ConversationConfig {
     pub harness: HarnessKind,
+    pub session_id: Option<String>,
     pub executable: String,
     pub model: String,
     pub effort: ThinkingEffort,
 }
 
 pub struct NewTaskRun<'a> {
+    pub task_id: Option<Uuid>,
     pub project_id: Uuid,
     pub title: &'a str,
     pub prompt: &'a str,
@@ -29,6 +31,19 @@ pub struct NewTaskRun<'a> {
     pub model: Option<&'a str>,
     pub effort: ThinkingEffort,
     pub harness_version: Option<&'a str>,
+}
+
+pub struct PendingTaskRun<'a> {
+    pub task_id: Uuid,
+    pub run_id: Uuid,
+    transaction: Transaction<'a>,
+}
+
+impl PendingTaskRun<'_> {
+    pub fn commit(self) -> Result<(Uuid, Uuid)> {
+        self.transaction.commit()?;
+        Ok((self.task_id, self.run_id))
+    }
 }
 
 impl Storage {
@@ -56,7 +71,8 @@ impl Storage {
                  title TEXT NOT NULL,
                  status TEXT NOT NULL,
                  created_at TEXT NOT NULL,
-                 updated_at TEXT NOT NULL
+                 updated_at TEXT NOT NULL,
+                 archived_at TEXT
              );
              CREATE TABLE IF NOT EXISTS runs (
                  id TEXT PRIMARY KEY,
@@ -106,7 +122,13 @@ impl Storage {
         if !table_has_column(&connection, "messages", "tool")? {
             connection.execute("ALTER TABLE messages ADD COLUMN tool TEXT", [])?;
         }
-        connection.execute_batch("PRAGMA user_version = 4;")?;
+        if !table_has_column(&connection, "tasks", "session_id")? {
+            connection.execute("ALTER TABLE tasks ADD COLUMN session_id TEXT", [])?;
+        }
+        if !table_has_column(&connection, "tasks", "archived_at")? {
+            connection.execute("ALTER TABLE tasks ADD COLUMN archived_at TEXT", [])?;
+        }
+        connection.execute_batch("PRAGMA user_version = 6;")?;
         let storage = Self { connection };
         storage.recover_interrupted()?;
         Ok(storage)
@@ -170,8 +192,17 @@ impl Storage {
 
     pub fn projects(&self) -> Result<Vec<Project>> {
         let mut statement = self.connection.prepare(
-            "SELECT id, display_name, canonical_path, created_at, last_opened_at
-             FROM projects ORDER BY last_opened_at DESC LIMIT 20",
+            "WITH recent_projects AS (
+                 SELECT id FROM projects ORDER BY last_opened_at DESC LIMIT 20
+             )
+             SELECT id, display_name, canonical_path, created_at, last_opened_at
+             FROM projects
+             WHERE id IN (SELECT id FROM recent_projects)
+                OR EXISTS (
+                    SELECT 1 FROM tasks
+                    WHERE tasks.project_id = projects.id AND archived_at IS NOT NULL
+                )
+             ORDER BY last_opened_at DESC",
         )?;
         let rows = statement.query_map([], project_from_row)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -193,17 +224,11 @@ impl Storage {
     pub fn tasks(&self, project_id: Uuid) -> Result<Vec<TaskSummary>> {
         let mut statement = self.connection.prepare(
             "SELECT id, project_id, title, status, created_at
-             FROM tasks WHERE project_id = ?1 ORDER BY created_at DESC",
+             FROM tasks
+             WHERE project_id = ?1 AND archived_at IS NULL
+             ORDER BY created_at DESC",
         )?;
-        let rows = statement.query_map([project_id.to_string()], |row| {
-            Ok(TaskSummary {
-                id: parse_uuid(row.get::<_, String>(0)?)?,
-                project_id: parse_uuid(row.get::<_, String>(1)?)?,
-                title: row.get(2)?,
-                status: parse_status(row.get::<_, String>(3)?)?,
-                created_at: parse_date(row.get::<_, String>(4)?)?,
-            })
-        })?;
+        let rows = statement.query_map([project_id.to_string()], task_from_row)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
@@ -219,8 +244,102 @@ impl Storage {
             .map_err(Into::into)
     }
 
+    pub fn archived_tasks(&self) -> Result<Vec<TaskSummary>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, project_id, title, status, created_at
+             FROM tasks
+             WHERE archived_at IS NOT NULL
+             ORDER BY archived_at DESC, created_at DESC",
+        )?;
+        let rows = statement.query_map([], task_from_row)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub fn archive_task(&self, task_id: Uuid) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let updated = self.connection.execute(
+            "UPDATE tasks SET archived_at = ?2, updated_at = ?2
+             WHERE id = ?1 AND archived_at IS NULL",
+            params![task_id.to_string(), now],
+        )?;
+        if updated != 1 {
+            return Err(anyhow!("对话不存在或已经归档"));
+        }
+        Ok(())
+    }
+
+    pub fn restore_task(&mut self, task_id: Uuid) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let transaction = self.connection.transaction()?;
+        let updated = transaction.execute(
+            "UPDATE tasks SET archived_at = NULL, updated_at = ?2
+             WHERE id = ?1 AND archived_at IS NOT NULL",
+            params![task_id.to_string(), &now],
+        )?;
+        if updated != 1 {
+            return Err(anyhow!("归档对话不存在"));
+        }
+        let updated = transaction.execute(
+            "UPDATE projects SET last_opened_at = ?2
+             WHERE id = (SELECT project_id FROM tasks WHERE id = ?1)",
+            params![task_id.to_string(), now],
+        )?;
+        if updated != 1 {
+            return Err(anyhow!("归档对话所属项目不存在"));
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn delete_task(&mut self, task_id: Uuid) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM messages WHERE task_id = ?1",
+            [task_id.to_string()],
+        )?;
+        transaction.execute("DELETE FROM runs WHERE task_id = ?1", [task_id.to_string()])?;
+        let deleted =
+            transaction.execute("DELETE FROM tasks WHERE id = ?1", [task_id.to_string()])?;
+        if deleted != 1 {
+            return Err(anyhow!("对话不存在"));
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn delete_archived_tasks(&mut self) -> Result<usize> {
+        let transaction = self.connection.transaction()?;
+        let count = transaction.query_row(
+            "SELECT COUNT(*) FROM tasks WHERE archived_at IS NOT NULL",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        transaction.execute(
+            "DELETE FROM messages
+             WHERE task_id IN (SELECT id FROM tasks WHERE archived_at IS NOT NULL)",
+            [],
+        )?;
+        transaction.execute(
+            "DELETE FROM runs
+             WHERE task_id IN (SELECT id FROM tasks WHERE archived_at IS NOT NULL)",
+            [],
+        )?;
+        transaction.execute("DELETE FROM tasks WHERE archived_at IS NOT NULL", [])?;
+        transaction.commit()?;
+        Ok(count as usize)
+    }
+
+    #[cfg(test)]
     pub fn create_task_run(&mut self, request: NewTaskRun<'_>) -> Result<(Uuid, Uuid)> {
+        self.prepare_task_run(request)?.commit()
+    }
+
+    // Keep creation uncommitted until the runner accepts the start command.
+    // Dropping the pending run rolls back its message and task status as well.
+    pub fn prepare_task_run(&mut self, request: NewTaskRun<'_>) -> Result<PendingTaskRun<'_>> {
         let NewTaskRun {
+            task_id,
             project_id,
             title,
             prompt,
@@ -230,16 +349,28 @@ impl Storage {
             effort,
             harness_version,
         } = request;
-        let task_id = Uuid::new_v4();
+        let existing_task = task_id;
+        let task_id = task_id.unwrap_or_else(Uuid::new_v4);
         let run_id = Uuid::new_v4();
         let message_id = Uuid::new_v4();
         let now = Utc::now().to_rfc3339();
         let transaction = self.connection.transaction()?;
-        transaction.execute(
-            "INSERT INTO tasks(id, project_id, title, status, created_at, updated_at)
-             VALUES(?1, ?2, ?3, 'starting', ?4, ?4)",
-            params![task_id.to_string(), project_id.to_string(), title, now],
-        )?;
+        if existing_task.is_some() {
+            let updated = transaction.execute(
+                "UPDATE tasks SET status = 'starting', updated_at = ?3
+                 WHERE id = ?1 AND project_id = ?2",
+                params![task_id.to_string(), project_id.to_string(), now],
+            )?;
+            if updated != 1 {
+                return Err(anyhow!("任务不属于当前项目"));
+            }
+        } else {
+            transaction.execute(
+                "INSERT INTO tasks(id, project_id, title, status, created_at, updated_at)
+                 VALUES(?1, ?2, ?3, 'starting', ?4, ?4)",
+                params![task_id.to_string(), project_id.to_string(), title, now],
+            )?;
+        }
         transaction.execute(
             "INSERT INTO runs(
                  id, task_id, status, harness_kind, executable, model, effort,
@@ -258,7 +389,9 @@ impl Storage {
         )?;
         transaction.execute(
             "INSERT INTO messages(id, task_id, run_id, sequence, role, kind, content, created_at)
-             VALUES(?1, ?2, ?3, 1, 'user', 'text', ?4, ?5)",
+             VALUES(?1, ?2, ?3,
+                 (SELECT COALESCE(MAX(sequence), 0) + 1 FROM messages WHERE task_id = ?2),
+                 'user', 'text', ?4, ?5)",
             params![
                 message_id.to_string(),
                 task_id.to_string(),
@@ -267,15 +400,19 @@ impl Storage {
                 now
             ],
         )?;
-        transaction.commit()?;
-        Ok((task_id, run_id))
+        Ok(PendingTaskRun {
+            task_id,
+            run_id,
+            transaction,
+        })
     }
 
     pub fn conversation_config(&self, task_id: Uuid) -> Result<Option<ConversationConfig>> {
         self.connection
             .query_row(
-                "SELECT harness_kind, executable, model, effort
-                 FROM runs WHERE task_id = ?1 ORDER BY started_at DESC LIMIT 1",
+                "SELECT harness_kind, executable, model, effort, tasks.session_id
+                 FROM runs JOIN tasks ON tasks.id = runs.task_id
+                 WHERE task_id = ?1 ORDER BY started_at DESC, runs.rowid DESC LIMIT 1",
                 [task_id.to_string()],
                 |row| {
                     Ok(ConversationConfig {
@@ -285,11 +422,21 @@ impl Storage {
                         model: row.get(2)?,
                         effort: ThinkingEffort::from_str(&row.get::<_, String>(3)?)
                             .map_err(to_sql_data_error)?,
+                        session_id: row.get(4)?,
                     })
                 },
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    pub fn save_run_session(&self, run_id: Uuid, session_id: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE tasks SET session_id = ?2
+             WHERE id = (SELECT task_id FROM runs WHERE id = ?1)",
+            params![run_id.to_string(), session_id],
+        )?;
+        Ok(())
     }
 
     pub fn update_run_status(&self, run_id: Uuid, status: RunStatus) -> Result<()> {
@@ -445,6 +592,16 @@ fn project_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
     })
 }
 
+fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskSummary> {
+    Ok(TaskSummary {
+        id: parse_uuid(row.get::<_, String>(0)?)?,
+        project_id: parse_uuid(row.get::<_, String>(1)?)?,
+        title: row.get(2)?,
+        status: parse_status(row.get::<_, String>(3)?)?,
+        created_at: parse_date(row.get::<_, String>(4)?)?,
+    })
+}
+
 fn parse_uuid(value: String) -> rusqlite::Result<Uuid> {
     Uuid::parse_str(&value).map_err(to_sql_error)
 }
@@ -525,6 +682,7 @@ mod tests {
         let project = storage.open_project(&project_dir).unwrap();
         let (task_id, run_id) = storage
             .create_task_run(NewTaskRun {
+                task_id: None,
                 project_id: project.id,
                 title: "Test task",
                 prompt: "hello",
@@ -548,6 +706,7 @@ mod tests {
                 .update_task_title(task_id, "Generated title")
                 .unwrap()
         );
+        storage.save_run_session(run_id, "claude-session").unwrap();
         drop(storage);
 
         let storage = Storage::open(&database).unwrap();
@@ -558,6 +717,7 @@ mod tests {
         assert_eq!(messages[0].content, "hello");
         let config = storage.conversation_config(task_id).unwrap().unwrap();
         assert_eq!(config.harness, HarnessKind::Claude);
+        assert_eq!(config.session_id.as_deref(), Some("claude-session"));
         assert_eq!(config.executable, "claude-custom");
         assert_eq!(config.model, "sonnet");
         assert_eq!(config.effort, ThinkingEffort::High);
@@ -583,6 +743,7 @@ mod tests {
         let project = storage.open_project(&project_dir).unwrap();
         let (task_id, run_id) = storage
             .create_task_run(NewTaskRun {
+                task_id: None,
                 project_id: project.id,
                 title: "Codex task",
                 prompt: "describe this project",
@@ -625,11 +786,27 @@ mod tests {
             .connection
             .execute("ALTER TABLE messages DROP COLUMN tool", [])
             .unwrap();
+        storage
+            .connection
+            .execute("ALTER TABLE tasks DROP COLUMN session_id", [])
+            .unwrap();
+        storage
+            .connection
+            .execute("ALTER TABLE tasks DROP COLUMN archived_at", [])
+            .unwrap();
         drop(storage);
         let storage = Storage::open(&database).unwrap();
         assert_eq!(
             storage.messages(task_id).unwrap()[1].content,
             "project summary"
+        );
+        assert!(
+            storage
+                .conversation_config(task_id)
+                .unwrap()
+                .unwrap()
+                .session_id
+                .is_none()
         );
         let content = "完整工具输出\n".repeat(100);
         let metadata = ToolMetadata {
@@ -651,6 +828,66 @@ mod tests {
         let messages = storage.messages(task_id).unwrap();
         assert_eq!(messages[2].content, content);
         assert_eq!(messages[2].tool.as_ref(), Some(&metadata));
+    }
+
+    #[test]
+    fn archives_restores_and_deletes_conversations_with_their_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let project_dir = directory.path().join("project");
+        fs::create_dir(&project_dir).unwrap();
+        let mut storage = Storage::open(&directory.path().join("nexus.db")).unwrap();
+        let project = storage.open_project(&project_dir).unwrap();
+        let create_task = |storage: &mut Storage, title: &str| {
+            storage
+                .create_task_run(NewTaskRun {
+                    task_id: None,
+                    project_id: project.id,
+                    title,
+                    prompt: title,
+                    harness: HarnessKind::Claude,
+                    executable: "claude",
+                    model: None,
+                    effort: ThinkingEffort::Medium,
+                    harness_version: None,
+                })
+                .unwrap()
+        };
+        let (first_task, _) = create_task(&mut storage, "First task");
+        let (second_task, _) = create_task(&mut storage, "Second task");
+
+        storage.archive_task(first_task).unwrap();
+        assert_eq!(storage.tasks(project.id).unwrap()[0].id, second_task);
+        assert_eq!(storage.archived_tasks().unwrap()[0].id, first_task);
+
+        storage.restore_task(first_task).unwrap();
+        assert_eq!(storage.tasks(project.id).unwrap().len(), 2);
+        assert!(storage.archived_tasks().unwrap().is_empty());
+
+        storage.archive_task(first_task).unwrap();
+        storage.archive_task(second_task).unwrap();
+        storage.delete_task(first_task).unwrap();
+        assert_eq!(storage.archived_tasks().unwrap()[0].id, second_task);
+        let first_run_count = storage
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM runs WHERE task_id = ?1",
+                [first_task.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        let first_message_count = storage
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE task_id = ?1",
+                [first_task.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!((first_run_count, first_message_count), (0, 0));
+
+        assert_eq!(storage.delete_archived_tasks().unwrap(), 1);
+        assert!(storage.archived_tasks().unwrap().is_empty());
+        assert!(storage.tasks(project.id).unwrap().is_empty());
     }
 
     #[test]

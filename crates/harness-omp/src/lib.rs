@@ -1,11 +1,20 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    process::Stdio,
+    time::Duration,
+};
 
-use nexus_domain::{HarnessKind, ThinkingEffort};
-pub use nexus_harness_core::{DecodedEvent, LaunchSpec};
-use nexus_harness_core::{LineDecoder, resolve_executable, summarize_text, tool_content};
-use nexus_protocol::HarnessProbe;
-use serde_json::Value;
-use tokio::process::Command;
+use nexus_domain::{HarnessKind, ModelDescriptor, ModelReasoningEffort, ThinkingEffort};
+pub use nexus_harness_core::{DecodedEvent, LaunchSpec, ModelCatalogError};
+use nexus_harness_core::{
+    InputFrame, LineDecoder, resolve_executable, summarize_text, tool_content,
+};
+use nexus_protocol::{EnvironmentVariable, HarnessProbe};
+use serde_json::{Value, json};
+use tokio::{io::AsyncReadExt as _, process::Command, sync::watch, time::sleep};
+
+const MODEL_CATALOG_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub fn build_launch_spec(
     executable: &str,
@@ -13,28 +22,37 @@ pub fn build_launch_spec(
     prompt: &str,
     model: Option<&str>,
     effort: ThinkingEffort,
+    session_id: Option<&str>,
 ) -> LaunchSpec {
     let mut args = vec![
-        "--print".into(),
         "--mode".into(),
-        "json".into(),
-        "--no-session".into(),
+        "rpc".into(),
         "--no-title".into(),
         "--approval-mode".into(),
         "write".into(),
-        "--thinking".into(),
-        omp_thinking_value(effort).into(),
     ];
+    if let Some(effort) = omp_thinking_value(effort) {
+        args.push("--thinking".into());
+        args.push(effort.into());
+    }
     if let Some(model) = model {
         args.push("--model".into());
         args.push(model.into());
+    }
+    if let Some(session_id) = session_id {
+        args.push("--resume".into());
+        args.push(session_id.into());
     }
 
     LaunchSpec {
         executable: PathBuf::from(executable),
         args,
         cwd: cwd.to_path_buf(),
-        stdin: prompt.to_owned(),
+        stdin: format!(
+            "{}\n{}\n",
+            json!({"type": "get_state", "id": "nexus-session"}),
+            json!({"type": "prompt", "id": "nexus-prompt", "message": prompt})
+        ),
     }
 }
 
@@ -45,7 +63,7 @@ pub fn build_title_launch_spec(
     model: Option<&str>,
     effort: ThinkingEffort,
 ) -> LaunchSpec {
-    let mut spec = build_launch_spec(executable, cwd, prompt, model, effort);
+    let mut spec = build_launch_spec(executable, cwd, prompt, model, effort, None);
     spec.args.extend([
         "--no-tools".into(),
         "--no-lsp".into(),
@@ -56,11 +74,174 @@ pub fn build_title_launch_spec(
     spec
 }
 
-fn omp_thinking_value(effort: ThinkingEffort) -> &'static str {
+fn omp_thinking_value(effort: ThinkingEffort) -> Option<&'static str> {
     match effort {
-        ThinkingEffort::Max => ThinkingEffort::XHigh.as_str(),
-        _ => effort.as_str(),
+        ThinkingEffort::Default => None,
+        ThinkingEffort::Max => Some(ThinkingEffort::XHigh.as_str()),
+        ThinkingEffort::None => Some(ThinkingEffort::Off.as_str()),
+        _ => Some(effort.as_str()),
     }
+}
+
+pub async fn discover_models(
+    configured_executable: &str,
+    cwd: &Path,
+    environment: &[EnvironmentVariable],
+    mut cancel: watch::Receiver<bool>,
+) -> Result<Vec<ModelDescriptor>, ModelCatalogError> {
+    if *cancel.borrow() {
+        return Err(ModelCatalogError::Cancelled);
+    }
+    let executable = resolve_executable(configured_executable).ok_or_else(|| {
+        ModelCatalogError::Failed(
+            "未找到 Oh My Pi，无法加载模型目录。请检查可执行文件路径。".into(),
+        )
+    })?;
+    let mut child = Command::new(&executable)
+        .args(["models", "--json"])
+        .envs(
+            environment
+                .iter()
+                .map(|variable| (&variable.name, &variable.value)),
+        )
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|_| {
+            ModelCatalogError::Failed(
+                "无法启动 Oh My Pi 模型目录命令。请检查 CLI 版本和可执行文件权限。".into(),
+            )
+        })?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| ModelCatalogError::Failed("无法读取 Oh My Pi 模型目录输出。".into()))?;
+
+    enum Collection {
+        Complete(Result<(std::process::ExitStatus, Vec<u8>), ()>),
+        Cancelled,
+        TimedOut,
+    }
+    let collection = {
+        let collect = async {
+            let mut output = Vec::new();
+            stdout.read_to_end(&mut output).await.map_err(|_| ())?;
+            let status = child.wait().await.map_err(|_| ())?;
+            Ok((status, output))
+        };
+        tokio::pin!(collect);
+        let timeout = sleep(MODEL_CATALOG_TIMEOUT);
+        tokio::pin!(timeout);
+        tokio::select! {
+            result = &mut collect => Collection::Complete(result),
+            _ = cancel.changed() => Collection::Cancelled,
+            _ = &mut timeout => Collection::TimedOut,
+        }
+    };
+
+    let (status, output) = match collection {
+        Collection::Complete(Ok(output)) => output,
+        Collection::Complete(Err(())) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(ModelCatalogError::Failed(
+                "执行 Oh My Pi 模型目录命令失败。".into(),
+            ));
+        }
+        Collection::Cancelled => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(ModelCatalogError::Cancelled);
+        }
+        Collection::TimedOut => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(ModelCatalogError::Failed(
+                "Oh My Pi 模型目录命令超时，请重试。".into(),
+            ));
+        }
+    };
+    if !status.success() {
+        return Err(ModelCatalogError::Failed(
+            "Oh My Pi 模型目录命令执行失败。请检查 Provider 配置后重试。".into(),
+        ));
+    }
+    parse_model_catalog(&output)
+}
+
+fn parse_model_catalog(output: &[u8]) -> Result<Vec<ModelDescriptor>, ModelCatalogError> {
+    let value: Value = serde_json::from_slice(output)
+        .map_err(|_| ModelCatalogError::Failed("Oh My Pi 模型目录返回了无效 JSON。".into()))?;
+    let items = value
+        .get("models")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ModelCatalogError::Failed("Oh My Pi 模型目录响应缺少 models。".into()))?;
+    let mut selectors = HashSet::new();
+    let mut models = Vec::with_capacity(items.len());
+    for item in items {
+        let provider = required_catalog_string(item, "provider")?;
+        let selector = required_catalog_string(item, "selector")?;
+        if !selectors.insert(selector.clone()) {
+            return Err(ModelCatalogError::Failed(format!(
+                "Oh My Pi 模型目录包含重复标识：{selector}。"
+            )));
+        }
+        let display_name = item
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+            .unwrap_or(&selector)
+            .to_owned();
+        let mut supported_reasoning_efforts = Vec::new();
+        for value in item
+            .get("thinking")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let value = value.as_str().ok_or_else(|| {
+                ModelCatalogError::Failed("Oh My Pi 模型目录包含无效的 thinking 能力项。".into())
+            })?;
+            let effort = value.parse().map_err(|_| {
+                ModelCatalogError::Failed(format!(
+                    "Oh My Pi 模型目录包含未知的 thinking 值：{value}。"
+                ))
+            })?;
+            if !supported_reasoning_efforts
+                .iter()
+                .any(|option: &ModelReasoningEffort| option.effort == effort)
+            {
+                supported_reasoning_efforts.push(ModelReasoningEffort {
+                    effort,
+                    description: String::new(),
+                });
+            }
+        }
+        models.push(ModelDescriptor {
+            id: selector,
+            display_name,
+            source: nexus_domain::ModelSource::OmpCli,
+            availability: nexus_domain::ModelAvailability::Available,
+            provider: Some(provider),
+            is_default: false,
+            supported_reasoning_efforts,
+            default_reasoning_effort: None,
+        });
+    }
+    Ok(models)
+}
+
+fn required_catalog_string(item: &Value, field: &str) -> Result<String, ModelCatalogError> {
+    item.get(field)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            ModelCatalogError::Failed(format!("Oh My Pi 模型目录包含缺少 {field} 的模型。"))
+        })
 }
 
 pub async fn probe(configured_executable: &str) -> HarnessProbe {
@@ -130,10 +311,70 @@ impl LineDecoder for EventDecoder {
         let frame: Value = serde_json::from_str(line)?;
         Ok(decode_frame(&frame))
     }
+
+    fn steer(&mut self, message_id: &str, prompt: &str) -> Option<InputFrame> {
+        Some(InputFrame(
+            json!({"type": "steer", "id": message_id, "message": prompt}),
+        ))
+    }
 }
 
 fn decode_frame(frame: &Value) -> Vec<DecodedEvent> {
     match frame.get("type").and_then(Value::as_str) {
+        Some("response") => {
+            let id = frame.get("id").and_then(Value::as_str).unwrap_or_default();
+            let command = frame
+                .get("command")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if frame.get("success").and_then(Value::as_bool) != Some(true) {
+                let message = frame
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Oh My Pi 请求失败。")
+                    .to_owned();
+                return if command == "steer" {
+                    vec![DecodedEvent::InputRejected {
+                        id: id.into(),
+                        message,
+                    }]
+                } else {
+                    vec![DecodedEvent::Error(message), DecodedEvent::TurnCompleted]
+                };
+            }
+            match (command, id) {
+                ("get_state", "nexus-session") => match frame
+                    .pointer("/data/sessionId")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                {
+                    Some(id) => vec![DecodedEvent::SessionStarted(id.into())],
+                    None => vec![
+                        DecodedEvent::Error("Oh My Pi 未返回会话 ID。".into()),
+                        DecodedEvent::TurnCompleted,
+                    ],
+                },
+                ("steer", _) => vec![DecodedEvent::InputAccepted(id.into())],
+                ("prompt", _)
+                    if frame.pointer("/data/agentInvoked").and_then(Value::as_bool)
+                        == Some(false) =>
+                {
+                    vec![DecodedEvent::TurnCompleted]
+                }
+                _ => Vec::new(),
+            }
+        }
+        Some("prompt_result")
+            if frame.get("agentInvoked").and_then(Value::as_bool) == Some(false) =>
+        {
+            vec![DecodedEvent::TurnCompleted]
+        }
+        Some("agent_end") if frame.get("isTerminal").and_then(Value::as_bool) != Some(false) => {
+            vec![DecodedEvent::TurnCompleted]
+        }
+        Some("extension_ui_request") => vec![DecodedEvent::WriteStdin(InputFrame(json!({
+            "type": "extension_ui_response", "id": frame["id"], "cancelled": true
+        })))],
         Some("agent_start") => vec![DecodedEvent::Status("Oh My Pi 会话已启动".into())],
         Some("turn_start") => vec![DecodedEvent::Status("Oh My Pi 正在处理任务…".into())],
         Some("message_update") => frame
@@ -247,15 +488,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn launch_spec_uses_json_print_mode_without_prompt_in_argv() {
+    fn launch_spec_uses_rpc_without_prompt_in_argv() {
         let spec = build_launch_spec(
             "/usr/local/bin/omp",
             Path::new("/tmp/project"),
             "secret prompt",
             Some("deepseek/deepseek-v4-pro"),
             ThinkingEffort::High,
+            None,
         );
-        assert!(spec.args.windows(2).any(|pair| pair == ["--mode", "json"]));
+        assert!(spec.args.windows(2).any(|pair| pair == ["--mode", "rpc"]));
+        assert!(!spec.args.iter().any(|arg| arg == "--print"));
         assert!(
             spec.args
                 .windows(2)
@@ -272,7 +515,49 @@ mod tests {
                 .any(|pair| pair == ["--model", "deepseek/deepseek-v4-pro"])
         );
         assert!(!spec.args.iter().any(|arg| arg.contains("secret prompt")));
-        assert_eq!(spec.stdin, "secret prompt");
+        let frames: Vec<Value> = spec
+            .stdin
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(frames[0]["type"], "get_state");
+        assert_eq!(frames[1]["message"], "secret prompt");
+        assert!(
+            !spec
+                .args
+                .iter()
+                .any(|arg| arg == "--no-session" || arg == "--resume")
+        );
+        let resumed = build_launch_spec(
+            "omp",
+            Path::new("/tmp/project"),
+            "follow-up",
+            None,
+            ThinkingEffort::High,
+            Some("existing-session"),
+        );
+        assert!(
+            resumed
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--resume", "existing-session"])
+        );
+        assert!(
+            resumed
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--approval-mode", "write"])
+        );
+        assert!(
+            !resumed
+                .args
+                .iter()
+                .any(|arg| arg == "--no-session" || arg == "--continue")
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(resumed.stdin.lines().nth(1).unwrap()).unwrap()["message"],
+            "follow-up"
+        );
 
         let max_spec = build_launch_spec(
             "omp",
@@ -280,6 +565,7 @@ mod tests {
             "prompt",
             None,
             ThinkingEffort::Max,
+            None,
         );
         assert!(
             max_spec
@@ -288,6 +574,117 @@ mod tests {
                 .any(|pair| pair == ["--thinking", "xhigh"])
         );
         assert!(!max_spec.args.iter().any(|arg| arg == "max"));
+
+        let default_spec = build_launch_spec(
+            "omp",
+            Path::new("/tmp/project"),
+            "prompt",
+            None,
+            ThinkingEffort::Default,
+            None,
+        );
+        assert!(!default_spec.args.iter().any(|arg| arg == "--thinking"));
+
+        let legacy_none_spec = build_launch_spec(
+            "omp",
+            Path::new("/tmp/project"),
+            "prompt",
+            None,
+            ThinkingEffort::None,
+            None,
+        );
+        assert!(
+            legacy_none_spec
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--thinking", "off"])
+        );
+    }
+
+    #[test]
+    fn model_catalog_parses_real_omp_shape_and_preserves_provider_selectors() {
+        let output = br#"{
+          "models": [
+            {
+              "provider": "bigmodel",
+              "id": "glm-5.2",
+              "selector": "bigmodel/glm-5.2",
+              "name": "GLM-5.2",
+              "contextWindow": 1048576,
+              "maxTokens": 131072,
+              "reasoning": true,
+              "thinking": ["minimal", "low", "medium", "high", "xhigh"],
+              "input": ["text"],
+              "cost": {}
+            },
+            {
+              "provider": "second-provider",
+              "id": "glm-5.2",
+              "selector": "second-provider/glm-5.2",
+              "name": "GLM-5.2",
+              "reasoning": true,
+              "thinking": ["off", "auto"]
+            }
+          ]
+        }"#;
+
+        let models = parse_model_catalog(output).unwrap();
+
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "bigmodel/glm-5.2");
+        assert_eq!(models[0].provider.as_deref(), Some("bigmodel"));
+        assert_eq!(models[1].id, "second-provider/glm-5.2");
+        assert_eq!(models[0].display_name, models[1].display_name);
+        assert_eq!(
+            models[0]
+                .supported_reasoning_efforts
+                .iter()
+                .map(|option| option.effort)
+                .collect::<Vec<_>>(),
+            [
+                ThinkingEffort::Minimal,
+                ThinkingEffort::Low,
+                ThinkingEffort::Medium,
+                ThinkingEffort::High,
+                ThinkingEffort::XHigh,
+            ]
+        );
+        assert_eq!(
+            models[1]
+                .supported_reasoning_efforts
+                .iter()
+                .map(|option| option.effort)
+                .collect::<Vec<_>>(),
+            [ThinkingEffort::Off, ThinkingEffort::Auto]
+        );
+    }
+
+    #[test]
+    fn model_catalog_distinguishes_empty_and_malformed_responses() {
+        assert!(
+            parse_model_catalog(br#"{"models": []}"#)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(matches!(
+            parse_model_catalog(b"not json"),
+            Err(ModelCatalogError::Failed(message)) if message.contains("无效 JSON")
+        ));
+        assert!(matches!(
+            parse_model_catalog(br#"{}"#),
+            Err(ModelCatalogError::Failed(message)) if message.contains("缺少 models")
+        ));
+        assert!(matches!(
+            parse_model_catalog(br#"{"models":[{"provider":"p"}]}"#),
+            Err(ModelCatalogError::Failed(message)) if message.contains("selector")
+        ));
+        assert!(matches!(
+            parse_model_catalog(br#"{"models":[
+                {"provider":"a","selector":"same","thinking":[]},
+                {"provider":"b","selector":"same","thinking":[]}
+            ]}"#),
+            Err(ModelCatalogError::Failed(message)) if message.contains("重复标识")
+        ));
     }
 
     #[test]
@@ -315,6 +712,12 @@ mod tests {
     #[test]
     fn decoder_maps_stream_messages_and_tool_events() {
         let mut decoder = EventDecoder;
+        assert_eq!(
+            decoder
+                .decode_line(r#"{"type":"response","command":"get_state","id":"nexus-session","success":true,"data":{"sessionId":"existing-session"}}"#)
+                .unwrap(),
+            vec![DecodedEvent::SessionStarted("existing-session".into())]
+        );
         let delta = r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"你好"}}"#;
         assert_eq!(
             decoder.decode_line(delta).unwrap(),
@@ -368,6 +771,50 @@ mod tests {
             })),
             code
         );
+    }
+
+    #[test]
+    fn steering_receipts_and_terminal_events_are_distinct() {
+        let mut decoder = EventDecoder;
+        let frame = decoder.steer("message-1", "update\n第二行").unwrap();
+        assert_eq!(
+            frame.0,
+            json!({"type": "steer", "id": "message-1", "message": "update\n第二行"})
+        );
+        assert_eq!(
+            decoder
+                .decode_line(
+                    r#"{"type":"response","command":"steer","id":"message-1","success":true}"#
+                )
+                .unwrap(),
+            vec![DecodedEvent::InputAccepted("message-1".into())]
+        );
+        assert_eq!(decoder.decode_line(r#"{"type":"response","command":"steer","id":"message-1","success":false,"error":"ended"}"#).unwrap(),
+            vec![DecodedEvent::InputRejected { id: "message-1".into(), message: "ended".into() }]);
+        assert!(
+            decoder
+                .decode_line(r#"{"type":"agent_end","isTerminal":false}"#)
+                .unwrap()
+                .is_empty()
+        );
+        for terminal in [
+            r#"{"type":"agent_end","isTerminal":true}"#,
+            r#"{"type":"prompt_result","agentInvoked":false}"#,
+        ] {
+            assert_eq!(
+                decoder.decode_line(terminal).unwrap(),
+                vec![DecodedEvent::TurnCompleted]
+            );
+        }
+        assert!(matches!(
+            decoder
+                .decode_line(
+                    r#"{"type":"response","command":"prompt","success":false,"error":"denied"}"#
+                )
+                .unwrap()
+                .as_slice(),
+            [DecodedEvent::Error(_), DecodedEvent::TurnCompleted]
+        ));
     }
 
     #[test]

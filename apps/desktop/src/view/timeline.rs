@@ -1,5 +1,6 @@
 use super::*;
 use crate::model::tools::{TimelineItem, timeline_items};
+use gpui_kit::component::button::ButtonCustomVariant;
 
 impl NexusView {
     pub(super) fn render_timeline(
@@ -7,6 +8,7 @@ impl NexusView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let locale = self.presenter.model().language;
         let colors = palette(cx);
         let model = self.presenter.model();
         let compact = window.viewport_size().height < px(740.);
@@ -96,7 +98,7 @@ impl NexusView {
                                                 div()
                                                     .flex_1()
                                                     .min_w_0()
-                                                    .child(model.status.clone()),
+                                                    .child(model.status_text().to_owned()),
                                             )
                                             .when_some(
                                                 model.active_run_elapsed_seconds,
@@ -112,7 +114,7 @@ impl NexusView {
                                                             .gap_2()
                                                             .text_size(px(12.))
                                                             .text_color(rgb(colors.muted))
-                                                            .child("已运行")
+                                                            .child(locale.text("已运行"))
                                                             .child(
                                                                 div().font_family(MONO_FONT).child(
                                                                     format_run_elapsed(seconds),
@@ -131,6 +133,7 @@ impl NexusView {
                     && self.timeline_scroll.max_offset().y + self.timeline_scroll.offset().y
                         > px(48.),
                 |element| {
+                    let latest_message_background: Hsla = rgb(0x202020).into();
                     element.child(
                         div()
                             .absolute()
@@ -141,14 +144,22 @@ impl NexusView {
                             .justify_center()
                             .child(
                                 Button::new("latest-message")
+                                    .custom(
+                                        ButtonCustomVariant::new(cx)
+                                            .color(latest_message_background)
+                                            .foreground(rgb(0xffffff).into())
+                                            .hover(rgb(0x303030).into())
+                                            .active(rgb(0x101010).into()),
+                                    )
                                     .outline()
                                     .small()
                                     .h(px(COMPACT_CONTROL_HEIGHT))
                                     .rounded(px(CONTROL_RADIUS))
-                                    .bg(materials(cx).floating)
+                                    // Custom variants soften their normal fill; keep this overlay opaque.
+                                    .bg(latest_message_background)
                                     .shadow(materials(cx).shadow())
                                     .icon(IconName::ArrowDown)
-                                    .label("回到最新消息")
+                                    .label(locale.text("回到最新消息"))
                                     .on_click(cx.listener(|app, _, _, cx| {
                                         app.timeline_scroll.scroll_to_bottom();
                                         cx.notify();
@@ -160,24 +171,10 @@ impl NexusView {
     }
 
     fn render_welcome(&self, colors: Palette, compact: bool) -> impl IntoElement {
+        let locale = self.presenter.model().language;
         let model = self.presenter.model();
         let history = model.selected_codex_thread.is_some();
         if !history {
-            // Brand SVGs from LobeHub Icons; see assets/harness/LICENSE.
-            let (icon, color): (&[u8], _) = match model.selected_harness {
-                HarnessKind::Claude => (
-                    include_bytes!("../../assets/harness/claude.svg"),
-                    rgb(0xd97757),
-                ),
-                HarnessKind::Codex => (
-                    include_bytes!("../../assets/harness/codex.svg"),
-                    rgb(colors.text),
-                ),
-                HarnessKind::Omp => (
-                    include_bytes!("../../assets/harness/omp.svg"),
-                    rgb(0xf97316),
-                ),
-            };
             return div()
                 .flex_1()
                 .w_full()
@@ -187,13 +184,11 @@ impl NexusView {
                 .justify_center()
                 .py(px(if compact { 8. } else { 32. }))
                 .text_center()
-                .child(
-                    gpui::svg()
-                        .data(icon)
-                        .size(px(if compact { 40. } else { 48. }))
-                        .flex_none()
-                        .text_color(color),
-                )
+                .child(harness_icon(
+                    model.selected_harness,
+                    colors,
+                    if compact { 40. } else { 48. },
+                ))
                 .child(
                     div()
                         .mt_3()
@@ -206,15 +201,15 @@ impl NexusView {
         }
         let (eyebrow, title, description) = if model.codex_thread_loading {
             (
-                "CODEX HISTORY",
-                "正在读取会话",
-                "正在从本机加载消息，稍等片刻。",
+                locale.text("Codex 历史"),
+                locale.text("正在读取会话"),
+                locale.text("正在从本机加载消息，稍等片刻。"),
             )
         } else {
             (
-                "CODEX HISTORY",
-                "此会话没有消息",
-                "这条历史记录中没有可显示的用户或助手消息。",
+                locale.text("Codex 历史"),
+                locale.text("此会话没有消息"),
+                locale.text("这条历史记录中没有可显示的用户或助手消息。"),
             )
         };
         div()
@@ -265,7 +260,7 @@ impl NexusView {
                             rgb(colors.accent).into(),
                             !self.reduced_motion,
                         ))
-                        .child("正在加载…"),
+                        .child(locale.text("正在加载…")),
                 )
             })
             .map(|element| entrance(element, "empty-state-enter", !self.reduced_motion))
@@ -307,6 +302,7 @@ mod tests {
             exit_code: Some(0),
         });
         presenter.drain_events();
+        presenter.new_task();
         assert!(presenter.submit(&"Long prompt for scrolling.\n\n".repeat(80), "claude"));
         let run_id = presenter.model().active_run.unwrap();
         let active_task = presenter.model().selected_task.unwrap();

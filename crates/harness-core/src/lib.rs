@@ -6,6 +6,21 @@ use std::{
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelCatalogError {
+    Cancelled,
+    Failed(String),
+}
+
+impl std::fmt::Display for ModelCatalogError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cancelled => formatter.write_str("模型目录探测已取消"),
+            Self::Failed(message) => formatter.write_str(message),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchSpec {
     pub executable: PathBuf,
     pub args: Vec<String>,
@@ -13,8 +28,26 @@ pub struct LaunchSpec {
     pub stdin: String,
 }
 
+// Interactive frames may contain an API key during in-memory authentication.
+#[derive(Clone, PartialEq)]
+pub struct InputFrame(pub Value);
+
+impl std::fmt::Debug for InputFrame {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("InputFrame([REDACTED])")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum DecodedEvent {
+    WriteStdin(InputFrame),
+    SessionStarted(String),
+    InputAccepted(String),
+    InputRejected {
+        id: String,
+        message: String,
+    },
+    TurnCompleted,
     TextDelta(String),
     MessageCompleted(String),
     ToolStarted {
@@ -33,6 +66,7 @@ pub enum DecodedEvent {
 
 pub trait LineDecoder: Send {
     fn decode_line(&mut self, line: &str) -> Result<Vec<DecodedEvent>, serde_json::Error>;
+    fn steer(&mut self, message_id: &str, prompt: &str) -> Option<InputFrame>;
 }
 
 pub fn resolve_executable(configured: &str) -> Option<PathBuf> {

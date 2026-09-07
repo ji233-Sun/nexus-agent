@@ -5,6 +5,29 @@ use gpui_kit::{
     component::menu::PopupMenu,
 };
 
+pub(super) fn harness_icon(harness: HarnessKind, colors: Palette, size: f32) -> gpui::Svg {
+    // Brand SVGs from LobeHub Icons; see assets/harness/LICENSE.
+    let (icon, color): (&[u8], _) = match harness {
+        HarnessKind::Claude => (
+            include_bytes!("../../assets/harness/claude.svg"),
+            rgb(0xd97757),
+        ),
+        HarnessKind::Codex => (
+            include_bytes!("../../assets/harness/codex.svg"),
+            rgb(colors.text),
+        ),
+        HarnessKind::Omp => (
+            include_bytes!("../../assets/harness/omp.svg"),
+            rgb(0xf97316),
+        ),
+    };
+    gpui::svg()
+        .data(icon)
+        .size(px(size))
+        .flex_none()
+        .text_color(color)
+}
+
 fn control_transition(reduced_motion: bool) -> Transition {
     Transition::new(if reduced_motion {
         Duration::ZERO
@@ -38,6 +61,7 @@ pub(super) struct AnimatedDropdown {
     id: ElementId,
     trigger: Button,
     reduced_motion: bool,
+    show_caret: bool,
     builder: MenuBuilder,
 }
 
@@ -58,8 +82,14 @@ impl AnimatedDropdown {
             id: id.into(),
             trigger,
             reduced_motion,
+            show_caret: true,
             builder: std::rc::Rc::new(builder),
         }
+    }
+
+    pub(super) fn show_caret(mut self, show_caret: bool) -> Self {
+        self.show_caret = show_caret;
+        self
     }
 }
 
@@ -113,11 +143,13 @@ impl RenderOnce for AnimatedDropdown {
             .trigger
             .selected(open)
             .dropdown_caret(false)
-            .child(
-                Icon::new(IconName::ChevronDown)
-                    .size(px(14.))
-                    .rotate(gpui::radians(-std::f32::consts::PI * progress)),
-            )
+            .when(self.show_caret, |trigger| {
+                trigger.child(
+                    Icon::new(IconName::ChevronDown)
+                        .size(px(14.))
+                        .rotate(gpui::radians(-std::f32::consts::PI * progress)),
+                )
+            })
             .on_click({
                 let toggle = toggle.clone();
                 move |event, window, cx| {
@@ -217,7 +249,9 @@ pub(super) fn matches_search(text: &str, query: &str) -> bool {
 }
 
 pub(super) fn can_send_prompt(model: &crate::model::AppModel, prompt: &str) -> bool {
-    model.can_submit() && model.selected_codex_thread.is_none() && !prompt.trim().is_empty()
+    (model.can_submit() || model.can_queue())
+        && model.selected_codex_thread.is_none()
+        && !prompt.trim().is_empty()
 }
 
 impl NexusView {
@@ -273,12 +307,12 @@ impl NexusView {
         let colors = palette(cx);
         let id = id.into();
         let animated = !self.reduced_motion;
-        let label = match role {
-            MessageRole::User => "You",
-            MessageRole::Assistant => "Agent",
-            MessageRole::Tool => "Tool",
-            MessageRole::System => "System",
-        };
+        let label = self.presenter.model().language.text(match role {
+            MessageRole::User => "你",
+            MessageRole::Assistant => "助手",
+            MessageRole::Tool => "工具",
+            MessageRole::System => "系统",
+        });
         let is_user = role == MessageRole::User;
         let is_panel = matches!(
             kind,
@@ -453,12 +487,11 @@ pub(super) fn live_status_dot(color: Hsla, animated: bool) -> gpui::AnyElement {
 
 pub(super) fn run_status_color(colors: Palette, status: RunStatus) -> Option<Hsla> {
     match status {
-        RunStatus::Completed => None,
+        RunStatus::Completed | RunStatus::Cancelled | RunStatus::Interrupted => None,
         RunStatus::Failed => Some(rgb(colors.danger).into()),
         RunStatus::Running | RunStatus::Starting | RunStatus::Cancelling => {
             Some(rgb(colors.accent).into())
         }
-        RunStatus::Cancelled | RunStatus::Interrupted => Some(rgb(colors.muted).into()),
     }
 }
 
@@ -482,6 +515,7 @@ mod tests {
         let project = storage.open_project(directory.path()).unwrap();
         let (task_id, run_id) = storage
             .create_task_run(NewTaskRun {
+                task_id: None,
                 project_id: project.id,
                 title: "Tool details",
                 prompt: "Check these tools",
@@ -765,9 +799,15 @@ mod tests {
     }
 
     #[test]
-    fn completed_tasks_do_not_show_a_dot_that_looks_like_an_unread_badge() {
+    fn finished_tasks_only_show_a_status_indicator_for_failures() {
         let colors = Palette::for_dark(true);
-        assert!(run_status_color(colors, RunStatus::Completed).is_none());
+        for status in [
+            RunStatus::Completed,
+            RunStatus::Cancelled,
+            RunStatus::Interrupted,
+        ] {
+            assert!(run_status_color(colors, status).is_none());
+        }
         for status in [
             RunStatus::Starting,
             RunStatus::Running,
@@ -793,7 +833,7 @@ mod tests {
     }
 
     #[test]
-    fn composer_rejects_blank_prompts_read_only_history_and_busy_or_unready_agents() {
+    fn composer_allows_queueing_only_for_the_active_task_and_rejects_invalid_input() {
         let directory = tempfile::tempdir().unwrap();
         let storage = Storage::open(Path::new(":memory:")).unwrap();
         let mut model = AppModel {
@@ -819,6 +859,11 @@ mod tests {
         assert!(!can_send_prompt(&model, "检查当前项目"));
         model.selected_codex_thread = None;
         model.active_run = Some(Uuid::new_v4());
+        assert!(!can_send_prompt(&model, "检查当前项目"));
+        model.active_task = Some(Uuid::new_v4());
+        model.selected_task = model.active_task;
+        assert!(can_send_prompt(&model, "检查当前项目"));
+        model.run_cancelling = true;
         assert!(!can_send_prompt(&model, "检查当前项目"));
         model.active_run = None;
         model.harnesses.clear();

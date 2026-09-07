@@ -8,14 +8,14 @@ use std::{
     sync::Arc,
 };
 use tokio::{
-    sync::{Mutex, watch},
+    sync::{Mutex, mpsc, watch},
     task::JoinHandle,
 };
 use uuid::Uuid;
 
 use crate::infrastructure::{
     harness,
-    process::{generate_title, run_harness},
+    process::{SteerInput, generate_title, run_harness},
 };
 use events::Emitter;
 
@@ -23,6 +23,7 @@ use events::Emitter;
 struct ActiveRun {
     id: Uuid,
     cancel: watch::Sender<bool>,
+    input: mpsc::UnboundedSender<SteerInput>,
 }
 
 struct BackgroundTask {
@@ -102,10 +103,8 @@ impl Runner {
                                             })
                                             .await;
                                     }
-                                    Err(nexus_harness_codex::ModelCatalogError::Cancelled) => {}
-                                    Err(nexus_harness_codex::ModelCatalogError::Failed(
-                                        message,
-                                    )) => {
+                                    Err(nexus_harness_core::ModelCatalogError::Cancelled) => {}
+                                    Err(nexus_harness_core::ModelCatalogError::Failed(message)) => {
                                         emitter
                                             .send(Event::ModelCatalogFailed {
                                                 request_id,
@@ -131,11 +130,36 @@ impl Runner {
                 }
             }
             Command::RunStart(request) => {
+                let should_generate_title = request.session_id.is_none();
                 let title_request = request.clone();
                 if let Some(cwd) =
                     start_run(request, self.active.clone(), self.emitter.clone()).await
+                    && should_generate_title
                 {
                     self.spawn_title_generation(title_request, cwd);
+                }
+            }
+            Command::RunSteer {
+                run_id,
+                message_id,
+                prompt,
+            } => {
+                let guard = self.active.lock().await;
+                let sent = !prompt.trim().is_empty()
+                    && guard
+                        .as_ref()
+                        .filter(|run| run.id == run_id && !*run.cancel.borrow())
+                        .is_some_and(|run| {
+                            run.input.send(SteerInput { message_id, prompt }).is_ok()
+                        });
+                if !sent {
+                    self.emitter
+                        .send(Event::RunInputRejected {
+                            run_id,
+                            message_id,
+                            message: "当前轮次无法接收 Steer，消息仍保留在队列中。".into(),
+                        })
+                        .await;
                 }
             }
             Command::RunCancel { run_id } => {
@@ -257,9 +281,11 @@ async fn start_run(
     };
 
     let (cancel, cancel_rx) = watch::channel(false);
+    let (input, input_rx) = mpsc::unbounded_channel();
     *guard = Some(ActiveRun {
         id: request.run_id,
         cancel,
+        input,
     });
     drop(guard);
 
@@ -267,11 +293,20 @@ async fn start_run(
     let active_for_task = active.clone();
     let title_cwd = cwd.clone();
     tokio::spawn(async move {
-        run_harness(request, cwd, cancel_rx, emitter).await;
+        let (status, exit_code) =
+            run_harness(request, cwd, cancel_rx, input_rx, emitter.clone()).await;
         let mut guard = active_for_task.lock().await;
         if guard.as_ref().is_some_and(|run| run.id == run_id) {
             *guard = None;
         }
+        drop(guard);
+        emitter
+            .send(Event::RunExited {
+                run_id,
+                status,
+                exit_code,
+            })
+            .await;
     });
     Some(title_cwd)
 }
@@ -311,6 +346,7 @@ mod tests {
         StartRun {
             run_id: Uuid::new_v4(),
             task_id: Uuid::new_v4(),
+            session_id: None,
             cwd,
             prompt: "test".into(),
             harness: HarnessKind::Claude,
@@ -365,6 +401,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resumed_runs_do_not_regenerate_task_titles() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut request = request(directory.path().to_string_lossy().into_owned());
+        request.session_id = Some("existing-session".into());
+        let (emitter, _) = Emitter::channel();
+        let mut runner = Runner::new(emitter);
+
+        runner.handle(Command::RunStart(request)).await;
+
+        assert!(runner.title_tasks.is_empty());
+        runner.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn second_run_is_rejected_without_replacing_active_run() {
         let (emitter, mut events) = Emitter::channel();
         let mut runner = Runner::new(emitter);
@@ -373,6 +423,7 @@ mod tests {
         *runner.active.lock().await = Some(ActiveRun {
             id: active_id,
             cancel,
+            input: mpsc::unbounded_channel().0,
         });
         let request = request("unused".into());
         let rejected_id = request.run_id;
@@ -392,7 +443,11 @@ mod tests {
         let mut runner = Runner::new(emitter);
         let run_id = Uuid::new_v4();
         let (cancel, receiver) = watch::channel(false);
-        *runner.active.lock().await = Some(ActiveRun { id: run_id, cancel });
+        *runner.active.lock().await = Some(ActiveRun {
+            id: run_id,
+            cancel,
+            input: mpsc::unbounded_channel().0,
+        });
 
         runner
             .handle(Command::RunCancel {
@@ -410,6 +465,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn steer_routes_only_to_the_matching_live_run() {
+        let (emitter, mut events) = Emitter::channel();
+        let mut runner = Runner::new(emitter);
+        let run_id = Uuid::new_v4();
+        let (cancel, _) = watch::channel(false);
+        let (input, mut received) = mpsc::unbounded_channel();
+        *runner.active.lock().await = Some(ActiveRun {
+            id: run_id,
+            cancel: cancel.clone(),
+            input,
+        });
+        let message_id = Uuid::new_v4();
+        runner
+            .handle(Command::RunSteer {
+                run_id,
+                message_id,
+                prompt: "correction".into(),
+            })
+            .await;
+        let message = received.recv().await.unwrap();
+        assert_eq!(message.message_id, message_id);
+        assert_eq!(message.prompt, "correction");
+        assert!(
+            events.try_recv().is_err(),
+            "only the harness can acknowledge delivery"
+        );
+        for (id, prompt) in [(Uuid::new_v4(), "wrong run"), (run_id, " \n ")] {
+            runner
+                .handle(Command::RunSteer {
+                    run_id: id,
+                    message_id,
+                    prompt: prompt.into(),
+                })
+                .await;
+            assert!(matches!(
+                events.recv().await.unwrap().event,
+                Event::RunInputRejected { .. }
+            ));
+            assert!(received.try_recv().is_err());
+        }
+        cancel.send_replace(true);
+        runner
+            .handle(Command::RunSteer {
+                run_id,
+                message_id,
+                prompt: "too late".into(),
+            })
+            .await;
+        assert!(matches!(
+            events.recv().await.unwrap().event,
+            Event::RunInputRejected { .. }
+        ));
+        assert!(received.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn shutdown_cancels_active_run() {
         let (emitter, _) = Emitter::channel();
         let mut runner = Runner::new(emitter);
@@ -417,6 +528,7 @@ mod tests {
         *runner.active.lock().await = Some(ActiveRun {
             id: Uuid::new_v4(),
             cancel,
+            input: mpsc::unbounded_channel().0,
         });
 
         assert!(!runner.handle(Command::RunnerShutdown).await);

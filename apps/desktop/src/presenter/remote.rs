@@ -1,6 +1,6 @@
 use super::{Presenter, RemoteCommand};
+use crate::i18n::Language;
 use crate::remote_control::{RemoteControl, RemoteProject, RemoteState};
-use nexus_domain::HarnessKind;
 
 impl Presenter {
     pub(super) fn handle_remote_command(&mut self, command: RemoteCommand) -> bool {
@@ -40,10 +40,10 @@ impl Presenter {
                         self.select_project(project);
                     }
                     let executable = self.model.executable.clone();
-                    if self.submit(&prompt, &executable) {
+                    if self.start_run(None, &prompt, &executable) {
                         Ok(())
                     } else {
-                        Err(self.model.status.clone())
+                        Err(self.model.status.render(Language::Chinese).to_owned())
                     }
                 } else {
                     Err("项目不存在，请先在 Nexus 中打开项目".into())
@@ -59,7 +59,7 @@ impl Presenter {
         }
     }
 
-    fn remote_state(&self) -> RemoteState {
+    pub(super) fn remote_state(&self) -> RemoteState {
         let mut tasks = self
             .model
             .projects
@@ -67,6 +67,7 @@ impl Presenter {
             .flat_map(|project| self.storage.tasks(project.id).unwrap_or_default())
             .collect::<Vec<_>>();
         tasks.sort_by_key(|task| std::cmp::Reverse(task.created_at));
+        let selection = self.model.resolved_model_selection();
         RemoteState {
             projects: self
                 .model
@@ -84,21 +85,10 @@ impl Presenter {
             active_run_id: self.model.active_run,
             active_task_id: self.model.active_task,
             streaming_text: self.model.streaming_text.clone(),
-            status: self.model.status.clone(),
+            status: self.model.status.render(Language::Chinese).to_owned(),
             harness: self.model.selected_harness,
-            model: match self.model.selected_harness {
-                HarnessKind::Claude => self
-                    .model
-                    .selected_provider_profile()
-                    .and_then(|profile| profile.model.clone())
-                    .or_else(|| Some(self.model.claude_model.to_string())),
-                HarnessKind::Codex => self.model.configured_codex_model().map(str::to_owned),
-                HarnessKind::Omp => self
-                    .model
-                    .selected_provider_profile()
-                    .and_then(|profile| profile.model.clone()),
-            },
-            effort: self.model.effort,
+            model: selection.model,
+            effort: selection.effort,
             harness_ready: self.model.selected_probe().is_some_and(|probe| {
                 let profile_ready = self
                     .model

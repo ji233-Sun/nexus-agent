@@ -68,3 +68,6 @@ and confirm the new scope.
 # 项目规则
 
 - 任何变更都应当优先在当前工作区完成，而不是新建worktree，或在target内新建一个全新的工作区
+- main分支是被保护的分支 —— 因此，任何变更都应当开新分支进行，请及时进行commit和push，最终需要将变更提出PR
+- PR的标题和内容**必须**为中文
+- 解决 PR 内的 comment 提出的问题之后，你应当将 comment 进行 resolve

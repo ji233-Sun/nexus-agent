@@ -1,13 +1,13 @@
 pub(crate) mod history;
 pub(crate) mod tools;
 
+use crate::i18n::{Language, LocalizedText};
 use history::{HistoryMessage, ThreadSummary};
 use nexus_domain::{
-    ClaudeModel, HarnessKind, Message, ModelDescriptor, Project, ProviderProfile, TaskSummary,
-    ThinkingEffort,
+    HarnessKind, Message, ModelDescriptor, Project, ProviderProfile, TaskSummary, ThinkingEffort,
 };
 use nexus_protocol::HarnessProbe;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Default)]
@@ -16,22 +16,34 @@ pub(crate) enum ModelCatalogState {
     Idle,
     Loading {
         request_id: Uuid,
+        models: Vec<ModelDescriptor>,
     },
     Ready(Vec<ModelDescriptor>),
     Empty,
-    Failed(String),
+    NotReady(LocalizedText),
+    Failed {
+        message: LocalizedText,
+        models: Vec<ModelDescriptor>,
+    },
 }
 
 impl ModelCatalogState {
     pub(crate) fn models(&self) -> Option<&[ModelDescriptor]> {
         match self {
-            Self::Ready(models) => Some(models),
-            Self::Idle | Self::Loading { .. } | Self::Empty | Self::Failed(_) => None,
+            Self::Ready(models) | Self::Loading { models, .. } | Self::Failed { models, .. } => {
+                Some(models)
+            }
+            Self::Idle | Self::Empty | Self::NotReady(_) => None,
         }
     }
 
     pub(crate) fn accepts(&self, request_id: Uuid) -> bool {
-        matches!(self, Self::Loading { request_id: current } if *current == request_id)
+        matches!(self, Self::Loading { request_id: current, .. } if *current == request_id)
+    }
+
+    pub(crate) fn fail(&mut self, message: LocalizedText) {
+        let models = self.models().unwrap_or_default().to_vec();
+        *self = Self::Failed { message, models };
     }
 }
 
@@ -62,32 +74,50 @@ impl Default for AppearanceSettings {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct QueuedMessage {
+    pub(crate) id: Uuid,
+    pub(crate) task_id: Uuid,
+    pub(crate) prompt: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedModelSelection {
+    pub(crate) model: Option<String>,
+    pub(crate) effort: ThinkingEffort,
+}
+
 #[derive(Default)]
 pub(crate) struct AppModel {
+    pub(crate) language: Language,
     pub(crate) appearance: AppearanceSettings,
     pub(crate) projects: Vec<Project>,
     pub(crate) selected_project: Option<Project>,
     pub(crate) tasks: Vec<TaskSummary>,
+    pub(crate) archived_tasks: Vec<TaskSummary>,
     pub(crate) selected_task: Option<Uuid>,
     pub(crate) messages: Vec<Message>,
     pub(crate) active_run: Option<Uuid>,
+    pub(crate) run_cancelling: bool,
+    pub(crate) queued_messages: VecDeque<QueuedMessage>,
+    pub(crate) steering_message: Option<Uuid>,
     pub(crate) active_run_elapsed_seconds: Option<u64>,
     pub(crate) active_task: Option<Uuid>,
     pub(crate) active_harness: Option<HarnessKind>,
     pub(crate) streaming_text: String,
-    pub(crate) status: String,
+    pub(crate) status: LocalizedText,
     pub(crate) harnesses: BTreeMap<HarnessKind, HarnessProbe>,
     pub(crate) codex_threads: Vec<ThreadSummary>,
     pub(crate) selected_codex_thread: Option<String>,
     pub(crate) codex_history_messages: Vec<HistoryMessage>,
     pub(crate) codex_history_loading: bool,
     pub(crate) codex_thread_loading: bool,
-    pub(crate) codex_history_error: Option<String>,
+    pub(crate) codex_history_error: Option<LocalizedText>,
     pub(crate) selected_harness: HarnessKind,
     pub(crate) project_dirty: bool,
-    pub(crate) claude_model: ClaudeModel,
-    pub(crate) codex_model_override: Option<String>,
-    pub(crate) codex_model_catalog: ModelCatalogState,
+    pub(crate) model_override: Option<String>,
+    pub(crate) model_override_name: Option<String>,
+    pub(crate) model_catalog: ModelCatalogState,
     pub(crate) effort: ThinkingEffort,
     pub(crate) executable: String,
     pub(crate) provider_profiles: Vec<ProviderProfile>,
@@ -95,6 +125,10 @@ pub(crate) struct AppModel {
 }
 
 impl AppModel {
+    pub(crate) fn status_text(&self) -> &str {
+        self.status.render(self.language)
+    }
+
     pub(crate) fn selected_probe(&self) -> Option<&HarnessProbe> {
         self.harnesses.get(&self.selected_harness)
     }
@@ -108,7 +142,15 @@ impl AppModel {
             && self
                 .selected_probe()
                 .is_some_and(|probe| probe.available && (probe.authenticated || profile_ready))
-            && self.codex_selection_is_valid()
+            && self.catalog_selection_is_valid()
+    }
+
+    pub(crate) fn can_queue(&self) -> bool {
+        self.active_run.is_some()
+            && !self.run_cancelling
+            && self.active_task.is_some()
+            && self.active_task == self.selected_task
+            && self.selected_codex_thread.is_none()
     }
 
     pub(crate) fn selected_provider_profile(&self) -> Option<&ProviderProfile> {
@@ -118,41 +160,56 @@ impl AppModel {
             .find(|profile| profile.id == *profile_id && profile.harness == self.selected_harness)
     }
 
-    pub(crate) fn configured_codex_model(&self) -> Option<&str> {
-        self.codex_model_override.as_deref().or_else(|| {
+    pub(crate) fn configured_catalog_model(&self) -> Option<&str> {
+        self.model_override.as_deref().or_else(|| {
             self.selected_provider_profile()
                 .and_then(|profile| profile.model.as_deref())
         })
     }
 
-    pub(crate) fn selected_codex_catalog_model(&self) -> Option<&ModelDescriptor> {
-        let models = self.codex_model_catalog.models()?;
-        if let Some(id) = self.configured_codex_model() {
+    pub(crate) fn selected_catalog_model(&self) -> Option<&ModelDescriptor> {
+        let models = self.model_catalog.models()?;
+        if let Some(id) = self.configured_catalog_model() {
             models.iter().find(|model| model.id == id)
         } else {
             models.iter().find(|model| model.is_default)
         }
     }
 
-    pub(crate) fn codex_model_override_is_unavailable(&self) -> bool {
-        self.codex_model_override.is_some()
-            && matches!(
-                self.codex_model_catalog,
-                ModelCatalogState::Ready(_) | ModelCatalogState::Empty
-            )
-            && self.selected_codex_catalog_model().is_none()
+    pub(crate) fn model_override_is_unavailable(&self) -> bool {
+        self.model_override.is_some()
+            && self
+                .selected_catalog_model()
+                .is_none_or(|model| !model.availability.is_selectable())
     }
 
-    pub(crate) fn codex_selection_is_valid(&self) -> bool {
-        if self.selected_harness != HarnessKind::Codex {
-            return true;
-        }
-        if self.codex_model_override.is_some() && self.selected_codex_catalog_model().is_none() {
+    pub(crate) fn catalog_selection_is_valid(&self) -> bool {
+        if self.model_override_is_unavailable() {
             return false;
         }
-        self.effort.is_default()
-            || self
-                .selected_codex_catalog_model()
-                .is_some_and(|model| model.supports_effort(&self.effort))
+        self.selected_catalog_model().is_none_or(|model| {
+            model.availability.is_selectable()
+                && (self.effort.is_default() || model.supports_effort(&self.effort))
+        })
+    }
+
+    // One resolution path for the composer, Remote API, StartRun and persisted requests.
+    pub(crate) fn resolved_model_selection(&self) -> ResolvedModelSelection {
+        let model = self.configured_catalog_model().map(str::to_owned);
+        let descriptor = self.selected_catalog_model();
+        let effort = if descriptor.is_some_and(|model| model.supports_effort(&self.effort)) {
+            self.effort
+        } else if model.is_some() && self.effort.is_default() {
+            descriptor
+                .and_then(|model| {
+                    model
+                        .default_reasoning_effort
+                        .filter(|effort| model.supports_effort(effort))
+                })
+                .unwrap_or(ThinkingEffort::Default)
+        } else {
+            ThinkingEffort::Default
+        };
+        ResolvedModelSelection { model, effort }
     }
 }

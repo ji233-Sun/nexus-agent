@@ -74,6 +74,16 @@ impl TestRunner {
         serde_json::from_str::<EventEnvelope>(&line).unwrap().event
     }
 
+    async fn expect_runner_ready(&mut self) {
+        loop {
+            match self.next().await {
+                Event::RunnerReady => return,
+                Event::TaskTitleGenerated { .. } => {}
+                event => panic!("expected runner.ready, got {event:?}"),
+            }
+        }
+    }
+
     async fn collect_run(&mut self, run_id: Uuid, expected: RunStatus) -> Vec<Event> {
         let mut events = Vec::new();
         loop {
@@ -140,6 +150,7 @@ fn request(directory: &Path, executable: PathBuf, harness: HarnessKind, prompt: 
     StartRun {
         run_id: Uuid::new_v4(),
         task_id: Uuid::new_v4(),
+        session_id: None,
         cwd: directory.to_string_lossy().into_owned(),
         prompt: prompt.into(),
         harness,
@@ -147,6 +158,93 @@ fn request(directory: &Path, executable: PathBuf, harness: HarnessKind, prompt: 
         model: None,
         effort: ThinkingEffort::High,
         environment: Vec::new(),
+    }
+}
+
+#[tokio::test]
+async fn exited_run_releases_the_slot_before_the_next_message_starts() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = fake_harness(directory.path());
+    let mut runner = TestRunner::spawn();
+    for _ in 0..10 {
+        let request = request(
+            directory.path(),
+            executable.clone(),
+            HarnessKind::Claude,
+            "next message",
+        );
+        let run_id = request.run_id;
+        runner.send(Command::RunStart(request)).await;
+        runner.collect_run(run_id, RunStatus::Completed).await;
+    }
+    runner.shutdown().await;
+}
+
+#[tokio::test]
+async fn runner_resumes_each_harness_session_across_processes() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = fake_harness(directory.path());
+    for harness in HarnessKind::ALL {
+        let mut request = request(
+            directory.path(),
+            executable.clone(),
+            harness,
+            "remember this",
+        );
+        let mut runner = TestRunner::spawn();
+        runner.send(Command::RunStart(request.clone())).await;
+        let events = runner
+            .collect_run(request.run_id, RunStatus::Completed)
+            .await;
+        let session_id = events
+            .iter()
+            .find_map(|event| match event {
+                Event::RunSessionStarted { run_id, session_id } if *run_id == request.run_id => {
+                    Some(session_id.clone())
+                }
+                _ => None,
+            })
+            .expect("the harness must report its session ID");
+        runner.shutdown().await;
+
+        // Restart the runner as well as the harness to require native persistence.
+        let mut runner = TestRunner::spawn();
+        request.run_id = Uuid::new_v4();
+        request.prompt = "follow-up".into();
+        request.session_id = Some(session_id.clone());
+        runner.send(Command::RunStart(request.clone())).await;
+        let events = runner
+            .collect_run(request.run_id, RunStatus::Completed)
+            .await;
+        runner.shutdown().await;
+        assert!(events.iter().any(|event| matches!(event,
+            Event::RunSessionStarted { session_id: id, .. } if id == &session_id)));
+        assert!(events.iter().any(|event| matches!(event,
+            Event::RunMessageCompleted { text, .. } if text == "remember this")));
+        assert_eq!(
+            fs::read_to_string(directory.path().join("stdin.txt")).unwrap(),
+            "follow-up"
+        );
+        let args_file = match harness {
+            HarnessKind::Claude => "args.txt",
+            HarnessKind::Codex => "codex-args.txt",
+            HarnessKind::Omp => "omp-args.txt",
+        };
+        let args = fs::read_to_string(directory.path().join(args_file)).unwrap();
+        if harness == HarnessKind::Codex {
+            let frame: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(directory.path().join("thread-params.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(frame["method"], "thread/resume");
+            assert_eq!(frame["params"]["threadId"], session_id);
+        } else {
+            assert!(args.lines().any(|arg| arg == session_id));
+        }
+        assert!(!args.lines().any(|arg| matches!(
+            arg,
+            "--ephemeral" | "--no-session" | "--no-session-persistence" | "--last" | "--continue"
+        )));
     }
 }
 
@@ -189,7 +287,7 @@ async fn runner_streams_fake_claude_and_forwards_model_configuration() {
 }
 
 #[tokio::test]
-async fn runner_streams_fake_codex_and_uses_non_interactive_mode() {
+async fn runner_streams_fake_codex_and_preserves_non_interactive_permissions() {
     let directory = tempfile::tempdir().unwrap();
     let request = request(
         directory.path(),
@@ -220,17 +318,49 @@ async fn runner_streams_fake_codex_and_uses_non_interactive_mode() {
     );
     let args = fs::read_to_string(directory.path().join("codex-args.txt")).unwrap();
     let args = args.lines().collect::<Vec<_>>();
-    assert_eq!(args.first().copied(), Some("exec"));
-    assert!(
-        args.windows(2)
-            .any(|pair| pair == ["--sandbox", "workspace-write"])
-    );
-    assert!(
-        args.windows(2)
-            .any(|pair| pair == ["--config", "model_reasoning_effort=\"high\""])
-    );
-    assert_eq!(args.last().copied(), Some("-"));
+    assert_eq!(args.first().copied(), Some("app-server"));
+    let thread: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(directory.path().join("thread-params.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(thread["params"]["sandbox"], "workspace-write");
+    assert_eq!(thread["params"]["approvalPolicy"], "never");
+    let turn: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(directory.path().join("turn-params.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(turn["params"]["effort"], "high");
     assert!(!args.contains(&"test prompt"));
+}
+
+#[tokio::test]
+async fn runner_routes_claude_alias_catalog_without_starting_a_run() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = fake_harness(directory.path());
+    let request_id = Uuid::new_v4();
+    let mut runner = TestRunner::spawn();
+    runner
+        .send(Command::ModelCatalogRefresh {
+            request_id,
+            harness: HarnessKind::Claude,
+            executable: executable.to_string_lossy().into_owned(),
+            cwd: directory.path().to_string_lossy().into_owned(),
+            environment: vec![EnvironmentVariable {
+                name: "ANTHROPIC_API_KEY".into(),
+                value: "catalog-secret".into(),
+            }],
+        })
+        .await;
+    let event = runner.next().await;
+    assert!(!format!("{event:?}").contains("catalog-secret"));
+    assert!(
+        matches!(event, Event::ModelCatalogLoaded { request_id: id, harness: HarnessKind::Claude, models }
+        if id == request_id && models.len() == 3 && models.iter().all(|model|
+            model.source.harness() == HarnessKind::Claude && model.supported_reasoning_efforts.is_empty()))
+    );
+    runner.send(Command::RunnerHello).await;
+    runner.expect_runner_ready().await;
+    runner.shutdown().await;
 }
 
 #[tokio::test]
@@ -276,6 +406,146 @@ async fn runner_loads_all_codex_model_pages_and_reaps_the_app_server() {
         fs::read_to_string(directory.path().join("catalog-stopped.txt")).unwrap(),
         "stopped"
     );
+    runner.shutdown().await;
+}
+
+#[tokio::test]
+async fn runner_loads_omp_catalog_with_provider_context_and_reaps_the_command() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = fake_harness(directory.path());
+    let request_id = Uuid::new_v4();
+    let mut runner = TestRunner::spawn();
+    runner
+        .send(Command::ModelCatalogRefresh {
+            request_id,
+            harness: HarnessKind::Omp,
+            executable: executable.to_string_lossy().into_owned(),
+            cwd: directory.path().to_string_lossy().into_owned(),
+            environment: vec![EnvironmentVariable {
+                name: "TEST_PROVIDER_API_KEY".into(),
+                value: "catalog-secret".into(),
+            }],
+        })
+        .await;
+
+    let Event::ModelCatalogLoaded {
+        request_id: received_id,
+        harness,
+        models,
+    } = runner.next().await
+    else {
+        panic!("expected OMP model catalog")
+    };
+
+    assert_eq!(received_id, request_id);
+    assert_eq!(harness, HarnessKind::Omp);
+    assert_eq!(models.len(), 2);
+    assert_eq!(models[0].id, "alpha/shared-model");
+    assert_eq!(models[0].provider.as_deref(), Some("alpha"));
+    assert_eq!(models[1].id, "beta/shared-model");
+    assert_eq!(models[1].provider.as_deref(), Some("beta"));
+    assert_eq!(models[0].display_name, models[1].display_name);
+    assert!(models[0].supports_effort(&ThinkingEffort::Off));
+    assert!(models[0].supports_effort(&ThinkingEffort::Auto));
+    assert_eq!(
+        PathBuf::from(fs::read_to_string(directory.path().join("omp-catalog-cwd.txt")).unwrap())
+            .canonicalize()
+            .unwrap(),
+        directory.path().canonicalize().unwrap()
+    );
+    assert_eq!(
+        fs::read_to_string(directory.path().join("omp-catalog-env.txt")).unwrap(),
+        "catalog-secret"
+    );
+    assert_eq!(
+        fs::read_to_string(directory.path().join("omp-catalog-stopped.txt")).unwrap(),
+        "stopped"
+    );
+    runner.shutdown().await;
+}
+
+#[tokio::test]
+async fn omp_catalog_reports_command_json_and_empty_states_without_leaking_stderr() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = fake_harness(directory.path());
+    let mut runner = TestRunner::spawn();
+    for (name, expected) in [
+        ("TEST_OMP_CATALOG_ERROR", "命令执行失败"),
+        ("TEST_OMP_CATALOG_MALFORMED", "无效 JSON"),
+    ] {
+        let request_id = Uuid::new_v4();
+        runner
+            .send(Command::ModelCatalogRefresh {
+                request_id,
+                harness: HarnessKind::Omp,
+                executable: executable.to_string_lossy().into_owned(),
+                cwd: directory.path().to_string_lossy().into_owned(),
+                environment: vec![EnvironmentVariable {
+                    name: name.into(),
+                    value: "1".into(),
+                }],
+            })
+            .await;
+        assert!(matches!(
+            runner.next().await,
+            Event::ModelCatalogFailed { request_id: id, message, .. }
+                if id == request_id
+                    && message.contains(expected)
+                    && !message.contains("test-secret-must-not-leak")
+        ));
+    }
+
+    let request_id = Uuid::new_v4();
+    runner
+        .send(Command::ModelCatalogRefresh {
+            request_id,
+            harness: HarnessKind::Omp,
+            executable: executable.to_string_lossy().into_owned(),
+            cwd: directory.path().to_string_lossy().into_owned(),
+            environment: vec![EnvironmentVariable {
+                name: "TEST_OMP_CATALOG_EMPTY".into(),
+                value: "1".into(),
+            }],
+        })
+        .await;
+    assert!(matches!(
+        runner.next().await,
+        Event::ModelCatalogLoaded { request_id: id, models, .. }
+            if id == request_id && models.is_empty()
+    ));
+    runner.shutdown().await;
+}
+
+#[tokio::test]
+async fn newer_omp_catalog_request_cancels_and_reaps_the_previous_command() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = fake_harness(directory.path());
+    let stale_id = Uuid::new_v4();
+    let current_id = Uuid::new_v4();
+    let command = |request_id, environment| Command::ModelCatalogRefresh {
+        request_id,
+        harness: HarnessKind::Omp,
+        executable: executable.to_string_lossy().into_owned(),
+        cwd: directory.path().to_string_lossy().into_owned(),
+        environment,
+    };
+    let mut runner = TestRunner::spawn();
+    runner
+        .send(command(
+            stale_id,
+            vec![EnvironmentVariable {
+                name: "TEST_OMP_CATALOG_BLOCK".into(),
+                value: "1".into(),
+            }],
+        ))
+        .await;
+    runner.send(command(current_id, Vec::new())).await;
+
+    assert!(matches!(
+        runner.next().await,
+        Event::ModelCatalogLoaded { request_id, harness: HarnessKind::Omp, .. }
+            if request_id == current_id
+    ));
     runner.shutdown().await;
 }
 
@@ -339,7 +609,7 @@ async fn catalog_request_errors_are_explicit_and_retriable() {
 }
 
 #[tokio::test]
-async fn runner_streams_fake_omp_and_uses_guarded_json_mode() {
+async fn runner_streams_fake_omp_and_uses_guarded_rpc_mode() {
     let directory = tempfile::tempdir().unwrap();
     let mut request = request(
         directory.path(),
@@ -375,7 +645,7 @@ async fn runner_streams_fake_omp_and_uses_guarded_json_mode() {
     );
     let args = fs::read_to_string(directory.path().join("omp-args.txt")).unwrap();
     let args = args.lines().collect::<Vec<_>>();
-    assert!(args.windows(2).any(|pair| pair == ["--mode", "json"]));
+    assert!(args.windows(2).any(|pair| pair == ["--mode", "rpc"]));
     assert!(
         args.windows(2)
             .any(|pair| pair == ["--approval-mode", "write"])
@@ -447,6 +717,101 @@ async fn runner_generates_titles_with_each_harness_in_a_safe_background_process(
 }
 
 #[tokio::test]
+async fn steer_waits_for_all_tools_and_uses_native_receipts_in_the_same_run() {
+    let binaries = tempfile::tempdir().unwrap();
+    let executable = fake_harness(binaries.path());
+    for harness in HarnessKind::ALL {
+        for scenario in ["steer-tools", "steer-rejected", "steer-unconfirmed"] {
+            if harness == HarnessKind::Claude && scenario == "steer-rejected" {
+                continue;
+            }
+            let directory = tempfile::tempdir().unwrap();
+            let request = request(directory.path(), executable.clone(), harness, scenario);
+            let run_id = request.run_id;
+            let message_id = Uuid::new_v4();
+            let prompt = "corrected\n指令 \"quoted\"";
+            let mut runner = TestRunner::spawn();
+            runner.send(Command::RunStart(request)).await;
+            loop {
+                if matches!(runner.next().await, Event::RunToolStarted { tool_id, .. } if tool_id == "tool-2")
+                {
+                    break;
+                }
+            }
+            runner
+                .send(Command::RunSteer {
+                    run_id,
+                    message_id,
+                    prompt: prompt.into(),
+                })
+                .await;
+            runner.send(Command::RunnerHello).await;
+            runner.expect_runner_ready().await;
+            fs::write(directory.path().join("finish-first"), "ready").unwrap();
+            loop {
+                match runner.next().await {
+                    Event::RunMessageCompleted { text, .. } if text == "first-tool-done" => break,
+                    Event::RunInputAccepted { .. } | Event::RunExited { .. } => {
+                        panic!("Steer must wait for the whole batch")
+                    }
+                    _ => {}
+                }
+            }
+            assert!(
+                timeout(Duration::from_millis(100), runner.events.next_line())
+                    .await
+                    .is_err()
+            );
+            assert!(!directory.path().join("steer-input.json").exists());
+            fs::write(directory.path().join("finish-second"), "ready").unwrap();
+            let expected = if scenario == "steer-unconfirmed" {
+                RunStatus::Failed
+            } else {
+                RunStatus::Completed
+            };
+            let events = runner.collect_run(run_id, expected).await;
+            assert!(
+                events.iter().any(|event| match event {
+                    Event::RunInputAccepted {
+                        run_id: id,
+                        message_id: received,
+                    } => scenario == "steer-tools" && *id == run_id && *received == message_id,
+                    Event::RunInputRejected {
+                        run_id: id,
+                        message_id: received,
+                        ..
+                    } => scenario != "steer-tools" && *id == run_id && *received == message_id,
+                    _ => false,
+                }),
+                "missing native receipt for {harness} / {scenario}"
+            );
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, Event::RunStarted { .. }))
+            );
+            let frame: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(directory.path().join("steer-input.json")).unwrap(),
+            )
+            .unwrap();
+            match harness {
+                HarnessKind::Codex => {
+                    assert_eq!(frame["method"], "turn/steer");
+                    assert_eq!(frame["params"]["expectedTurnId"], "turn-1");
+                    assert_eq!(frame["params"]["input"][0]["text"], prompt);
+                }
+                HarnessKind::Claude => assert_eq!(frame["message"]["content"], prompt),
+                HarnessKind::Omp => {
+                    assert_eq!(frame["type"], "steer");
+                    assert_eq!(frame["message"], prompt);
+                }
+            }
+            runner.shutdown().await;
+        }
+    }
+}
+
+#[tokio::test]
 async fn shutdown_reaps_a_blocked_title_process_tree() {
     let directory = tempfile::tempdir().unwrap();
     let mut request = request(
@@ -472,6 +837,58 @@ async fn shutdown_reaps_a_blocked_title_process_tree() {
     .await
     .unwrap();
     runner.shutdown().await;
+}
+
+#[tokio::test]
+async fn unsent_steer_is_rejected_on_completion_or_cancellation() {
+    let binaries = tempfile::tempdir().unwrap();
+    let executable = fake_harness(binaries.path());
+    for harness in HarnessKind::ALL {
+        for cancel in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let request = request(
+                directory.path(),
+                executable.clone(),
+                harness,
+                "steer-no-tools",
+            );
+            let run_id = request.run_id;
+            let message_id = Uuid::new_v4();
+            let mut runner = TestRunner::spawn();
+            runner.send(Command::RunStart(request)).await;
+            loop {
+                if matches!(runner.next().await, Event::RunMessageCompleted { text, .. } if text == "ready")
+                {
+                    break;
+                }
+            }
+            runner
+                .send(Command::RunSteer {
+                    run_id,
+                    message_id,
+                    prompt: "keep queued".into(),
+                })
+                .await;
+            runner.send(Command::RunnerHello).await;
+            runner.expect_runner_ready().await;
+            let expected = if cancel {
+                runner.send(Command::RunCancel { run_id }).await;
+                RunStatus::Cancelled
+            } else {
+                fs::write(directory.path().join("finish-turn"), "ready").unwrap();
+                RunStatus::Completed
+            };
+            let events = runner.collect_run(run_id, expected).await;
+            assert!(events.iter().any(|event| matches!(event,
+                Event::RunInputRejected { run_id: id, message_id: received, .. } if *id == run_id && *received == message_id)));
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, Event::RunInputAccepted { .. }))
+            );
+            runner.shutdown().await;
+        }
+    }
 }
 
 #[tokio::test]

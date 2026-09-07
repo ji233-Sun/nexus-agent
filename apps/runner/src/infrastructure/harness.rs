@@ -1,7 +1,7 @@
 use nexus_domain::{HarnessKind, ModelDescriptor};
 use nexus_harness_claude as claude;
 use nexus_harness_codex as codex;
-use nexus_harness_core::{LaunchSpec, LineDecoder};
+use nexus_harness_core::{LaunchSpec, LineDecoder, ModelCatalogError};
 use nexus_harness_omp as omp;
 use nexus_protocol::{EnvironmentVariable, HarnessProbe, StartRun};
 use std::path::Path;
@@ -21,12 +21,11 @@ pub(crate) async fn discover_models(
     cwd: &Path,
     environment: &[EnvironmentVariable],
     cancel: watch::Receiver<bool>,
-) -> Result<Vec<ModelDescriptor>, codex::ModelCatalogError> {
+) -> Result<Vec<ModelDescriptor>, ModelCatalogError> {
     match harness {
         HarnessKind::Codex => codex::discover_models(executable, cwd, environment, cancel).await,
-        HarnessKind::Claude | HarnessKind::Omp => Err(codex::ModelCatalogError::Failed(format!(
-            "{harness} 尚未提供模型目录。"
-        ))),
+        HarnessKind::Omp => omp::discover_models(executable, cwd, environment, cancel).await,
+        HarnessKind::Claude => claude::discover_models(executable, cwd, environment, cancel).await,
     }
 }
 
@@ -39,19 +38,14 @@ pub(crate) fn prepare(request: &StartRun, cwd: &Path) -> (LaunchSpec, Box<dyn Li
                 &request.prompt,
                 request.model.as_deref(),
                 request.effort,
+                request.session_id.as_deref(),
             ),
             Box::new(claude::EventDecoder),
         ),
-        HarnessKind::Codex => (
-            codex::build_launch_spec(
-                &request.executable,
-                cwd,
-                &request.prompt,
-                request.model.as_deref(),
-                request.effort,
-            ),
-            Box::new(codex::EventDecoder),
-        ),
+        HarnessKind::Codex => {
+            let (spec, decoder) = codex::prepare_run(request, cwd);
+            (spec, Box::new(decoder))
+        }
         HarnessKind::Omp => (
             omp::build_launch_spec(
                 &request.executable,
@@ -59,6 +53,7 @@ pub(crate) fn prepare(request: &StartRun, cwd: &Path) -> (LaunchSpec, Box<dyn Li
                 &request.prompt,
                 request.model.as_deref(),
                 request.effort,
+                request.session_id.as_deref(),
             ),
             Box::new(omp::EventDecoder),
         ),
@@ -89,7 +84,7 @@ pub(crate) fn prepare_title(
                 request.model.as_deref(),
                 request.effort,
             ),
-            Box::new(codex::EventDecoder),
+            Box::new(codex::TitleEventDecoder),
         ),
         HarnessKind::Omp => (
             omp::build_title_launch_spec(

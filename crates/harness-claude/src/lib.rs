@@ -1,11 +1,49 @@
 use std::path::{Path, PathBuf};
 
-use nexus_domain::{HarnessKind, ThinkingEffort};
+use nexus_domain::{
+    ClaudeModel, HarnessKind, ModelAvailability, ModelDescriptor, ModelSource, ThinkingEffort,
+};
 pub use nexus_harness_core::{DecodedEvent, LaunchSpec};
-use nexus_harness_core::{LineDecoder, resolve_executable, tool_content};
-use nexus_protocol::HarnessProbe;
-use serde_json::Value;
+use nexus_harness_core::{
+    InputFrame, LineDecoder, ModelCatalogError, resolve_executable, tool_content,
+};
+use nexus_protocol::{EnvironmentVariable, HarnessProbe};
+use serde_json::{Value, json};
 use tokio::process::Command;
+use tokio::sync::watch;
+
+pub async fn discover_models(
+    executable: &str,
+    _cwd: &Path,
+    _environment: &[EnvironmentVariable],
+    cancel: watch::Receiver<bool>,
+) -> Result<Vec<ModelDescriptor>, ModelCatalogError> {
+    if *cancel.borrow() {
+        return Err(ModelCatalogError::Cancelled);
+    }
+    if resolve_executable(executable).is_none() {
+        return Err(ModelCatalogError::Failed(
+            "未找到 Claude Code，无法加载模型别名。".into(),
+        ));
+    }
+    // These are CLI aliases, not a discovered account catalog. Version-specific
+    // model capabilities are deliberately left unknown until the adapter reports them.
+    Ok(ClaudeModel::ALL
+        .into_iter()
+        .filter_map(|model| {
+            Some(ModelDescriptor {
+                id: model.cli_value()?.into(),
+                display_name: model.to_string(),
+                source: ModelSource::ClaudeAliases,
+                availability: ModelAvailability::Unknown,
+                provider: None,
+                is_default: false,
+                supported_reasoning_efforts: Vec::new(),
+                default_reasoning_effort: None,
+            })
+        })
+        .collect())
+}
 
 pub fn build_launch_spec(
     executable: &str,
@@ -13,31 +51,37 @@ pub fn build_launch_spec(
     prompt: &str,
     model: Option<&str>,
     effort: ThinkingEffort,
+    session_id: Option<&str>,
 ) -> LaunchSpec {
     let mut args = vec![
         "--print".into(),
         "--input-format".into(),
-        "text".into(),
+        "stream-json".into(),
         "--output-format".into(),
         "stream-json".into(),
         "--verbose".into(),
         "--include-partial-messages".into(),
+        "--replay-user-messages".into(),
         "--permission-mode".into(),
         "acceptEdits".into(),
-        "--no-session-persistence".into(),
-        "--effort".into(),
-        effort.as_str().into(),
     ];
+    if !effort.is_default() {
+        args.extend(["--effort".into(), effort.as_str().into()]);
+    }
     if let Some(model) = model {
         args.push("--model".into());
         args.push(model.into());
+    }
+    if let Some(session_id) = session_id {
+        args.push("--resume".into());
+        args.push(session_id.into());
     }
 
     LaunchSpec {
         executable: PathBuf::from(executable),
         args,
         cwd: cwd.to_path_buf(),
-        stdin: prompt.to_owned(),
+        stdin: format!("{}\n", user_input(prompt, None)),
     }
 }
 
@@ -48,12 +92,23 @@ pub fn build_title_launch_spec(
     model: Option<&str>,
     effort: ThinkingEffort,
 ) -> LaunchSpec {
-    let mut spec = build_launch_spec(executable, cwd, prompt, model, effort);
+    let mut spec = build_launch_spec(executable, cwd, prompt, model, effort, None);
     if let Some(permission_mode) = spec.args.iter_mut().find(|arg| *arg == "acceptEdits") {
         *permission_mode = "dontAsk".into();
     }
     spec.args.extend(["--tools".into(), String::new()]);
     spec
+}
+
+fn user_input(prompt: &str, message_id: Option<&str>) -> Value {
+    let mut frame = json!({
+        "type": "user", "session_id": "", "parent_tool_use_id": null,
+        "message": { "role": "user", "content": prompt }
+    });
+    if let Some(id) = message_id {
+        frame["uuid"] = id.into();
+    }
+    frame
 }
 
 pub async fn probe(configured_executable: &str) -> HarnessProbe {
@@ -125,19 +180,65 @@ impl LineDecoder for EventDecoder {
         let frame: Value = serde_json::from_str(line)?;
         Ok(decode_frame(&frame))
     }
+
+    fn steer(&mut self, message_id: &str, prompt: &str) -> Option<InputFrame> {
+        Some(InputFrame(user_input(prompt, Some(message_id))))
+    }
 }
 
 fn decode_frame(frame: &Value) -> Vec<DecodedEvent> {
     match frame.get("type").and_then(Value::as_str) {
         Some("stream_event") => decode_stream_event(frame),
         Some("assistant") => decode_assistant(frame),
-        Some("user") => decode_tool_results(frame),
-        Some("system") => frame
-            .get("subtype")
-            .and_then(Value::as_str)
-            .map(|subtype| vec![DecodedEvent::Status(format!("Claude: {subtype}"))])
-            .unwrap_or_default(),
-        Some("result") => Vec::new(),
+        Some("user") => {
+            let mut events = decode_tool_results(frame);
+            if events.is_empty()
+                && let Some(id) = frame.get("uuid").and_then(Value::as_str)
+            {
+                events.push(DecodedEvent::InputAccepted(id.into()));
+            }
+            events
+        }
+        Some("system") => {
+            let mut events = Vec::new();
+            if let Some(subtype) = frame.get("subtype").and_then(Value::as_str) {
+                if subtype == "init"
+                    && let Some(session_id) = frame.get("session_id").and_then(Value::as_str)
+                    && !session_id.is_empty()
+                {
+                    events.push(DecodedEvent::SessionStarted(session_id.to_owned()));
+                }
+                events.push(DecodedEvent::Status(format!("Claude: {subtype}")));
+            }
+            events
+        }
+        Some("result") => {
+            let mut events = Vec::new();
+            if frame.get("is_error").and_then(Value::as_bool) == Some(true) {
+                events.push(DecodedEvent::Error(
+                    frame
+                        .get("errors")
+                        .map(tool_content)
+                        .unwrap_or_else(|| "Claude 轮次执行失败。".into()),
+                ));
+            }
+            events.push(DecodedEvent::TurnCompleted);
+            events
+        }
+        Some("control_request") => {
+            let request_id = &frame["request_id"];
+            let response = if frame.pointer("/request/subtype").and_then(Value::as_str)
+                == Some("can_use_tool")
+            {
+                json!({"subtype": "success", "request_id": request_id,
+                    "response": {"behavior": "deny", "message": "Nexus 暂不支持交互式工具审批。"}})
+            } else {
+                json!({"subtype": "error", "request_id": request_id, "error": "Nexus 不支持此控制请求。"})
+            };
+            vec![DecodedEvent::WriteStdin(InputFrame(
+                json!({"type": "control_response", "response": response}),
+            ))]
+        }
         _ => Vec::new(),
     }
 }
@@ -225,14 +326,71 @@ fn decode_tool_results(frame: &Value) -> Vec<DecodedEvent> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn catalog_exposes_aliases_without_claiming_unknown_capabilities() {
+        let executable = std::env::current_exe().unwrap();
+        let (cancel, receiver) = watch::channel(false);
+        let models = discover_models(
+            executable.to_str().unwrap(),
+            Path::new("."),
+            &[],
+            receiver.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["sonnet", "opus", "haiku"]
+        );
+        for model in models {
+            assert_eq!(model.source.harness(), HarnessKind::Claude);
+            assert_eq!(model.availability, ModelAvailability::Unknown);
+            assert!(model.supported_reasoning_efforts.is_empty());
+            assert!(model.default_reasoning_effort.is_none());
+        }
+        cancel.send_replace(true);
+        assert_eq!(
+            discover_models("unused", Path::new("."), &[], receiver).await,
+            Err(ModelCatalogError::Cancelled)
+        );
+        assert!(matches!(
+            discover_models(
+                "nexus-missing-claude",
+                Path::new("."),
+                &[],
+                watch::channel(false).1
+            )
+            .await,
+            Err(ModelCatalogError::Failed(_))
+        ));
+    }
+
     #[test]
     fn launch_spec_includes_model_and_effort_without_prompt_in_argv() {
+        let defaults = build_launch_spec(
+            "claude",
+            Path::new("."),
+            "test",
+            None,
+            ThinkingEffort::Default,
+            None,
+        );
+        assert!(
+            !defaults
+                .args
+                .iter()
+                .any(|arg| arg == "--model" || arg == "--effort")
+        );
         let spec = build_launch_spec(
             "/usr/local/bin/claude",
             Path::new("/tmp/project"),
             "secret prompt",
             Some("opus"),
             ThinkingEffort::XHigh,
+            None,
         );
         assert!(spec.args.windows(2).any(|pair| pair == ["--model", "opus"]));
         assert!(
@@ -241,7 +399,52 @@ mod tests {
                 .any(|pair| pair == ["--effort", "xhigh"])
         );
         assert!(!spec.args.iter().any(|arg| arg.contains("secret prompt")));
-        assert_eq!(spec.stdin, "secret prompt");
+        assert!(
+            spec.args
+                .windows(2)
+                .any(|pair| pair == ["--input-format", "stream-json"])
+        );
+        assert!(spec.args.iter().any(|arg| arg == "--replay-user-messages"));
+        assert_eq!(
+            serde_json::from_str::<Value>(&spec.stdin).unwrap()["message"]["content"],
+            "secret prompt"
+        );
+        assert!(
+            !spec
+                .args
+                .iter()
+                .any(|arg| arg == "--no-session-persistence" || arg == "--resume")
+        );
+        let resumed = build_launch_spec(
+            "claude",
+            Path::new("/tmp/project"),
+            "follow-up",
+            None,
+            ThinkingEffort::High,
+            Some("existing-session"),
+        );
+        assert!(
+            resumed
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--resume", "existing-session"])
+        );
+        assert!(
+            resumed
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--permission-mode", "acceptEdits"])
+        );
+        assert!(
+            !resumed
+                .args
+                .iter()
+                .any(|arg| arg == "--no-session-persistence" || arg == "--fork-session")
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&resumed.stdin).unwrap()["message"]["content"],
+            "follow-up"
+        );
     }
 
     #[test]
@@ -267,6 +470,17 @@ mod tests {
     #[test]
     fn decoder_maps_text_and_tool_events() {
         let mut decoder = EventDecoder;
+        assert_eq!(
+            decoder
+                .decode_line(
+                    r#"{"type":"system","subtype":"init","session_id":"existing-session"}"#
+                )
+                .unwrap(),
+            vec![
+                DecodedEvent::SessionStarted("existing-session".into()),
+                DecodedEvent::Status("Claude: init".into())
+            ]
+        );
         let delta = r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"你好"}}}"#;
         assert_eq!(
             decoder.decode_line(delta).unwrap(),
@@ -307,7 +521,25 @@ mod tests {
             decoder
                 .decode_line(r#"{"type":"result","result":"done"}"#)
                 .unwrap(),
-            Vec::<DecodedEvent>::new()
+            vec![DecodedEvent::TurnCompleted]
+        );
+    }
+
+    #[test]
+    fn steering_replays_the_message_id_and_reports_failed_turns() {
+        let mut decoder = EventDecoder;
+        let frame = decoder
+            .steer("message-id", "new instruction\n第二行")
+            .unwrap();
+        assert_eq!(frame.0["uuid"], "message-id");
+        assert_eq!(frame.0["message"]["content"], "new instruction\n第二行");
+        assert_eq!(
+            decoder.decode_line(&frame.0.to_string()).unwrap(),
+            vec![DecodedEvent::InputAccepted("message-id".into())]
+        );
+        assert!(
+            matches!(decoder.decode_line(r#"{"type":"result","is_error":true,"errors":["denied"]}"#).unwrap().as_slice(),
+            [DecodedEvent::Error(message), DecodedEvent::TurnCompleted] if message.contains("denied"))
         );
     }
 }

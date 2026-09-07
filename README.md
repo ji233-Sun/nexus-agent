@@ -14,16 +14,21 @@ Nexus Agent 是一个面向 Linux、macOS 和 Windows 的本地桌面应用，�
 - 用当前 Harness 异步生成简洁任务标题；生成失败时保留首条 Prompt 的本地回退标题。
 - 取消和关闭时清理 Harness 进程树：Unix 先中断再超时终止，Windows 使用系统 `taskkill /T /F`。
 - SQLite 持久化 Nexus 发起的项目、任务、Run 和最终消息；启动时将遗留运行标为 `Interrupted`。
+- 当前任务中的后续消息追加为新一轮 Run，并复用同一个 Harness Session；重新打开任务后仍可继续对话，点击“新建任务”才开始独立会话。
+- 运行中发送的消息默认排队，每轮成功结束后按顺序发送一条；输入区可查看和移除排队消息。停止、运行失败或轮次结束时已切换到其他任务，都会暂停自动发送，返回原任务后可手动继续。队列属于原任务，仅保留在当前应用内，退出应用后不恢复；归档时保留，永久删除对话时清理。
+- 点击排队消息上的 **Steer**，在下一次工具调用结束后介入当前轮次；同批并行工具全部结束后才会发送。收到 Harness 回执后，消息才从队列移入当前对话。如果本轮不再调用工具，消息会优先作为下一轮发送；停止、失败或送达结果未确认时保留消息并暂停自动发送。
 - 在本机回环地址提供带令牌鉴权的 Remote Control 服务，并内置 React Web Client，可通过 FRP TCP 转发后远程查看会话、发起任务和取消运行。
 - 提示项目中的未提交修改，但不创建 Worktree，也不执行 Git 写操作。
 
-Claude Code 以 `--permission-mode acceptEdits` 运行：文件编辑按 Claude Code 的该模式处理，其余受限工具仍遵循 Claude Code 自身权限策略。
+Claude Code 通过 `--print --input-format stream-json --output-format stream-json --replay-user-messages` 收发消息，以 `--permission-mode acceptEdits` 运行：文件编辑按 Claude Code 的该模式处理，其余受限工具仍遵循 Claude Code 自身权限策略。
 
-Codex 按[官方非交互模式](https://learn.chatgpt.com/docs/non-interactive-mode)通过 `codex exec --skip-git-repo-check --json --sandbox workspace-write --ephemeral -` 运行。用户已在 Nexus 中明确选择工作目录，因此也允许运行非 Git 项目。Prompt 由 stdin 传入，Codex 可以修改所选工作目录，但不能通过 Nexus 请求交互式提权。当前版本没有交互式审批面板。
+Codex 通过[官方 App Server 协议](https://learn.chatgpt.com/docs/app-server)运行，使用 `thread/start` / `thread/resume` 和 `turn/start`，Steer 通过带当前轮次 ID 的 `turn/steer` 注入。所选工作目录继续使用 `workspace-write` 沙箱和 `never` 审批策略，也支持非 Git 项目。Prompt 由 stdin 传入，Codex 可以修改所选工作目录，但不能通过 Nexus 请求交互式提权。当前版本没有交互式审批面板。
 
-OMP 通过 `omp --print --mode json --no-session --approval-mode write` 运行，Prompt 同样由 stdin 传入。OMP 的本地 Session 被关闭，但 Nexus 仍会把任务、运行状态和最终消息保存到自己的历史记录中。
+OMP 通过 `omp --mode rpc --approval-mode write` 运行，Prompt 与 Steer 同样由 stdin 传入。Claude Code 与 OMP 的后续轮次均通过 `--resume <SESSION_ID>` 继续原会话。
 
-Provider Profile 的名称、Base URL、环境变量名和默认模型保存在 `nexus.db`；API Key 持久化时只保存在系统凭据库（macOS Keychain、Windows Credential Manager 或 Linux Secret Service），不会写入数据库、命令参数、运行记录或 Debug 输出。选中的配置只在单次 Harness 子进程中注入，不修改全局 shell 环境。系统凭据库不可用时 Nexus 会显示错误，不会退回明文存储。Codex 非交互运行默认使用官方支持的 [`CODEX_API_KEY`](https://learn.chatgpt.com/docs/config-file/environment-variables)；DeepSeek 等 Provider 可按目标 Harness 要求填写自己的环境变量名。
+三个 Harness 均保存原生 Session，Nexus 在自己的数据库中记录 Session ID、各轮运行状态和消息。旧版本关闭了原生 Session 保存，因此旧任务可能只能浏览历史；缺少 Session ID 时会提示无法续聊。继续对话需使用原任务的 Harness，切换 Harness 请新建任务。
+
+Provider Profile 的名称、Base URL、环境变量名和默认模型保存在 `nexus.db`；API Key 持久化时只保存在系统凭据库（macOS Keychain、Windows Credential Manager 或 Linux Secret Service），不会写入数据库、命令参数、运行记录或 Debug 输出。选中的配置只在单次 Harness 子进程中注入，不修改全局 shell 环境。系统凭据库不可用时 Nexus 会显示错误，不会退回明文存储。配置 `CODEX_API_KEY` 时，Nexus 会在 Codex App Server 内完成仅存于该进程内存的 API Key 登录，不改写 CLI 的持久登录凭据；DeepSeek 等 Provider 可按目标 Harness 要求填写自己的环境变量名。
 
 Codex 原有历史通过 CLI 自带的实验性 `codex app-server` 协议读取，不复制到 Nexus 数据库，也不会被 Nexus 修改。若独立 CLI 无法读取 Desktop 创建的新版分页会话，Nexus 会自动尝试 Desktop 内置的 Codex。Nexus 自己完成或失败的任务继续保存在 `nexus.db` 中。
 
@@ -131,6 +136,8 @@ cargo build --workspace
 
 桌面 UI 基于 [GPUI Kit 0.6](https://github.com/longbridge/gpui-kit)，使用其 Sidebar 导航、图标资源、Button、Input / Textarea、下拉菜单、Switch 和 Markdown 组件，统一石墨灰主题与控件交互。点击侧栏底部或任务顶部的“设置”进入独立设置页面，管理执行环境、远程访问和交互偏好；点击“返回工作区”恢复原任务、输入草稿和滚动位置。界面保留 `⌘/Ctrl K` 搜索、`⌘/Ctrl N` 新任务、`⌘/Ctrl ,` 切换设置和 `⌘/Ctrl Enter` 发送快捷键。
 
+桌面端默认使用简体中文，可在 **设置 → 通用 → 界面语言** 切换为 **English**，立即生效并在重启后保留。切换会更新界面、菜单、占位文字和应用状态提示，保留当前任务与输入草稿；用户内容、Agent 输出、原始诊断和 Remote Web 内容保持原样。
+
 桌面 UI 使用 MVP（Model–View–Presenter），Runner 使用分层架构。两个进程的入口只负责启动装配，业务逻辑放在独立模块中。
 
 ```text
@@ -148,8 +155,8 @@ React Remote Web ── authenticated HTTP/WebSocket ──┐
                                         JSONL         调度、独占、取消   Harness / 进程组
                                                         │
                                                         ├── stream-json ──▶ Claude Code
-                                                        ├── exec --json ──▶ Codex CLI
-                                                        └── --print --mode json ──▶ Oh My Pi
+                                                        ├── app-server ──▶ Codex CLI
+                                                        └── --mode rpc ──▶ Oh My Pi
 ```
 
 - `crates/domain`：领域状态、模型和思考层级。

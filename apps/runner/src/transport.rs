@@ -75,9 +75,12 @@ mod tests {
     async fn skips_invalid_frames_and_stops_at_shutdown() {
         let mut wrong_version = CommandEnvelope::new(Command::RunnerHello);
         wrong_version.protocol_version = PROTOCOL_VERSION + 1;
+        let mut old_version = CommandEnvelope::new(Command::RunnerHello);
+        old_version.protocol_version = PROTOCOL_VERSION - 1;
         let input = format!(
-            "invalid json\n{}\n{}{}{}",
+            "invalid json\n{}\n{}\n{}{}{}",
             serde_json::to_string(&wrong_version).unwrap(),
+            serde_json::to_string(&old_version).unwrap(),
             frame(Command::RunnerHello),
             frame(Command::RunnerShutdown),
             frame(Command::RunnerHello)

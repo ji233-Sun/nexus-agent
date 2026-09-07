@@ -6,6 +6,7 @@ mod runs;
 pub(crate) mod tests;
 
 use crate::{
+    i18n::{Language, LocalizedText},
     infrastructure::{
         codex_history::Client as CodexHistoryClient,
         credentials::{CredentialStore, SystemCredentialStore},
@@ -32,6 +33,7 @@ pub(crate) trait RunnerPort {
 pub(crate) struct Presenter {
     model: AppModel,
     active_run_started_at: Option<Instant>,
+    catalog_project: Option<Uuid>,
     storage: Storage,
     runner: Option<Box<dyn RunnerPort>>,
     codex_history_client: Option<CodexHistoryClient>,
@@ -72,6 +74,13 @@ impl Presenter {
         credentials: Box<dyn CredentialStore>,
     ) -> Self {
         let projects = storage.projects().unwrap_or_default();
+        let archived_tasks = storage.archived_tasks().unwrap_or_default();
+        let language = storage
+            .setting("language")
+            .ok()
+            .flatten()
+            .map(|value| Language::from_setting(&value))
+            .unwrap_or_default();
         let appearance = storage
             .setting("appearance")
             .ok()
@@ -84,18 +93,12 @@ impl Presenter {
             .flatten()
             .and_then(|value| HarnessKind::from_str(&value).ok())
             .unwrap_or_default();
-        let model = storage
-            .setting("claude_model")
-            .ok()
-            .flatten()
-            .and_then(|value| ClaudeModel::from_str(&value).ok())
-            .unwrap_or_default();
         let stored_effort = storage
             .setting("thinking_effort")
             .ok()
             .flatten()
             .and_then(|value| ThinkingEffort::from_str(&value).ok())
-            .unwrap_or_default();
+            .unwrap_or(ThinkingEffort::Default);
         let executable = storage
             .setting(executable_setting_key(selected_harness))
             .ok()
@@ -126,18 +129,17 @@ impl Presenter {
                     .then_some((harness, profile_id))
             })
             .collect::<BTreeMap<_, _>>();
-        let codex_profile_id = active_provider_profiles.get(&HarnessKind::Codex).copied();
-        let codex_model_override = storage
-            .setting(&codex_model_setting_key(codex_profile_id))
+        let profile_id = active_provider_profiles.get(&selected_harness).copied();
+        let (model_override, effort) =
+            load_catalog_preferences(&storage, selected_harness, profile_id, stored_effort);
+        let model_override_name = storage
+            .setting(&catalog_model_name_setting_key(
+                selected_harness,
+                profile_id,
+            ))
             .ok()
             .flatten()
-            .filter(|model| !model.is_empty());
-        let codex_effort = storage
-            .setting(&codex_effort_setting_key(codex_profile_id))
-            .ok()
-            .flatten()
-            .and_then(|value| ThinkingEffort::from_str(&value).ok())
-            .unwrap_or(ThinkingEffort::Default);
+            .filter(|name| !name.is_empty());
         let remote_token = storage
             .setting(TOKEN_SETTING_KEY)
             .ok()
@@ -159,23 +161,28 @@ impl Presenter {
             storage,
             runner,
             active_run_started_at: None,
+            catalog_project: None,
             model: AppModel {
+                language,
                 appearance,
                 projects,
+                archived_tasks,
                 selected_harness,
-                claude_model: model,
-                codex_model_override,
-                effort: if selected_harness == HarnessKind::Codex {
-                    codex_effort
-                } else {
-                    stored_effort
-                },
+                model_override,
+                model_override_name,
+                effort,
                 executable,
                 provider_profiles,
                 active_provider_profiles,
                 status: storage_error
+                    .map(LocalizedText::from)
                     .or_else(|| {
-                        credential_store_error.map(|error| format!("无法读取系统凭据库：{error}"))
+                        credential_store_error.map(|error| {
+                            LocalizedText::new(
+                                "无法读取系统凭据库：{error}",
+                                &[("error", (error).to_string())],
+                            )
+                        })
                     })
                     .unwrap_or_else(|| "正在连接本地 Runner…".into()),
                 ..AppModel::default()
@@ -201,13 +208,29 @@ impl Presenter {
                 }));
             }
         } else if !has_storage_error {
-            presenter.model.status = runner_error.unwrap_or_default();
+            presenter.model.status = runner_error.unwrap_or_default().into();
         }
         presenter
     }
 
     pub(crate) fn model(&self) -> &AppModel {
         &self.model
+    }
+
+    pub(crate) fn set_language(&mut self, language: Language) -> bool {
+        match self.storage.set_setting("language", language.as_str()) {
+            Ok(()) => {
+                self.model.language = language;
+                true
+            }
+            Err(error) => {
+                self.model.status = LocalizedText::new(
+                    "无法保存语言偏好：{error}",
+                    &[("error", error.to_string())],
+                );
+                false
+            }
+        }
     }
 
     pub(crate) fn set_appearance(&mut self, appearance: AppearanceSettings) -> bool {
@@ -220,7 +243,10 @@ impl Presenter {
                 true
             }
             Err(error) => {
-                self.model.status = format!("无法保存外观偏好：{error}");
+                self.model.status = LocalizedText::new(
+                    "无法保存外观偏好：{error}",
+                    &[("error", (error).to_string())],
+                );
                 false
             }
         }
@@ -244,6 +270,10 @@ impl Presenter {
             .unwrap_or_default();
         let mut changed = !runner_events.is_empty() || !history_events.is_empty();
         for envelope in runner_events {
+            if envelope.protocol_version != nexus_protocol::PROTOCOL_VERSION {
+                self.model.status = "Desktop 与 Runner 协议版本不匹配，请重启或更新应用。".into();
+                continue;
+            }
             self.handle_event(envelope.event);
         }
         for event in history_events {
@@ -262,9 +292,12 @@ impl Presenter {
         match self.storage.open_project(path) {
             Ok(project) => {
                 self.select_project(project);
-                self.model.projects = self.storage.projects().unwrap_or_default();
+                self.reload_projects();
             }
-            Err(error) => self.model.status = format!("无法打开项目：{error}"),
+            Err(error) => {
+                self.model.status =
+                    LocalizedText::new("无法打开项目：{error}", &[("error", (error).to_string())])
+            }
         }
     }
 
@@ -294,6 +327,20 @@ impl Presenter {
         self.refresh_model_catalog();
     }
 
+    fn reload_projects(&mut self) {
+        let Ok(mut projects) = self.storage.projects() else {
+            return;
+        };
+        if let Some(selected_project) = &self.model.selected_project
+            && !projects
+                .iter()
+                .any(|project| project.id == selected_project.id)
+        {
+            projects.push(selected_project.clone());
+        }
+        self.model.projects = projects;
+    }
+
     fn reload_tasks(&mut self) {
         self.model.tasks = self
             .model
@@ -301,6 +348,7 @@ impl Presenter {
             .as_ref()
             .and_then(|project| self.storage.tasks(project.id).ok())
             .unwrap_or_default();
+        self.model.archived_tasks = self.storage.archived_tasks().unwrap_or_default();
     }
 
     pub(crate) fn select_task(&mut self, task_id: Uuid) {
@@ -309,15 +357,15 @@ impl Presenter {
         self.model.codex_history_messages.clear();
         self.model.codex_thread_loading = false;
         self.model.messages = self.storage.messages(task_id).unwrap_or_default();
+        if self.model.active_run.is_some() {
+            return;
+        }
         if let Ok(Some(config)) = self.storage.conversation_config(task_id) {
             self.model.selected_harness = config.harness;
-            self.model.effort = config.effort;
-            if config.harness == HarnessKind::Claude {
-                self.model.claude_model = ClaudeModel::from_str(&config.model).unwrap_or_default();
-            } else if config.harness == HarnessKind::Codex {
-                self.model.codex_model_override =
-                    (config.model != "default").then_some(config.model.clone());
-            }
+            self.model.effort = normalize_effort_for_harness(config.harness, config.effort);
+            self.model.model_override = (config.model != "default").then_some(config.model.clone());
+            self.model.model_override_name = None;
+            self.model.model_catalog = ModelCatalogState::Idle;
             let executable = if config.executable.is_empty() {
                 self.storage
                     .setting(executable_setting_key(config.harness))
@@ -327,15 +375,125 @@ impl Presenter {
             } else {
                 config.executable
             };
-            self.model.executable = executable;
+            self.model.executable = executable.clone();
+            if !self
+                .model
+                .selected_probe()
+                .is_some_and(|probe| probe.executable == executable)
+            {
+                self.model.harnesses.remove(&config.harness);
+                self.model.status = if let Some(runner) = &self.runner
+                    && runner
+                        .send(CommandEnvelope::new(Command::HarnessProbe {
+                            harness: config.harness,
+                            executable,
+                        }))
+                        .is_ok()
+                {
+                    LocalizedText::new("正在探测 {0}…", &[("0", (config.harness).to_string())])
+                } else {
+                    "Runner 不可用，无法探测任务使用的可执行文件。".into()
+                };
+            }
             self.refresh_model_catalog();
         }
     }
 
+    pub(crate) fn archive_task(&mut self, task_id: Uuid) -> bool {
+        if self.model.active_run.is_some() {
+            return false;
+        }
+        if let Err(error) = self.storage.archive_task(task_id) {
+            self.model.status =
+                LocalizedText::new("无法归档对话：{error}", &[("error", (error).to_string())]);
+            return false;
+        }
+        if self.model.selected_task == Some(task_id) {
+            self.new_task();
+        }
+        self.reload_tasks();
+        self.model.status = "对话已归档。".into();
+        true
+    }
+
+    pub(crate) fn restore_task(&mut self, task_id: Uuid) -> bool {
+        if self.model.active_run.is_some() {
+            return false;
+        }
+        if let Err(error) = self.storage.restore_task(task_id) {
+            self.model.status =
+                LocalizedText::new("无法取消归档：{error}", &[("error", (error).to_string())]);
+            return false;
+        }
+        self.reload_projects();
+        self.reload_tasks();
+        self.model.status = "对话已恢复。".into();
+        true
+    }
+
+    pub(crate) fn delete_task(&mut self, task_id: Uuid) -> bool {
+        if self.model.active_run.is_some() {
+            return false;
+        }
+        if let Err(error) = self.storage.delete_task(task_id) {
+            self.model.status =
+                LocalizedText::new("无法删除对话：{error}", &[("error", (error).to_string())]);
+            return false;
+        }
+        self.model
+            .queued_messages
+            .retain(|message| message.task_id != task_id);
+        if self.model.selected_task == Some(task_id) {
+            self.new_task();
+        }
+        self.reload_projects();
+        self.reload_tasks();
+        self.model.status = "对话已删除。".into();
+        true
+    }
+
+    pub(crate) fn delete_archived_tasks(&mut self) -> bool {
+        if self.model.active_run.is_some() {
+            return false;
+        }
+        match self.storage.delete_archived_tasks() {
+            Ok(count) => {
+                self.model.queued_messages.retain(|message| {
+                    !self
+                        .model
+                        .archived_tasks
+                        .iter()
+                        .any(|task| task.id == message.task_id)
+                });
+                self.reload_projects();
+                self.reload_tasks();
+                self.model.status = LocalizedText::new(
+                    "已删除 {count} 个归档对话。",
+                    &[("count", (count).to_string())],
+                );
+                true
+            }
+            Err(error) => {
+                self.model.status = LocalizedText::new(
+                    "无法清空归档对话：{error}",
+                    &[("error", (error).to_string())],
+                );
+                false
+            }
+        }
+    }
+
     pub(crate) fn probe(&mut self, executable: &str) {
+        if self.model.active_run.is_some() {
+            return;
+        }
         let executable = executable.trim().to_owned();
         let harness = self.model.selected_harness;
+        if self.model.executable != executable {
+            self.model.model_catalog = ModelCatalogState::Idle;
+        }
         self.model.executable = executable.clone();
+        self.model.harnesses.remove(&harness);
         if let Some(runner) = &self.runner {
             let _ = runner.send(CommandEnvelope::new(Command::HarnessProbe {
                 harness,
@@ -344,7 +502,8 @@ impl Presenter {
             let _ = self
                 .storage
                 .set_setting(executable_setting_key(harness), &executable);
-            self.model.status = format!("正在探测 {harness}…");
+            self.model.status =
+                LocalizedText::new("正在探测 {harness}…", &[("harness", (harness).to_string())]);
         }
         self.refresh_model_catalog();
     }
@@ -354,6 +513,42 @@ impl Presenter {
         harness: HarnessKind,
         current_executable: &str,
     ) -> bool {
+        if !self.switch_harness(harness, current_executable) {
+            return false;
+        }
+        self.restore_catalog_preferences();
+        self.refresh_model_catalog();
+        true
+    }
+
+    pub(crate) fn select_model_configuration(
+        &mut self,
+        harness: HarnessKind,
+        profile_id: Option<Uuid>,
+        current_executable: &str,
+    ) -> bool {
+        if self.model.active_run.is_some()
+            || (self.model.selected_harness == harness
+                && self
+                    .model
+                    .selected_provider_profile()
+                    .map(|profile| profile.id)
+                    == profile_id)
+            || profile_id.is_some_and(|id| {
+                !self
+                    .model
+                    .provider_profiles
+                    .iter()
+                    .any(|profile| profile.id == id && profile.harness == harness)
+            })
+        {
+            return false;
+        }
+        self.switch_harness(harness, current_executable);
+        self.select_provider_profile(profile_id)
+    }
+
+    fn switch_harness(&mut self, harness: HarnessKind, current_executable: &str) -> bool {
         if self.model.active_run.is_some() || self.model.selected_harness == harness {
             return false;
         }
@@ -366,18 +561,6 @@ impl Presenter {
         }
 
         self.model.selected_harness = harness;
-        if harness == HarnessKind::Codex {
-            self.restore_codex_preferences();
-        } else {
-            self.model.effort = self
-                .storage
-                .setting("thinking_effort")
-                .ok()
-                .flatten()
-                .and_then(|value| ThinkingEffort::from_str(&value).ok())
-                .unwrap_or_default();
-            self.model.codex_model_catalog = ModelCatalogState::Idle;
-        }
         let _ = self
             .storage
             .set_setting("default_harness", self.model.selected_harness.as_str());
@@ -393,61 +576,61 @@ impl Presenter {
                 harness: self.model.selected_harness,
                 executable,
             }));
-            self.model.status = format!("正在探测 {}…", self.model.selected_harness);
+            self.model.status = LocalizedText::new(
+                "正在探测 {0}…",
+                &[("0", (self.model.selected_harness).to_string())],
+            );
         }
-        self.refresh_model_catalog();
         true
     }
 
-    pub(crate) fn select_model(&mut self, model: ClaudeModel) {
-        if self.model.active_run.is_some()
-            || self.model.selected_harness != HarnessKind::Claude
-            || self.model.claude_model == model
-        {
-            return;
-        }
-        self.model.claude_model = model;
-        let _ = self
-            .storage
-            .set_setting("claude_model", self.model.claude_model.as_str());
-    }
-
-    pub(crate) fn select_codex_model(&mut self, model_id: Option<String>) {
-        if self.model.active_run.is_some() || self.model.selected_harness != HarnessKind::Codex {
+    pub(crate) fn select_catalog_model(&mut self, model_id: Option<String>) {
+        if self.model.active_run.is_some() {
             return;
         }
         if model_id.as_deref().is_some_and(|id| {
-            !self
-                .model
-                .codex_model_catalog
-                .models()
-                .is_some_and(|models| models.iter().any(|model| model.id == id))
+            !self.model.model_catalog.models().is_some_and(|models| {
+                models
+                    .iter()
+                    .any(|model| model.id == id && model.availability.is_selectable())
+            })
         }) {
-            self.model.status = "所选模型不在当前 Codex 目录中，请刷新后重试。".into();
+            self.model.status = LocalizedText::new(
+                "所选模型不在当前 {0} 目录中，请刷新后重试。",
+                &[("0", (self.model.selected_harness).to_string())],
+            );
             return;
         }
-        if self.model.codex_model_override == model_id {
+        if self.model.model_override == model_id {
             return;
         }
-        self.model.codex_model_override = model_id;
+        self.model.model_override = model_id;
+        self.remember_model_name();
+        let harness = self.model.selected_harness;
         let profile_id = self
             .model
             .selected_provider_profile()
             .map(|profile| profile.id);
         let _ = self.storage.set_setting(
-            &codex_model_setting_key(profile_id),
-            self.model
-                .codex_model_override
-                .as_deref()
-                .unwrap_or_default(),
+            &catalog_model_setting_key(harness, profile_id),
+            self.model.model_override.as_deref().unwrap_or_default(),
         );
-        let effort_reset = self.normalize_codex_effort();
+        let effort_reset = self.normalize_catalog_effort();
         self.model.status = if effort_reset {
             "模型已切换；原 effort 不受支持，已恢复为模型默认。".into()
-        } else if let Some(model) = &self.model.codex_model_override {
-            format!("本次 Codex 任务将使用 {model}。")
+        } else if let Some(model) = &self.model.model_override {
+            LocalizedText::new(
+                "本次 {harness} 任务将使用 {model}。",
+                &[
+                    ("harness", (harness).to_string()),
+                    ("model", (model).to_string()),
+                ],
+            )
         } else {
-            "Codex 模型已恢复为跟随 Profile / CLI 默认。".into()
+            LocalizedText::new(
+                "{harness} 模型已恢复为跟随 Profile / CLI 默认。",
+                &[("harness", (harness).to_string())],
+            )
         };
     }
 
@@ -455,62 +638,104 @@ impl Presenter {
         if self.model.active_run.is_some() || self.model.effort == effort {
             return;
         }
-        if self.model.selected_harness == HarnessKind::Codex
-            && !effort.is_default()
-            && !self
+        if !effort.is_default()
+            && self
                 .model
-                .selected_codex_catalog_model()
-                .is_some_and(|model| model.supports_effort(&effort))
+                .selected_catalog_model()
+                .is_none_or(|model| !model.supports_effort(&effort))
         {
-            self.model.status = "当前 Codex 模型不支持所选 effort。".into();
+            self.model.status = LocalizedText::new(
+                "当前 {0} 模型不支持所选 effort。",
+                &[("0", (self.model.selected_harness).to_string())],
+            );
             return;
         }
-        self.model.effort = effort;
-        if self.model.selected_harness == HarnessKind::Codex {
-            self.persist_codex_effort();
-        } else {
-            let _ = self
-                .storage
-                .set_setting("thinking_effort", self.model.effort.as_str());
-        }
+        self.model.effort = normalize_effort_for_harness(self.model.selected_harness, effort);
+        self.persist_catalog_effort();
     }
 
     pub(crate) fn refresh_model_catalog(&mut self) -> bool {
-        if self.model.active_run.is_some() || self.model.selected_harness != HarnessKind::Codex {
+        if self.model.active_run.is_some() {
             return false;
         }
+        let project_id = self
+            .model
+            .selected_project
+            .as_ref()
+            .map(|project| project.id);
+        let project_changed = self.catalog_project != project_id;
+        self.catalog_project = project_id;
+        let harness = self.model.selected_harness;
         let Some(project) = self.model.selected_project.as_ref() else {
-            self.model.codex_model_catalog = ModelCatalogState::Idle;
+            self.model.model_catalog = ModelCatalogState::Idle;
             return false;
         };
-        let (environment, _) = match self.provider_launch_configuration() {
+        if self
+            .model
+            .selected_probe()
+            .is_some_and(|probe| !probe.available)
+        {
+            self.model.model_catalog = ModelCatalogState::NotReady(
+                "可执行文件尚未就绪，请在设置中检查并重新探测。".into(),
+            );
+            return false;
+        }
+        let environment = match self.provider_launch_configuration() {
             Ok(configuration) => configuration,
             Err(error) => {
-                self.model.codex_model_catalog = ModelCatalogState::Failed(error.to_string());
-                self.model.status = format!("无法加载 Codex 模型目录：{error}");
+                self.model.model_catalog = ModelCatalogState::NotReady(error.to_string().into());
+                self.model.status = LocalizedText::new(
+                    "无法加载 {harness} 模型目录：{error}",
+                    &[
+                        ("harness", (harness).to_string()),
+                        ("error", (error).to_string()),
+                    ],
+                );
                 return false;
             }
         };
         let Some(runner) = &self.runner else {
-            self.model.codex_model_catalog = ModelCatalogState::Failed("Runner 不可用。".into());
-            self.model.status = "Runner 不可用，无法加载 Codex 模型目录。".into();
+            self.model.model_catalog.fail("Runner 不可用。".into());
+            self.model.status = LocalizedText::new(
+                "Runner 不可用，无法加载 {harness} 模型目录。",
+                &[("harness", (harness).to_string())],
+            );
             return false;
         };
         let request_id = Uuid::new_v4();
         let command = CommandEnvelope::new(Command::ModelCatalogRefresh {
             request_id,
-            harness: HarnessKind::Codex,
+            harness,
             executable: self.model.executable.clone(),
             cwd: project.canonical_path.clone(),
             environment,
         });
-        self.model.codex_model_catalog = ModelCatalogState::Loading { request_id };
+        let mut models = self
+            .model
+            .model_catalog
+            .models()
+            .unwrap_or_default()
+            .to_vec();
+        if project_changed {
+            // Explicit model capabilities remain useful while refreshing, but the CLI
+            // default can differ between project configurations.
+            for model in &mut models {
+                model.is_default = false;
+            }
+        }
+        self.model.model_catalog = ModelCatalogState::Loading { request_id, models };
         if runner.send(command).is_err() {
-            self.model.codex_model_catalog = ModelCatalogState::Failed("Runner 不可用。".into());
-            self.model.status = "Runner 不可用，无法加载 Codex 模型目录。".into();
+            self.model.model_catalog.fail("Runner 不可用。".into());
+            self.model.status = LocalizedText::new(
+                "Runner 不可用，无法加载 {harness} 模型目录。",
+                &[("harness", (harness).to_string())],
+            );
             return false;
         }
-        self.model.status = "正在加载 Codex 模型目录…".into();
+        self.model.status = LocalizedText::new(
+            "正在加载 {harness} 模型目录…",
+            &[("harness", (harness).to_string())],
+        );
         true
     }
 
@@ -541,23 +766,34 @@ impl Presenter {
                 &profile_id.to_string(),
             );
             self.model.status = match credential_result {
-                Ok(true) => format!("已启用 Provider Profile：{profile_name}"),
-                Ok(false) => {
-                    format!("已选择 {profile_name}，但系统凭据库中没有 API Key。")
-                }
-                Err(error) => format!("已选择 {profile_name}，但无法读取系统凭据库：{error}"),
+                Ok(true) => LocalizedText::new(
+                    "已启用 Provider Profile：{profile_name}",
+                    &[("profile_name", (profile_name).to_string())],
+                ),
+                Ok(false) => LocalizedText::new(
+                    "已选择 {profile_name}，但系统凭据库中没有 API Key。",
+                    &[("profile_name", (profile_name).to_string())],
+                ),
+                Err(error) => LocalizedText::new(
+                    "已选择 {profile_name}，但无法读取系统凭据库：{error}",
+                    &[
+                        ("profile_name", (profile_name).to_string()),
+                        ("error", (error).to_string()),
+                    ],
+                ),
             };
         } else {
             self.model.active_provider_profiles.remove(&harness);
             let _ = self
                 .storage
                 .set_setting(&active_profile_setting_key(harness), "");
-            self.model.status = format!("{harness} 将使用 CLI 当前登录配置。");
+            self.model.status = LocalizedText::new(
+                "{harness} 将使用 CLI 当前登录配置。",
+                &[("harness", (harness).to_string())],
+            );
         }
-        if harness == HarnessKind::Codex {
-            self.restore_codex_preferences();
-            self.refresh_model_catalog();
-        }
+        self.restore_catalog_preferences();
+        self.refresh_model_catalog();
         true
     }
 
@@ -579,15 +815,26 @@ impl Presenter {
             return None;
         }
         if name.chars().count() > PROVIDER_PROFILE_NAME_MAX_CHARS {
-            self.model.status =
-                format!("Provider Profile 名称不能超过 {PROVIDER_PROFILE_NAME_MAX_CHARS} 个字符。");
+            self.model.status = LocalizedText::new(
+                "Provider Profile 名称不能超过 {PROVIDER_PROFILE_NAME_MAX_CHARS} 个字符。",
+                &[(
+                    "PROVIDER_PROFILE_NAME_MAX_CHARS",
+                    (PROVIDER_PROFILE_NAME_MAX_CHARS).to_string(),
+                )],
+            );
             return None;
         }
         if model
             .as_deref()
             .is_some_and(|model| model.chars().count() > PROVIDER_MODEL_MAX_CHARS)
         {
-            self.model.status = format!("默认模型不能超过 {PROVIDER_MODEL_MAX_CHARS} 个字符。");
+            self.model.status = LocalizedText::new(
+                "默认模型不能超过 {PROVIDER_MODEL_MAX_CHARS} 个字符。",
+                &[(
+                    "PROVIDER_MODEL_MAX_CHARS",
+                    (PROVIDER_MODEL_MAX_CHARS).to_string(),
+                )],
+            );
             return None;
         }
         if !is_secret_environment_name(&api_key_env) {
@@ -606,7 +853,10 @@ impl Presenter {
                 && profile.id != draft.id.unwrap_or_default()
                 && profile.name.eq_ignore_ascii_case(&name)
         }) {
-            self.model.status = format!("{harness} 已存在同名 Provider Profile。");
+            self.model.status = LocalizedText::new(
+                "{harness} 已存在同名 Provider Profile。",
+                &[("harness", (harness).to_string())],
+            );
             return None;
         }
 
@@ -634,13 +884,19 @@ impl Presenter {
                     return None;
                 }
                 Err(error) => {
-                    self.model.status = format!("无法读取系统凭据库：{error}");
+                    self.model.status = LocalizedText::new(
+                        "无法读取系统凭据库：{error}",
+                        &[("error", (error).to_string())],
+                    );
                     return None;
                 }
             }
         } else {
             if let Err(error) = self.credentials.set_api_key(profile_id, api_key) {
-                self.model.status = format!("无法安全保存 API Key：{error}");
+                self.model.status = LocalizedText::new(
+                    "无法安全保存 API Key：{error}",
+                    &[("error", (error).to_string())],
+                );
                 return None;
             }
             true
@@ -662,7 +918,10 @@ impl Presenter {
             profiles.push(profile.clone());
         }
         if let Err(error) = self.storage.set_provider_profiles(&profiles) {
-            self.model.status = format!("无法保存 Provider Profile：{error}");
+            self.model.status = LocalizedText::new(
+                "无法保存 Provider Profile：{error}",
+                &[("error", (error).to_string())],
+            );
             return None;
         }
         self.model.provider_profiles = profiles;
@@ -673,11 +932,12 @@ impl Presenter {
             &active_profile_setting_key(harness),
             &profile_id.to_string(),
         );
-        self.model.status = format!("Provider Profile 已保存并启用：{}", profile.name);
-        if harness == HarnessKind::Codex {
-            self.restore_codex_preferences();
-            self.refresh_model_catalog();
-        }
+        self.model.status = LocalizedText::new(
+            "Provider Profile 已保存并启用：{0}",
+            &[("0", (profile.name).to_string())],
+        );
+        self.restore_catalog_preferences();
+        self.refresh_model_catalog();
         Some(profile_id)
     }
 
@@ -692,13 +952,19 @@ impl Presenter {
             return false;
         }
         if let Err(error) = self.credentials.delete_api_key(profile_id) {
-            self.model.status = format!("无法从系统凭据库删除 API Key：{error}");
+            self.model.status = LocalizedText::new(
+                "无法从系统凭据库删除 API Key：{error}",
+                &[("error", (error).to_string())],
+            );
             return false;
         }
         let mut profiles = self.model.provider_profiles.clone();
         profiles.retain(|profile| profile.id != profile_id);
         if let Err(error) = self.storage.set_provider_profiles(&profiles) {
-            self.model.status = format!("无法删除 Provider Profile：{error}");
+            self.model.status = LocalizedText::new(
+                "无法删除 Provider Profile：{error}",
+                &[("error", (error).to_string())],
+            );
             return false;
         }
         self.model.provider_profiles = profiles;
@@ -715,16 +981,14 @@ impl Presenter {
                 .set_setting(&active_profile_setting_key(harness), "");
         }
         self.model.status = "Provider Profile 已删除。".into();
-        if self.model.selected_harness == HarnessKind::Codex {
-            self.restore_codex_preferences();
-            self.refresh_model_catalog();
-        }
+        self.restore_catalog_preferences();
+        self.refresh_model_catalog();
         true
     }
 
-    fn provider_launch_configuration(&self) -> Result<(Vec<EnvironmentVariable>, Option<String>)> {
+    fn provider_launch_configuration(&self) -> Result<Vec<EnvironmentVariable>> {
         let Some(profile) = self.model.selected_provider_profile() else {
-            return Ok((Vec::new(), None));
+            return Ok(Vec::new());
         };
         let Some(api_key) = self.credentials.api_key(profile.id)? else {
             bail!("系统凭据库中找不到 {} 的 API Key", profile.name);
@@ -742,68 +1006,76 @@ impl Presenter {
         if environment.iter().any(|variable| !variable.has_safe_name()) {
             bail!("Provider Profile 包含不安全的环境变量名称");
         }
-        Ok((environment, profile.model.clone()))
+        Ok(environment)
     }
 
-    fn restore_codex_preferences(&mut self) {
+    fn restore_catalog_preferences(&mut self) {
+        let harness = self.model.selected_harness;
         let profile_id = self
             .model
             .selected_provider_profile()
             .map(|profile| profile.id);
-        self.model.codex_model_override = self
+        let legacy_effort = self
             .storage
-            .setting(&codex_model_setting_key(profile_id))
-            .ok()
-            .flatten()
-            .filter(|model| !model.is_empty());
-        self.model.effort = self
-            .storage
-            .setting(&codex_effort_setting_key(profile_id))
+            .setting("thinking_effort")
             .ok()
             .flatten()
             .and_then(|value| ThinkingEffort::from_str(&value).ok())
             .unwrap_or(ThinkingEffort::Default);
-        self.model.codex_model_catalog = ModelCatalogState::Idle;
+        (self.model.model_override, self.model.effort) =
+            load_catalog_preferences(&self.storage, harness, profile_id, legacy_effort);
+        self.model.model_override_name = self
+            .storage
+            .setting(&catalog_model_name_setting_key(harness, profile_id))
+            .ok()
+            .flatten()
+            .filter(|name| !name.is_empty());
+        self.model.model_catalog = ModelCatalogState::Idle;
     }
 
-    fn persist_codex_effort(&self) {
+    fn remember_model_name(&mut self) {
+        self.model.model_override_name = self.model.model_override.as_ref().and_then(|_| {
+            self.model
+                .selected_catalog_model()
+                .map(|model| model.display_name.clone())
+        });
         let profile_id = self
             .model
             .selected_provider_profile()
             .map(|profile| profile.id);
         let _ = self.storage.set_setting(
-            &codex_effort_setting_key(profile_id),
+            &catalog_model_name_setting_key(self.model.selected_harness, profile_id),
+            self.model
+                .model_override_name
+                .as_deref()
+                .unwrap_or_default(),
+        );
+    }
+
+    fn persist_catalog_effort(&self) {
+        let harness = self.model.selected_harness;
+        let profile_id = self
+            .model
+            .selected_provider_profile()
+            .map(|profile| profile.id);
+        let _ = self.storage.set_setting(
+            &catalog_effort_setting_key(harness, profile_id),
             self.model.effort.as_str(),
         );
     }
 
-    fn normalize_codex_effort(&mut self) -> bool {
+    fn normalize_catalog_effort(&mut self) -> bool {
         if self.model.effort.is_default()
             || self
                 .model
-                .selected_codex_catalog_model()
+                .selected_catalog_model()
                 .is_some_and(|model| model.supports_effort(&self.model.effort))
         {
             return false;
         }
         self.model.effort = ThinkingEffort::Default;
-        self.persist_codex_effort();
+        self.persist_catalog_effort();
         true
-    }
-
-    fn resolved_codex_effort(&self, model_id: Option<&str>) -> ThinkingEffort {
-        if !self.model.effort.is_default() {
-            return self.model.effort;
-        }
-        let Some(model_id) = model_id else {
-            return ThinkingEffort::Default;
-        };
-        self.model
-            .codex_model_catalog
-            .models()
-            .and_then(|models| models.iter().find(|model| model.id == model_id))
-            .and_then(|model| model.default_reasoning_effort)
-            .unwrap_or(ThinkingEffort::Default)
     }
 }
 
@@ -819,22 +1091,90 @@ fn active_profile_setting_key(harness: HarnessKind) -> String {
     format!("active_provider_profile_{}", harness.as_str())
 }
 
-fn codex_model_setting_key(profile_id: Option<Uuid>) -> String {
+fn catalog_model_setting_key(harness: HarnessKind, profile_id: Option<Uuid>) -> String {
     format!(
-        "codex_model_override_{}",
+        "{}_model_override_{}",
+        harness.as_str(),
         profile_id
             .map(|id| id.to_string())
             .unwrap_or_else(|| "cli".into())
     )
 }
 
-fn codex_effort_setting_key(profile_id: Option<Uuid>) -> String {
+fn catalog_effort_setting_key(harness: HarnessKind, profile_id: Option<Uuid>) -> String {
     format!(
-        "codex_effort_{}",
+        "{}_effort_{}",
+        harness.as_str(),
         profile_id
             .map(|id| id.to_string())
             .unwrap_or_else(|| "cli".into())
     )
+}
+
+fn catalog_model_name_setting_key(harness: HarnessKind, profile_id: Option<Uuid>) -> String {
+    format!("{}_name", catalog_model_setting_key(harness, profile_id))
+}
+
+fn load_catalog_preferences(
+    storage: &Storage,
+    harness: HarnessKind,
+    profile_id: Option<Uuid>,
+    legacy_effort: ThinkingEffort,
+) -> (Option<String>, ThinkingEffort) {
+    let model_override = storage
+        .setting(&catalog_model_setting_key(harness, profile_id))
+        .ok()
+        .flatten()
+        .or_else(|| {
+            (harness == HarnessKind::Claude && profile_id.is_none()).then(|| {
+                storage
+                    .setting("claude_model")
+                    .ok()
+                    .flatten()
+                    .and_then(|value| ClaudeModel::from_str(&value).ok())
+                    .and_then(|model| model.cli_value().map(str::to_owned))
+                    .unwrap_or_default()
+            })
+        })
+        .filter(|model| !model.is_empty());
+    let stored_effort = storage
+        .setting(&catalog_effort_setting_key(harness, profile_id))
+        .ok()
+        .flatten()
+        .and_then(|value| ThinkingEffort::from_str(&value).ok());
+    let effort = normalize_effort_for_harness(
+        harness,
+        stored_effort.unwrap_or_else(|| {
+            if profile_id.is_none() && matches!(harness, HarnessKind::Claude | HarnessKind::Omp) {
+                legacy_effort
+            } else {
+                ThinkingEffort::Default
+            }
+        }),
+    );
+    if stored_effort != Some(effort) {
+        let _ = storage.set_setting(
+            &catalog_effort_setting_key(harness, profile_id),
+            effort.as_str(),
+        );
+    }
+    let _ = storage.set_setting(
+        &catalog_model_setting_key(harness, profile_id),
+        model_override.as_deref().unwrap_or_default(),
+    );
+    (model_override, effort)
+}
+
+fn normalize_effort_for_harness(harness: HarnessKind, effort: ThinkingEffort) -> ThinkingEffort {
+    if harness != HarnessKind::Omp {
+        return effort;
+    }
+    match effort {
+        ThinkingEffort::None => ThinkingEffort::Off,
+        ThinkingEffort::Max => ThinkingEffort::XHigh,
+        ThinkingEffort::Ultra => ThinkingEffort::Default,
+        effort => effort,
+    }
 }
 
 fn optional_trimmed(value: String) -> Option<String> {
