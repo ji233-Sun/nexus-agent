@@ -4,3 +4,4 @@ pub(crate) mod git;
 mod paths;
 pub(crate) mod runner_client;
 pub(crate) mod storage;
+pub(crate) mod updates;

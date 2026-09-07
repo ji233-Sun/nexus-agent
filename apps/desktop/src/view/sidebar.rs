@@ -581,7 +581,13 @@ impl NexusView {
                                                 .items_center()
                                                 .gap_2()
                                                 .child(Icon::new(IconName::Settings2))
-                                                .child(locale.text("设置")),
+                                                .child(locale.text("设置"))
+                                                .when(matches!(model.updates.state, crate::model::updates::UpdateState::Ready { .. }), |element| {
+                                                    element.child(div()
+                                                        .debug_selector(|| "update-ready-badge".into())
+                                                        .text_size(px(11.)).text_color(rgb(colors.accent))
+                                                        .child(locale.text("更新已下载")))
+                                                }),
                                         )
                                         .child(status_dot(
                                             model
@@ -597,6 +603,9 @@ impl NexusView {
                                         )),
                                 )
                                 .on_click(cx.listener(|app, _, window, cx| {
+                                    if matches!(app.presenter.model().updates.state, crate::model::updates::UpdateState::Ready { .. }) {
+                                        app.settings_section = SettingsSection::General;
+                                    }
                                     app.toggle_settings(window, cx)
                                 })),
                         ),
@@ -612,6 +621,54 @@ mod tests {
     use gpui::{ScrollDelta, ScrollWheelEvent, TestAppContext, point};
     use nexus_protocol::Event;
     use std::path::Path;
+
+    #[gpui::test]
+    fn software_update_settings_follow_progress_and_show_download_completion(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::{
+            model::updates::{UpdateChannel, UpdateState},
+            presenter::tests::pending_update,
+        };
+        let (view, cx) = scroll_test_view(cx);
+        cx.simulate_resize(gpui::size(px(1040.), px(680.)));
+        view.update_in(cx, |view, window, cx| view.toggle_settings(window, cx));
+        cx.run_until_parked();
+        let channel_button = cx.debug_bounds("update-channel-nightly").unwrap().center();
+        cx.simulate_click(channel_button, Default::default());
+        assert_eq!(
+            view.read_with(cx, |view, _| view.presenter.model().updates.channel),
+            UpdateChannel::Nightly
+        );
+        let sender = view.update_in(cx, |view, _, cx| {
+            let sender = pending_update(&mut view.presenter);
+            cx.notify();
+            sender
+        });
+        cx.run_until_parked();
+        let other_channel = cx.debug_bounds("update-channel-release").unwrap().center();
+        cx.simulate_click(other_channel, Default::default());
+        assert_eq!(
+            view.read_with(cx, |view, _| view.presenter.model().updates.channel),
+            UpdateChannel::Nightly
+        );
+        sender
+            .send(UpdateState::Ready {
+                tag: "nightly-test".into(),
+                path: Path::new("update.zip").to_path_buf(),
+            })
+            .unwrap();
+        view.update_in(cx, |view, window, cx| {
+            view.poll_events(Instant::now(), cx);
+            view.settings_scroll.scroll_to_bottom();
+            view.set_language(Language::English, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("reveal-update").is_some());
+        view.update_in(cx, |view, window, cx| view.toggle_settings(window, cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("update-ready-badge").is_some());
+    }
 
     fn scroll_test_view(
         cx: &mut TestAppContext,
