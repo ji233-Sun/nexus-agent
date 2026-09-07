@@ -148,6 +148,7 @@ impl TestRunner {
 
 fn request(directory: &Path, executable: PathBuf, harness: HarnessKind, prompt: &str) -> StartRun {
     StartRun {
+        permission_mode: nexus_domain::PermissionMode::AutoEdit,
         run_id: Uuid::new_v4(),
         task_id: Uuid::new_v4(),
         session_id: None,
@@ -159,6 +160,213 @@ fn request(directory: &Path, executable: PathBuf, harness: HarnessKind, prompt: 
         effort: ThinkingEffort::High,
         environment: Vec::new(),
     }
+}
+
+async fn next_approval(runner: &mut TestRunner, run_id: Uuid) -> nexus_protocol::ApprovalRequest {
+    loop {
+        match runner.next().await {
+            Event::RunApprovalRequested {
+                run_id: id,
+                request,
+            } => {
+                assert_eq!(id, run_id);
+                return request;
+            }
+            Event::RunExited { .. } => panic!("run ended before approval"),
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test]
+async fn approval_round_trip_for_each_harness_rejects_invalid_and_duplicate_responses() {
+    let fixtures = tempfile::tempdir().unwrap();
+    let executable = fake_harness(fixtures.path());
+    for harness in HarnessKind::ALL {
+        for option in [0, 1] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut request = request(
+                directory.path(),
+                executable.clone(),
+                harness,
+                "approval-round-trip",
+            );
+            request.permission_mode = nexus_domain::PermissionMode::Ask;
+            let run_id = request.run_id;
+            let mut runner = TestRunner::spawn();
+            runner.send(Command::RunStart(request)).await;
+            let approval = next_approval(&mut runner, run_id).await;
+            assert!(approval.details.contains("echo approved"));
+            assert!(!directory.path().join("approval-response.json").exists());
+            for (run, id, selected) in [
+                (Uuid::new_v4(), approval.request_id, option),
+                (run_id, Uuid::new_v4(), option),
+                (run_id, approval.request_id, 99),
+            ] {
+                runner
+                    .send(Command::RunApprovalRespond {
+                        run_id: run,
+                        request_id: id,
+                        option: Some(selected),
+                    })
+                    .await;
+                loop {
+                    match runner.next().await {
+                        Event::RunApprovalRejected {
+                            run_id: rejected_run,
+                            request_id,
+                            ..
+                        } => {
+                            assert_eq!((rejected_run, request_id), (run, id));
+                            break;
+                        }
+                        Event::RunExited { .. } => panic!("invalid reply ended run"),
+                        _ => {}
+                    }
+                }
+                assert!(!directory.path().join("approval-response.json").exists());
+            }
+            let response = Command::RunApprovalRespond {
+                run_id,
+                request_id: approval.request_id,
+                option: Some(option),
+            };
+            runner.send(response.clone()).await;
+            runner.send(response).await;
+            let events = runner.collect_run(run_id, RunStatus::Completed).await;
+            assert!(events.iter().any(|event| matches!(event, Event::RunApprovalResolved { request_id, .. } if *request_id == approval.request_id)));
+            assert!(events.iter().any(|event| matches!(event, Event::RunMessageCompleted { text, .. } if text == if option == 0 { "approved" } else { "denied" })));
+            let response: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(directory.path().join("approval-response.json")).unwrap(),
+            )
+            .unwrap();
+            match harness {
+                HarnessKind::Claude => {
+                    assert_eq!(response["response"]["request_id"], "approval-1");
+                    if option == 0 {
+                        assert_eq!(
+                            response["response"]["response"]["updatedInput"]["command"],
+                            "echo approved"
+                        );
+                    }
+                }
+                HarnessKind::Codex => assert_eq!(response["id"], 99),
+                HarnessKind::Omp => assert_eq!(response["id"], "approval-1"),
+            }
+            runner.shutdown().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn pending_approvals_are_cleared_on_cancel_and_late_replies_never_reach_harness() {
+    let fixtures = tempfile::tempdir().unwrap();
+    let executable = fake_harness(fixtures.path());
+    for harness in HarnessKind::ALL {
+        let directory = tempfile::tempdir().unwrap();
+        let request = request(
+            directory.path(),
+            executable.clone(),
+            harness,
+            "approval-cancel",
+        );
+        let run_id = request.run_id;
+        let mut runner = TestRunner::spawn();
+        runner.send(Command::RunStart(request)).await;
+        let approval = next_approval(&mut runner, run_id).await;
+        runner.send(Command::RunCancel { run_id }).await;
+        runner
+            .send(Command::RunApprovalRespond {
+                run_id,
+                request_id: approval.request_id,
+                option: Some(0),
+            })
+            .await;
+        runner.collect_run(run_id, RunStatus::Cancelled).await;
+        assert!(!directory.path().join("approval-response.json").exists());
+        runner.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn native_approval_cancellation_removes_the_request_before_the_run_ends() {
+    let fixtures = tempfile::tempdir().unwrap();
+    let executable = fake_harness(fixtures.path());
+    for harness in HarnessKind::ALL {
+        let directory = tempfile::tempdir().unwrap();
+        let request = request(
+            directory.path(),
+            executable.clone(),
+            harness,
+            "approval-native-cancel",
+        );
+        let run_id = request.run_id;
+        let mut runner = TestRunner::spawn();
+        runner.send(Command::RunStart(request)).await;
+        let approval = next_approval(&mut runner, run_id).await;
+        fs::write(directory.path().join("resolve-approval"), "resolve").unwrap();
+        loop {
+            match runner.next().await {
+                Event::RunApprovalResolved { request_id, .. } => {
+                    assert_eq!(request_id, approval.request_id);
+                    break;
+                }
+                Event::RunExited { .. } => panic!("run ended while awaiting native cancellation"),
+                _ => {}
+            }
+        }
+        runner
+            .send(Command::RunApprovalRespond {
+                run_id,
+                request_id: approval.request_id,
+                option: Some(0),
+            })
+            .await;
+        loop {
+            match runner.next().await {
+                Event::RunApprovalRejected { request_id, .. } => {
+                    assert_eq!(request_id, approval.request_id);
+                    break;
+                }
+                Event::RunExited { .. } => panic!("stale reply reached harness"),
+                _ => {}
+            }
+        }
+        fs::write(directory.path().join("finish-turn"), "finish").unwrap();
+        runner.collect_run(run_id, RunStatus::Completed).await;
+        runner.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn omp_approval_timeout_cancels_without_granting_permission() {
+    let directory = tempfile::tempdir().unwrap();
+    let request = request(
+        directory.path(),
+        fake_harness(directory.path()),
+        HarnessKind::Omp,
+        "approval-timeout",
+    );
+    let run_id = request.run_id;
+    let mut runner = TestRunner::spawn();
+    runner.send(Command::RunStart(request)).await;
+    let events = runner.collect_run(run_id, RunStatus::Completed).await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::RunApprovalResolved { .. }))
+    );
+    assert!(
+        events.iter().any(
+            |event| matches!(event, Event::RunMessageCompleted { text, .. } if text == "denied")
+        )
+    );
+    let response: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(directory.path().join("approval-response.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(response["cancelled"], true);
+    runner.shutdown().await;
 }
 
 #[tokio::test]
@@ -287,7 +495,7 @@ async fn runner_streams_fake_claude_and_forwards_model_configuration() {
 }
 
 #[tokio::test]
-async fn runner_streams_fake_codex_and_preserves_non_interactive_permissions() {
+async fn runner_streams_fake_codex_and_preserves_workspace_permissions() {
     let directory = tempfile::tempdir().unwrap();
     let request = request(
         directory.path(),
@@ -324,7 +532,7 @@ async fn runner_streams_fake_codex_and_preserves_non_interactive_permissions() {
     )
     .unwrap();
     assert_eq!(thread["params"]["sandbox"], "workspace-write");
-    assert_eq!(thread["params"]["approvalPolicy"], "never");
+    assert_eq!(thread["params"]["approvalPolicy"], "on-request");
     let turn: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(directory.path().join("turn-params.json")).unwrap(),
     )

@@ -316,5 +316,19 @@
   "{harness} 不可用，请在设置中检查可执行文件。": "{harness} unavailable. Check its executable in settings.",
   "{harness} 尚未登录，请登录 CLI 或配置 Provider Profile。": "{harness} is not signed in. Sign in to the CLI or configure a provider profile.",
   "{harness} 已就绪。": "{harness} is ready.",
-  "原始诊断": "Original diagnostic"
+  "原始诊断": "Original diagnostic",
+  "请求授权": "Ask for approval",
+  "自动编辑": "Auto edit",
+  "YOLO": "YOLO",
+  "设置下一条消息的权限，已开始的轮次保持原权限。": "Set permissions for the next message. Active turns keep their permissions.",
+  "无法保存权限设置。": "Could not save permission settings.",
+  "排队消息的权限与当前轮次不同，请等待下一轮发送。": "This queued message has different permissions. Wait for the next turn to send it.",
+  "等待授权，请在桌面弹窗中处理。": "Waiting for approval in the desktop dialog.",
+  "审批已处理，等待 Agent 继续…": "Approval resolved. Waiting for the agent to continue…",
+  "审批回复发送失败，请重试或停止任务。": "Could not send the approval response. Retry or stop the task.",
+  "正在发送审批回复…": "Sending approval response…",
+  "需要授权": "Approval required",
+  "允许本次": "Approve once",
+  "拒绝": "Deny",
+  "停止任务": "Stop task"
 }

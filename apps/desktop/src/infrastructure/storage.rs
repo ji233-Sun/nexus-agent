@@ -3,8 +3,8 @@ use std::{fs, path::Path, str::FromStr as _};
 use anyhow::{Context as _, Result, anyhow};
 use chrono::{DateTime, Utc};
 use nexus_domain::{
-    HarnessKind, Message, MessageKind, MessageRole, Project, ProviderProfile, RunStatus,
-    TaskSummary, ThinkingEffort, ToolMetadata,
+    HarnessKind, Message, MessageKind, MessageRole, PermissionMode, Project, ProviderProfile,
+    RunStatus, TaskSummary, ThinkingEffort, ToolMetadata,
 };
 use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
 use uuid::Uuid;
@@ -19,6 +19,7 @@ pub struct ConversationConfig {
     pub executable: String,
     pub model: String,
     pub effort: ThinkingEffort,
+    pub permission_mode: PermissionMode,
 }
 
 pub struct NewTaskRun<'a> {
@@ -30,6 +31,7 @@ pub struct NewTaskRun<'a> {
     pub executable: &'a str,
     pub model: Option<&'a str>,
     pub effort: ThinkingEffort,
+    pub permission_mode: PermissionMode,
     pub harness_version: Option<&'a str>,
 }
 
@@ -107,6 +109,12 @@ impl Storage {
              );
              PRAGMA user_version = 1;",
         )?;
+        if !table_has_column(&connection, "runs", "permission_mode")? {
+            connection.execute(
+                "ALTER TABLE runs ADD COLUMN permission_mode TEXT NOT NULL DEFAULT 'auto_edit'",
+                [],
+            )?;
+        }
         if !table_has_column(&connection, "runs", "harness_kind")? {
             connection.execute(
                 "ALTER TABLE runs ADD COLUMN harness_kind TEXT NOT NULL DEFAULT 'claude'",
@@ -347,6 +355,7 @@ impl Storage {
             executable,
             model,
             effort,
+            permission_mode,
             harness_version,
         } = request;
         let existing_task = task_id;
@@ -374,8 +383,8 @@ impl Storage {
         transaction.execute(
             "INSERT INTO runs(
                  id, task_id, status, harness_kind, executable, model, effort,
-                 harness_version, started_at
-             ) VALUES(?1, ?2, 'starting', ?3, ?4, ?5, ?6, ?7, ?8)",
+                 harness_version, started_at, permission_mode
+             ) VALUES(?1, ?2, 'starting', ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 run_id.to_string(),
                 task_id.to_string(),
@@ -384,7 +393,8 @@ impl Storage {
                 model.unwrap_or("default"),
                 effort.as_str(),
                 harness_version,
-                now
+                now,
+                permission_mode.as_str()
             ],
         )?;
         transaction.execute(
@@ -410,7 +420,7 @@ impl Storage {
     pub fn conversation_config(&self, task_id: Uuid) -> Result<Option<ConversationConfig>> {
         self.connection
             .query_row(
-                "SELECT harness_kind, executable, model, effort, tasks.session_id
+                "SELECT harness_kind, executable, model, effort, tasks.session_id, permission_mode
                  FROM runs JOIN tasks ON tasks.id = runs.task_id
                  WHERE task_id = ?1 ORDER BY started_at DESC, runs.rowid DESC LIMIT 1",
                 [task_id.to_string()],
@@ -423,6 +433,8 @@ impl Storage {
                         effort: ThinkingEffort::from_str(&row.get::<_, String>(3)?)
                             .map_err(to_sql_data_error)?,
                         session_id: row.get(4)?,
+                        permission_mode: PermissionMode::from_str(&row.get::<_, String>(5)?)
+                            .map_err(to_sql_data_error)?,
                     })
                 },
             )
@@ -682,6 +694,7 @@ mod tests {
         let project = storage.open_project(&project_dir).unwrap();
         let (task_id, run_id) = storage
             .create_task_run(NewTaskRun {
+                permission_mode: PermissionMode::Ask,
                 task_id: None,
                 project_id: project.id,
                 title: "Test task",
@@ -721,6 +734,7 @@ mod tests {
         assert_eq!(config.executable, "claude-custom");
         assert_eq!(config.model, "sonnet");
         assert_eq!(config.effort, ThinkingEffort::High);
+        assert_eq!(config.permission_mode, PermissionMode::Ask);
         let harness_version: String = storage
             .connection
             .query_row(
@@ -743,6 +757,7 @@ mod tests {
         let project = storage.open_project(&project_dir).unwrap();
         let (task_id, run_id) = storage
             .create_task_run(NewTaskRun {
+                permission_mode: nexus_domain::PermissionMode::AutoEdit,
                 task_id: None,
                 project_id: project.id,
                 title: "Codex task",
@@ -784,6 +799,10 @@ mod tests {
         // Simulate the previous schema with real messages, then migrate in place.
         storage
             .connection
+            .execute("ALTER TABLE runs DROP COLUMN permission_mode", [])
+            .unwrap();
+        storage
+            .connection
             .execute("ALTER TABLE messages DROP COLUMN tool", [])
             .unwrap();
         storage
@@ -799,6 +818,14 @@ mod tests {
         assert_eq!(
             storage.messages(task_id).unwrap()[1].content,
             "project summary"
+        );
+        assert_eq!(
+            storage
+                .conversation_config(task_id)
+                .unwrap()
+                .unwrap()
+                .permission_mode,
+            PermissionMode::AutoEdit
         );
         assert!(
             storage
@@ -840,6 +867,7 @@ mod tests {
         let create_task = |storage: &mut Storage, title: &str| {
             storage
                 .create_task_run(NewTaskRun {
+                    permission_mode: nexus_domain::PermissionMode::AutoEdit,
                     task_id: None,
                     project_id: project.id,
                     title,

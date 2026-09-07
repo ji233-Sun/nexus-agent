@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::infrastructure::{
     harness,
-    process::{SteerInput, generate_title, run_harness},
+    process::{RunInput, SteerInput, generate_title, run_harness},
 };
 use events::Emitter;
 
@@ -23,7 +23,7 @@ use events::Emitter;
 struct ActiveRun {
     id: Uuid,
     cancel: watch::Sender<bool>,
-    input: mpsc::UnboundedSender<SteerInput>,
+    input: mpsc::UnboundedSender<RunInput>,
 }
 
 struct BackgroundTask {
@@ -150,7 +150,9 @@ impl Runner {
                         .as_ref()
                         .filter(|run| run.id == run_id && !*run.cancel.borrow())
                         .is_some_and(|run| {
-                            run.input.send(SteerInput { message_id, prompt }).is_ok()
+                            run.input
+                                .send(RunInput::Steer(SteerInput { message_id, prompt }))
+                                .is_ok()
                         });
                 if !sent {
                     self.emitter
@@ -158,6 +160,30 @@ impl Runner {
                             run_id,
                             message_id,
                             message: "当前轮次无法接收 Steer，消息仍保留在队列中。".into(),
+                        })
+                        .await;
+                }
+            }
+            Command::RunApprovalRespond {
+                run_id,
+                request_id,
+                option,
+            } => {
+                let guard = self.active.lock().await;
+                let sent = guard
+                    .as_ref()
+                    .filter(|run| run.id == run_id && !*run.cancel.borrow())
+                    .is_some_and(|run| {
+                        run.input
+                            .send(RunInput::Approval { request_id, option })
+                            .is_ok()
+                    });
+                if !sent {
+                    self.emitter
+                        .send(Event::RunApprovalRejected {
+                            run_id,
+                            request_id,
+                            message: "当前轮次无法接收审批回复。".into(),
                         })
                         .await;
                 }
@@ -344,6 +370,7 @@ mod tests {
 
     fn request(cwd: String) -> StartRun {
         StartRun {
+            permission_mode: nexus_domain::PermissionMode::AutoEdit,
             run_id: Uuid::new_v4(),
             task_id: Uuid::new_v4(),
             session_id: None,
@@ -484,7 +511,9 @@ mod tests {
                 prompt: "correction".into(),
             })
             .await;
-        let message = received.recv().await.unwrap();
+        let RunInput::Steer(message) = received.recv().await.unwrap() else {
+            panic!("expected steer")
+        };
         assert_eq!(message.message_id, message_id);
         assert_eq!(message.prompt, "correction");
         assert!(
