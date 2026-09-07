@@ -37,6 +37,15 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: actions/setup-node@v7
+        if: runner.os == 'Linux'
+        with:
+          node-version: "24"
+
+      - name: Test PR conflict resolver
+        if: runner.os == 'Linux'
+        run: node --test ".github/scripts/resolve-conflicts.test.mjs"
+
       - name: Install Linux GUI dependencies
         if: runner.os == 'Linux'
         run: |
