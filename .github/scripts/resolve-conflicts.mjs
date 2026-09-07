@@ -151,7 +151,7 @@ export async function requestResolution(file, text, conflicts, fetchImpl = fetch
     },
     signal: AbortSignal.timeout(180_000),
     body: JSON.stringify({
-      model: 'deepseek-v4-pro',
+      model: 'deepseek-v4-flash',
       thinking: { type: 'enabled' },
       reasoning_effort: 'high',
       max_tokens: 16384,

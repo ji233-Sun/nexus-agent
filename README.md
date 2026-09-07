@@ -213,7 +213,7 @@ CI 验证构建和自动化行为；窗口显示、输入法、目录选择、�
 
 [Resolve PR conflicts 工作流](.github/workflows/resolve-conflicts.yml) 在收到 PR 评论 `/resolve-conflicts` 后，使用 DeepSeek 尝试解决合并冲突。评论中只填写这一条命令。PR 创建或追加提交不会自动调用模型，也不会启动自动审查。
 
-启用时，将工作流合并到默认分支，并在仓库 **Settings → Secrets and variables → Actions** 中添加 `DEEPSEEK_API_KEY`。模型固定使用 `deepseek-v4-pro`，费用由对应的 DeepSeek API 账户承担；不需要 Qodo 或 OpenAI 凭据。执行前会检查评论者当前拥有 `write`、`maintain` 或 `admin` 权限。
+启用时，将工作流合并到默认分支，并在仓库 **Settings → Secrets and variables → Actions** 中添加 `DEEPSEEK_API_KEY`。模型固定使用 `deepseek-v4-flash`，费用由对应的 DeepSeek API 账户承担；不需要 Qodo 或 OpenAI 凭据。执行前会检查评论者当前拥有 `write`、`maintain` 或 `admin` 权限。
 
 处理过程如下：
 

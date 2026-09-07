@@ -197,6 +197,7 @@ test('DeepSeek requests use JSON output and reject truncated or empty completion
   const result = await requestResolution('file.txt', 'conflicted text', [{}], async (url, options) => {
     assert.equal(url, 'https://api.deepseek.com/chat/completions');
     const body = JSON.parse(options.body);
+    assert.equal(body.model, 'deepseek-v4-flash');
     assert.equal(body.response_format.type, 'json_object');
     assert.equal(body.tools, undefined);
     return Response.json({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(valid) } }] });
