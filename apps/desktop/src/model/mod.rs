@@ -1,5 +1,6 @@
 pub(crate) mod history;
 pub(crate) mod tools;
+pub(crate) mod updates;
 
 use crate::i18n::{Language, LocalizedText};
 use history::{HistoryMessage, ThreadSummary};
@@ -188,6 +189,7 @@ pub(crate) struct AppModel {
     pub(crate) appearance: AppearanceSettings,
     pub(crate) title_generation: TitleGenerationSettings,
     pub(crate) title_model_catalog: ModelCatalogState,
+    pub(crate) updates: updates::UpdateModel,
     pub(crate) projects: Vec<Project>,
     pub(crate) selected_project: Option<Project>,
     pub(crate) tasks: Vec<TaskSummary>,

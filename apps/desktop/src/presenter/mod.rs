@@ -1,6 +1,7 @@
 mod history;
 mod remote;
 mod runs;
+mod updates;
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -13,7 +14,10 @@ use crate::{
         git::is_git_dirty,
         storage::Storage,
     },
-    model::{AppModel, AppearanceSettings, ModelCatalogState, TitleGenerationSettings},
+    model::{
+        AppModel, AppearanceSettings, ModelCatalogState, TitleGenerationSettings,
+        updates::{UpdateChannel, UpdateModel, UpdateState},
+    },
     remote_control::{RemoteCommand, RemoteControl, TOKEN_SETTING_KEY},
 };
 use anyhow::{Result, bail};
@@ -61,6 +65,7 @@ pub(crate) struct Presenter {
     remote_control: Option<RemoteControl>,
     remote_control_error: Option<String>,
     credentials: Box<dyn CredentialStore>,
+    update_events: Option<std::sync::mpsc::Receiver<UpdateState>>,
 }
 
 pub(crate) struct ProviderProfileDraft {
@@ -107,6 +112,20 @@ impl Presenter {
             .flatten()
             .and_then(|value| serde_json::from_str(&value).ok())
             .unwrap_or_default();
+        let updates = UpdateModel {
+            channel: storage
+                .setting("update_channel")
+                .ok()
+                .flatten()
+                .and_then(|value| UpdateChannel::from_setting(&value))
+                .unwrap_or_default(),
+            check_on_startup: storage
+                .setting("update_check_on_startup")
+                .ok()
+                .flatten()
+                .is_none_or(|value| value != "false"),
+            ..UpdateModel::default()
+        };
         let selected_harness = storage
             .setting("default_harness")
             .ok()
@@ -200,6 +219,7 @@ impl Presenter {
                 language,
                 appearance,
                 title_generation,
+                updates,
                 projects,
                 archived_tasks,
                 selected_harness,
@@ -228,6 +248,7 @@ impl Presenter {
             remote_control,
             remote_control_error,
             credentials,
+            update_events: None,
         };
         if let Some(runner) = &presenter.runner {
             let _ = runner.send(CommandEnvelope::new(Command::RunnerHello));

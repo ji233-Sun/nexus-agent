@@ -95,6 +95,105 @@ pub(crate) fn fixture() -> (Presenter, FakeRunner, tempfile::TempDir) {
     (presenter, runner, directory)
 }
 
+pub(crate) fn pending_update(presenter: &mut Presenter) -> std::sync::mpsc::Sender<UpdateState> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    presenter.update_events = Some(receiver);
+    presenter.model.updates.state = UpdateState::Checking;
+    sender
+}
+
+#[test]
+fn update_preferences_restore_and_invalid_values_follow_the_installed_channel() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("updates.sqlite");
+    let mut presenter = Presenter::new(
+        Storage::open(&path).unwrap(),
+        Err(anyhow::anyhow!("test")),
+        None,
+    );
+    assert_eq!(presenter.model().updates.channel, UpdateChannel::default());
+    assert!(presenter.model().updates.check_on_startup);
+    assert!(presenter.set_update_check_on_startup(false));
+    for channel in [UpdateChannel::Nightly, UpdateChannel::Release] {
+        assert!(presenter.set_update_channel(channel));
+        drop(presenter);
+        presenter = Presenter::new(
+            Storage::open(&path).unwrap(),
+            Err(anyhow::anyhow!("test")),
+            None,
+        );
+        assert_eq!(presenter.model().updates.channel, channel);
+        assert!(!presenter.model().updates.check_on_startup);
+    }
+    presenter
+        .storage
+        .set_setting("update_channel", "unknown")
+        .unwrap();
+    drop(presenter);
+    let presenter = Presenter::new(
+        Storage::open(&path).unwrap(),
+        Err(anyhow::anyhow!("test")),
+        None,
+    );
+    assert_eq!(presenter.model().updates.channel, UpdateChannel::default());
+    assert!(!presenter.model().updates.check_on_startup);
+}
+
+#[test]
+fn update_events_guard_concurrency_and_preserve_conversations_through_completion_and_failure() {
+    let (mut presenter, _, directory) = fixture();
+    assert!(presenter.submit("Keep this conversation running", "claude"));
+    let task = presenter.model().selected_task;
+    let run = presenter.model().active_run;
+    let status = presenter.model().status.clone();
+    let sender = pending_update(&mut presenter);
+    let channel = presenter.model().updates.channel;
+    assert!(!presenter.set_update_channel(UpdateChannel::Nightly));
+    presenter.check_for_updates();
+    sender
+        .send(UpdateState::Downloading {
+            tag: "v1.0.0".into(),
+            received: 12,
+            total: 24,
+        })
+        .unwrap();
+    assert!(presenter.drain_update_events());
+    assert_eq!(presenter.model().updates.channel, channel);
+    assert!(
+        presenter
+            .model()
+            .updates
+            .state
+            .message(Language::English)
+            .contains("50%")
+    );
+    assert!(!presenter.drain_update_events());
+    sender
+        .send(UpdateState::Ready {
+            tag: "v1.0.0".into(),
+            path: directory.path().join("update.zip"),
+        })
+        .unwrap();
+    assert!(presenter.drain_update_events());
+    assert!(presenter.update_events.is_none());
+    assert!(presenter.set_update_channel(channel));
+    assert!(matches!(
+        presenter.model().updates.state,
+        UpdateState::Ready { .. }
+    ));
+    let sender = pending_update(&mut presenter);
+    drop(sender);
+    assert!(presenter.drain_update_events());
+    assert!(matches!(
+        presenter.model().updates.state,
+        UpdateState::Failed(_)
+    ));
+    assert_eq!(presenter.model().selected_task, task);
+    assert_eq!(presenter.model().active_run, run);
+    assert_eq!(presenter.model().status, status);
+    assert!(!presenter.drain_update_events());
+}
+
 #[test]
 fn language_preferences_restore_and_fall_back_without_changing_appearance() {
     let directory = tempfile::tempdir().unwrap();

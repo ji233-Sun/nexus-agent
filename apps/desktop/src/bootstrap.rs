@@ -24,7 +24,11 @@ fn create_presenter() -> Presenter {
     };
 
     let runner = RunnerClient::spawn().map(|runner| Box::new(runner) as Box<dyn RunnerPort>);
-    Presenter::new(storage, runner, storage_error)
+    let mut presenter = Presenter::new(storage, runner, storage_error);
+    if presenter.model().updates.check_on_startup {
+        presenter.check_for_updates();
+    }
+    presenter
 }
 
 pub(crate) fn run() -> anyhow::Result<()> {

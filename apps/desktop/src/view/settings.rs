@@ -1,5 +1,6 @@
 use super::*;
 use crate::i18n::probe_status;
+use crate::model::updates::{UpdateChannel, UpdateState, installed_tag};
 use gpui_kit::component::scroll::ScrollableElement as _;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -265,6 +266,7 @@ impl NexusView {
                 )],
             ))
             .child(self.render_title_generation_settings(cx))
+            .child(self.render_update_settings(cx))
             .when_some(model.selected_project.as_ref(), |element, project| {
                 element
                     .child(settings_group(
@@ -429,6 +431,115 @@ impl NexusView {
                                 })),
                         ),
                 ),
+            ],
+        )
+    }
+
+    fn render_update_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let locale = self.presenter.model().language;
+        let colors = palette(cx);
+        let updates = &self.presenter.model().updates;
+        let busy = updates.state.is_busy();
+        settings_group(
+            colors,
+            locale.text("软件更新"),
+            [
+                settings_row(
+                    colors,
+                    locale.text("当前版本"),
+                    locale.text("此应用的构建标签。"),
+                    installed_tag(),
+                ),
+                settings_row(
+                    colors,
+                    locale.text("更新频道"),
+                    locale.text(
+                        "Release 包含版本号预发布；Nightly 跟随每日构建。切换后点击检查更新。",
+                    ),
+                    div().flex().gap_2().children(
+                        [UpdateChannel::Release, UpdateChannel::Nightly].map(|channel| {
+                            Button::new(channel.as_str())
+                                .debug_selector(move || {
+                                    format!("update-channel-{}", channel.as_str())
+                                })
+                                .outline()
+                                .small()
+                                .label(channel.label())
+                                .selected(updates.channel == channel)
+                                .disabled(busy)
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.presenter.set_update_channel(channel);
+                                    cx.notify();
+                                }))
+                        }),
+                    ),
+                ),
+                settings_row(
+                    colors,
+                    locale.text("启动时检查更新"),
+                    locale.text("检查所选频道，发现新版本后自动下载更新包。"),
+                    div()
+                        .debug_selector(|| "update-check-on-startup".into())
+                        .child(
+                            Switch::new("update-check-on-startup")
+                                .accessibility_label(locale.text("启动时检查更新"))
+                                .small()
+                                .checked(updates.check_on_startup)
+                                .on_click(cx.listener(|app, checked, _, cx| {
+                                    app.presenter.set_update_check_on_startup(*checked);
+                                    cx.notify();
+                                })),
+                        ),
+                ),
+                div()
+                    .py_4()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .debug_selector(|| "update-status".into())
+                            .text_size(px(13.))
+                            .text_color(rgb(colors.text_secondary))
+                            .child(updates.state.message(locale)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(
+                                Button::new("check-for-updates")
+                                    .debug_selector(|| "check-for-updates".into())
+                                    .outline()
+                                    .small()
+                                    .label(locale.text("检查更新"))
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|app, _, _, cx| {
+                                        app.presenter.check_for_updates();
+                                        cx.notify();
+                                    })),
+                            )
+                            .when(
+                                matches!(updates.state, UpdateState::Ready { .. }),
+                                |element| {
+                                    element.child(
+                                        Button::new("reveal-update")
+                                            .debug_selector(|| "reveal-update".into())
+                                            .primary()
+                                            .small()
+                                            .label(locale.text("打开下载位置"))
+                                            .on_click(cx.listener(|app, _, _, cx| {
+                                                if let UpdateState::Ready { path, .. } =
+                                                    &app.presenter.model().updates.state
+                                                {
+                                                    cx.reveal_path(path);
+                                                }
+                                            })),
+                                    )
+                                },
+                            ),
+                    ),
             ],
         )
     }

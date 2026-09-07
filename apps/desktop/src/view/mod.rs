@@ -575,6 +575,9 @@ impl NexusView {
     }
 
     fn poll_events(&mut self, now: Instant, cx: &mut Context<Self>) {
+        if self.presenter.drain_update_events() {
+            cx.notify();
+        }
         let follow_latest =
             self.timeline_scroll.max_offset().y + self.timeline_scroll.offset().y <= px(48.);
         if self.presenter.drain_events() {

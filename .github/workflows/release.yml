@@ -87,6 +87,7 @@ jobs:
     env:
       RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
       RELEASE_TARGET: ${{ matrix.target }}
+      NEXUS_RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
     defaults:
       run:
         shell: bash
