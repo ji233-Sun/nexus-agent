@@ -76,6 +76,9 @@ pub(crate) struct NexusView {
     catalog_model_select: Entity<ListState<ModelPickerList>>,
     catalog_model_select_content: CatalogModelSelectContent,
     model_picker_open: bool,
+    title_model_select: Entity<ListState<ModelPickerList>>,
+    title_model_select_content: CatalogModelSelectContent,
+    title_model_picker_open: bool,
     executable_input: Entity<InputState>,
     provider_name_input: Entity<InputState>,
     provider_api_key_env_input: Entity<InputState>,
@@ -181,6 +184,40 @@ impl NexusView {
             state.set_selected_index(catalog_model_select_content.selected_index(), window, cx);
             state
         });
+        let title_model_select_content =
+            CatalogModelSelectContent::from_title_settings(presenter.model());
+        let title_model_select = cx.new(|cx| {
+            ListState::new(
+                ModelPickerList::new(title_model_select_content.clone()),
+                window,
+                cx,
+            )
+            .searchable(true)
+        });
+        cx.subscribe(&title_model_select, |app, list, event: &ListEvent, cx| {
+            match event {
+                ListEvent::Confirm(index) => {
+                    let choice = list
+                        .read(cx)
+                        .delegate()
+                        .item(*index)
+                        .filter(|item| !item.disabled)
+                        .map(|item| item.choice.clone());
+                    let selected = match choice {
+                        Some(CatalogModelChoice::FollowDefault) => None,
+                        Some(CatalogModelChoice::Model(id)) => Some(id),
+                        _ => return,
+                    };
+                    if app.presenter.select_title_model(selected) {
+                        app.title_model_picker_open = false;
+                    }
+                }
+                ListEvent::Cancel => app.title_model_picker_open = false,
+                _ => return,
+            }
+            cx.notify();
+        })
+        .detach();
         cx.subscribe(&prompt_input, |_, _, event: &InputEvent, cx| {
             if matches!(
                 event,
@@ -249,6 +286,9 @@ impl NexusView {
             catalog_model_select,
             catalog_model_select_content,
             model_picker_open: false,
+            title_model_select,
+            title_model_select_content,
+            title_model_picker_open: false,
             executable_input,
             provider_name_input,
             provider_api_key_env_input,
@@ -986,6 +1026,16 @@ impl NexusView {
     }
 
     fn sync_catalog_model_select(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let content = CatalogModelSelectContent::from_title_settings(self.presenter.model());
+        if content != self.title_model_select_content {
+            self.title_model_select_content = content.clone();
+            self.title_model_select.update(cx, |state, cx| {
+                state.delegate_mut().replace_content(content);
+                let selected = state.delegate().selected_index();
+                state.set_selected_index(selected, window, cx);
+                cx.notify();
+            });
+        }
         let content = CatalogModelSelectContent::from_model(self.presenter.model());
         if content == self.catalog_model_select_content {
             return;
@@ -2111,6 +2161,94 @@ mod catalog_model_tests {
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         assert!(cx.debug_bounds("model-picker-surface").is_none());
+    }
+
+    #[gpui::test]
+    fn title_model_settings_support_search_and_preserve_conversation_selection(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (presenter, runner, _directory) = fixture();
+        let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
+        for (width, height, language) in [
+            (1040., 680., Language::Chinese),
+            (1280., 800., Language::English),
+        ] {
+            cx.simulate_resize(gpui::size(px(width), px(height)));
+            view.update_in(cx, |view, window, cx| {
+                view.settings_open = true;
+                view.set_language(language, window, cx);
+                view.presenter.select_title_harness(HarnessKind::Claude);
+                view.reduced_motion = true;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            click_debug(cx, "title-harness");
+            cx.run_until_parked();
+            cx.simulate_keystrokes("down down down enter");
+            cx.run_until_parked();
+            assert_eq!(
+                view.read_with(cx, |view, _| view
+                    .presenter
+                    .model()
+                    .title_generation
+                    .harness),
+                HarnessKind::Omp
+            );
+            click_debug(cx, "title-model");
+            cx.run_until_parked();
+            let request_id = view.read_with(cx, |view, _| {
+                let ModelCatalogState::Loading { request_id, .. } =
+                    view.presenter.model().title_model_catalog
+                else {
+                    panic!("loading")
+                };
+                request_id
+            });
+            let mut long = omp_model("provider", "provider/title-target");
+            long.display_name = "Long title model name ".repeat(30);
+            runner.emit(Event::ModelCatalogLoaded {
+                request_id,
+                harness: HarnessKind::Omp,
+                models: vec![long],
+            });
+            view.update(cx, |view, cx| {
+                view.presenter.drain_events();
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let bounds = cx.debug_bounds("title-model-picker-surface").unwrap();
+            assert!(
+                bounds.left() >= px(0.) && bounds.right() <= px(width),
+                "{bounds:?}"
+            );
+            assert!(
+                bounds.top() >= px(0.) && bounds.bottom() <= px(height),
+                "{bounds:?}"
+            );
+            cx.simulate_input("title-target");
+            cx.run_until_parked();
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("title-model-picker-surface").is_none());
+            view.read_with(cx, |view, _| {
+                assert_eq!(
+                    view.presenter.model().title_generation.model.as_deref(),
+                    Some("provider/title-target")
+                );
+                assert_eq!(view.presenter.model().selected_harness, HarnessKind::Claude);
+                assert!(view.presenter.model().model_override.is_none());
+            });
+            let trigger = cx.debug_bounds("title-model").unwrap();
+            assert!(trigger.right() <= px(width));
+            assert!(trigger.size.width <= px(320.));
+            click_debug(cx, "title-model");
+            cx.run_until_parked();
+            cx.simulate_keystrokes("escape");
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("title-model-picker-surface").is_none());
+        }
     }
 
     #[gpui::test]

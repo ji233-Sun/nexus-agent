@@ -59,6 +59,28 @@ impl Presenter {
                 request_id,
                 harness,
                 models,
+            } if harness == self.model.title_generation.harness
+                && self.model.title_model_catalog.accepts(request_id) =>
+            {
+                self.model.title_model_catalog = if models.is_empty() {
+                    ModelCatalogState::Empty
+                } else {
+                    ModelCatalogState::Ready(models)
+                };
+            }
+            Event::ModelCatalogFailed {
+                request_id,
+                harness,
+                message,
+            } if harness == self.model.title_generation.harness
+                && self.model.title_model_catalog.accepts(request_id) =>
+            {
+                self.model.title_model_catalog.fail(message.into());
+            }
+            Event::ModelCatalogLoaded {
+                request_id,
+                harness,
+                models,
             } if harness == self.model.selected_harness
                 && self.model.active_run.is_none()
                 && self.model.model_catalog.accepts(request_id) =>
@@ -875,7 +897,7 @@ impl Presenter {
             );
             return false;
         }
-        let environment = match self.provider_launch_configuration() {
+        let environment = match self.provider_launch_configuration(harness) {
             Ok(configuration) => configuration,
             Err(error) => {
                 self.model.status = LocalizedText::new(
@@ -886,6 +908,10 @@ impl Presenter {
             }
         };
         let ResolvedModelSelection { model, effort } = self.model.resolved_model_selection();
+        let title_generation = session_id
+            .is_none()
+            .then(|| self.title_generation_configuration().ok())
+            .flatten();
         let title = compact_task_title(&prompt).unwrap_or_else(|| "新任务".into());
         let Ok(pending_run) = self.storage.prepare_task_run(NewTaskRun {
             task_id,
@@ -916,6 +942,7 @@ impl Presenter {
             effort,
             permission_mode,
             environment,
+            title_generation,
         }));
         if let Some(runner) = &self.runner
             && runner.send(command).is_ok()

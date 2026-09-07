@@ -202,7 +202,8 @@ pub(crate) async fn generate_title(
     mut cancel: watch::Receiver<bool>,
 ) -> Option<String> {
     let prompt = title_generation_prompt(&request.prompt);
-    let (spec, decoder) = super::harness::prepare_title(&request, &cwd, &prompt);
+    let (mut spec, decoder) = super::harness::prepare_title(&request, &cwd, &prompt);
+    spec.executable = nexus_harness_core::resolve_executable(&request.executable)?;
     let mut child = process_command(&spec, &request.environment).spawn().ok()?;
     let pid = child.id().unwrap_or_default();
 
@@ -793,6 +794,7 @@ mod tests {
     ) -> (StartRun, LaunchSpec) {
         let executable = executable.to_string_lossy().into_owned();
         let request = StartRun {
+            title_generation: None,
             permission_mode: nexus_domain::PermissionMode::AutoEdit,
             run_id: Uuid::new_v4(),
             task_id: Uuid::new_v4(),

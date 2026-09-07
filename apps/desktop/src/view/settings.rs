@@ -264,6 +264,7 @@ impl NexusView {
                     ),
                 )],
             ))
+            .child(self.render_title_generation_settings(cx))
             .when_some(model.selected_project.as_ref(), |element, project| {
                 element
                     .child(settings_group(
@@ -295,6 +296,141 @@ impl NexusView {
                         )
                     })
             })
+    }
+
+    fn render_title_generation_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let model = self.presenter.model();
+        let locale = model.language;
+        let colors = palette(cx);
+        let selected = model.title_generation.harness;
+        let app = cx.entity();
+        let harness = AnimatedDropdown::new(
+            "title-harness",
+            Button::new("title-harness")
+                .debug_selector(|| "title-harness".into())
+                .outline()
+                .small()
+                .w_full()
+                .h(px(CONTROL_HEIGHT))
+                .child(harness_icon(selected, colors, 16.))
+                .label(selected.to_string())
+                .accessibility_label(locale.text("标题生成引擎")),
+            self.reduced_motion,
+            move |menu, _, _| {
+                HarnessKind::ALL
+                    .into_iter()
+                    .fold(menu.min_w(px(220.)), |menu, harness| {
+                        let app = app.clone();
+                        menu.item(
+                            PopupMenuItem::new(harness.to_string())
+                                .checked(harness == selected)
+                                .on_click(move |_, _, cx| {
+                                    app.update(cx, |app, cx| {
+                                        if app.presenter.select_title_harness(harness) {
+                                            app.presenter.refresh_title_model_catalog();
+                                        }
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                    })
+            },
+        );
+        let content = &self.title_model_select_content;
+        let label = content
+            .selected_index()
+            .and_then(|index| content.groups.get(index.section)?.items.get(index.row))
+            .map(|item| item.trigger_title.clone())
+            .unwrap_or_else(|| locale.text("跟随默认").into());
+        let app = cx.entity();
+        let material = materials(cx);
+        let picker = Popover::new("title-model-picker")
+            .anchor(Anchor::BottomRight)
+            .appearance(false)
+            .open(self.title_model_picker_open)
+            .track_focus(&self.title_model_select.focus_handle(cx))
+            .trigger(
+                Button::new("title-model")
+                    .debug_selector(|| "title-model".into())
+                    .outline()
+                    .small()
+                    .w_full()
+                    .min_w_0()
+                    .h(px(CONTROL_HEIGHT))
+                    .icon(IconName::Cpu)
+                    .tooltip(label.clone())
+                    .label(label)
+                    .accessibility_label(locale.text("标题生成模型"))
+                    .child(Icon::new(IconName::ChevronDown).small()),
+            )
+            .on_open_change(move |open, window, cx| {
+                app.update(cx, |app, cx| {
+                    app.title_model_picker_open = *open;
+                    if *open {
+                        app.presenter.refresh_title_model_catalog();
+                        app.title_model_select.update(cx, |list, cx| {
+                            list.set_query("", window, cx);
+                            let selected = list.delegate().selected_index();
+                            list.set_selected_index(selected, window, cx);
+                            list.scroll_to_selected_item(window, cx);
+                        });
+                    }
+                    cx.notify();
+                });
+            })
+            .when(self.title_model_picker_open, |picker| {
+                picker.child(
+                    div()
+                        .debug_selector(|| "title-model-picker-surface".into())
+                        .w(px(360.))
+                        .h(px(320.))
+                        .rounded(px(CARD_RADIUS))
+                        .overflow_hidden()
+                        .bg(material.floating)
+                        .border_1()
+                        .border_color(material.edge)
+                        .shadow(material.shadow())
+                        .child(
+                            List::new(&self.title_model_select)
+                                .search_placeholder(locale.text("按 Provider、名称或模型 ID 搜索"))
+                                .size_full(),
+                        ),
+                )
+            });
+        settings_group(
+            colors,
+            locale.text("对话标题"),
+            [
+                settings_row(colors, locale.text("执行引擎"), "", harness),
+                settings_row(
+                    colors,
+                    locale.text("模型"),
+                    model.provider_profile_for(selected).map_or_else(
+                        || locale.text("CLI 默认配置").to_owned(),
+                        |profile| profile.name.clone(),
+                    ),
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(div().flex_1().min_w_0().child(picker))
+                        .child(
+                            Button::new("title-model-refresh")
+                                .ghost()
+                                .small()
+                                .icon(IconName::RotateCw)
+                                .tooltip(locale.text("刷新模型目录"))
+                                .accessibility_label(locale.text("刷新模型目录"))
+                                .disabled(model.selected_project.is_none())
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    app.presenter.refresh_title_model_catalog();
+                                    cx.notify();
+                                })),
+                        ),
+                ),
+            ],
+        )
     }
 
     fn render_appearance_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {

@@ -65,6 +65,12 @@ pub(crate) struct AppearanceSettings {
     pub(crate) reduced_motion: bool,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct TitleGenerationSettings {
+    pub(crate) harness: HarnessKind,
+    pub(crate) model: Option<String>,
+}
+
 impl Default for AppearanceSettings {
     fn default() -> Self {
         Self {
@@ -180,6 +186,8 @@ pub(crate) struct ResolvedModelSelection {
 pub(crate) struct AppModel {
     pub(crate) language: Language,
     pub(crate) appearance: AppearanceSettings,
+    pub(crate) title_generation: TitleGenerationSettings,
+    pub(crate) title_model_catalog: ModelCatalogState,
     pub(crate) projects: Vec<Project>,
     pub(crate) selected_project: Option<Project>,
     pub(crate) tasks: Vec<TaskSummary>,
@@ -248,10 +256,14 @@ impl AppModel {
     }
 
     pub(crate) fn selected_provider_profile(&self) -> Option<&ProviderProfile> {
-        let profile_id = self.active_provider_profiles.get(&self.selected_harness)?;
+        self.provider_profile_for(self.selected_harness)
+    }
+
+    pub(crate) fn provider_profile_for(&self, harness: HarnessKind) -> Option<&ProviderProfile> {
+        let profile_id = self.active_provider_profiles.get(&harness)?;
         self.provider_profiles
             .iter()
-            .find(|profile| profile.id == *profile_id && profile.harness == self.selected_harness)
+            .find(|profile| profile.id == *profile_id && profile.harness == harness)
     }
 
     pub(crate) fn configured_catalog_model(&self) -> Option<&str> {

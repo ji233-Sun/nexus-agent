@@ -148,6 +148,12 @@ impl TestRunner {
 
 fn request(directory: &Path, executable: PathBuf, harness: HarnessKind, prompt: &str) -> StartRun {
     StartRun {
+        title_generation: Some(nexus_protocol::TitleGenerationConfig {
+            harness,
+            executable: executable.to_string_lossy().into_owned(),
+            model: None,
+            environment: Vec::new(),
+        }),
         permission_mode: nexus_domain::PermissionMode::AutoEdit,
         run_id: Uuid::new_v4(),
         task_id: Uuid::new_v4(),
@@ -549,6 +555,7 @@ async fn runner_routes_claude_alias_catalog_without_starting_a_run() {
     let mut runner = TestRunner::spawn();
     runner
         .send(Command::ModelCatalogRefresh {
+            purpose: Default::default(),
             request_id,
             harness: HarnessKind::Claude,
             executable: executable.to_string_lossy().into_owned(),
@@ -579,6 +586,7 @@ async fn runner_loads_all_codex_model_pages_and_reaps_the_app_server() {
     let mut runner = TestRunner::spawn();
     runner
         .send(Command::ModelCatalogRefresh {
+            purpose: Default::default(),
             request_id,
             harness: HarnessKind::Codex,
             executable: executable.to_string_lossy().into_owned(),
@@ -625,6 +633,7 @@ async fn runner_loads_omp_catalog_with_provider_context_and_reaps_the_command() 
     let mut runner = TestRunner::spawn();
     runner
         .send(Command::ModelCatalogRefresh {
+            purpose: Default::default(),
             request_id,
             harness: HarnessKind::Omp,
             executable: executable.to_string_lossy().into_owned(),
@@ -684,6 +693,7 @@ async fn omp_catalog_reports_command_json_and_empty_states_without_leaking_stder
         let request_id = Uuid::new_v4();
         runner
             .send(Command::ModelCatalogRefresh {
+                purpose: Default::default(),
                 request_id,
                 harness: HarnessKind::Omp,
                 executable: executable.to_string_lossy().into_owned(),
@@ -706,6 +716,7 @@ async fn omp_catalog_reports_command_json_and_empty_states_without_leaking_stder
     let request_id = Uuid::new_v4();
     runner
         .send(Command::ModelCatalogRefresh {
+            purpose: Default::default(),
             request_id,
             harness: HarnessKind::Omp,
             executable: executable.to_string_lossy().into_owned(),
@@ -731,6 +742,7 @@ async fn newer_omp_catalog_request_cancels_and_reaps_the_previous_command() {
     let stale_id = Uuid::new_v4();
     let current_id = Uuid::new_v4();
     let command = |request_id, environment| Command::ModelCatalogRefresh {
+        purpose: Default::default(),
         request_id,
         harness: HarnessKind::Omp,
         executable: executable.to_string_lossy().into_owned(),
@@ -764,6 +776,7 @@ async fn newer_catalog_requests_cancel_older_app_servers_without_stale_events() 
     let stale_id = Uuid::new_v4();
     let current_id = Uuid::new_v4();
     let command = |request_id, environment| Command::ModelCatalogRefresh {
+        purpose: Default::default(),
         request_id,
         harness: HarnessKind::Codex,
         executable: executable.to_string_lossy().into_owned(),
@@ -797,6 +810,7 @@ async fn catalog_request_errors_are_explicit_and_retriable() {
     let mut runner = TestRunner::spawn();
     runner
         .send(Command::ModelCatalogRefresh {
+            purpose: Default::default(),
             request_id,
             harness: HarnessKind::Codex,
             executable: executable.to_string_lossy().into_owned(),
@@ -873,15 +887,34 @@ async fn runner_streams_fake_omp_and_uses_guarded_rpc_mode() {
 async fn runner_generates_titles_with_each_harness_in_a_safe_background_process() {
     for harness in HarnessKind::ALL {
         let directory = tempfile::tempdir().unwrap();
+        let executable = fake_harness(directory.path());
+        let title_executable = directory
+            .path()
+            .join(format!("title-harness{}", std::env::consts::EXE_SUFFIX));
+        fs::copy(&executable, &title_executable).unwrap();
         let mut request = request(
             directory.path(),
-            fake_harness(directory.path()),
-            harness,
+            executable,
+            if harness == HarnessKind::Claude {
+                HarnessKind::Codex
+            } else {
+                HarnessKind::Claude
+            },
             "Please fix the authentication flow and add regression tests",
         );
+        request.model = Some("conversation-model".into());
         request.environment.push(EnvironmentVariable {
             name: "TEST_PROVIDER_API_KEY".into(),
-            value: "title-secret".into(),
+            value: "conversation-secret".into(),
+        });
+        request.title_generation = Some(nexus_protocol::TitleGenerationConfig {
+            harness,
+            executable: title_executable.to_string_lossy().into_owned(),
+            model: Some("title-model".into()),
+            environment: vec![EnvironmentVariable {
+                name: "TEST_PROVIDER_API_KEY".into(),
+                value: "title-secret".into(),
+            }],
         });
         let run_id = request.run_id;
         let task_id = request.task_id;
@@ -896,6 +929,21 @@ async fn runner_generates_titles_with_each_harness_in_a_safe_background_process(
         assert_eq!(title, "Fix authentication flow");
         let args = fs::read_to_string(directory.path().join("title-args.txt")).unwrap();
         assert!(!args.contains("Please fix the authentication flow"));
+        assert!(args.contains("--model\ntitle-model"));
+        assert!(!args.contains("conversation-model"));
+        assert!(!args.contains("high"));
+        assert_eq!(
+            PathBuf::from(
+                fs::read_to_string(directory.path().join("title-executable.txt")).unwrap()
+            )
+            .canonicalize()
+            .unwrap(),
+            title_executable.canonicalize().unwrap(),
+        );
+        assert_eq!(
+            fs::read_to_string(directory.path().join("provider-env.txt")).unwrap(),
+            "conversation-secret"
+        );
         match harness {
             HarnessKind::Claude => {
                 assert!(args.contains("--permission-mode\ndontAsk"));
@@ -922,6 +970,34 @@ async fn runner_generates_titles_with_each_harness_in_a_safe_background_process(
             "title-secret"
         );
     }
+}
+
+#[tokio::test]
+async fn title_generation_failure_does_not_fail_the_conversation() {
+    let binaries = tempfile::tempdir().unwrap();
+    let executable = fake_harness(binaries.path());
+    let directory = tempfile::tempdir().unwrap();
+    let mut request = request(
+        directory.path(),
+        executable,
+        HarnessKind::Claude,
+        "keep the fallback title",
+    );
+    request.title_generation.as_mut().unwrap().executable = directory
+        .path()
+        .join("missing-harness")
+        .to_string_lossy()
+        .into_owned();
+    let run_id = request.run_id;
+    let mut runner = TestRunner::spawn();
+    runner.send(Command::RunStart(request)).await;
+    let events = runner.collect_run(run_id, RunStatus::Completed).await;
+    runner.shutdown().await;
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        Event::RunFailed { .. } | Event::TaskTitleGenerated { .. }
+    )));
+    assert!(!directory.path().join("title-args.txt").exists());
 }
 
 #[tokio::test]
@@ -1034,10 +1110,15 @@ async fn shutdown_reaps_a_blocked_title_process_tree() {
         HarnessKind::Codex,
         "generate a title",
     );
-    request.environment.push(EnvironmentVariable {
-        name: "TEST_TITLE_BLOCK".into(),
-        value: "1".into(),
-    });
+    request
+        .title_generation
+        .as_mut()
+        .unwrap()
+        .environment
+        .push(EnvironmentVariable {
+            name: "TEST_TITLE_BLOCK".into(),
+            value: "1".into(),
+        });
     let run_id = request.run_id;
     let mut runner = TestRunner::spawn();
     runner.send(Command::RunStart(request)).await;
