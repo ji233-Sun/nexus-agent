@@ -1065,11 +1065,10 @@ impl NexusView {
         let selected_profile_ready = model
             .selected_provider_profile()
             .is_some_and(|profile| profile.credential_configured);
+        let background_run = model.active_run.is_some() && model.active_task != model.selected_task;
         let header_status_pending = model.active_run.is_some()
             || model.codex_thread_loading
-            || (!history
-                && (matches!(model.model_catalog, ModelCatalogState::Loading { .. })
-                    || model.selected_probe().is_none()));
+            || (!history && matches!(model.model_catalog, ModelCatalogState::Loading { .. }));
         let header_status_color = if header_status_pending {
             rgb(colors.accent).into()
         } else if !history
@@ -1120,7 +1119,21 @@ impl NexusView {
                         .unwrap_or_else(|| locale.text("新建任务").into())
                 })
             });
-        let header_status = model.status_text().to_owned();
+        let header_status = if background_run {
+            locale.format(
+                "其他任务 · {status}",
+                &[("status", model.status_text().to_owned())],
+            )
+        } else {
+            model.status_text().to_owned()
+        };
+        let header_status_selector = if background_run {
+            "workspace-header-background-status"
+        } else if header_status_pending {
+            "workspace-header-pending-status"
+        } else {
+            "workspace-header-settled-status"
+        };
         div()
             .debug_selector(|| "workspace-page".into())
             .size_full()
@@ -1210,6 +1223,7 @@ impl NexusView {
                             )
                             .child(
                                 div()
+                                    .debug_selector(move || header_status_selector.into())
                                     .flex_none()
                                     .flex()
                                     .items_center()

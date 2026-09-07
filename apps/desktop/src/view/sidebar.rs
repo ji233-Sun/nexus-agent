@@ -603,6 +603,7 @@ mod tests {
     use super::*;
     use crate::infrastructure::storage::{NewTaskRun, Storage};
     use gpui::{ScrollDelta, ScrollWheelEvent, TestAppContext, point};
+    use nexus_protocol::Event;
     use std::path::Path;
 
     fn scroll_test_view(
@@ -750,6 +751,8 @@ mod tests {
         assert!(cx.debug_bounds("workspace-empty-no-project").is_some());
         assert!(cx.debug_bounds("workspace-empty-agent-status").is_none());
         assert!(cx.debug_bounds("workspace-header-task").is_none());
+        assert!(cx.debug_bounds("workspace-header-settled-status").is_some());
+        assert!(cx.debug_bounds("workspace-header-pending-status").is_none());
 
         view.update(cx, |view, cx| {
             view.presenter.open_project(directory.path());
@@ -763,6 +766,42 @@ mod tests {
         assert!(cx.debug_bounds("workspace-empty-no-project").is_none());
         assert!(cx.debug_bounds("workspace-empty-agent-status").is_some());
         assert!(cx.debug_bounds("workspace-empty-status").is_some());
+        assert!(cx.debug_bounds("workspace-header-task").is_some());
+        assert!(cx.debug_bounds("workspace-header-settled-status").is_some());
+    }
+
+    #[gpui::test]
+    fn header_marks_an_active_run_as_background_after_selecting_another_task(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (mut presenter, runner, _directory) = crate::presenter::tests::fixture();
+        assert!(presenter.submit("inactive conversation", "claude"));
+        let inactive_task = presenter.model().active_task.unwrap();
+        runner.emit(Event::RunExited {
+            run_id: presenter.model().active_run.unwrap(),
+            status: RunStatus::Completed,
+            exit_code: Some(0),
+        });
+        presenter.drain_events();
+        presenter.new_task();
+        assert!(presenter.submit("background conversation", "claude"));
+        let active_task = presenter.model().active_task.unwrap();
+        presenter.select_task(inactive_task);
+        assert_ne!(presenter.model().selected_task, Some(active_task));
+
+        let (_view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            let _ = window.draw(cx);
+        });
+
+        assert!(
+            cx.debug_bounds("workspace-header-background-status")
+                .is_some()
+        );
         assert!(cx.debug_bounds("workspace-header-task").is_some());
     }
 
