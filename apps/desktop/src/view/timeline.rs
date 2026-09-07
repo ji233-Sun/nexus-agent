@@ -175,7 +175,30 @@ impl NexusView {
         let model = self.presenter.model();
         let history = model.selected_codex_thread.is_some();
         if !history {
+            let project = model.selected_project.as_ref();
+            let has_project = project.is_some();
+            let selector = if has_project {
+                "workspace-empty-agent-status"
+            } else {
+                "workspace-empty-no-project"
+            };
+            let context = project
+                .map(|project| project.display_name.clone())
+                .unwrap_or_else(|| "Nexus Agent".into());
+            let title = if has_project {
+                model.selected_harness.to_string()
+            } else {
+                locale.text("未选择项目").into()
+            };
+            let description = if has_project {
+                model.status_text().to_owned()
+            } else {
+                locale
+                    .text("先选择本地项目，再描述你希望完成的工作。")
+                    .into()
+            };
             return div()
+                .debug_selector(move || selector.into())
                 .flex_1()
                 .w_full()
                 .flex()
@@ -184,18 +207,44 @@ impl NexusView {
                 .justify_center()
                 .py(px(if compact { 8. } else { 32. }))
                 .text_center()
-                .child(harness_icon(
-                    model.selected_harness,
-                    colors,
-                    if compact { 40. } else { 48. },
-                ))
+                .child(if has_project {
+                    harness_icon(
+                        model.selected_harness,
+                        colors,
+                        if compact { 36. } else { 42. },
+                    )
+                    .into_any_element()
+                } else {
+                    brand_mark(colors, if compact { 36. } else { 42. }).into_any_element()
+                })
+                .child(
+                    div()
+                        .debug_selector(|| "workspace-empty-context".into())
+                        .mt_4()
+                        .max_w_full()
+                        .truncate()
+                        .text_size(px(12.))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(rgb(colors.muted))
+                        .child(context),
+                )
                 .child(
                     div()
                         .mt_3()
-                        .text_size(px(if compact { 24. } else { 28. }))
+                        .text_size(px(if compact { 20. } else { 24. }))
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .line_height(relative(1.25))
-                        .child(model.selected_harness.to_string()),
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .debug_selector(|| "workspace-empty-status".into())
+                        .mt_3()
+                        .max_w(px(520.))
+                        .text_size(px(13.))
+                        .text_color(rgb(colors.muted))
+                        .line_height(relative(1.55))
+                        .child(description),
                 )
                 .map(|element| entrance(element, "empty-state-enter", !self.reduced_motion));
         }

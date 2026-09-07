@@ -5,48 +5,53 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SettingsSection {
     General,
-    Archived,
+    Appearance,
     Agent,
     Providers,
     Remote,
+    Archived,
 }
 
 impl SettingsSection {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::General,
-        Self::Archived,
+        Self::Appearance,
         Self::Agent,
         Self::Providers,
         Self::Remote,
+        Self::Archived,
     ];
 
     fn id(self) -> &'static str {
         match self {
             Self::General => "general",
-            Self::Archived => "archived",
+            Self::Appearance => "appearance",
             Self::Agent => "agent",
             Self::Providers => "providers",
             Self::Remote => "remote",
+            Self::Archived => "archived",
         }
     }
 
     fn label(self, locale: Language) -> &'static str {
         match self {
             Self::General => locale.text("通用"),
-            Self::Archived => locale.text("归档对话"),
+            Self::Appearance => locale.text("外观"),
             Self::Agent => locale.text("执行引擎"),
             Self::Providers => locale.text("凭据配置"),
             Self::Remote => locale.text("远程访问"),
+            Self::Archived => locale.text("归档对话"),
         }
     }
 
     fn icon(self) -> IconName {
         match self {
             Self::General => IconName::Settings2,
-            Self::Archived => IconName::Inbox,
+            Self::Appearance => IconName::Palette,
             Self::Agent => IconName::Bot,
             Self::Providers => IconName::Cpu,
             Self::Remote => IconName::Globe,
+            Self::Archived => IconName::Inbox,
         }
     }
 }
@@ -74,10 +79,11 @@ impl NexusView {
         let section = self.settings_section;
         let content = match section {
             SettingsSection::General => self.render_general_settings(cx).into_any_element(),
-            SettingsSection::Archived => self.render_archived_settings(cx).into_any_element(),
+            SettingsSection::Appearance => self.render_appearance_settings(cx).into_any_element(),
             SettingsSection::Agent => self.render_agent_settings(cx).into_any_element(),
             SettingsSection::Providers => self.render_provider_profiles(cx).into_any_element(),
             SettingsSection::Remote => self.render_remote_settings(cx).into_any_element(),
+            SettingsSection::Archived => self.render_archived_settings(cx).into_any_element(),
         };
         let titlebar_inset = if cfg!(target_os = "macos") { 36. } else { 0. };
 
@@ -204,18 +210,19 @@ impl NexusView {
                             .overflow_y_scroll()
                             .lock_scroll_axis()
                             .track_scroll(&self.settings_scroll)
-                            .px_8()
                             .pt_8()
                             .pb_8()
                             .child(
-                                div()
-                                    .debug_selector(move || {
-                                        format!("settings-content-{}", section.id())
-                                    })
-                                    .w_full()
-                                    .max_w(px(CONTENT_WIDTH))
-                                    .mx_auto()
-                                    .child(content),
+                                div().min_w_0().px_8().child(
+                                    div()
+                                        .debug_selector(move || {
+                                            format!("settings-content-{}", section.id())
+                                        })
+                                        .w_full()
+                                        .max_w(px(CONTENT_WIDTH))
+                                        .mx_auto()
+                                        .child(content),
+                                ),
                             )
                             .vertical_scrollbar(&self.settings_scroll),
                     ),
@@ -226,7 +233,6 @@ impl NexusView {
         let locale = self.presenter.model().language;
         let colors = palette(cx);
         let model = self.presenter.model();
-        let appearance = model.appearance;
         div()
             .flex()
             .flex_col()
@@ -257,131 +263,6 @@ impl NexusView {
                         }),
                     ),
                 )],
-            ))
-            .child(settings_group(
-                colors,
-                locale.text("外观"),
-                [
-                    div()
-                        .py_4()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .child(locale.text("主题"))
-                        .child(
-                            div().w_full().max_w(px(600.)).flex().gap_3().children(
-                                [
-                                    (ThemePreference::System, "system", locale.text("系统")),
-                                    (ThemePreference::Light, "light", locale.text("浅色")),
-                                    (ThemePreference::Dark, "dark", locale.text("深色")),
-                                ]
-                                .map(|(theme, id, label)| {
-                                    let selected = appearance.theme == theme;
-                                    Button::new(id)
-                                        .debug_selector(move || format!("appearance-theme-{id}"))
-                                        .ghost()
-                                        .p_1()
-                                        .h_auto()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .accessibility_label(locale.format(
-                                            "{label}主题",
-                                            &[("label", (label).to_string())],
-                                        ))
-                                        .child(
-                                            div()
-                                                .w_full()
-                                                .flex()
-                                                .flex_col()
-                                                .gap_2()
-                                                .child(
-                                                    theme_preview(theme).border_2().border_color(
-                                                        rgb(if selected {
-                                                            colors.accent
-                                                        } else {
-                                                            colors.border
-                                                        }),
-                                                    ),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .flex()
-                                                        .items_center()
-                                                        .justify_center()
-                                                        .gap_1()
-                                                        .text_size(px(13.))
-                                                        .child(label)
-                                                        .child(
-                                                            Icon::new(IconName::Check)
-                                                                .size(px(14.))
-                                                                .opacity(if selected {
-                                                                    1.
-                                                                } else {
-                                                                    0.
-                                                                }),
-                                                        ),
-                                                ),
-                                        )
-                                        .on_click(cx.listener(move |app, _, window, cx| {
-                                            app.set_appearance(
-                                                AppearanceSettings {
-                                                    theme,
-                                                    ..app.presenter.model().appearance
-                                                },
-                                                window,
-                                                cx,
-                                            );
-                                        }))
-                                }),
-                            ),
-                        ),
-                    settings_row(
-                        colors,
-                        locale.text("玻璃效果"),
-                        if cfg!(target_os = "macos") {
-                            locale.text("轻透的导航与浮层；系统减少透明度时自动使用实色。")
-                        } else {
-                            locale.text("此平台使用有边界的实色外观。偏好仍会保存。")
-                        },
-                        div().debug_selector(|| "appearance-glass".into()).child(
-                            Switch::new("appearance-glass")
-                                .accessibility_label(locale.text("玻璃效果"))
-                                .small()
-                                .checked(appearance.glass)
-                                .on_click(cx.listener(|app, checked, window, cx| {
-                                    app.set_appearance(
-                                        AppearanceSettings {
-                                            glass: *checked,
-                                            ..app.presenter.model().appearance
-                                        },
-                                        window,
-                                        cx,
-                                    );
-                                })),
-                        ),
-                    ),
-                    settings_row(
-                        colors,
-                        locale.text("减少动效"),
-                        locale.text("关闭装饰动画和平滑滚动，同时遵循系统减少动效设置。"),
-                        div().debug_selector(|| "reduce-motion".into()).child(
-                            Switch::new("reduce-motion")
-                                .accessibility_label(locale.text("减少动效"))
-                                .small()
-                                .checked(appearance.reduced_motion)
-                                .on_click(cx.listener(|app, checked, window, cx| {
-                                    app.set_appearance(
-                                        AppearanceSettings {
-                                            reduced_motion: *checked,
-                                            ..app.presenter.model().appearance
-                                        },
-                                        window,
-                                        cx,
-                                    );
-                                })),
-                        ),
-                    ),
-                ],
             ))
             .when_some(model.selected_project.as_ref(), |element, project| {
                 element
@@ -414,6 +295,137 @@ impl NexusView {
                         )
                     })
             })
+    }
+
+    fn render_appearance_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let locale = self.presenter.model().language;
+        let colors = palette(cx);
+        let appearance = self.presenter.model().appearance;
+        settings_group(
+            colors,
+            locale.text("外观"),
+            [
+                div()
+                    .py_4()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(locale.text("主题"))
+                    .child(
+                        div().w_full().max_w(px(600.)).flex().gap_3().children(
+                            [
+                                (ThemePreference::System, "system", locale.text("系统")),
+                                (ThemePreference::Light, "light", locale.text("浅色")),
+                                (ThemePreference::Dark, "dark", locale.text("深色")),
+                            ]
+                            .map(|(theme, id, label)| {
+                                let selected = appearance.theme == theme;
+                                Button::new(id)
+                                    .debug_selector(move || format!("appearance-theme-{id}"))
+                                    .ghost()
+                                    .p_1()
+                                    .h_auto()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .accessibility_label(
+                                        locale.format(
+                                            "{label}主题",
+                                            &[("label", (label).to_string())],
+                                        ),
+                                    )
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_2()
+                                            .child(theme_preview(theme).border_2().border_color(
+                                                rgb(if selected {
+                                                    colors.accent
+                                                } else {
+                                                    colors.border
+                                                }),
+                                            ))
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .gap_1()
+                                                    .text_size(px(13.))
+                                                    .child(label)
+                                                    .child(
+                                                        Icon::new(IconName::Check)
+                                                            .size(px(14.))
+                                                            .opacity(if selected {
+                                                                1.
+                                                            } else {
+                                                                0.
+                                                            }),
+                                                    ),
+                                            ),
+                                    )
+                                    .on_click(cx.listener(move |app, _, window, cx| {
+                                        app.set_appearance(
+                                            AppearanceSettings {
+                                                theme,
+                                                ..app.presenter.model().appearance
+                                            },
+                                            window,
+                                            cx,
+                                        );
+                                    }))
+                            }),
+                        ),
+                    ),
+                settings_row(
+                    colors,
+                    locale.text("玻璃效果"),
+                    if cfg!(target_os = "macos") {
+                        locale.text("轻透的导航与浮层；系统减少透明度时自动使用实色。")
+                    } else {
+                        locale.text("此平台使用有边界的实色外观。偏好仍会保存。")
+                    },
+                    div().debug_selector(|| "appearance-glass".into()).child(
+                        Switch::new("appearance-glass")
+                            .accessibility_label(locale.text("玻璃效果"))
+                            .small()
+                            .checked(appearance.glass)
+                            .on_click(cx.listener(|app, checked, window, cx| {
+                                app.set_appearance(
+                                    AppearanceSettings {
+                                        glass: *checked,
+                                        ..app.presenter.model().appearance
+                                    },
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    ),
+                ),
+                settings_row(
+                    colors,
+                    locale.text("减少动效"),
+                    locale.text("关闭装饰动画和平滑滚动，同时遵循系统减少动效设置。"),
+                    div().debug_selector(|| "reduce-motion".into()).child(
+                        Switch::new("reduce-motion")
+                            .accessibility_label(locale.text("减少动效"))
+                            .small()
+                            .checked(appearance.reduced_motion)
+                            .on_click(cx.listener(|app, checked, window, cx| {
+                                app.set_appearance(
+                                    AppearanceSettings {
+                                        reduced_motion: *checked,
+                                        ..app.presenter.model().appearance
+                                    },
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    ),
+                ),
+            ],
+        )
     }
 
     fn render_archived_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {

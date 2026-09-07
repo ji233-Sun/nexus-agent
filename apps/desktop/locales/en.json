@@ -162,6 +162,7 @@
   "这是只读历史。选择项目并新建任务后即可开始。": "This history is read only. Choose a project and create a task to start.",
   "先选择本地项目，再描述你希望完成的工作。": "Choose a local project, then describe what you want done.",
   "Agent 正在执行 · 发送后排队，每轮结束后发送一条": "Agent running · Messages queue and send one per completed turn",
+  "其他任务 · {status}": "Other task · {status}",
   "Agent 尚未就绪 · 打开设置检查探测和登录状态": "Agent not ready · Open settings to check detection and sign-in",
   "⌘ Enter 发送消息 · Enter 换行": "⌘ Enter to send · Enter for a new line",
   "Ctrl Enter 发送消息 · Enter 换行": "Ctrl Enter to send · Enter for a new line",
