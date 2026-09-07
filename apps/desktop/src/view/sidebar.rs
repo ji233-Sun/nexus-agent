@@ -1,6 +1,6 @@
 use super::*;
 use crate::model::history::ThreadSummary;
-use gpui_kit::component::{list::ListItem, scroll::ScrollableElement as _, spinner::Spinner};
+use gpui_kit::component::{list::ListItem, scroll::Scrollbar, spinner::Spinner};
 
 const SIDEBAR_ROW_HEIGHT: f32 = 32.;
 pub(super) const HISTORY_PAGE_SIZE: usize = 10;
@@ -512,7 +512,8 @@ impl NexusView {
                                     ),
                             ),
                     )
-                    .vertical_scrollbar(&self.sidebar_scroll),
+                    // Anchor the track to the handle's viewport, not the scrolled child layout.
+                    .child(Scrollbar::vertical(&self.sidebar_scroll)),
             )
             .child(
                 div().flex_none().px(px(12.)).pb(px(12.)).child(
@@ -1204,6 +1205,86 @@ mod tests {
                 renders,
             );
         }
+    }
+
+    #[gpui::test]
+    fn sidebar_scrollbar_tracks_scrolling_and_dragging(cx: &mut TestAppContext) {
+        let (view, cx) = scroll_test_view(cx);
+        cx.update(|window, cx| {
+            gpui_kit::component::Theme::set_scrollbar_mode(
+                gpui_kit::component::scroll::ScrollbarMode::Always,
+                cx,
+            );
+            window.refresh();
+            let _ = window.draw(cx);
+        });
+        let scroll = view.read_with(cx, |view, _| view.sidebar_scroll.clone());
+        let viewport = scroll.bounds();
+        let thumb_bounds = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, _| {
+                let thumbs: Vec<_> = window
+                    .painted_quads()
+                    .into_iter()
+                    .map(|quad| quad.bounds.map(|value| px(value.0 / window.scale_factor())))
+                    .filter(|bounds| {
+                        bounds.left() >= viewport.right() - px(16.)
+                            && bounds.right() <= viewport.right()
+                            && bounds.size.width > px(0.)
+                            && bounds.size.width < px(16.)
+                            && bounds.size.height > px(32.)
+                    })
+                    .collect();
+                assert_eq!(thumbs.len(), 1, "expected one painted sidebar thumb");
+                thumbs[0]
+            })
+        };
+        let initial_thumb = thumb_bounds(cx);
+        assert!(initial_thumb.top() >= viewport.top());
+        for delta in [
+            ScrollDelta::Pixels(point(px(0.), px(-80.))),
+            ScrollDelta::Lines(point(0., -3.)),
+        ] {
+            let before = thumb_bounds(cx);
+            cx.simulate_event(ScrollWheelEvent {
+                position: viewport.center(),
+                delta,
+                ..Default::default()
+            });
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let after = thumb_bounds(cx);
+            assert!(
+                after.top() > before.top(),
+                "thumb must follow downward scrolling"
+            );
+            assert_eq!(after.size.height, initial_thumb.size.height);
+            assert_eq!(scroll.bounds(), viewport);
+        }
+
+        let thumb = thumb_bounds(cx);
+        let before_drag = scroll.offset().y;
+        let destination = thumb.center() + point(px(0.), px(40.));
+        cx.simulate_mouse_down(thumb.center(), gpui::MouseButton::Left, Default::default());
+        cx.simulate_mouse_move(destination, gpui::MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(destination, gpui::MouseButton::Left, Default::default());
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            scroll.offset().y < before_drag,
+            "dragging must scroll the sidebar"
+        );
+        assert!(thumb_bounds(cx).top() > thumb.top());
+
+        scroll.scroll_to_bottom();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            let _ = window.draw(cx);
+        });
+        let bottom_thumb = thumb_bounds(cx);
+        assert!(bottom_thumb.top() > initial_thumb.top());
+        assert!((bottom_thumb.bottom() - viewport.bottom()).abs() < px(8.));
     }
 
     #[gpui::test]
