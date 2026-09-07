@@ -4,10 +4,10 @@ pub(crate) mod tools;
 use crate::i18n::{Language, LocalizedText};
 use history::{HistoryMessage, ThreadSummary};
 use nexus_domain::{
-    HarnessKind, Message, ModelDescriptor, Project, ProviderProfile, TaskSummary, ThinkingEffort,
-    UserAskQuestion,
+    HarnessKind, Message, ModelDescriptor, PermissionMode, Project, ProviderProfile, TaskSummary,
+    ThinkingEffort, UserAskQuestion,
 };
-use nexus_protocol::HarnessProbe;
+use nexus_protocol::{ApprovalRequest, HarnessProbe};
 use std::collections::{BTreeMap, VecDeque};
 use uuid::Uuid;
 
@@ -80,6 +80,7 @@ pub(crate) struct QueuedMessage {
     pub(crate) id: Uuid,
     pub(crate) task_id: Uuid,
     pub(crate) prompt: String,
+    pub(crate) permission_mode: PermissionMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,6 +124,9 @@ pub(crate) struct AppModel {
     pub(crate) active_run_elapsed_seconds: Option<u64>,
     pub(crate) active_task: Option<Uuid>,
     pub(crate) active_harness: Option<HarnessKind>,
+    pub(crate) active_permission_mode: Option<PermissionMode>,
+    pub(crate) pending_approvals: VecDeque<ApprovalRequest>,
+    pub(crate) responding_approval: Option<Uuid>,
     pub(crate) streaming_text: String,
     pub(crate) status: LocalizedText,
     pub(crate) harnesses: BTreeMap<HarnessKind, HarnessProbe>,
@@ -138,6 +142,7 @@ pub(crate) struct AppModel {
     pub(crate) model_override_name: Option<String>,
     pub(crate) model_catalog: ModelCatalogState,
     pub(crate) effort: ThinkingEffort,
+    pub(crate) permission_mode: PermissionMode,
     pub(crate) executable: String,
     pub(crate) provider_profiles: Vec<ProviderProfile>,
     pub(crate) active_provider_profiles: BTreeMap<HarnessKind, Uuid>,

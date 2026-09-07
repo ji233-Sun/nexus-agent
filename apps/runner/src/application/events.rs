@@ -71,6 +71,8 @@ pub(crate) async fn emit_decoded(run_id: Uuid, decoded: DecodedEvent, emitter: &
         DecodedEvent::WriteStdin(_)
         | DecodedEvent::UserAskRequested(_)
         | DecodedEvent::UserAskFinished { .. }
+        | DecodedEvent::ApprovalRequested(_)
+        | DecodedEvent::ApprovalResolved(_)
         | DecodedEvent::InputAccepted(_)
         | DecodedEvent::InputRejected { .. }
         | DecodedEvent::TurnCompleted => return,

@@ -18,7 +18,8 @@ use crate::{
 };
 use anyhow::{Result, bail};
 use nexus_domain::{
-    ClaudeModel, HarnessKind, Project, ProviderProfile, ThinkingEffort, UserAskAnswer,
+    ClaudeModel, HarnessKind, PermissionMode, Project, ProviderProfile, ThinkingEffort,
+    UserAskAnswer,
 };
 use nexus_protocol::{Command, CommandEnvelope, EnvironmentVariable, EventEnvelope};
 use std::{collections::BTreeMap, path::Path, str::FromStr as _, time::Instant};
@@ -115,6 +116,7 @@ impl Presenter {
             .flatten()
             .and_then(|value| ThinkingEffort::from_str(&value).ok())
             .unwrap_or(ThinkingEffort::Default);
+        let permission_mode = load_permission_mode(&storage, selected_harness);
         let executable = storage
             .setting(executable_setting_key(selected_harness))
             .ok()
@@ -184,6 +186,7 @@ impl Presenter {
                 projects,
                 archived_tasks,
                 selected_harness,
+                permission_mode,
                 model_override,
                 model_override_name,
                 effort,
@@ -328,9 +331,13 @@ impl Presenter {
         self.model.codex_thread_loading = false;
         self.model.streaming_text.clear();
         self.model.status = "已准备好新任务。".into();
+        self.model.permission_mode =
+            load_permission_mode(&self.storage, self.model.selected_harness);
     }
 
     pub(crate) fn select_project(&mut self, project: Project) {
+        self.model.permission_mode =
+            load_permission_mode(&self.storage, self.model.selected_harness);
         self.model.project_dirty = is_git_dirty(Path::new(&project.canonical_path));
         self.model.selected_project = Some(project);
         self.model.selected_task = None;
@@ -378,6 +385,7 @@ impl Presenter {
         }
         if let Ok(Some(config)) = self.storage.conversation_config(task_id) {
             self.model.selected_harness = config.harness;
+            self.model.permission_mode = config.permission_mode;
             self.model.effort = normalize_effort_for_harness(config.harness, config.effort);
             self.model.model_override = (config.model != "default").then_some(config.model.clone());
             self.model.model_override_name = None;
@@ -577,6 +585,7 @@ impl Presenter {
         }
 
         self.model.selected_harness = harness;
+        self.model.permission_mode = load_permission_mode(&self.storage, harness);
         let _ = self
             .storage
             .set_setting("default_harness", self.model.selected_harness.as_str());
@@ -648,6 +657,24 @@ impl Presenter {
                 &[("harness", (harness).to_string())],
             )
         };
+    }
+
+    pub(crate) fn select_permission_mode(&mut self, mode: PermissionMode) {
+        if self.model.active_run.is_some() && !self.model.can_queue() {
+            return;
+        }
+        if self
+            .storage
+            .set_setting(
+                &permission_setting_key(self.model.selected_harness),
+                mode.as_str(),
+            )
+            .is_err()
+        {
+            self.model.status = "无法保存权限设置。".into();
+            return;
+        }
+        self.model.permission_mode = mode;
     }
 
     pub(crate) fn select_effort(&mut self, effort: ThinkingEffort) {
@@ -1093,6 +1120,19 @@ impl Presenter {
         self.persist_catalog_effort();
         true
     }
+}
+
+fn permission_setting_key(harness: HarnessKind) -> String {
+    format!("permission_mode.{}", harness.as_str())
+}
+
+fn load_permission_mode(storage: &Storage, harness: HarnessKind) -> PermissionMode {
+    storage
+        .setting(&permission_setting_key(harness))
+        .ok()
+        .flatten()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_default()
 }
 
 fn executable_setting_key(harness: HarnessKind) -> &'static str {

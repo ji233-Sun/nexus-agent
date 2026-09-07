@@ -4,18 +4,18 @@ use crate::application::{
     user_ask::{PendingUserAsks, UserAskInput},
 };
 use nexus_domain::{RunStatus, UserAskStatus, compact_task_title};
-use nexus_harness_core::{DecodedEvent, InputFrame, LaunchSpec, LineDecoder};
-use nexus_protocol::{EnvironmentVariable, ErrorCode, Event, StartRun};
+use nexus_harness_core::{ApprovalPrompt, DecodedEvent, InputFrame, LaunchSpec, LineDecoder};
+use nexus_protocol::{ApprovalRequest, EnvironmentVariable, ErrorCode, Event, StartRun};
 use serde_json::Value;
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     time::Duration,
 };
 use tokio::{
     io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader},
     process::{ChildStdin, ChildStdout, Command as ProcessCommand},
     sync::{mpsc, watch},
-    time::{sleep, timeout},
+    time::{Instant, sleep, sleep_until, timeout},
 };
 use uuid::Uuid;
 
@@ -31,6 +31,10 @@ pub(crate) struct SteerInput {
 pub(crate) enum RunInput {
     Steer(SteerInput),
     UserAsk(UserAskInput),
+    Approval {
+        request_id: Uuid,
+        option: Option<usize>,
+    },
 }
 
 struct StreamContext {
@@ -39,6 +43,11 @@ struct StreamContext {
     user_asks: PendingUserAsks,
     cancel: watch::Receiver<bool>,
     emitter: Emitter,
+}
+
+struct PendingApproval {
+    prompt: ApprovalPrompt,
+    deadline: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -137,6 +146,7 @@ async fn run_prepared_harness(
             (output, true)
         }
     };
+    let was_cancelled = was_cancelled || *cancel.borrow();
     let (ask_status, ask_message) = if was_cancelled {
         (UserAskStatus::Cancelled, None)
     } else if let Some(message) = &output.provider_error {
@@ -335,7 +345,7 @@ async fn read_stdout(
         run_id,
         harness,
         user_asks,
-        cancel,
+        mut cancel,
         emitter,
     } = context;
     let mut lines = BufReader::new(stdout).lines();
@@ -345,85 +355,165 @@ async fn read_stdout(
     let mut awaiting_receipt = HashSet::new();
     let mut input_open = true;
     let mut session_started = false;
+    let mut approvals = HashMap::<Uuid, PendingApproval>::new();
     'stream: loop {
-        enum Next {
-            Input(Option<RunInput>),
-            Line(std::io::Result<Option<String>>),
-        }
-        let next = tokio::select! {
+        let deadline = approvals
+            .values()
+            .filter_map(|pending| pending.deadline)
+            .min();
+        let line = tokio::select! {
             biased;
-            message = input.recv(), if input_open => Next::Input(message),
-            line = lines.next_line() => Next::Line(line),
-        };
-        let line = match next {
-            Next::Input(Some(RunInput::Steer(message))) => {
-                queued.push_back(message);
-                continue;
-            }
-            Next::Input(Some(RunInput::UserAsk(answer))) => {
-                if !user_asks.is_answer_queued(answer.request_id) {
-                    continue;
-                }
-                let Some(frame) =
-                    decoder.answer_user_ask(&answer.native_request_id, &answer.answers)
-                else {
-                    let message = format!("{harness} 无法编码 User Ask 回答。");
-                    if user_asks.finish(answer.request_id) {
-                        emitter
-                            .send(Event::RunUserAskFinished {
-                                run_id,
-                                request_id: answer.request_id,
-                                status: UserAskStatus::Failed,
-                                message: Some(message.clone()),
-                            })
-                            .await;
+            _ = cancel.changed() => break,
+            _ = sleep_until(deadline.unwrap_or_else(Instant::now)), if deadline.is_some() => {
+                let expired: Vec<_> = approvals.iter().filter_map(|(id, pending)|
+                    pending.deadline.is_some_and(|deadline| deadline <= Instant::now()).then_some(*id)).collect();
+                for request_id in expired {
+                    let pending = approvals.remove(&request_id).unwrap();
+                    if write_frame(&mut stdin, &pending.prompt.cancel).await.is_err() {
+                        output.provider_error = Some(format!("无法向 {harness} 写入审批回复。"));
+                        break 'stream;
                     }
-                    output.provider_error = Some(message);
-                    break;
-                };
-                if *cancel.borrow() || !user_asks.is_answer_queued(answer.request_id) {
-                    continue;
+                    emitter.send(Event::RunApprovalResolved { run_id, request_id }).await;
                 }
-                if !matches!(
-                    timeout(USER_ASK_WRITE_TIMEOUT, write_frame(&mut stdin, &frame)).await,
-                    Ok(Ok(()))
-                ) {
-                    let message = format!("无法向 {harness} 写入 User Ask 回答。");
-                    if user_asks.finish(answer.request_id) {
-                        emitter
-                            .send(Event::RunUserAskFinished {
-                                run_id,
-                                request_id: answer.request_id,
-                                status: UserAskStatus::Failed,
-                                message: Some(message.clone()),
-                            })
-                            .await;
+                continue;
+            }
+            message = input.recv(), if input_open => {
+                match message {
+                    Some(RunInput::Steer(message)) => queued.push_back(message),
+                    Some(RunInput::UserAsk(answer)) => {
+                        if !user_asks.is_answer_queued(answer.request_id) {
+                            continue;
+                        }
+                        let Some(frame) = decoder
+                            .answer_user_ask(&answer.native_request_id, &answer.answers)
+                        else {
+                            let message = format!("{harness} 无法编码 User Ask 回答。");
+                            if user_asks.finish(answer.request_id) {
+                                emitter
+                                    .send(Event::RunUserAskFinished {
+                                        run_id,
+                                        request_id: answer.request_id,
+                                        status: UserAskStatus::Failed,
+                                        message: Some(message.clone()),
+                                    })
+                                    .await;
+                            }
+                            output.provider_error = Some(message);
+                            break 'stream;
+                        };
+                        if *cancel.borrow() || !user_asks.is_answer_queued(answer.request_id) {
+                            continue;
+                        }
+                        if !matches!(
+                            timeout(USER_ASK_WRITE_TIMEOUT, write_frame(&mut stdin, &frame)).await,
+                            Ok(Ok(()))
+                        ) {
+                            let message = format!("无法向 {harness} 写入 User Ask 回答。");
+                            if user_asks.finish(answer.request_id) {
+                                emitter
+                                    .send(Event::RunUserAskFinished {
+                                        run_id,
+                                        request_id: answer.request_id,
+                                        status: UserAskStatus::Failed,
+                                        message: Some(message.clone()),
+                                    })
+                                    .await;
+                            }
+                            output.provider_error = Some(message);
+                            break 'stream;
+                        }
+                        if user_asks.mark_answer_sent(answer.request_id) {
+                            emitter
+                                .send(Event::RunUserAskAnswerSent {
+                                    run_id,
+                                    request_id: answer.request_id,
+                                })
+                                .await;
+                        }
                     }
-                    output.provider_error = Some(message);
-                    break;
-                }
-                if user_asks.mark_answer_sent(answer.request_id) {
-                    emitter
-                        .send(Event::RunUserAskAnswerSent {
-                            run_id,
-                            request_id: answer.request_id,
-                        })
-                        .await;
+                    Some(RunInput::Approval { request_id, option }) => {
+                        let response = approvals.get(&request_id).and_then(|pending| {
+                            if *cancel.borrow() { return None; }
+                            match option {
+                                Some(index) => pending.prompt.options.get(index).map(|option| &option.response),
+                                None => Some(&pending.prompt.cancel),
+                            }
+                        });
+                        if let Some(response) = response {
+                            if write_frame(&mut stdin, response).await.is_err() {
+                                output.provider_error = Some(format!("无法向 {harness} 写入审批回复。"));
+                                break 'stream;
+                            }
+                            approvals.remove(&request_id);
+                            emitter.send(Event::RunApprovalResolved { run_id, request_id }).await;
+                        } else {
+                            emitter.send(Event::RunApprovalRejected { run_id, request_id,
+                                message: "审批请求已失效或选项无效。".into() }).await;
+                        }
+                    }
+                    None => input_open = false,
                 }
                 continue;
             }
-            Next::Input(None) => {
-                input_open = false;
-                continue;
+            line = lines.next_line() => match line {
+                Ok(Some(line)) => line,
+                _ => break,
             }
-            Next::Line(Ok(Some(line))) => line,
-            Next::Line(Ok(None) | Err(_)) => break,
         };
         let mut tool_completed = false;
         match decoder.decode_line(&line) {
             Ok(events) => {
                 for event in events {
                     match &event {
+                        DecodedEvent::ApprovalRequested(prompt) => {
+                            if *cancel.borrow() {
+                                break 'stream;
+                            }
+                            // A replay cannot create a second actionable copy of one native request.
+                            if approvals
+                                .values()
+                                .any(|pending| pending.prompt.id == prompt.id)
+                            {
+                                continue;
+                            }
+                            let request_id = Uuid::new_v4();
+                            let request = ApprovalRequest {
+                                request_id,
+                                title: prompt.title.clone(),
+                                details: prompt.details.clone(),
+                                options: prompt
+                                    .options
+                                    .iter()
+                                    .map(|option| option.label.clone())
+                                    .collect(),
+                            };
+                            approvals.insert(
+                                request_id,
+                                PendingApproval {
+                                    prompt: prompt.clone(),
+                                    deadline: prompt.timeout_ms.and_then(|ms| {
+                                        Instant::now().checked_add(Duration::from_millis(ms))
+                                    }),
+                                },
+                            );
+                            emitter
+                                .send(Event::RunApprovalRequested { run_id, request })
+                                .await;
+                            continue;
+                        }
+                        DecodedEvent::ApprovalResolved(id) => {
+                            if let Some(request_id) =
+                                approvals.iter().find_map(|(request_id, pending)| {
+                                    (&pending.prompt.id == id).then_some(*request_id)
+                                })
+                            {
+                                approvals.remove(&request_id);
+                                emitter
+                                    .send(Event::RunApprovalResolved { run_id, request_id })
+                                    .await;
+                            }
+                            continue;
+                        }
                         DecodedEvent::WriteStdin(frame) => {
                             if write_frame(&mut stdin, frame).await.is_err() {
                                 output.provider_error =
@@ -545,9 +635,24 @@ async fn read_stdout(
     // Close the receiver before announcing exit so late requests are explicitly rejected.
     input.close();
     while let Ok(message) = input.try_recv() {
-        if let RunInput::Steer(message) = message {
-            queued.push_back(message);
+        match message {
+            RunInput::Steer(message) => queued.push_back(message),
+            RunInput::UserAsk(_) => {}
+            RunInput::Approval { request_id, .. } => {
+                emitter
+                    .send(Event::RunApprovalRejected {
+                        run_id,
+                        request_id,
+                        message: "当前轮次已结束，审批请求已失效。".into(),
+                    })
+                    .await;
+            }
         }
+    }
+    for request_id in approvals.into_keys() {
+        emitter
+            .send(Event::RunApprovalResolved { run_id, request_id })
+            .await;
     }
     for message in queued {
         emitter
@@ -688,6 +793,7 @@ mod tests {
     ) -> (StartRun, LaunchSpec) {
         let executable = executable.to_string_lossy().into_owned();
         let request = StartRun {
+            permission_mode: nexus_domain::PermissionMode::AutoEdit,
             run_id: Uuid::new_v4(),
             task_id: Uuid::new_v4(),
             session_id: None,
@@ -706,6 +812,7 @@ mod tests {
             None,
             ThinkingEffort::Medium,
             None,
+            nexus_domain::PermissionMode::AutoEdit,
         );
         (request, spec)
     }

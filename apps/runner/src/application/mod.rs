@@ -174,6 +174,30 @@ impl Runner {
             } => {
                 answer_user_ask(run_id, request_id, answers, &self.active, &self.emitter).await;
             }
+            Command::RunApprovalRespond {
+                run_id,
+                request_id,
+                option,
+            } => {
+                let guard = self.active.lock().await;
+                let sent = guard
+                    .as_ref()
+                    .filter(|run| run.id == run_id && !*run.cancel.borrow())
+                    .is_some_and(|run| {
+                        run.input
+                            .send(RunInput::Approval { request_id, option })
+                            .is_ok()
+                    });
+                if !sent {
+                    self.emitter
+                        .send(Event::RunApprovalRejected {
+                            run_id,
+                            request_id,
+                            message: "当前轮次无法接收审批回复。".into(),
+                        })
+                        .await;
+                }
+            }
             Command::RunCancel { run_id } => {
                 cancel_run(run_id, &self.active, &self.emitter).await;
             }
@@ -469,6 +493,7 @@ mod tests {
 
     fn request(cwd: String) -> StartRun {
         StartRun {
+            permission_mode: nexus_domain::PermissionMode::AutoEdit,
             run_id: Uuid::new_v4(),
             task_id: Uuid::new_v4(),
             session_id: None,

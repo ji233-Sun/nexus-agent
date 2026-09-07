@@ -46,6 +46,23 @@ pub struct UserAskRequest {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct ApprovalOption {
+    pub label: String,
+    pub response: InputFrame,
+}
+
+// Native response frames stay in the runner; the UI can only select offered options.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ApprovalPrompt {
+    pub id: String,
+    pub title: String,
+    pub details: String,
+    pub options: Vec<ApprovalOption>,
+    pub cancel: InputFrame,
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum DecodedEvent {
     WriteStdin(InputFrame),
     UserAskRequested(UserAskRequest),
@@ -54,6 +71,8 @@ pub enum DecodedEvent {
         status: nexus_domain::UserAskStatus,
         message: Option<String>,
     },
+    ApprovalRequested(ApprovalPrompt),
+    ApprovalResolved(String),
     SessionStarted(String),
     InputAccepted(String),
     InputRejected {

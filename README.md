@@ -10,6 +10,7 @@ Nexus Agent 是一个面向 Linux、macOS 和 Windows 的本地桌面应用，�
 - 管理多个 Provider Profile，在任务输入区快捷切换 API Key、Base URL 和默认模型。
 - 为 Claude Code 选择 `默认 / Sonnet / Opus / Haiku` 模型；Codex 与 OMP 可使用 CLI 默认模型或当前 Profile 的模型。
 - 配置 `Low / Medium / High / XHigh / Max` 思考层级。
+- 为每轮消息选择并记忆权限模式（请求授权 / 自动编辑 / YOLO），在桌面弹窗中处理运行期间的授权请求。
 - 通过 JSON Lines Runner 启动 Harness，显示文本、工具调用、状态和错误。
 - 用当前 Harness 异步生成简洁任务标题；生成失败时保留首条 Prompt 的本地回退标题。
 - 取消和关闭时清理 Harness 进程树：Unix 先中断再超时终止，Windows 使用系统 `taskkill /T /F`。
@@ -20,11 +21,23 @@ Nexus Agent 是一个面向 Linux、macOS 和 Windows 的本地桌面应用，�
 - 在本机回环地址提供带令牌鉴权的 Remote Control 服务，并内置 React Web Client，可通过 FRP TCP 转发后远程查看会话、发起任务和取消运行。
 - 提示项目中的未提交修改，但不创建 Worktree，也不执行 Git 写操作。
 
-Claude Code 通过 `--print --input-format stream-json --output-format stream-json --replay-user-messages` 收发消息，以 `--permission-mode acceptEdits` 运行：文件编辑按 Claude Code 的该模式处理，其余受限工具仍遵循 Claude Code 自身权限策略。
+输入区的权限选择按 Harness 分别记忆，默认“自动编辑”。每轮发送时保存所选权限；重新打开会话会恢复该会话最后一轮的选择，新建任务使用该 Harness 最近选择的模式。运行中调整权限只影响下一条消息。排队消息各自保留发送时的权限；权限与当前轮次不同的消息需等到下一轮发送，不能通过 Steer 改变当前轮次权限。
 
-Codex 通过[官方 App Server 协议](https://learn.chatgpt.com/docs/app-server)运行，使用 `thread/start` / `thread/resume` 和 `turn/start`，Steer 通过带当前轮次 ID 的 `turn/steer` 注入。所选工作目录继续使用 `workspace-write` 沙箱和 `never` 审批策略，也支持非 Git 项目。Prompt 由 stdin 传入，Codex 可以修改所选工作目录，但不能通过 Nexus 请求交互式提权。当前版本没有交互式审批面板。
+| 权限模式 | Claude Code | Codex | OMP |
+| --- | --- | --- | --- |
+| 请求授权 | `default` | `read-only` + `on-request` | `always-ask` |
+| 自动编辑 | `acceptEdits` | `workspace-write` + `on-request` | `write` |
+| YOLO | `bypassPermissions` | `danger-full-access` + `never` | `yolo` |
 
-OMP 通过 `omp --mode rpc --approval-mode write` 运行，Prompt 与 Steer 同样由 stdin 传入。Claude Code 与 OMP 的后续轮次均通过 `--resume <SESSION_ID>` 继续原会话。
+“请求授权”让编辑或受限操作按 CLI 策略请求批准；“自动编辑”允许文件编辑，其余受限操作按需授权。Codex 在工作区沙箱内的命令可以直接执行。YOLO 自动允许操作，Codex 同时关闭自身沙箱；CLI 的强制策略仍然有效。
+
+Claude Code 通过 `--print --input-format stream-json --output-format stream-json --replay-user-messages --permission-prompt-tool stdio` 收发消息，并将工具审批请求交给桌面弹窗。允许时保留原始工具输入，拒绝时将拒绝结果返回 CLI；参见[官方权限文档](https://code.claude.com/docs/en/agent-sdk/permissions)。
+
+Codex 通过[官方 App Server 协议](https://learn.chatgpt.com/docs/app-server)运行，使用 `thread/start` / `thread/resume` 和 `turn/start`，Steer 通过带当前轮次 ID 的 `turn/steer` 注入。支持命令执行、文件变更和额外文件系统/网络权限审批；额外权限的批准仅作用于当前轮次。支持非 Git 项目，Prompt 由 stdin 传入。
+
+OMP 通过 `omp --mode rpc --approval-mode <模式>` 运行，Prompt 与 Steer 同样由 stdin 传入，授权使用 RPC 的选择/确认弹窗。Claude Code 与 OMP 的后续轮次均通过 `--resume <SESSION_ID>` 继续原会话。
+
+审批弹窗显示所属任务和操作详情，可允许、拒绝或停止任务。回复只发送给对应运行中的请求；停止、CLI 撤销请求、超时或轮次结束后，旧请求失效。后台标题生成不继承 YOLO：Claude Code / OMP 继续禁用工具，Codex 保留只读沙箱。
 
 三个 Harness 均保存原生 Session，Nexus 在自己的数据库中记录 Session ID、各轮运行状态和消息。旧版本关闭了原生 Session 保存，因此旧任务可能只能浏览历史；缺少 Session ID 时会提示无法续聊。继续对话需使用原任务的 Harness，切换 Harness 请新建任务。
 
@@ -118,6 +131,7 @@ Desktop 启动后默认在 `127.0.0.1:3210` 提供 HTTP/WebSocket 服务。设�
 
 - 浏览 Nexus 自己保存的项目、会话和消息；Codex CLI/Desktop 的只读导入历史不通过 Remote API 暴露。
 - 使用 Desktop 当前选择的 Harness、模型和思考层级发起任务。
+- 发起任务时使用 Desktop 当前选择的权限模式；需要授权时在 Desktop 弹窗中处理，Remote Web 暂不提供审批入口。
 - 通过 WebSocket 接收状态变化和流式输出，并取消当前运行。
 
 默认只监听回环地址，不直接暴露给局域网。端口冲突时可以在启动 Desktop 前设置 `NEXUS_REMOTE_ADDR`，例如 `127.0.0.1:4310`。本版本不内置 TLS 或 FRP 配置；公网暴露时应优先使用支持 HTTPS/WSS 的入口，并妥善保管访问令牌。
@@ -205,4 +219,4 @@ CI 验证构建和自动化行为；窗口显示、输入法、目录选择、�
 
 ## 当前边界
 
-这个 Alpha 的 Remote Control 仅包含单机 TCP、令牌鉴权和静态 Web Client，不包含 UDP、内置 TLS、FRP 自动配置、云端 Control Plane 或多设备账户。它同样不包含 Worktree 管理、Git 提交、附件、多 Agent、交互式审批、从 Nexus 续聊 Codex 原有会话、签名或公证。Codex 历史浏览依赖当前 CLI 的实验性 `app-server` 协议。Codex CLI 的 `--json` 模式会实时提供生命周期和工具事件，但 Assistant 文本按完成消息输出，不提供 token 级文本增量。模型与思考层级是否可用取决于本机 CLI 版本和账户权限。
+这个 Alpha 的 Remote Control 仅包含单机 TCP、令牌鉴权和静态 Web Client，不包含 UDP、内置 TLS、FRP 自动配置、云端 Control Plane 或多设备账户。它同样不包含 Worktree 管理、Git 提交、附件、多 Agent、从 Nexus 续聊 Codex 原有会话、签名或公证。桌面审批支持上述工具/权限请求，尚不支持 Codex 的 MCP elicitation 表单或自由文本问答。Codex 历史浏览依赖当前 CLI 的实验性 `app-server` 协议。Codex CLI 的 `--json` 模式会实时提供生命周期和工具事件，但 Assistant 文本按完成消息输出，不提供 token 级文本增量。模型与思考层级是否可用取决于本机 CLI 版本和账户权限。

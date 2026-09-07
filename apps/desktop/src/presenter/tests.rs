@@ -270,6 +270,7 @@ fn conversation_actions_keep_active_and_archived_models_in_sync() {
         presenter
             .storage
             .create_task_run(NewTaskRun {
+                permission_mode: nexus_domain::PermissionMode::AutoEdit,
                 task_id: None,
                 project_id: project.id,
                 title,
@@ -290,6 +291,7 @@ fn conversation_actions_keep_active_and_archived_models_in_sync() {
             .model
             .queued_messages
             .push_back(crate::model::QueuedMessage {
+                permission_mode: nexus_domain::PermissionMode::AutoEdit,
                 id: Uuid::new_v4(),
                 task_id,
                 prompt: "unsent follow-up".into(),
@@ -344,6 +346,7 @@ fn archived_project_fixture() -> ArchivedProjectFixture {
     let archived_project = storage.open_project(&archived_project_path).unwrap();
     let archived_task = storage
         .create_task_run(NewTaskRun {
+            permission_mode: nexus_domain::PermissionMode::AutoEdit,
             task_id: None,
             project_id: archived_project.id,
             title: "Archived conversation",
@@ -365,6 +368,7 @@ fn archived_project_fixture() -> ArchivedProjectFixture {
         if index == 0 {
             let task = storage
                 .create_task_run(NewTaskRun {
+                    permission_mode: nexus_domain::PermissionMode::AutoEdit,
                     task_id: None,
                     project_id: project.id,
                     title: "Selected conversation",
@@ -668,6 +672,137 @@ fn last_start(runner: &FakeRunner) -> StartRun {
         .expect("expected start")
 }
 
+#[test]
+fn permission_modes_are_snapshotted_per_turn_and_restored_per_harness_and_conversation() {
+    let (mut presenter, runner, _directory) = fixture();
+    presenter.select_permission_mode(PermissionMode::Ask);
+    assert!(presenter.submit("first", "claude"));
+    let first = last_start(&runner);
+    assert_eq!(first.permission_mode, PermissionMode::Ask);
+    runner.emit(Event::RunSessionStarted {
+        run_id: first.run_id,
+        session_id: "session".into(),
+    });
+    presenter.drain_events();
+    presenter.select_permission_mode(PermissionMode::Yolo);
+    assert!(presenter.submit("second", "claude"));
+    let queued = presenter.model().queued_messages[0].id;
+    assert!(!presenter.steer_queued_message(queued));
+    presenter.select_permission_mode(PermissionMode::AutoEdit);
+    assert!(presenter.submit("third", "claude"));
+    presenter.select_permission_mode(PermissionMode::Ask);
+    assert_eq!(last_start(&runner).permission_mode, PermissionMode::Ask);
+    assert_eq!(
+        presenter.model().active_permission_mode,
+        Some(PermissionMode::Ask)
+    );
+    runner.emit(Event::RunExited {
+        run_id: first.run_id,
+        status: RunStatus::Completed,
+        exit_code: Some(0),
+    });
+    presenter.drain_events();
+    let second = last_start(&runner);
+    assert_eq!(second.task_id, first.task_id);
+    assert_eq!(second.permission_mode, PermissionMode::Yolo);
+    assert_eq!(second.session_id.as_deref(), Some("session"));
+    assert_eq!(
+        presenter.model().active_permission_mode,
+        Some(PermissionMode::Yolo)
+    );
+    assert_eq!(
+        presenter.model().queued_messages[0].permission_mode,
+        PermissionMode::AutoEdit
+    );
+    runner.emit(Event::RunExited {
+        run_id: second.run_id,
+        status: RunStatus::Failed,
+        exit_code: Some(1),
+    });
+    presenter.drain_events();
+    presenter.select_task(first.task_id);
+    assert_eq!(presenter.model().permission_mode, PermissionMode::Yolo);
+    let config = presenter
+        .storage
+        .conversation_config(first.task_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(config.permission_mode, PermissionMode::Yolo);
+    presenter.new_task();
+    assert_eq!(presenter.model().permission_mode, PermissionMode::Ask);
+    assert!(presenter.select_harness(HarnessKind::Omp, "claude"));
+    assert_eq!(presenter.model().permission_mode, PermissionMode::AutoEdit);
+    presenter.select_permission_mode(PermissionMode::Yolo);
+    assert!(presenter.select_harness(HarnessKind::Claude, "omp"));
+    assert_eq!(presenter.model().permission_mode, PermissionMode::Ask);
+    assert!(presenter.select_harness(HarnessKind::Omp, "claude"));
+    assert_eq!(presenter.model().permission_mode, PermissionMode::Yolo);
+}
+
+#[test]
+fn approvals_ignore_stale_events_validate_choices_and_remain_retryable_until_resolved() {
+    let (mut presenter, runner, _directory) = fixture();
+    assert!(presenter.submit("first", "claude"));
+    let run_id = presenter.model().active_run.unwrap();
+    let request = nexus_protocol::ApprovalRequest {
+        request_id: Uuid::new_v4(),
+        title: "Bash".into(),
+        details: "echo test".into(),
+        options: vec!["Approve".into(), "Deny".into()],
+    };
+    runner.emit(Event::RunApprovalRequested {
+        run_id: Uuid::new_v4(),
+        request: request.clone(),
+    });
+    presenter.drain_events();
+    assert!(presenter.model().pending_approvals.is_empty());
+    for _ in 0..2 {
+        runner.emit(Event::RunApprovalRequested {
+            run_id,
+            request: request.clone(),
+        });
+    }
+    let second = nexus_protocol::ApprovalRequest {
+        request_id: Uuid::new_v4(),
+        ..request.clone()
+    };
+    runner.emit(Event::RunApprovalRequested {
+        run_id,
+        request: second.clone(),
+    });
+    presenter.drain_events();
+    assert_eq!(presenter.model().pending_approvals.len(), 2);
+    assert!(!presenter.respond_approval(Uuid::new_v4(), request.request_id, Some(0)));
+    assert!(!presenter.respond_approval(run_id, second.request_id, Some(0)));
+    assert!(!presenter.respond_approval(run_id, request.request_id, Some(2)));
+    runner.0.borrow_mut().fail_send = true;
+    assert!(!presenter.respond_approval(run_id, request.request_id, Some(0)));
+    assert!(presenter.model().responding_approval.is_none());
+    runner.0.borrow_mut().fail_send = false;
+    assert!(presenter.respond_approval(run_id, request.request_id, Some(1)));
+    assert!(!presenter.respond_approval(run_id, request.request_id, Some(1)));
+    assert_eq!(presenter.model().pending_approvals.len(), 2);
+    assert!(matches!(runner.0.borrow().commands.last().unwrap().command,
+        Command::RunApprovalRespond { run_id: run, request_id, option: Some(1) } if run == run_id && request_id == request.request_id));
+    runner.emit(Event::RunApprovalResolved {
+        run_id,
+        request_id: request.request_id,
+    });
+    presenter.drain_events();
+    assert_eq!(presenter.model().pending_approvals.len(), 1);
+    assert!(presenter.respond_approval(run_id, second.request_id, None));
+    presenter.cancel();
+    assert!(presenter.model().pending_approvals.is_empty());
+    assert!(presenter.model().responding_approval.is_none());
+    runner.emit(Event::RunApprovalRequested {
+        run_id,
+        request: second,
+    });
+    presenter.drain_events();
+    assert!(presenter.model().pending_approvals.is_empty());
+    assert!(!presenter.respond_approval(run_id, request.request_id, Some(0)));
+}
+
 fn profile_draft(id: Option<Uuid>, name: &str, api_key: &str) -> ProviderProfileDraft {
     ProviderProfileDraft {
         id,
@@ -689,6 +824,7 @@ fn startup_restores_preferences_and_probes_all_harnesses() {
         ("thinking_effort", "high"),
         ("codex_effort_cli", "high"),
         ("codex_executable", "/custom/codex"),
+        ("permission_mode.codex", "yolo"),
     ] {
         storage.set_setting(key, value).unwrap();
     }
@@ -698,6 +834,7 @@ fn startup_restores_preferences_and_probes_all_harnesses() {
     assert_eq!(presenter.model().selected_harness, HarnessKind::Codex);
     assert!(presenter.model().model_override.is_none());
     assert_eq!(presenter.model().effort, ThinkingEffort::High);
+    assert_eq!(presenter.model().permission_mode, PermissionMode::Yolo);
     assert_eq!(presenter.model().executable, "/custom/codex");
     let state = runner.0.borrow();
     assert_eq!(state.commands.len(), 4);

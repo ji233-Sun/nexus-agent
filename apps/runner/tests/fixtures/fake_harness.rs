@@ -209,6 +209,37 @@ fn run_turn(
         terminal(harness);
         return;
     }
+    if prompt.starts_with("approval-") {
+        match harness {
+            Harness::Claude => println!(r#"{{"type":"control_request","request_id":"approval-1","request":{{"subtype":"can_use_tool","tool_name":"Bash","input":{{"command":"echo approved"}}}}}}"#),
+            Harness::Codex => println!(r#"{{"id":99,"method":"item/commandExecution/requestApproval","params":{{"threadId":{session:?},"turnId":"turn-1","itemId":"tool-1","command":"echo approved","cwd":"/tmp/project","reason":"test approval"}}}}"#),
+            Harness::Omp => {
+                let timeout = if prompt == "approval-timeout" { ",\"timeout\":100" } else { "" };
+                println!(r#"{{"type":"extension_ui_request","id":"approval-1","method":"select","title":"Allow tool: bash\necho approved","options":["Approve","Deny"]{timeout}}}"#);
+            }
+        }
+        io::stdout().flush().unwrap();
+        if prompt == "approval-native-cancel" {
+            wait_for_marker("resolve-approval", input);
+            match harness {
+                Harness::Claude => println!(r#"{{"type":"control_cancel_request","request_id":"approval-1"}}"#),
+                Harness::Codex => println!(r#"{{"method":"serverRequest/resolved","params":{{"threadId":{session:?},"requestId":99}}}}"#),
+                Harness::Omp => println!(r#"{{"type":"extension_ui_request","id":"cancel-1","method":"cancel","targetId":"approval-1"}}"#),
+            }
+            io::stdout().flush().unwrap();
+            wait_for_marker("finish-turn", input);
+        } else if let Ok(response) = input.recv_timeout(Duration::from_secs(10)) {
+            fs::write("approval-response.json", &response).unwrap();
+            let approved = match harness {
+                Harness::Claude => string_field(&response, "behavior") == "allow",
+                Harness::Codex => string_field(&response, "decision") == "accept",
+                Harness::Omp => string_field(&response, "value") == "Approve",
+            };
+            message(harness, if approved { "approved" } else { "denied" });
+        }
+        terminal(harness);
+        return;
+    }
     if prompt == "wait-for-cancel" {
         let _child = Command::new(env::current_exe().unwrap())
             .arg("--child")

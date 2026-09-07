@@ -1,12 +1,12 @@
 use nexus_domain::{
-    HarnessKind, ModelDescriptor, RunStatus, ThinkingEffort, UserAskAnswer, UserAskQuestion,
-    UserAskStatus,
+    HarnessKind, ModelDescriptor, PermissionMode, RunStatus, ThinkingEffort, UserAskAnswer,
+    UserAskQuestion, UserAskStatus,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandEnvelope {
@@ -59,6 +59,12 @@ pub enum Command {
         request_id: Uuid,
         answers: Vec<UserAskAnswer>,
     },
+    #[serde(rename = "run.approval.respond")]
+    RunApprovalRespond {
+        run_id: Uuid,
+        request_id: Uuid,
+        option: Option<usize>,
+    },
     #[serde(rename = "run.cancel")]
     RunCancel { run_id: Uuid },
     #[serde(rename = "runner.shutdown")]
@@ -76,6 +82,7 @@ pub struct StartRun {
     pub executable: String,
     pub model: Option<String>,
     pub effort: ThinkingEffort,
+    pub permission_mode: PermissionMode,
     #[serde(default)]
     pub environment: Vec<EnvironmentVariable>,
 }
@@ -130,6 +137,14 @@ pub struct EventEnvelope {
     pub event: Event,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalRequest {
+    pub request_id: Uuid,
+    pub title: String,
+    pub details: String,
+    pub options: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload")]
 pub enum Event {
@@ -153,6 +168,19 @@ pub enum Event {
     RunStarted { run_id: Uuid, pid: u32 },
     #[serde(rename = "run.session.started")]
     RunSessionStarted { run_id: Uuid, session_id: String },
+    #[serde(rename = "run.approval.requested")]
+    RunApprovalRequested {
+        run_id: Uuid,
+        request: ApprovalRequest,
+    },
+    #[serde(rename = "run.approval.resolved")]
+    RunApprovalResolved { run_id: Uuid, request_id: Uuid },
+    #[serde(rename = "run.approval.rejected")]
+    RunApprovalRejected {
+        run_id: Uuid,
+        request_id: Uuid,
+        message: String,
+    },
     #[serde(rename = "run.input.accepted")]
     RunInputAccepted { run_id: Uuid, message_id: Uuid },
     #[serde(rename = "run.input.rejected")]
@@ -345,6 +373,7 @@ mod tests {
     #[test]
     fn protocol_round_trip_preserves_harness_model_and_effort() {
         let command = CommandEnvelope::new(Command::RunStart(StartRun {
+            permission_mode: PermissionMode::Yolo,
             run_id: Uuid::new_v4(),
             task_id: Uuid::new_v4(),
             session_id: Some("existing-session".into()),
@@ -370,8 +399,44 @@ mod tests {
         assert_eq!(request.session_id.as_deref(), Some("existing-session"));
         assert_eq!(request.model.as_deref(), Some("gpt-test"));
         assert_eq!(request.effort, ThinkingEffort::XHigh);
+        assert_eq!(request.permission_mode, PermissionMode::Yolo);
         assert_eq!(request.environment[0].name, "OPENAI_API_KEY");
         assert_eq!(request.environment[0].value, "secret-value");
+    }
+
+    #[test]
+    fn approval_protocol_preserves_request_identity_and_selected_option() {
+        let run_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        for option in [Some(0), Some(1), None] {
+            let command = Command::RunApprovalRespond {
+                run_id,
+                request_id,
+                option,
+            };
+            let encoded = serde_json::to_value(&command).unwrap();
+            let decoded: Command = serde_json::from_value(encoded.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), encoded);
+        }
+        let request = ApprovalRequest {
+            request_id,
+            title: "Bash".into(),
+            details: "echo test".into(),
+            options: vec!["Approve".into(), "Deny".into()],
+        };
+        for event in [
+            Event::RunApprovalRequested { run_id, request },
+            Event::RunApprovalResolved { run_id, request_id },
+            Event::RunApprovalRejected {
+                run_id,
+                request_id,
+                message: "expired".into(),
+            },
+        ] {
+            let encoded = serde_json::to_value(&event).unwrap();
+            let decoded: Event = serde_json::from_value(encoded.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), encoded);
+        }
     }
 
     #[test]
