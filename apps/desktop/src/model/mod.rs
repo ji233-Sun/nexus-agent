@@ -5,7 +5,7 @@ use crate::i18n::{Language, LocalizedText};
 use history::{HistoryMessage, ThreadSummary};
 use nexus_domain::{
     HarnessKind, Message, ModelDescriptor, PermissionMode, Project, ProviderProfile, TaskSummary,
-    ThinkingEffort, UserAskQuestion,
+    ThinkingEffort, UserAskAnswer, UserAskAnswerMode, UserAskAnswerValue, UserAskQuestion,
 };
 use nexus_protocol::{ApprovalRequest, HarnessProbe};
 use std::collections::{BTreeMap, VecDeque};
@@ -98,6 +98,76 @@ pub(crate) struct PendingUserAsk {
     pub(crate) questions: Vec<UserAskQuestion>,
     pub(crate) submission: UserAskSubmissionState,
     pub(crate) error: Option<String>,
+    pub(crate) active_question: usize,
+    pub(crate) collapsed: bool,
+    pub(crate) drafts: BTreeMap<String, UserAskAnswerValue>,
+    pub(crate) submitted_answers: Option<Vec<UserAskAnswer>>,
+}
+
+impl PendingUserAsk {
+    pub(crate) fn new(request_id: Uuid, questions: Vec<UserAskQuestion>) -> Self {
+        let drafts = questions
+            .iter()
+            .map(|question| {
+                let value = match question.answer_mode {
+                    UserAskAnswerMode::Text => UserAskAnswerValue::Text(String::new()),
+                    UserAskAnswerMode::Choice { .. } => UserAskAnswerValue::Selected(Vec::new()),
+                };
+                (question.id.clone(), value)
+            })
+            .collect();
+        Self {
+            request_id,
+            questions,
+            submission: UserAskSubmissionState::Pending,
+            error: None,
+            active_question: 0,
+            collapsed: false,
+            drafts,
+            submitted_answers: None,
+        }
+    }
+
+    pub(crate) fn answers(&self) -> Option<Vec<UserAskAnswer>> {
+        if self.questions.is_empty() {
+            return None;
+        }
+        self.questions
+            .iter()
+            .map(|question| {
+                let value = self.drafts.get(&question.id)?.clone();
+                let valid = match (&question.answer_mode, &value) {
+                    (UserAskAnswerMode::Text, UserAskAnswerValue::Text(text)) => {
+                        !text.trim().is_empty()
+                    }
+                    (
+                        UserAskAnswerMode::Choice { multiple, .. },
+                        UserAskAnswerValue::Selected(option_ids),
+                    ) => {
+                        !option_ids.is_empty()
+                            && (*multiple || option_ids.len() == 1)
+                            && option_ids.iter().all(|option_id| {
+                                question
+                                    .options
+                                    .iter()
+                                    .any(|option| option.id == *option_id)
+                            })
+                    }
+                    (
+                        UserAskAnswerMode::Choice {
+                            allow_custom: true, ..
+                        },
+                        UserAskAnswerValue::Text(text),
+                    ) => !text.trim().is_empty(),
+                    _ => false,
+                };
+                valid.then_some(UserAskAnswer {
+                    question_id: question.id.clone(),
+                    value,
+                })
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
