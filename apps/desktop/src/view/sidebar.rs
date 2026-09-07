@@ -24,6 +24,8 @@ fn navigation_row(
     title: impl Into<SharedString>,
     icon: Option<IconName>,
 ) -> ListItem {
+    let title = title.into();
+    let tooltip = title.clone();
     ListItem::new(id)
         .w_full()
         .h(px(SIDEBAR_ROW_HEIGHT))
@@ -32,6 +34,7 @@ fn navigation_row(
         .py_0()
         .rounded(px(CONTROL_RADIUS))
         .text_size(px(13.))
+        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
         .child(
             div()
                 .w_full()
@@ -42,7 +45,7 @@ fn navigation_row(
                 .when_some(icon, |row, icon| {
                     row.child(Icon::new(icon).size(px(16.)).text_color(rgb(colors.muted)))
                 })
-                .child(div().flex_1().min_w_0().truncate().child(title.into())),
+                .child(div().flex_1().min_w_0().truncate().child(title)),
         )
 }
 
@@ -610,16 +613,13 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mut storage = Storage::open(Path::new(":memory:")).unwrap();
         let project = storage.open_project(directory.path()).unwrap();
+        let long_title = "A deliberately long task title that must stay inside compact navigation";
         for index in 0..30 {
             storage
                 .create_task_run(NewTaskRun {
                     task_id: None,
                     project_id: project.id,
-                    title: if index % 2 == 0 {
-                        "Hi"
-                    } else {
-                        "Scroll regression"
-                    },
+                    title: if index % 2 == 0 { "Hi" } else { long_title },
                     prompt: &"A long message for scrolling.\n\n".repeat(100),
                     harness: HarnessKind::Claude,
                     executable: "claude",
@@ -688,6 +688,82 @@ mod tests {
             view.read_with(cx, |view, _| view.presenter.model().selected_task),
             Some(tasks[short_index].id),
         );
+    }
+
+    #[gpui::test]
+    fn supported_window_sizes_keep_workspace_regions_and_header_context_separate(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, cx) = scroll_test_view(cx);
+        for size in [
+            gpui::size(px(1040.), px(680.)),
+            gpui::size(px(1280.), px(800.)),
+        ] {
+            cx.simulate_resize(size);
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.refresh();
+                let _ = window.draw(cx);
+            });
+
+            let page = cx.debug_bounds("workspace-page").unwrap();
+            let sidebar = cx.debug_bounds("workspace-sidebar").unwrap();
+            let header = cx.debug_bounds("workspace-header").unwrap();
+            let timeline = view.read_with(cx, |view, _| view.timeline_scroll.bounds());
+            let composer = cx.debug_bounds("composer-surface").unwrap();
+            let project = cx.debug_bounds("workspace-header-project").unwrap();
+            let task = cx.debug_bounds("workspace-header-task").unwrap();
+            let status = cx.debug_bounds("workspace-header-status").unwrap();
+
+            for bounds in [sidebar, header, timeline, composer, project, task, status] {
+                assert!(
+                    bounds.left() >= page.left()
+                        && bounds.right() <= page.right()
+                        && bounds.top() >= page.top()
+                        && bounds.bottom() <= page.bottom(),
+                    "{bounds:?} must stay inside {page:?} at {size:?}"
+                );
+            }
+            assert!(sidebar.right() <= header.left());
+            assert!(header.bottom() <= timeline.top());
+            assert!(timeline.bottom() <= composer.top());
+            assert!(project.right() <= task.left());
+            assert!(task.right() <= status.left());
+            assert!(composer.left() >= timeline.left());
+            assert!(composer.right() <= timeline.right());
+        }
+    }
+
+    #[gpui::test]
+    fn empty_workspace_surfaces_project_and_agent_readiness(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Storage::open(Path::new(":memory:")).unwrap();
+        let presenter = Presenter::new(storage, Err(anyhow::anyhow!("runner unavailable")), None);
+        let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            let _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds("workspace-empty-no-project").is_some());
+        assert!(cx.debug_bounds("workspace-empty-agent-status").is_none());
+        assert!(cx.debug_bounds("workspace-header-task").is_none());
+
+        view.update(cx, |view, cx| {
+            view.presenter.open_project(directory.path());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            let _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds("workspace-empty-no-project").is_none());
+        assert!(cx.debug_bounds("workspace-empty-agent-status").is_some());
+        assert!(cx.debug_bounds("workspace-empty-status").is_some());
+        assert!(cx.debug_bounds("workspace-header-task").is_some());
     }
 
     #[gpui::test]
@@ -1243,6 +1319,14 @@ mod tests {
         ] {
             cx.simulate_resize(size);
             cx.run_until_parked();
+            let page = cx.debug_bounds("settings-page").unwrap();
+            let navigation = cx.debug_bounds("settings-navigation").unwrap();
+            let content = cx.debug_bounds("settings-content-appearance").unwrap();
+            let settings_scroll = view.read_with(cx, |view, _| view.settings_scroll.clone());
+            assert!(navigation.right() <= settings_scroll.bounds().left());
+            assert!(content.left() >= settings_scroll.bounds().left());
+            assert!(content.right() <= page.right());
+            assert_eq!(settings_scroll.max_offset().x, px(0.));
             for (selector, theme) in [
                 ("appearance-theme-dark", ThemePreference::Dark),
                 ("appearance-theme-light", ThemePreference::Light),

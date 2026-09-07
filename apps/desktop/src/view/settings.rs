@@ -210,18 +210,19 @@ impl NexusView {
                             .overflow_y_scroll()
                             .lock_scroll_axis()
                             .track_scroll(&self.settings_scroll)
-                            .px_8()
                             .pt_8()
                             .pb_8()
                             .child(
-                                div()
-                                    .debug_selector(move || {
-                                        format!("settings-content-{}", section.id())
-                                    })
-                                    .w_full()
-                                    .max_w(px(CONTENT_WIDTH))
-                                    .mx_auto()
-                                    .child(content),
+                                div().min_w_0().px_8().child(
+                                    div()
+                                        .debug_selector(move || {
+                                            format!("settings-content-{}", section.id())
+                                        })
+                                        .w_full()
+                                        .max_w(px(CONTENT_WIDTH))
+                                        .mx_auto()
+                                        .child(content),
+                                ),
                             )
                             .vertical_scrollbar(&self.settings_scroll),
                     ),

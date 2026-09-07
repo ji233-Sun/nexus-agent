@@ -1053,12 +1053,40 @@ impl NexusView {
         } else {
             locale.text("Ctrl Enter 发送消息 · Enter 换行")
         };
-        let header_status_color = if model.active_run.is_some() {
+        let selected_thread = model.selected_codex_thread.as_ref().and_then(|thread_id| {
+            model
+                .codex_threads
+                .iter()
+                .find(|thread| &thread.id == thread_id)
+        });
+        let selected_task = model
+            .selected_task
+            .and_then(|task_id| model.tasks.iter().find(|task| task.id == task_id));
+        let selected_profile_ready = model
+            .selected_provider_profile()
+            .is_some_and(|profile| profile.credential_configured);
+        let header_status_pending = model.active_run.is_some()
+            || model.codex_thread_loading
+            || (!history
+                && (matches!(model.model_catalog, ModelCatalogState::Loading { .. })
+                    || model.selected_probe().is_none()));
+        let header_status_color = if header_status_pending {
             rgb(colors.accent).into()
+        } else if !history
+            && (matches!(
+                model.model_catalog,
+                ModelCatalogState::Failed { .. } | ModelCatalogState::NotReady(_)
+            ) || selected_task.is_some_and(|task| task.status == RunStatus::Failed))
+        {
+            rgb(colors.danger).into()
+        } else if selected_task.is_some_and(|task| {
+            matches!(task.status, RunStatus::Cancelled | RunStatus::Interrupted)
+        }) {
+            rgb(colors.warning).into()
         } else {
             probe
                 .map(|probe| {
-                    if probe.available && probe.authenticated {
+                    if probe.available && (probe.authenticated || selected_profile_ready) {
                         rgb(colors.success).into()
                     } else {
                         rgb(colors.danger).into()
@@ -1066,30 +1094,33 @@ impl NexusView {
                 })
                 .unwrap_or_else(|| rgb(colors.muted).into())
         };
-        let header_title = model
-            .selected_codex_thread
-            .as_ref()
-            .and_then(|thread_id| {
-                model
-                    .codex_threads
-                    .iter()
-                    .find(|thread| &thread.id == thread_id)
-            })
-            .map(|thread| locale.format("Codex 历史 · {0}", &[("0", (thread.title).to_string())]))
-            .or_else(|| {
-                model
-                    .selected_project
-                    .as_ref()
-                    .map(|project| project.display_name.clone())
-            })
-            .unwrap_or_else(|| locale.text("未选择项目").into());
-        let header_context = if model.selected_codex_thread.is_some() {
-            Some(locale.text("Codex 原有会话"))
-        } else if model.selected_task.is_some() {
-            Some(locale.text("任务时间线"))
+        let header_project = if history {
+            locale.text("Codex 历史").to_owned()
         } else {
-            None
+            model
+                .selected_project
+                .as_ref()
+                .map(|project| project.display_name.clone())
+                .unwrap_or_else(|| locale.text("未选择项目").into())
         };
+        let header_project_tooltip = if history {
+            header_project.clone()
+        } else {
+            model.selected_project.as_ref().map_or_else(
+                || header_project.clone(),
+                |project| format!("{}\n{}", project.display_name, project.canonical_path),
+            )
+        };
+        let header_task = selected_thread
+            .map(|thread| thread.title.clone())
+            .or_else(|| {
+                model.selected_project.as_ref().map(|_| {
+                    selected_task
+                        .map(|task| task.title.clone())
+                        .unwrap_or_else(|| locale.text("新建任务").into())
+                })
+            });
+        let header_status = model.status_text().to_owned();
         div()
             .debug_selector(|| "workspace-page".into())
             .size_full()
@@ -1123,10 +1154,11 @@ impl NexusView {
                             .justify_between()
                             .child(
                                 div()
+                                    .flex_1()
                                     .min_w_0()
                                     .flex()
                                     .items_center()
-                                    .gap_3()
+                                    .gap_2()
                                     .child(
                                         Icon::new(if history {
                                             IconName::FileText
@@ -1137,22 +1169,48 @@ impl NexusView {
                                     )
                                     .child(
                                         div()
+                                            .id("workspace-header-project")
+                                            .debug_selector(|| "workspace-header-project".into())
+                                            .max_w(px(200.))
+                                            .min_w_0()
                                             .truncate()
-                                            .font_weight(gpui::FontWeight::MEDIUM)
-                                            .child(header_title),
+                                            .text_size(px(13.))
+                                            .text_color(rgb(colors.text_secondary))
+                                            .tooltip(move |window, cx| {
+                                                Tooltip::new(header_project_tooltip.clone())
+                                                    .build(window, cx)
+                                            })
+                                            .child(header_project),
                                     )
-                                    .when_some(header_context, |element, context| {
-                                        element.child(
-                                            div()
-                                                .flex_none()
-                                                .text_size(px(12.))
-                                                .text_color(rgb(colors.muted))
-                                                .child(context),
-                                        )
+                                    .when_some(header_task, |element, task| {
+                                        let tooltip = task.clone();
+                                        element
+                                            .child(
+                                                Icon::new(IconName::ChevronRight)
+                                                    .size(px(14.))
+                                                    .text_color(rgb(colors.muted)),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("workspace-header-task")
+                                                    .debug_selector(|| {
+                                                        "workspace-header-task".into()
+                                                    })
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .truncate()
+                                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                                    .tooltip(move |window, cx| {
+                                                        Tooltip::new(tooltip.clone())
+                                                            .build(window, cx)
+                                                    })
+                                                    .child(task),
+                                            )
                                     }),
                             )
                             .child(
                                 div()
+                                    .flex_none()
                                     .flex()
                                     .items_center()
                                     .gap_2()
@@ -1160,22 +1218,33 @@ impl NexusView {
                                     .text_color(rgb(colors.muted))
                                     .child(live_status_dot(
                                         header_status_color,
-                                        model.active_run.is_some() && !self.reduced_motion,
+                                        header_status_pending && !self.reduced_motion,
                                     ))
                                     .child(
                                         div()
+                                            .id("workspace-header-status")
+                                            .debug_selector(|| "workspace-header-status".into())
                                             .max_w(px(180.))
+                                            .min_w_0()
                                             .truncate()
-                                            .child(model.status_text().to_owned()),
+                                            .tooltip({
+                                                let header_status = header_status.clone();
+                                                move |window, cx| {
+                                                    Tooltip::new(header_status.clone())
+                                                        .build(window, cx)
+                                                }
+                                            })
+                                            .child(header_status),
                                     )
                                     .child(
                                         Button::new("open-settings")
                                             .debug_selector(|| "open-settings".into())
                                             .ghost()
                                             .small()
-                                            .h(px(COMPACT_CONTROL_HEIGHT))
+                                            .size(px(COMPACT_CONTROL_HEIGHT))
+                                            .p_0()
                                             .icon(IconName::Settings2)
-                                            .label(locale.text("设置"))
+                                            .accessibility_label(locale.text("设置"))
                                             .tooltip(if cfg!(target_os = "macos") {
                                                 locale.text("打开设置 · ⌘ ,")
                                             } else {
