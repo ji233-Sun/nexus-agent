@@ -25,7 +25,7 @@ use gpui::{
 use gpui_kit as gpui;
 use gpui_kit::component::{
     Disableable as _, Icon, IconName, IndexPath, InteractiveElementExt as _, Selectable as _,
-    Sizable as _,
+    Sizable as _, WindowExt as _,
     alert::Alert,
     button::{Button, ButtonVariants as _},
     input::{Enter, Input, InputEvent, InputState, Textarea, TextareaState},
@@ -39,8 +39,8 @@ use gpui_kit::component::{
 };
 use model_picker::{CatalogModelChoice, CatalogModelSelectContent, ModelPickerList};
 use nexus_domain::{
-    HarnessKind, Message, MessageKind, MessageRole, ModelDescriptor, Project, ProviderProfile,
-    RunStatus, ThinkingEffort,
+    HarnessKind, Message, MessageKind, MessageRole, ModelDescriptor, PermissionMode, Project,
+    ProviderProfile, RunStatus, ThinkingEffort,
 };
 use pane::{PaneKind, WorkspacePane};
 use settings::SettingsSection;
@@ -52,6 +52,18 @@ use theme::*;
 use uuid::Uuid;
 
 gpui::actions!(nexus_view, [SearchSessions, NewTask, ToggleSettings]);
+
+// Render outside NexusView's update so dialog builders can read its current model.
+struct ApprovalLayer;
+
+impl Render for ApprovalLayer {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .absolute()
+            .inset_0()
+            .children(gpui_kit::component::Root::render_dialog_layer(window, cx))
+    }
+}
 
 pub(crate) struct NexusView {
     presenter: Presenter,
@@ -82,6 +94,8 @@ pub(crate) struct NexusView {
     settings_section: SettingsSection,
     reduced_motion: bool,
     editing_provider_profile: Option<Uuid>,
+    approval_dialog: Option<(Uuid, Uuid)>,
+    approval_layer: Entity<ApprovalLayer>,
 }
 
 impl NexusView {
@@ -216,6 +230,12 @@ impl NexusView {
         let owner = cx.weak_entity();
         let sidebar_pane = cx.new(|cx| WorkspacePane::new(owner.clone(), PaneKind::Sidebar, cx));
         let timeline_pane = cx.new(|cx| WorkspacePane::new(owner.clone(), PaneKind::Timeline, cx));
+        let approval_layer = cx.new(|cx| {
+            if let Some(owner) = owner.upgrade() {
+                cx.observe(&owner, |_, _, cx| cx.notify()).detach();
+            }
+            ApprovalLayer
+        });
         let settings_pane = cx.new(|cx| WorkspacePane::new(owner, PaneKind::Settings, cx));
         let mut view = Self {
             presenter,
@@ -246,10 +266,12 @@ impl NexusView {
             settings_section: SettingsSection::General,
             reduced_motion: false,
             editing_provider_profile,
+            approval_dialog: None,
+            approval_layer,
         };
         view.refresh_appearance(window, cx);
         view.focus_handle.focus(window, cx);
-        view.start_event_pump(cx);
+        view.start_event_pump(window, cx);
         view
     }
 
@@ -325,19 +347,126 @@ impl NexusView {
         cx.notify();
     }
 
-    fn start_event_pump(&self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
+    fn start_event_pump(&self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(33))
                     .await;
-                let Some(this) = this.upgrade() else { break };
-                this.update(cx, |app, cx| {
-                    app.poll_events(Instant::now(), cx);
-                });
+                if this
+                    .update_in(cx, |app, window, cx| {
+                        app.poll_events(Instant::now(), cx);
+                        app.sync_approval_dialog(window, cx);
+                    })
+                    .is_err()
+                {
+                    break;
+                }
             }
         })
         .detach();
+    }
+
+    fn sync_approval_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let model = self.presenter.model();
+        let next = model.active_run.zip(
+            model
+                .pending_approvals
+                .front()
+                .map(|request| request.request_id),
+        );
+        if next == self.approval_dialog {
+            return;
+        }
+        if self.approval_dialog.take().is_some() {
+            window.close_dialog(cx);
+        }
+        let Some((run_id, request_id)) = next else {
+            return;
+        };
+        self.approval_dialog = next;
+        self.model_picker_open = false;
+        let app = cx.entity().clone();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let model = app.read(cx).presenter.model();
+            let locale = model.language;
+            let Some(request) = model
+                .pending_approvals
+                .front()
+                .filter(|request| request.request_id == request_id)
+            else {
+                return dialog;
+            };
+            let responding = model.responding_approval == Some(request_id);
+            let title = model
+                .tasks
+                .iter()
+                .find(|task| Some(task.id) == model.active_task)
+                .map(|task| task.title.as_str())
+                .unwrap_or_default();
+            let mut buttons = div().flex().flex_wrap().gap_2();
+            for (index, label) in request.options.iter().enumerate() {
+                let app = app.clone();
+                let label = match label.as_str() {
+                    "Approve" => locale.text("允许本次").to_owned(),
+                    "Deny" => locale.text("拒绝").to_owned(),
+                    _ => label.clone(),
+                };
+                buttons = buttons.child(
+                    Button::new(("approval-option", index))
+                        .debug_selector(move || format!("approval-option-{index}"))
+                        .label(label)
+                        .disabled(responding)
+                        .on_click(move |_, window, cx| {
+                            app.update(cx, |app, cx| {
+                                app.presenter
+                                    .respond_approval(run_id, request_id, Some(index));
+                                app.presenter.notify_remote_changed();
+                                cx.notify();
+                            });
+                            window.refresh();
+                        }),
+                );
+            }
+            let stop_app = app.clone();
+            buttons = buttons.child(
+                Button::new("approval-stop")
+                    .label(locale.text("停止任务"))
+                    .ghost()
+                    .on_click(move |_, window, cx| {
+                        stop_app.update(cx, |app, cx| {
+                            app.presenter.cancel();
+                            app.presenter.notify_remote_changed();
+                            cx.notify();
+                        });
+                        window.refresh();
+                    }),
+            );
+            dialog
+                .title(locale.text("需要授权"))
+                .width(px(640.).min(window.viewport_size().width - px(48.)))
+                .close_button(false)
+                .overlay_closable(false)
+                .keyboard(false)
+                .on_ok(|_, _, _| false)
+                .child(div().text_size(px(13.)).child(title.to_owned()))
+                .child(div().child(request.title.clone()))
+                .child(
+                    div()
+                        .id("approval-details")
+                        .debug_selector(|| "approval-details".into())
+                        .max_h(window.viewport_size().height * 0.45)
+                        .overflow_y_scroll()
+                        .text_size(px(13.))
+                        .child(request.details.clone()),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .child(model.status_text().to_owned()),
+                )
+                .footer(buttons)
+        });
     }
 
     fn poll_events(&mut self, now: Instant, cx: &mut Context<Self>) {
@@ -877,6 +1006,43 @@ impl NexusView {
             })
     }
 
+    fn permission_selector(&self, cx: &mut Context<Self>) -> AnyElement {
+        let model = self.presenter.model();
+        let locale = model.language;
+        let selected = model.permission_mode;
+        let app = cx.entity().clone();
+        let button_id = "composer-permissions";
+        let button = Button::new(button_id)
+            .debug_selector(|| "composer-permissions".into())
+            .ghost()
+            .small()
+            .h(px(COMPACT_CONTROL_HEIGHT))
+            .label(locale.permission_mode(selected))
+            .tooltip(locale.text("设置下一条消息的权限，已开始的轮次保持原权限。"))
+            .disabled(
+                model.selected_codex_thread.is_some()
+                    || (model.active_run.is_some() && !model.can_queue()),
+            );
+        AnimatedDropdown::new(button_id, button, self.reduced_motion, move |menu, _, _| {
+            PermissionMode::ALL
+                .into_iter()
+                .fold(menu.min_w(px(160.)), |menu, mode| {
+                    let app = app.clone();
+                    menu.item(
+                        PopupMenuItem::new(locale.permission_mode(mode))
+                            .checked(mode == selected)
+                            .on_click(move |_, _, cx| {
+                                app.update(cx, |app, cx| {
+                                    app.presenter.select_permission_mode(mode);
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                })
+        })
+        .into_any_element()
+    }
+
     fn effort_selector(&self, cx: &mut Context<Self>) -> AnyElement {
         let model = self.presenter.model();
         let locale = model.language;
@@ -972,7 +1138,11 @@ impl NexusView {
                                         .min_w_0()
                                         .truncate()
                                         .text_size(px(13.))
-                                        .child(message.prompt.clone()),
+                                        .child(format!(
+                                            "{} · {}",
+                                            locale.permission_mode(message.permission_mode),
+                                            message.prompt
+                                        )),
                                 )
                                 .when(model.active_run.is_none(), |element| {
                                     element.child(
@@ -1001,7 +1171,9 @@ impl NexusView {
                                             .tooltip(locale.text("等待工具执行结束后介入当前对话"))
                                             .disabled(
                                                 !model.can_queue()
-                                                    || model.steering_message.is_some(),
+                                                    || model.steering_message.is_some()
+                                                    || model.active_permission_mode
+                                                        != Some(message.permission_mode),
                                             )
                                             .on_click(cx.listener(move |app, _, _, cx| {
                                                 app.presenter.steer_queued_message(id);
@@ -1324,7 +1496,8 @@ impl NexusView {
                                                     .items_center()
                                                     .gap_1()
                                                     .child(self.model_selector(window, cx))
-                                                    .child(self.effort_selector(cx)),
+                                                    .child(self.effort_selector(cx))
+                                                    .child(self.permission_selector(cx)),
                                             )
                                             .child(
                                                 div()
@@ -1471,6 +1644,9 @@ impl Render for NexusView {
                         .clone()
                         .cached(gpui::StyleRefinement::default().size_full()),
                 )
+            })
+            .when(self.approval_dialog.is_some(), |element| {
+                element.child(self.approval_layer.clone())
             })
     }
 }
@@ -1752,6 +1928,70 @@ mod catalog_model_tests {
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         assert!(cx.debug_bounds("model-picker-surface").is_none());
+    }
+
+    #[gpui::test]
+    fn approval_dialog_renders_options_returns_the_choice_and_closes_on_resolution(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (mut presenter, runner, _directory) = fixture();
+        assert!(presenter.submit("approval task", "claude"));
+        let run_id = presenter.model().active_run.unwrap();
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| NexusView::new(presenter, window, cx));
+            gpui_kit::component::Root::new(view, window, cx)
+        });
+        let view = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<NexusView>().unwrap()
+        });
+        cx.simulate_resize(gpui::size(px(1040.), px(680.)));
+        let request_id = Uuid::new_v4();
+        runner.emit(nexus_protocol::Event::RunApprovalRequested {
+            run_id,
+            request: nexus_protocol::ApprovalRequest {
+                request_id,
+                title: "Bash".into(),
+                details: "echo approved\n".repeat(100),
+                options: vec!["Approve".into(), "Deny".into()],
+            },
+        });
+        view.update_in(cx, |view, window, cx| {
+            view.poll_events(Instant::now(), cx);
+            view.sync_approval_dialog(window, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            let _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds("dialog-layer").is_some());
+        let details = cx.debug_bounds("approval-details").unwrap();
+        assert!(details.size.height <= px(680. * 0.45));
+        assert!(details.left() >= px(0.) && details.right() <= px(1040.));
+        let approve = cx.debug_bounds("approval-option-0").unwrap();
+        assert!(approve.bottom() <= px(680.));
+        view.update_in(cx, |view, window, cx| {
+            assert!(!view.prompt_input.focus_handle(cx).is_focused(window));
+        });
+        cx.simulate_keystrokes("enter escape");
+        assert!(view.read_with(cx, |view, _| {
+            view.presenter.model().responding_approval.is_none()
+        }));
+        cx.simulate_click(approve.center(), Default::default());
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(cx, |view, _| view.presenter.model().responding_approval),
+            Some(request_id)
+        );
+        runner.emit(nexus_protocol::Event::RunApprovalResolved { run_id, request_id });
+        view.update_in(cx, |view, window, cx| {
+            view.poll_events(Instant::now(), cx);
+            view.sync_approval_dialog(window, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("dialog-layer").is_none());
     }
 
     #[gpui::test]

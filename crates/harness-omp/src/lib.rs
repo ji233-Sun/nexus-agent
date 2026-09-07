@@ -5,11 +5,14 @@ use std::{
     time::Duration,
 };
 
-use nexus_domain::{HarnessKind, ModelDescriptor, ModelReasoningEffort, ThinkingEffort};
-pub use nexus_harness_core::{DecodedEvent, LaunchSpec, ModelCatalogError};
-use nexus_harness_core::{
-    InputFrame, LineDecoder, resolve_executable, summarize_text, tool_content,
+use nexus_domain::{
+    HarnessKind, ModelDescriptor, ModelReasoningEffort, PermissionMode, ThinkingEffort,
 };
+use nexus_harness_core::{
+    ApprovalOption, ApprovalPrompt, InputFrame, LineDecoder, resolve_executable, summarize_text,
+    tool_content,
+};
+pub use nexus_harness_core::{DecodedEvent, LaunchSpec, ModelCatalogError};
 use nexus_protocol::{EnvironmentVariable, HarnessProbe};
 use serde_json::{Value, json};
 use tokio::{io::AsyncReadExt as _, process::Command, sync::watch, time::sleep};
@@ -23,13 +26,19 @@ pub fn build_launch_spec(
     model: Option<&str>,
     effort: ThinkingEffort,
     session_id: Option<&str>,
+    permission_mode: PermissionMode,
 ) -> LaunchSpec {
     let mut args = vec![
         "--mode".into(),
         "rpc".into(),
         "--no-title".into(),
         "--approval-mode".into(),
-        "write".into(),
+        match permission_mode {
+            PermissionMode::Ask => "always-ask",
+            PermissionMode::AutoEdit => "write",
+            PermissionMode::Yolo => "yolo",
+        }
+        .into(),
     ];
     if let Some(effort) = omp_thinking_value(effort) {
         args.push("--thinking".into());
@@ -63,7 +72,15 @@ pub fn build_title_launch_spec(
     model: Option<&str>,
     effort: ThinkingEffort,
 ) -> LaunchSpec {
-    let mut spec = build_launch_spec(executable, cwd, prompt, model, effort, None);
+    let mut spec = build_launch_spec(
+        executable,
+        cwd,
+        prompt,
+        model,
+        effort,
+        None,
+        PermissionMode::AutoEdit,
+    );
     spec.args.extend([
         "--no-tools".into(),
         "--no-lsp".into(),
@@ -372,9 +389,7 @@ fn decode_frame(frame: &Value) -> Vec<DecodedEvent> {
         Some("agent_end") if frame.get("isTerminal").and_then(Value::as_bool) != Some(false) => {
             vec![DecodedEvent::TurnCompleted]
         }
-        Some("extension_ui_request") => vec![DecodedEvent::WriteStdin(InputFrame(json!({
-            "type": "extension_ui_response", "id": frame["id"], "cancelled": true
-        })))],
+        Some("extension_ui_request") => decode_ui_request(frame),
         Some("agent_start") => vec![DecodedEvent::Status("Oh My Pi 会话已启动".into())],
         Some("turn_start") => vec![DecodedEvent::Status("Oh My Pi 正在处理任务…".into())],
         Some("message_update") => frame
@@ -423,6 +438,65 @@ fn decode_frame(frame: &Value) -> Vec<DecodedEvent> {
         }
         _ => Vec::new(),
     }
+}
+
+fn decode_ui_request(frame: &Value) -> Vec<DecodedEvent> {
+    let method = frame
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if method == "cancel" {
+        return vec![DecodedEvent::ApprovalResolved(
+            frame["targetId"].to_string(),
+        )];
+    }
+    let cancel =
+        InputFrame(json!({"type": "extension_ui_response", "id": frame["id"], "cancelled": true}));
+    let options = match method {
+        "select" => frame
+            .get("options")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(|label| ApprovalOption {
+                label: label.into(),
+                response: InputFrame(json!({
+                    "type": "extension_ui_response", "id": frame["id"], "value": label
+                })),
+            })
+            .collect::<Vec<_>>(),
+        "confirm" => [("Approve", true), ("Deny", false)]
+            .into_iter()
+            .map(|(label, confirmed)| ApprovalOption {
+                label: label.into(),
+                response: InputFrame(json!({
+                    "type": "extension_ui_response", "id": frame["id"], "confirmed": confirmed
+                })),
+            })
+            .collect(),
+        // Non-dialog notifications do not expect a response.
+        "notify" | "setStatus" | "setWidget" | "setTitle" | "set_editor_text" | "open_url" => {
+            return Vec::new();
+        }
+        _ => return vec![DecodedEvent::WriteStdin(cancel)],
+    };
+    if options.is_empty() || !frame["id"].is_string() {
+        return vec![DecodedEvent::WriteStdin(cancel)];
+    }
+    vec![DecodedEvent::ApprovalRequested(ApprovalPrompt {
+        id: frame["id"].to_string(),
+        title: "Oh My Pi".into(),
+        details: [frame.get("title"), frame.get("message")]
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        options,
+        cancel,
+        timeout_ms: frame.get("timeout").and_then(Value::as_u64),
+    })]
 }
 
 fn decode_message(frame: &Value) -> Vec<DecodedEvent> {
@@ -489,6 +563,26 @@ mod tests {
 
     #[test]
     fn launch_spec_uses_rpc_without_prompt_in_argv() {
+        for (mode, value) in [
+            (PermissionMode::Ask, "always-ask"),
+            (PermissionMode::AutoEdit, "write"),
+            (PermissionMode::Yolo, "yolo"),
+        ] {
+            let spec = build_launch_spec(
+                "omp",
+                Path::new("."),
+                "test",
+                None,
+                ThinkingEffort::Default,
+                Some("session"),
+                mode,
+            );
+            assert!(
+                spec.args
+                    .windows(2)
+                    .any(|pair| pair == ["--approval-mode", value])
+            );
+        }
         let spec = build_launch_spec(
             "/usr/local/bin/omp",
             Path::new("/tmp/project"),
@@ -496,6 +590,7 @@ mod tests {
             Some("deepseek/deepseek-v4-pro"),
             ThinkingEffort::High,
             None,
+            PermissionMode::AutoEdit,
         );
         assert!(spec.args.windows(2).any(|pair| pair == ["--mode", "rpc"]));
         assert!(!spec.args.iter().any(|arg| arg == "--print"));
@@ -535,6 +630,7 @@ mod tests {
             None,
             ThinkingEffort::High,
             Some("existing-session"),
+            PermissionMode::AutoEdit,
         );
         assert!(
             resumed
@@ -566,6 +662,7 @@ mod tests {
             None,
             ThinkingEffort::Max,
             None,
+            PermissionMode::AutoEdit,
         );
         assert!(
             max_spec
@@ -582,6 +679,7 @@ mod tests {
             None,
             ThinkingEffort::Default,
             None,
+            PermissionMode::AutoEdit,
         );
         assert!(!default_spec.args.iter().any(|arg| arg == "--thinking"));
 
@@ -592,6 +690,7 @@ mod tests {
             None,
             ThinkingEffort::None,
             None,
+            PermissionMode::AutoEdit,
         );
         assert!(
             legacy_none_spec
@@ -599,6 +698,37 @@ mod tests {
                 .windows(2)
                 .any(|pair| pair == ["--thinking", "off"])
         );
+    }
+
+    #[test]
+    fn rpc_approval_select_and_confirm_preserve_choices_timeout_and_cancel() {
+        let mut decoder = EventDecoder;
+        for (method, extra) in [
+            ("select", json!({"options": ["Approve", "Deny"]})),
+            ("confirm", json!({"message": "Run command?"})),
+        ] {
+            let mut frame = json!({"type": "extension_ui_request", "id": "approval-1", "method": method, "title": "Allow tool: bash", "timeout": 1000});
+            frame
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let events = decoder.decode_line(&frame.to_string()).unwrap();
+            let [DecodedEvent::ApprovalRequested(prompt)] = events.as_slice() else {
+                panic!("expected approval")
+            };
+            assert_eq!(prompt.options.len(), 2);
+            assert_eq!(prompt.timeout_ms, Some(1000));
+            assert!(prompt.details.contains("Allow tool: bash"));
+            if method == "select" {
+                assert_eq!(prompt.options[0].response.0["value"], "Approve");
+                assert_eq!(prompt.options[1].response.0["value"], "Deny");
+            } else {
+                assert_eq!(prompt.options[0].response.0["confirmed"], true);
+                assert_eq!(prompt.options[1].response.0["confirmed"], false);
+            }
+            assert_eq!(prompt.cancel.0["cancelled"], true);
+            assert_eq!(decoder.decode_line(r#"{"type":"extension_ui_request","method":"cancel","id":"other","targetId":"approval-1"}"#).unwrap(), vec![DecodedEvent::ApprovalResolved(prompt.id.clone())]);
+        }
     }
 
     #[test]

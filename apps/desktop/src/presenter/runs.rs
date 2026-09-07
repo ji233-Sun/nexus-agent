@@ -3,7 +3,8 @@ use crate::i18n::{Language, LocalizedText, probe_status};
 use crate::infrastructure::storage::NewTaskRun;
 use crate::model::{ModelCatalogState, QueuedMessage, ResolvedModelSelection};
 use nexus_domain::{
-    HarnessKind, MessageKind, MessageRole, RunStatus, ToolMetadata, compact_task_title,
+    HarnessKind, MessageKind, MessageRole, PermissionMode, RunStatus, ToolMetadata,
+    compact_task_title,
 };
 use nexus_protocol::{Command, CommandEnvelope, Event, StartRun};
 use std::time::Instant;
@@ -161,6 +162,44 @@ impl Presenter {
             Event::RunOutputDelta { run_id, text } if self.model.active_run == Some(run_id) => {
                 self.model.streaming_text.push_str(&text);
             }
+            Event::RunApprovalRequested { run_id, request }
+                if self.model.active_run == Some(run_id) && !self.model.run_cancelling =>
+            {
+                if !self
+                    .model
+                    .pending_approvals
+                    .iter()
+                    .any(|pending| pending.request_id == request.request_id)
+                {
+                    self.model.pending_approvals.push_back(request);
+                }
+                self.model.status = "等待授权，请在桌面弹窗中处理。".into();
+            }
+            Event::RunApprovalResolved { run_id, request_id }
+                if self.model.active_run == Some(run_id) =>
+            {
+                self.model
+                    .pending_approvals
+                    .retain(|request| request.request_id != request_id);
+                if self.model.responding_approval == Some(request_id) {
+                    self.model.responding_approval = None;
+                }
+                self.model.status = if self.model.pending_approvals.is_empty() {
+                    "审批已处理，等待 Agent 继续…".into()
+                } else {
+                    "等待授权，请在桌面弹窗中处理。".into()
+                };
+            }
+            Event::RunApprovalRejected {
+                run_id,
+                request_id,
+                message,
+            } if self.model.active_run == Some(run_id) => {
+                if self.model.responding_approval == Some(request_id) {
+                    self.model.responding_approval = None;
+                }
+                self.model.status = message.into();
+            }
             Event::RunInputAccepted { run_id, message_id }
                 if self.model.active_run == Some(run_id)
                     && self.model.steering_message == Some(message_id) =>
@@ -291,6 +330,9 @@ impl Presenter {
                 self.model.active_run_elapsed_seconds = None;
                 self.model.active_task = None;
                 self.model.active_harness = None;
+                self.model.active_permission_mode = None;
+                self.model.pending_approvals.clear();
+                self.model.responding_approval = None;
                 self.model.status = match status {
                     RunStatus::Completed => "任务已完成".into(),
                     RunStatus::Cancelled => "任务已取消".into(),
@@ -365,11 +407,17 @@ impl Presenter {
                 id: Uuid::new_v4(),
                 task_id: self.model.active_task.unwrap(),
                 prompt: prompt.trim().to_owned(),
+                permission_mode: self.model.permission_mode,
             });
             self.model.status = "消息已排队，将在当前轮次结束后依次发送。".into();
             return true;
         }
-        self.start_run(self.model.selected_task, prompt, configured_executable)
+        self.start_run(
+            self.model.selected_task,
+            prompt,
+            configured_executable,
+            self.model.permission_mode,
+        )
     }
 
     pub(crate) fn send_queued_message(&mut self, message_id: Uuid) -> bool {
@@ -386,7 +434,12 @@ impl Presenter {
             return false;
         }
         let executable = self.model.executable.clone();
-        if !self.start_run(Some(message.task_id), &message.prompt, &executable) {
+        if !self.start_run(
+            Some(message.task_id),
+            &message.prompt,
+            &executable,
+            message.permission_mode,
+        ) {
             return false;
         }
         self.model
@@ -414,6 +467,12 @@ impl Presenter {
             return false;
         };
         let run_id = self.model.active_run.unwrap();
+        if self.model.active_permission_mode
+            != Some(self.model.queued_messages[index].permission_mode)
+        {
+            self.model.status = "排队消息的权限与当前轮次不同，请等待下一轮发送。".into();
+            return false;
+        }
         let command = CommandEnvelope::new(Command::RunSteer {
             run_id,
             message_id,
@@ -440,6 +499,7 @@ impl Presenter {
         task_id: Option<Uuid>,
         prompt: &str,
         configured_executable: &str,
+        permission_mode: PermissionMode,
     ) -> bool {
         if self.model.active_run.is_some() {
             return false;
@@ -535,6 +595,7 @@ impl Presenter {
             executable: &executable,
             model: model.as_deref(),
             effort,
+            permission_mode,
             harness_version: harness_version.as_deref(),
         }) else {
             self.model.status = "无法保存任务运行。".into();
@@ -552,6 +613,7 @@ impl Presenter {
             executable: executable.clone(),
             model,
             effort,
+            permission_mode,
             environment,
         }));
         if let Some(runner) = &self.runner
@@ -567,6 +629,7 @@ impl Presenter {
             self.model.active_run_elapsed_seconds = Some(0);
             self.model.active_task = Some(task_id);
             self.model.active_harness = Some(harness);
+            self.model.active_permission_mode = Some(permission_mode);
             self.model.selected_task = Some(task_id);
             self.model.selected_codex_thread = None;
             self.model.codex_history_messages.clear();
@@ -598,6 +661,40 @@ impl Presenter {
         let _ = self.request_cancel();
     }
 
+    pub(crate) fn respond_approval(
+        &mut self,
+        run_id: Uuid,
+        request_id: Uuid,
+        option: Option<usize>,
+    ) -> bool {
+        if self.model.active_run != Some(run_id)
+            || self.model.run_cancelling
+            || self.model.responding_approval.is_some()
+            || !self.model.pending_approvals.front().is_some_and(|request| {
+                request.request_id == request_id
+                    && option.is_none_or(|index| index < request.options.len())
+            })
+        {
+            return false;
+        }
+        let command = CommandEnvelope::new(Command::RunApprovalRespond {
+            run_id,
+            request_id,
+            option,
+        });
+        if !self
+            .runner
+            .as_ref()
+            .is_some_and(|runner| runner.send(command).is_ok())
+        {
+            self.model.status = "审批回复发送失败，请重试或停止任务。".into();
+            return false;
+        }
+        self.model.responding_approval = Some(request_id);
+        self.model.status = "正在发送审批回复…".into();
+        true
+    }
+
     pub(super) fn request_cancel(&mut self) -> Result<(), String> {
         let Some(run_id) = self.model.active_run else {
             return Err("没有运行中的任务".into());
@@ -610,6 +707,8 @@ impl Presenter {
             .send(CommandEnvelope::new(Command::RunCancel { run_id }))
             .map_err(|error| error.to_string())?;
         self.model.run_cancelling = true;
+        self.model.pending_approvals.clear();
+        self.model.responding_approval = None;
         let _ = self
             .storage
             .update_run_status(run_id, RunStatus::Cancelling);

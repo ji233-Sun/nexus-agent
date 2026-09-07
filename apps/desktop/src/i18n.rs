@@ -1,4 +1,4 @@
-use nexus_domain::ThinkingEffort;
+use nexus_domain::{PermissionMode, ThinkingEffort};
 use nexus_protocol::HarnessProbe;
 use std::{collections::BTreeMap, sync::LazyLock};
 
@@ -34,6 +34,14 @@ impl Language {
             Self::Chinese => source,
             Self::English => ENGLISH.get(source).map(String::as_str).unwrap_or(source),
         }
+    }
+
+    pub(crate) fn permission_mode(self, mode: PermissionMode) -> &'static str {
+        self.text(match mode {
+            PermissionMode::Ask => "请求授权",
+            PermissionMode::AutoEdit => "自动编辑",
+            PermissionMode::Yolo => "YOLO",
+        })
     }
 
     pub(crate) fn effort(self, effort: ThinkingEffort) -> &'static str {

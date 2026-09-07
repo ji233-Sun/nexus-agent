@@ -64,6 +64,40 @@ impl FromStr for HarnessKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionMode {
+    Ask,
+    #[default]
+    AutoEdit,
+    Yolo,
+}
+
+impl PermissionMode {
+    pub const ALL: [Self; 3] = [Self::Ask, Self::AutoEdit, Self::Yolo];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::AutoEdit => "auto_edit",
+            Self::Yolo => "yolo",
+        }
+    }
+}
+
+impl FromStr for PermissionMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "ask" => Ok(Self::Ask),
+            "auto_edit" => Ok(Self::AutoEdit),
+            "yolo" => Ok(Self::Yolo),
+            _ => Err(format!("unknown permission mode: {value}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderProfile {
     pub id: Uuid,

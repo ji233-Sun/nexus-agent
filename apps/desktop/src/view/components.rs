@@ -515,6 +515,7 @@ mod tests {
         let project = storage.open_project(directory.path()).unwrap();
         let (task_id, run_id) = storage
             .create_task_run(NewTaskRun {
+                permission_mode: nexus_domain::PermissionMode::AutoEdit,
                 task_id: None,
                 project_id: project.id,
                 title: "Tool details",

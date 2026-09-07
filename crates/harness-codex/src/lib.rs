@@ -1,16 +1,19 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     env,
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
 };
 
-use nexus_domain::{HarnessKind, ModelDescriptor, ModelReasoningEffort, ThinkingEffort};
-pub use nexus_harness_core::{DecodedEvent, LaunchSpec, ModelCatalogError};
-use nexus_harness_core::{
-    InputFrame, LineDecoder, resolve_executable, summarize_text, tool_content,
+use nexus_domain::{
+    HarnessKind, ModelDescriptor, ModelReasoningEffort, PermissionMode, ThinkingEffort,
 };
+use nexus_harness_core::{
+    ApprovalOption, ApprovalPrompt, InputFrame, LineDecoder, resolve_executable, summarize_text,
+    tool_content,
+};
+pub use nexus_harness_core::{DecodedEvent, LaunchSpec, ModelCatalogError};
 use nexus_protocol::{EnvironmentVariable, HarnessProbe, StartRun};
 use serde_json::{Map, Value, json};
 use tokio::{
@@ -65,6 +68,7 @@ pub fn prepare_run(request: &StartRun, cwd: &Path) -> (LaunchSpec, EventDecoder)
             api_key,
             thread_id: None,
             turn_id: None,
+            approval_items: HashMap::new(),
         },
     )
 }
@@ -484,6 +488,7 @@ pub struct EventDecoder {
     api_key: Option<EnvironmentVariable>,
     thread_id: Option<String>,
     turn_id: Option<String>,
+    approval_items: HashMap<String, Value>,
 }
 
 impl LineDecoder for EventDecoder {
@@ -505,8 +510,12 @@ impl LineDecoder for EventDecoder {
 
 impl EventDecoder {
     fn start_thread(&self) -> DecodedEvent {
-        let mut params =
-            json!({"cwd": self.cwd, "approvalPolicy": "never", "sandbox": "workspace-write"});
+        let (sandbox, approval) = match self.request.permission_mode {
+            PermissionMode::Ask => ("read-only", "on-request"),
+            PermissionMode::AutoEdit => ("workspace-write", "on-request"),
+            PermissionMode::Yolo => ("danger-full-access", "never"),
+        };
+        let mut params = json!({"cwd": self.cwd, "approvalPolicy": approval, "sandbox": sandbox});
         if let Some(model) = &self.request.model {
             params["model"] = model.clone().into();
         }
@@ -521,11 +530,7 @@ impl EventDecoder {
 
     fn decode_frame(&mut self, frame: &Value) -> Vec<DecodedEvent> {
         if frame.get("id").is_some() && frame.get("method").is_some() {
-            return vec![DecodedEvent::WriteStdin(InputFrame(
-                json!({"id": frame["id"],
-                    "error": {"code": -32601, "message": "Nexus does not support interactive requests."}
-                }),
-            ))];
+            return self.decode_approval(frame);
         }
         if let Some(id) = frame.get("id").and_then(Value::as_str) {
             return if let Some(message) = frame.pointer("/error/message").and_then(Value::as_str) {
@@ -629,8 +634,23 @@ impl EventDecoder {
                     .map(str::to_owned);
                 vec![DecodedEvent::Status("Codex 正在处理任务…".into())]
             }
-            Some("item/started") => decode_started_item(&params["item"]),
-            Some("item/completed") => decode_completed_item(&params["item"]),
+            Some("item/started") => {
+                let item = &params["item"];
+                if matches!(
+                    item.get("type").and_then(Value::as_str),
+                    Some("commandExecution" | "fileChange")
+                ) {
+                    self.approval_items.insert(item_id(item), item.clone());
+                }
+                decode_started_item(item)
+            }
+            Some("item/completed") => {
+                self.approval_items.remove(&item_id(&params["item"]));
+                decode_completed_item(&params["item"])
+            }
+            Some("serverRequest/resolved") => vec![DecodedEvent::ApprovalResolved(
+                params["requestId"].to_string(),
+            )],
             Some("item/agentMessage/delta") => params
                 .get("delta")
                 .and_then(Value::as_str)
@@ -663,6 +683,109 @@ impl EventDecoder {
             }
             _ => Vec::new(),
         }
+    }
+
+    fn decode_approval(&self, frame: &Value) -> Vec<DecodedEvent> {
+        let params = &frame["params"];
+        let method = frame["method"].as_str().unwrap_or_default();
+        let response = |result| InputFrame(json!({"id": frame["id"], "result": result}));
+        if params.get("threadId").and_then(Value::as_str) != self.thread_id.as_deref()
+            || self.thread_id.is_none()
+            || params.get("turnId").and_then(Value::as_str) != self.turn_id.as_deref()
+            || self.turn_id.is_none()
+        {
+            return vec![DecodedEvent::WriteStdin(InputFrame(
+                json!({"id": frame["id"],
+                    "error": {"code": -32602, "message": "Approval does not belong to the active turn."}
+                }),
+            ))];
+        }
+        let (title, options, cancel) = match method {
+            "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
+                let options = [("Approve", "accept"), ("Deny", "decline")]
+                    .into_iter()
+                    .filter(|(_, decision)| {
+                        params
+                            .get("availableDecisions")
+                            .and_then(Value::as_array)
+                            .is_none_or(|available| {
+                                available
+                                    .iter()
+                                    .any(|value| value.as_str() == Some(decision))
+                            })
+                    })
+                    .map(|(label, decision)| ApprovalOption {
+                        label: label.into(),
+                        response: response(json!({"decision": decision})),
+                    })
+                    .collect();
+                (
+                    if method.contains("commandExecution") {
+                        "Codex · Command"
+                    } else {
+                        "Codex · File Change"
+                    },
+                    options,
+                    response(json!({"decision": "cancel"})),
+                )
+            }
+            "item/permissions/requestApproval" => (
+                "Codex · Permissions",
+                vec![
+                    ApprovalOption {
+                        label: "Approve".into(),
+                        response: response(
+                            json!({"permissions": params["permissions"], "scope": "turn"}),
+                        ),
+                    },
+                    ApprovalOption {
+                        label: "Deny".into(),
+                        response: response(json!({"permissions": {}, "scope": "turn"})),
+                    },
+                ],
+                response(json!({"permissions": {}, "scope": "turn"})),
+            ),
+            _ => {
+                return vec![DecodedEvent::WriteStdin(InputFrame(
+                    json!({"id": frame["id"],
+                        "error": {"code": -32601, "message": "Nexus does not support this interactive request."}
+                    }),
+                ))];
+            }
+        };
+        let mut details = Map::new();
+        if let Some(item) = params
+            .get("itemId")
+            .and_then(Value::as_str)
+            .and_then(|id| self.approval_items.get(id))
+        {
+            for key in ["command", "cwd", "changes"] {
+                if let Some(value) = item.get(key) {
+                    details.insert(key.into(), value.clone());
+                }
+            }
+        }
+        for key in [
+            "command",
+            "cwd",
+            "reason",
+            "grantRoot",
+            "permissions",
+            "additionalPermissions",
+            "networkApprovalContext",
+        ] {
+            if let Some(value) = params.get(key).filter(|value| !value.is_null()) {
+                details.insert(key.into(), value.clone());
+            }
+        }
+        vec![DecodedEvent::ApprovalRequested(ApprovalPrompt {
+            id: frame["id"].to_string(),
+            title: title.into(),
+            details: serde_json::to_string_pretty(&details).unwrap_or_default(),
+            options,
+            cancel,
+            timeout_ms: None,
+        })]
     }
 }
 
@@ -806,6 +929,7 @@ mod tests {
 
     fn request() -> StartRun {
         StartRun {
+            permission_mode: nexus_domain::PermissionMode::AutoEdit,
             run_id: Default::default(),
             task_id: Default::default(),
             session_id: None,
@@ -842,6 +966,22 @@ mod tests {
 
     #[test]
     fn launch_spec_preserves_permissions_model_effort_and_session_resume() {
+        for (mode, sandbox, policy) in [
+            (PermissionMode::Ask, "read-only", "on-request"),
+            (PermissionMode::AutoEdit, "workspace-write", "on-request"),
+            (PermissionMode::Yolo, "danger-full-access", "never"),
+        ] {
+            for session_id in [None, Some("existing-session".into())] {
+                let mut request = request();
+                request.permission_mode = mode;
+                request.session_id = session_id;
+                let (_, mut decoder) = prepare_run(&request, Path::new(&request.cwd));
+                let events = decoder.decode_line(r#"{"id":0,"result":{}}"#).unwrap();
+                let frame = input(&events);
+                assert_eq!(frame["params"]["sandbox"], sandbox);
+                assert_eq!(frame["params"]["approvalPolicy"], policy);
+            }
+        }
         for session_id in [None, Some("existing-thread")] {
             let mut request = request();
             request.session_id = session_id.map(str::to_owned);
@@ -865,7 +1005,7 @@ mod tests {
                 }
             );
             assert_eq!(frame["params"]["cwd"], request.cwd);
-            assert_eq!(frame["params"]["approvalPolicy"], "never");
+            assert_eq!(frame["params"]["approvalPolicy"], "on-request");
             assert_eq!(frame["params"]["sandbox"], "workspace-write");
             assert_eq!(frame["params"]["model"], "gpt-test");
             if let Some(id) = session_id {
@@ -880,6 +1020,55 @@ mod tests {
             assert_eq!(frame["params"]["input"][0]["text"], request.prompt);
             assert_eq!(frame["params"]["effort"], "xhigh");
         }
+    }
+
+    #[test]
+    fn approvals_preserve_rpc_ids_scope_and_file_change_details() {
+        let mut decoder = decoder();
+        decoder.decode_line(r#"{"method":"item/started","params":{"item":{"id":"patch","type":"fileChange","changes":[{"path":"src/lib.rs","diff":"+new content"}]}}}"#).unwrap();
+        for id in [json!(17), json!("approval-17")] {
+            for method in [
+                "item/commandExecution/requestApproval",
+                "item/fileChange/requestApproval",
+                "item/permissions/requestApproval",
+            ] {
+                let frame = json!({"id": id, "method": method, "params": {"threadId":"thread-1", "turnId":"turn-1", "itemId":"patch", "command":"echo test", "cwd":"/tmp/project", "reason":"needs access", "permissions":{"network":{"enabled":true}}}});
+                let events = decoder.decode_line(&frame.to_string()).unwrap();
+                let [DecodedEvent::ApprovalRequested(prompt)] = events.as_slice() else {
+                    panic!("expected approval")
+                };
+                assert_eq!(prompt.options[0].response.0["id"], id);
+                assert!(prompt.details.contains("src/lib.rs"));
+                assert!(prompt.details.contains("needs access"));
+                if method.contains("permissions") {
+                    assert_eq!(
+                        prompt.options[0].response.0["result"]["permissions"],
+                        frame["params"]["permissions"]
+                    );
+                    assert_eq!(prompt.options[0].response.0["result"]["scope"], "turn");
+                    assert_eq!(prompt.cancel.0["result"]["permissions"], json!({}));
+                } else {
+                    assert_eq!(prompt.options[0].response.0["result"]["decision"], "accept");
+                    assert_eq!(
+                        prompt.options[1].response.0["result"]["decision"],
+                        "decline"
+                    );
+                }
+                let resolved = json!({"method":"serverRequest/resolved","params":{"threadId":"thread-1","requestId":id}});
+                assert_eq!(
+                    decoder.decode_line(&resolved.to_string()).unwrap(),
+                    vec![DecodedEvent::ApprovalResolved(prompt.id.clone())]
+                );
+            }
+        }
+        let events = decoder.decode_line(r#"{"id":18,"method":"item/commandExecution/requestApproval","params":{"threadId":"other","turnId":"turn-1"}}"#).unwrap();
+        assert!(input(&events).get("error").is_some());
+        let events = decoder.decode_line(r#"{"id":19,"method":"item/commandExecution/requestApproval","params":{"threadId":"thread-1","turnId":"turn-1","availableDecisions":["decline","cancel"]}}"#).unwrap();
+        let [DecodedEvent::ApprovalRequested(prompt)] = events.as_slice() else {
+            panic!("expected approval")
+        };
+        assert_eq!(prompt.options.len(), 1);
+        assert_eq!(prompt.options[0].label, "Deny");
     }
 
     #[test]

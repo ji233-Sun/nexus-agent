@@ -1,12 +1,14 @@
 use std::path::{Path, PathBuf};
 
 use nexus_domain::{
-    ClaudeModel, HarnessKind, ModelAvailability, ModelDescriptor, ModelSource, ThinkingEffort,
+    ClaudeModel, HarnessKind, ModelAvailability, ModelDescriptor, ModelSource, PermissionMode,
+    ThinkingEffort,
+};
+use nexus_harness_core::{
+    ApprovalOption, ApprovalPrompt, InputFrame, LineDecoder, ModelCatalogError, resolve_executable,
+    tool_content,
 };
 pub use nexus_harness_core::{DecodedEvent, LaunchSpec};
-use nexus_harness_core::{
-    InputFrame, LineDecoder, ModelCatalogError, resolve_executable, tool_content,
-};
 use nexus_protocol::{EnvironmentVariable, HarnessProbe};
 use serde_json::{Value, json};
 use tokio::process::Command;
@@ -52,6 +54,7 @@ pub fn build_launch_spec(
     model: Option<&str>,
     effort: ThinkingEffort,
     session_id: Option<&str>,
+    permission_mode: PermissionMode,
 ) -> LaunchSpec {
     let mut args = vec![
         "--print".into(),
@@ -63,8 +66,18 @@ pub fn build_launch_spec(
         "--include-partial-messages".into(),
         "--replay-user-messages".into(),
         "--permission-mode".into(),
-        "acceptEdits".into(),
+        match permission_mode {
+            PermissionMode::Ask => "default",
+            PermissionMode::AutoEdit => "acceptEdits",
+            PermissionMode::Yolo => "bypassPermissions",
+        }
+        .into(),
+        "--permission-prompt-tool".into(),
+        "stdio".into(),
     ];
+    if permission_mode == PermissionMode::Yolo {
+        args.push("--allow-dangerously-skip-permissions".into());
+    }
     if !effort.is_default() {
         args.extend(["--effort".into(), effort.as_str().into()]);
     }
@@ -92,7 +105,15 @@ pub fn build_title_launch_spec(
     model: Option<&str>,
     effort: ThinkingEffort,
 ) -> LaunchSpec {
-    let mut spec = build_launch_spec(executable, cwd, prompt, model, effort, None);
+    let mut spec = build_launch_spec(
+        executable,
+        cwd,
+        prompt,
+        model,
+        effort,
+        None,
+        PermissionMode::AutoEdit,
+    );
     if let Some(permission_mode) = spec.args.iter_mut().find(|arg| *arg == "acceptEdits") {
         *permission_mode = "dontAsk".into();
     }
@@ -227,18 +248,49 @@ fn decode_frame(frame: &Value) -> Vec<DecodedEvent> {
         }
         Some("control_request") => {
             let request_id = &frame["request_id"];
-            let response = if frame.pointer("/request/subtype").and_then(Value::as_str)
-                == Some("can_use_tool")
+            if request_id.as_str().is_some_and(|id| !id.is_empty())
+                && frame.pointer("/request/subtype").and_then(Value::as_str) == Some("can_use_tool")
             {
-                json!({"subtype": "success", "request_id": request_id,
-                    "response": {"behavior": "deny", "message": "Nexus 暂不支持交互式工具审批。"}})
-            } else {
-                json!({"subtype": "error", "request_id": request_id, "error": "Nexus 不支持此控制请求。"})
-            };
+                let response = |value| {
+                    InputFrame(json!({"type": "control_response", "response": {
+                        "subtype": "success", "request_id": request_id, "response": value
+                    }}))
+                };
+                let deny =
+                    response(json!({"behavior": "deny", "message": "User denied this action."}));
+                return vec![DecodedEvent::ApprovalRequested(ApprovalPrompt {
+                    id: request_id.to_string(),
+                    title: frame
+                        .pointer("/request/tool_name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Claude Code")
+                        .into(),
+                    details: serde_json::to_string_pretty(&frame["request"]["input"])
+                        .unwrap_or_default(),
+                    options: vec![
+                        ApprovalOption {
+                            label: "Approve".into(),
+                            response: response(json!({
+                                "behavior": "allow", "updatedInput": frame["request"]["input"]
+                            })),
+                        },
+                        ApprovalOption {
+                            label: "Deny".into(),
+                            response: deny.clone(),
+                        },
+                    ],
+                    cancel: deny,
+                    timeout_ms: None,
+                })];
+            }
+            let response = json!({"subtype": "error", "request_id": request_id, "error": "Nexus 不支持此控制请求。"});
             vec![DecodedEvent::WriteStdin(InputFrame(
                 json!({"type": "control_response", "response": response}),
             ))]
         }
+        Some("control_cancel_request") => vec![DecodedEvent::ApprovalResolved(
+            frame["request_id"].to_string(),
+        )],
         _ => Vec::new(),
     }
 }
@@ -370,6 +422,37 @@ mod tests {
 
     #[test]
     fn launch_spec_includes_model_and_effort_without_prompt_in_argv() {
+        for (mode, value) in [
+            (PermissionMode::Ask, "default"),
+            (PermissionMode::AutoEdit, "acceptEdits"),
+            (PermissionMode::Yolo, "bypassPermissions"),
+        ] {
+            let spec = build_launch_spec(
+                "claude",
+                Path::new("."),
+                "test",
+                None,
+                ThinkingEffort::Default,
+                Some("session"),
+                mode,
+            );
+            assert!(
+                spec.args
+                    .windows(2)
+                    .any(|pair| pair == ["--permission-mode", value])
+            );
+            assert!(
+                spec.args
+                    .windows(2)
+                    .any(|pair| pair == ["--permission-prompt-tool", "stdio"])
+            );
+            assert_eq!(
+                spec.args
+                    .iter()
+                    .any(|arg| arg == "--allow-dangerously-skip-permissions"),
+                mode == PermissionMode::Yolo
+            );
+        }
         let defaults = build_launch_spec(
             "claude",
             Path::new("."),
@@ -377,6 +460,7 @@ mod tests {
             None,
             ThinkingEffort::Default,
             None,
+            PermissionMode::AutoEdit,
         );
         assert!(
             !defaults
@@ -391,6 +475,7 @@ mod tests {
             Some("opus"),
             ThinkingEffort::XHigh,
             None,
+            PermissionMode::AutoEdit,
         );
         assert!(spec.args.windows(2).any(|pair| pair == ["--model", "opus"]));
         assert!(
@@ -422,6 +507,7 @@ mod tests {
             None,
             ThinkingEffort::High,
             Some("existing-session"),
+            PermissionMode::AutoEdit,
         );
         assert!(
             resumed
@@ -444,6 +530,38 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&resumed.stdin).unwrap()["message"]["content"],
             "follow-up"
+        );
+    }
+
+    #[test]
+    fn tool_approval_waits_for_user_and_preserves_input_and_cancellation() {
+        let mut decoder = EventDecoder;
+        let frame = json!({"type": "control_request", "request_id": "approval-1", "request": {
+            "subtype": "can_use_tool", "tool_name": "Bash", "input": {"command": "echo \"审批\"", "timeout": 1000}
+        }});
+        let events = decoder.decode_line(&frame.to_string()).unwrap();
+        let [DecodedEvent::ApprovalRequested(prompt)] = events.as_slice() else {
+            panic!("expected approval")
+        };
+        assert!(prompt.details.contains("审批"));
+        assert_eq!(
+            prompt.options[0].response.0["response"]["response"]["updatedInput"],
+            frame["request"]["input"]
+        );
+        assert_eq!(
+            prompt.options[0].response.0["response"]["request_id"],
+            "approval-1"
+        );
+        assert_eq!(
+            prompt.options[1].response.0["response"]["response"]["behavior"],
+            "deny"
+        );
+        assert_eq!(prompt.cancel, prompt.options[1].response);
+        assert_eq!(
+            decoder
+                .decode_line(r#"{"type":"control_cancel_request","request_id":"approval-1"}"#)
+                .unwrap(),
+            vec![DecodedEvent::ApprovalResolved(prompt.id.clone())]
         );
     }
 

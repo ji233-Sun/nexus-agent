@@ -40,7 +40,7 @@ impl Presenter {
                         self.select_project(project);
                     }
                     let executable = self.model.executable.clone();
-                    if self.start_run(None, &prompt, &executable) {
+                    if self.start_run(None, &prompt, &executable, self.model.permission_mode) {
                         Ok(())
                     } else {
                         Err(self.model.status.render(Language::Chinese).to_owned())

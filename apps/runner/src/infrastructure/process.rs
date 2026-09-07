@@ -1,17 +1,17 @@
 use crate::application::events::{Emitter, emit_decoded};
 use nexus_domain::{RunStatus, compact_task_title};
-use nexus_harness_core::{DecodedEvent, InputFrame, LaunchSpec, LineDecoder};
-use nexus_protocol::{EnvironmentVariable, ErrorCode, Event, StartRun};
+use nexus_harness_core::{ApprovalPrompt, DecodedEvent, InputFrame, LaunchSpec, LineDecoder};
+use nexus_protocol::{ApprovalRequest, EnvironmentVariable, ErrorCode, Event, StartRun};
 use serde_json::Value;
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     time::Duration,
 };
 use tokio::{
     io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader},
     process::{ChildStdin, ChildStdout, Command as ProcessCommand},
     sync::{mpsc, watch},
-    time::{sleep, timeout},
+    time::{Instant, sleep, sleep_until, timeout},
 };
 use uuid::Uuid;
 
@@ -20,6 +20,19 @@ use super::process_tree;
 pub(crate) struct SteerInput {
     pub(crate) message_id: Uuid,
     pub(crate) prompt: String,
+}
+
+pub(crate) enum RunInput {
+    Steer(SteerInput),
+    Approval {
+        request_id: Uuid,
+        option: Option<usize>,
+    },
+}
+
+struct PendingApproval {
+    prompt: ApprovalPrompt,
+    deadline: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -32,7 +45,7 @@ pub(crate) async fn run_harness(
     request: StartRun,
     cwd: std::path::PathBuf,
     mut cancel: watch::Receiver<bool>,
-    input: mpsc::UnboundedReceiver<SteerInput>,
+    input: mpsc::UnboundedReceiver<RunInput>,
     emitter: Emitter,
 ) -> (RunStatus, Option<i32>) {
     let harness = request.harness;
@@ -113,7 +126,7 @@ pub(crate) async fn run_harness(
         stderr_task.abort();
     }
     let exit_code = status.as_ref().ok().and_then(|status| status.code());
-    let final_status = if was_cancelled {
+    let final_status = if was_cancelled || *cancel.borrow() {
         RunStatus::Cancelled
     } else if output.completed && output.provider_error.is_none() {
         RunStatus::Completed
@@ -278,8 +291,8 @@ async fn read_stdout(
     mut stdin: ChildStdin,
     request: StartRun,
     mut decoder: Box<dyn LineDecoder>,
-    mut input: mpsc::UnboundedReceiver<SteerInput>,
-    cancel: watch::Receiver<bool>,
+    mut input: mpsc::UnboundedReceiver<RunInput>,
+    mut cancel: watch::Receiver<bool>,
     emitter: Emitter,
 ) -> SessionOutput {
     let run_id = request.run_id;
@@ -291,14 +304,52 @@ async fn read_stdout(
     let mut awaiting_receipt = HashSet::new();
     let mut input_open = true;
     let mut session_started = false;
+    let mut approvals = HashMap::<Uuid, PendingApproval>::new();
     'stream: loop {
+        let deadline = approvals
+            .values()
+            .filter_map(|pending| pending.deadline)
+            .min();
         let line = tokio::select! {
             biased;
+            _ = cancel.changed() => break,
+            _ = sleep_until(deadline.unwrap_or_else(Instant::now)), if deadline.is_some() => {
+                let expired: Vec<_> = approvals.iter().filter_map(|(id, pending)|
+                    pending.deadline.is_some_and(|deadline| deadline <= Instant::now()).then_some(*id)).collect();
+                for request_id in expired {
+                    let pending = approvals.remove(&request_id).unwrap();
+                    if write_frame(&mut stdin, &pending.prompt.cancel).await.is_err() {
+                        output.provider_error = Some(format!("无法向 {harness} 写入审批回复。"));
+                        break 'stream;
+                    }
+                    emitter.send(Event::RunApprovalResolved { run_id, request_id }).await;
+                }
+                continue;
+            }
             message = input.recv(), if input_open => {
-                if let Some(message) = message {
-                    queued.push_back(message);
-                } else {
-                    input_open = false;
+                match message {
+                    Some(RunInput::Steer(message)) => queued.push_back(message),
+                    Some(RunInput::Approval { request_id, option }) => {
+                        let response = approvals.get(&request_id).and_then(|pending| {
+                            if *cancel.borrow() { return None; }
+                            match option {
+                                Some(index) => pending.prompt.options.get(index).map(|option| &option.response),
+                                None => Some(&pending.prompt.cancel),
+                            }
+                        });
+                        if let Some(response) = response {
+                            if write_frame(&mut stdin, response).await.is_err() {
+                                output.provider_error = Some(format!("无法向 {harness} 写入审批回复。"));
+                                break 'stream;
+                            }
+                            approvals.remove(&request_id);
+                            emitter.send(Event::RunApprovalResolved { run_id, request_id }).await;
+                        } else {
+                            emitter.send(Event::RunApprovalRejected { run_id, request_id,
+                                message: "审批请求已失效或选项无效。".into() }).await;
+                        }
+                    }
+                    None => input_open = false,
                 }
                 continue;
             }
@@ -312,6 +363,55 @@ async fn read_stdout(
             Ok(events) => {
                 for event in events {
                     match &event {
+                        DecodedEvent::ApprovalRequested(prompt) => {
+                            if *cancel.borrow() {
+                                break 'stream;
+                            }
+                            // A replay cannot create a second actionable copy of one native request.
+                            if approvals
+                                .values()
+                                .any(|pending| pending.prompt.id == prompt.id)
+                            {
+                                continue;
+                            }
+                            let request_id = Uuid::new_v4();
+                            let request = ApprovalRequest {
+                                request_id,
+                                title: prompt.title.clone(),
+                                details: prompt.details.clone(),
+                                options: prompt
+                                    .options
+                                    .iter()
+                                    .map(|option| option.label.clone())
+                                    .collect(),
+                            };
+                            approvals.insert(
+                                request_id,
+                                PendingApproval {
+                                    prompt: prompt.clone(),
+                                    deadline: prompt.timeout_ms.and_then(|ms| {
+                                        Instant::now().checked_add(Duration::from_millis(ms))
+                                    }),
+                                },
+                            );
+                            emitter
+                                .send(Event::RunApprovalRequested { run_id, request })
+                                .await;
+                            continue;
+                        }
+                        DecodedEvent::ApprovalResolved(id) => {
+                            if let Some(request_id) =
+                                approvals.iter().find_map(|(request_id, pending)| {
+                                    (&pending.prompt.id == id).then_some(*request_id)
+                                })
+                            {
+                                approvals.remove(&request_id);
+                                emitter
+                                    .send(Event::RunApprovalResolved { run_id, request_id })
+                                    .await;
+                            }
+                            continue;
+                        }
                         DecodedEvent::WriteStdin(frame) => {
                             if write_frame(&mut stdin, frame).await.is_err() {
                                 output.provider_error =
@@ -393,7 +493,23 @@ async fn read_stdout(
     // Close the receiver before announcing exit so late requests are explicitly rejected.
     input.close();
     while let Ok(message) = input.try_recv() {
-        queued.push_back(message);
+        match message {
+            RunInput::Steer(message) => queued.push_back(message),
+            RunInput::Approval { request_id, .. } => {
+                emitter
+                    .send(Event::RunApprovalRejected {
+                        run_id,
+                        request_id,
+                        message: "当前轮次已结束，审批请求已失效。".into(),
+                    })
+                    .await;
+            }
+        }
+    }
+    for request_id in approvals.into_keys() {
+        emitter
+            .send(Event::RunApprovalResolved { run_id, request_id })
+            .await;
     }
     for message in queued {
         emitter
