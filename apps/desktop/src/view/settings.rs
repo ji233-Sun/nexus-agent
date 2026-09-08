@@ -170,7 +170,8 @@ impl NexusView {
                                 .w_full()
                                 .h(px(CONTROL_HEIGHT))
                                 .icon(IconName::ArrowLeft)
-                                .label(locale.text("返回工作区"))
+                                .accessibility_label(locale.text("返回工作区"))
+                                .child(control_label(locale.text("返回工作区")))
                                 .on_click(cx.listener(|app, _, window, cx| {
                                     app.toggle_settings(window, cx)
                                 })),
@@ -198,6 +199,7 @@ impl NexusView {
                             .gap_3()
                             .child(
                                 div()
+                                    .debug_selector(|| "settings-breadcrumb-label".into())
                                     .text_color(rgb(colors.muted))
                                     .child(locale.text("设置")),
                             )
@@ -223,7 +225,6 @@ impl NexusView {
                                         })
                                         .w_full()
                                         .max_w(px(CONTENT_WIDTH))
-                                        .mx_auto()
                                         .child(content),
                                 ),
                             )
@@ -247,7 +248,7 @@ impl NexusView {
                     colors,
                     locale.text("界面语言"),
                     locale.text("立即生效，并在下次启动时保留。"),
-                    div().flex().gap_2().children(
+                    div().w_full().flex().gap_2().children(
                         [
                             (Language::Chinese, "简体中文"),
                             (Language::English, "English"),
@@ -257,8 +258,11 @@ impl NexusView {
                                 .debug_selector(move || format!("language-{}", language.as_str()))
                                 .outline()
                                 .small()
+                                .flex_1()
+                                .min_w_0()
                                 .h(px(CONTROL_HEIGHT))
-                                .label(label)
+                                .accessibility_label(label)
+                                .child(control_label(label))
                                 .selected(locale == language)
                                 .on_click(cx.listener(move |app, _, window, cx| {
                                     app.set_language(language, window, cx);
@@ -317,7 +321,7 @@ impl NexusView {
                 .w_full()
                 .h(px(CONTROL_HEIGHT))
                 .child(harness_icon(selected, colors, 16.))
-                .label(selected.to_string())
+                .child(control_label(selected.to_string()))
                 .accessibility_label(locale.text("标题生成引擎")),
             self.reduced_motion,
             move |menu, _, _| {
@@ -363,7 +367,7 @@ impl NexusView {
                     .h(px(CONTROL_HEIGHT))
                     .icon(IconName::Cpu)
                     .tooltip(label.clone())
-                    .label(label)
+                    .child(control_label(label))
                     .accessibility_label(locale.text("标题生成模型"))
                     .child(Icon::new(IconName::ChevronDown).small()),
             )
@@ -416,15 +420,16 @@ impl NexusView {
                     div()
                         .w_full()
                         .flex()
-                        .items_center()
+                        .flex_col()
+                        .items_start()
                         .gap_2()
-                        .child(div().flex_1().min_w_0().child(picker))
+                        .child(div().w_full().min_w_0().child(picker))
                         .child(
                             Button::new("title-model-refresh")
                                 .ghost()
                                 .small()
                                 .icon(IconName::RotateCw)
-                                .tooltip(locale.text("刷新模型目录"))
+                                .label(locale.text("刷新模型目录"))
                                 .accessibility_label(locale.text("刷新模型目录"))
                                 .disabled(model.selected_project.is_none())
                                 .on_click(cx.listener(|app, _, _, cx| {
@@ -433,8 +438,74 @@ impl NexusView {
                                 })),
                         ),
                 ),
+                settings_row(
+                    colors,
+                    locale.text("思考档位"),
+                    locale.text("仅用于生成对话标题，支持的档位由模型提供。"),
+                    self.title_effort_selector(cx),
+                ),
             ],
         )
+    }
+
+    fn title_effort_selector(&self, cx: &mut Context<Self>) -> AnyElement {
+        let model = self.presenter.model();
+        let locale = model.language;
+        let selected = model.title_generation.effort;
+        let mut efforts = vec![ThinkingEffort::Default];
+        if let Some(descriptor) = model.title_catalog_model(model.title_generation.model.as_deref())
+        {
+            efforts.extend(
+                descriptor
+                    .supported_reasoning_efforts
+                    .iter()
+                    .map(|option| option.effort),
+            );
+        }
+        let supported = efforts.len() > 1;
+        let button = Button::new("title-effort")
+            .debug_selector(|| "title-effort".into())
+            .outline()
+            .small()
+            .w_full()
+            .h(px(CONTROL_HEIGHT))
+            .icon(IconName::Cpu)
+            .label(locale.effort(selected))
+            .accessibility_label(locale.text("标题生成思考档位"))
+            .tooltip(if supported {
+                locale.text("标题生成思考档位")
+            } else {
+                locale.text("刷新模型目录后可选择支持的思考档位。")
+            })
+            .disabled(!supported && selected.is_default());
+        if !supported && selected.is_default() {
+            return button.into_any_element();
+        }
+        let app = cx.entity();
+        AnimatedDropdown::new(
+            "title-effort",
+            button,
+            self.reduced_motion,
+            move |menu, _, _| {
+                efforts
+                    .iter()
+                    .copied()
+                    .fold(menu.min_w(px(180.)), |menu, effort| {
+                        let app = app.clone();
+                        menu.item(
+                            PopupMenuItem::new(locale.effort(effort))
+                                .checked(effort == selected)
+                                .on_click(move |_, _, cx| {
+                                    app.update(cx, |app, cx| {
+                                        app.presenter.select_title_effort(effort);
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                    })
+            },
+        )
+        .into_any_element()
     }
 
     fn render_update_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -458,7 +529,7 @@ impl NexusView {
                     locale.text(
                         "Release 包含版本号预发布；Nightly 跟随每日构建。切换后点击检查更新。",
                     ),
-                    div().flex().gap_2().children(
+                    div().w_full().flex().gap_2().children(
                         [UpdateChannel::Release, UpdateChannel::Nightly].map(|channel| {
                             Button::new(channel.as_str())
                                 .debug_selector(move || {
@@ -466,7 +537,11 @@ impl NexusView {
                                 })
                                 .outline()
                                 .small()
-                                .label(channel.label())
+                                .flex_1()
+                                .min_w_0()
+                                .h(px(CONTROL_HEIGHT))
+                                .accessibility_label(channel.label())
+                                .child(control_label(channel.label()))
                                 .selected(updates.channel == channel)
                                 .disabled(busy)
                                 .on_click(cx.listener(move |app, _, _, cx| {
@@ -599,7 +674,7 @@ impl NexusView {
                                                 div()
                                                     .flex()
                                                     .items_center()
-                                                    .justify_center()
+                                                    .justify_start()
                                                     .gap_1()
                                                     .text_size(px(13.))
                                                     .child(label)
@@ -846,7 +921,7 @@ impl NexusView {
                             .on_click(cx.listener(Self::probe)),
                     ),
                     div()
-                        .p_5()
+                        .py_4()
                         .flex()
                         .flex_col()
                         .gap_3()
@@ -1254,10 +1329,10 @@ impl NexusView {
                             .prefix(Icon::new(IconName::Cpu).small()),
                     ),
                     div()
-                        .p_5()
+                        .py_4()
                         .flex()
                         .items_center()
-                        .justify_between()
+                        .flex_wrap()
                         .gap_3()
                         .child(
                             Button::new("new-provider-profile")
@@ -1428,11 +1503,20 @@ fn settings_row(
                 .w(px(320.))
                 .flex_none()
                 .flex()
-                .justify_end()
+                .justify_start()
                 .text_color(rgb(colors.text_secondary))
                 .whitespace_normal()
                 .child(control),
         )
+}
+
+pub(super) fn control_label(label: impl Into<SharedString>) -> gpui::Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .text_left()
+        .truncate()
+        .child(label.into())
 }
 
 fn theme_preview(theme: ThemePreference) -> gpui::Div {

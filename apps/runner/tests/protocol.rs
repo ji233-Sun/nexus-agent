@@ -152,6 +152,7 @@ fn request(directory: &Path, executable: PathBuf, harness: HarnessKind, prompt: 
             harness,
             executable: executable.to_string_lossy().into_owned(),
             model: None,
+            effort: ThinkingEffort::Default,
             environment: Vec::new(),
         }),
         permission_mode: nexus_domain::PermissionMode::AutoEdit,
@@ -885,7 +886,9 @@ async fn runner_streams_fake_omp_and_uses_guarded_rpc_mode() {
 
 #[tokio::test]
 async fn runner_generates_titles_with_each_harness_in_a_safe_background_process() {
-    for harness in HarnessKind::ALL {
+    for (harness, effort) in HarnessKind::ALL.into_iter().flat_map(|harness| {
+        [ThinkingEffort::Default, ThinkingEffort::Low].map(|effort| (harness, effort))
+    }) {
         let directory = tempfile::tempdir().unwrap();
         let executable = fake_harness(directory.path());
         let title_executable = directory
@@ -911,6 +914,7 @@ async fn runner_generates_titles_with_each_harness_in_a_safe_background_process(
             harness,
             executable: title_executable.to_string_lossy().into_owned(),
             model: Some("title-model".into()),
+            effort,
             environment: vec![EnvironmentVariable {
                 name: "TEST_PROVIDER_API_KEY".into(),
                 value: "title-secret".into(),
@@ -932,6 +936,17 @@ async fn runner_generates_titles_with_each_harness_in_a_safe_background_process(
         assert!(args.contains("--model\ntitle-model"));
         assert!(!args.contains("conversation-model"));
         assert!(!args.contains("high"));
+        if effort.is_default() {
+            assert!(!args.contains("--effort"));
+            assert!(!args.contains("model_reasoning_effort"));
+            assert!(!args.contains("--thinking"));
+        } else {
+            assert!(args.contains(match harness {
+                HarnessKind::Claude => "--effort\nlow",
+                HarnessKind::Codex => "--config\nmodel_reasoning_effort=\"low\"",
+                HarnessKind::Omp => "--thinking\nlow",
+            }));
+        }
         assert_eq!(
             PathBuf::from(
                 fs::read_to_string(directory.path().join("title-executable.txt")).unwrap()

@@ -67,6 +67,7 @@ impl Presenter {
                 } else {
                     ModelCatalogState::Ready(models)
                 };
+                self.normalize_title_effort();
             }
             Event::ModelCatalogFailed {
                 request_id,

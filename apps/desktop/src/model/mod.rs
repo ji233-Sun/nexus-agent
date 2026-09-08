@@ -67,10 +67,22 @@ pub(crate) struct AppearanceSettings {
     pub(crate) reduced_motion: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub(crate) struct TitleGenerationSettings {
     pub(crate) harness: HarnessKind,
     pub(crate) model: Option<String>,
+    pub(crate) effort: ThinkingEffort,
+}
+
+impl Default for TitleGenerationSettings {
+    fn default() -> Self {
+        Self {
+            harness: HarnessKind::default(),
+            model: None,
+            effort: ThinkingEffort::Default,
+        }
+    }
 }
 
 impl Default for AppearanceSettings {
@@ -299,6 +311,21 @@ impl AppModel {
         } else {
             models.iter().find(|model| model.is_default)
         }
+    }
+
+    pub(crate) fn title_catalog_model(
+        &self,
+        model_override: Option<&str>,
+    ) -> Option<&ModelDescriptor> {
+        let models = self.title_model_catalog.models()?;
+        let model_id = model_override.or_else(|| {
+            self.provider_profile_for(self.title_generation.harness)
+                .and_then(|profile| profile.model.as_deref())
+        });
+        models.iter().find(|model| {
+            model.availability.is_selectable()
+                && model_id.map_or(model.is_default, |id| model.id == id)
+        })
     }
 
     pub(crate) fn model_override_is_unavailable(&self) -> bool {

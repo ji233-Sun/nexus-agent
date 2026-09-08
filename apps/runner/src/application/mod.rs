@@ -153,7 +153,7 @@ impl Runner {
                     title_request.executable = config.executable;
                     title_request.model = config.model;
                     title_request.environment = config.environment;
-                    title_request.effort = nexus_domain::ThinkingEffort::Default;
+                    title_request.effort = config.effort;
                     self.spawn_title_generation(title_request, cwd);
                 }
             }
@@ -512,6 +512,7 @@ mod tests {
                 harness: HarnessKind::Claude,
                 executable: "unused".into(),
                 model: None,
+                effort: ThinkingEffort::Default,
                 environment: Vec::new(),
             }),
             permission_mode: nexus_domain::PermissionMode::AutoEdit,

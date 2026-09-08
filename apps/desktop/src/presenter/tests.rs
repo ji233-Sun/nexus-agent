@@ -1556,20 +1556,40 @@ fn generated_title_replaces_fallback_and_is_persisted() {
 fn title_generation_settings_persist_independently_of_conversation_selection() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("title-settings.sqlite");
-    let mut presenter = Presenter::new(
-        Storage::open(&path).unwrap(),
-        Err(anyhow::anyhow!("test")),
-        None,
+    let storage = Storage::open(&path).unwrap();
+    storage
+        .set_setting(
+            "title_generation",
+            r#"{"harness":"claude","model":"haiku"}"#,
+        )
+        .unwrap();
+    storage.set_setting("thinking_effort", "high").unwrap();
+    let mut presenter = Presenter::new(storage, Err(anyhow::anyhow!("test")), None);
+    assert_eq!(
+        presenter.model.title_generation.harness,
+        HarnessKind::Claude
     );
+    assert_eq!(
+        presenter.model.title_generation.model.as_deref(),
+        Some("haiku")
+    );
+    assert_eq!(
+        presenter.model.title_generation.effort,
+        ThinkingEffort::Default
+    );
+    assert_eq!(presenter.model.effort, ThinkingEffort::High);
     assert!(presenter.select_title_harness(HarnessKind::Omp));
     assert!(!presenter.select_title_model(Some("missing".into())));
     presenter.model.title_model_catalog = ModelCatalogState::Ready(vec![catalog_model(
         "provider/title-model",
         false,
-        &[],
+        &[ThinkingEffort::Low],
         ThinkingEffort::Default,
     )]);
     assert!(presenter.select_title_model(Some("provider/title-model".into())));
+    assert!(presenter.select_title_effort(ThinkingEffort::Low));
+    assert!(!presenter.select_title_effort(ThinkingEffort::High));
+    assert_eq!(presenter.model.effort, ThinkingEffort::High);
     assert!(presenter.select_harness(HarnessKind::Codex, "claude"));
     let expected = presenter.model.title_generation.clone();
     drop(presenter);
@@ -1579,9 +1599,17 @@ fn title_generation_settings_persist_independently_of_conversation_selection() {
         None,
     );
     assert_eq!(presenter.model.title_generation, expected);
+    assert_eq!(
+        presenter.title_generation_configuration().unwrap().effort,
+        ThinkingEffort::Low
+    );
     assert_eq!(presenter.model.selected_harness, HarnessKind::Codex);
     assert!(presenter.select_title_harness(HarnessKind::Claude));
     assert!(presenter.model.title_generation.model.is_none());
+    assert_eq!(
+        presenter.model.title_generation.effort,
+        ThinkingEffort::Default
+    );
     assert_eq!(presenter.model.selected_harness, HarnessKind::Codex);
 }
 
@@ -1589,16 +1617,23 @@ fn title_generation_settings_persist_independently_of_conversation_selection() {
 fn title_generation_uses_separate_configuration_and_skips_resumed_runs() {
     let (mut presenter, runner, credentials, _directory) = provider_fixture();
     presenter.select_harness(HarnessKind::Omp, "claude");
-    let title_profile = presenter
-        .save_provider_profile(profile_draft(None, "Title", "title-secret"))
-        .unwrap();
+    let mut draft = profile_draft(None, "Title", "title-secret");
+    draft.model = "provider/title-model".into();
+    let title_profile = presenter.save_provider_profile(draft).unwrap();
     presenter.select_title_harness(HarnessKind::Omp);
     presenter.model.title_model_catalog = ModelCatalogState::Ready(vec![catalog_model(
         "provider/title-model",
         false,
-        &[],
+        &[ThinkingEffort::Low],
         ThinkingEffort::Default,
     )]);
+    assert!(presenter.select_title_effort(ThinkingEffort::Low));
+    let profile_default = presenter.title_generation_configuration().unwrap();
+    assert_eq!(
+        profile_default.model.as_deref(),
+        Some("provider/title-model")
+    );
+    assert_eq!(profile_default.effort, ThinkingEffort::Low);
     assert!(presenter.select_title_model(Some("provider/title-model".into())));
     presenter.select_harness(HarnessKind::Claude, "/custom/omp");
     presenter
@@ -1616,11 +1651,13 @@ fn title_generation_uses_separate_configuration_and_skips_resumed_runs() {
     let first = last_start(&runner);
     assert_eq!(first.harness, HarnessKind::Claude);
     assert_eq!(first.model.as_deref(), Some("opus"));
+    assert_eq!(first.effort, ThinkingEffort::Default);
     assert_eq!(first.environment[0].value, "conversation-secret");
     let title = first.title_generation.as_ref().unwrap();
     assert_eq!(title.harness, HarnessKind::Omp);
     assert_eq!(title.executable, "/custom/omp");
     assert_eq!(title.model.as_deref(), Some("provider/title-model"));
+    assert_eq!(title.effort, ThinkingEffort::Low);
     assert_eq!(title.environment[0].value, "title-secret");
     assert!(!format!("{first:?}").contains("title-secret"));
 
@@ -1648,6 +1685,77 @@ fn title_generation_uses_separate_configuration_and_skips_resumed_runs() {
     assert!(presenter.submit("missing title credentials", "claude"));
     assert!(last_start(&runner).title_generation.is_none());
     assert_eq!(presenter.model.tasks[0].title, "missing title credentials");
+}
+
+#[test]
+fn title_effort_tracks_model_support_and_resets_after_catalog_changes() {
+    let (mut presenter, runner, _directory) = fixture();
+    assert!(presenter.select_title_harness(HarnessKind::Codex));
+    assert!(!presenter.select_title_effort(ThinkingEffort::Low));
+    presenter.model.title_model_catalog = ModelCatalogState::Ready(vec![
+        catalog_model(
+            "default-model",
+            true,
+            &[ThinkingEffort::Low],
+            ThinkingEffort::Low,
+        ),
+        catalog_model(
+            "other-model",
+            false,
+            &[ThinkingEffort::Low],
+            ThinkingEffort::Low,
+        ),
+        catalog_model("no-effort", false, &[], ThinkingEffort::Default),
+    ]);
+    assert!(presenter.select_title_effort(ThinkingEffort::Low));
+    assert!(presenter.select_title_model(Some("other-model".into())));
+    assert_eq!(presenter.model.title_generation.effort, ThinkingEffort::Low);
+    assert!(presenter.select_title_model(Some("no-effort".into())));
+    assert_eq!(
+        presenter.model.title_generation.effort,
+        ThinkingEffort::Default
+    );
+    assert!(!presenter.select_title_effort(ThinkingEffort::Low));
+    assert!(presenter.select_title_model(None));
+    assert!(presenter.select_title_effort(ThinkingEffort::Low));
+
+    assert!(presenter.refresh_title_model_catalog());
+    let ModelCatalogState::Loading { request_id, .. } = presenter.model.title_model_catalog else {
+        panic!("loading")
+    };
+    runner.emit(Event::ModelCatalogLoaded {
+        request_id: Uuid::new_v4(),
+        harness: HarnessKind::Codex,
+        models: Vec::new(),
+    });
+    presenter.drain_events();
+    assert_eq!(presenter.model.title_generation.effort, ThinkingEffort::Low);
+    runner.emit(Event::ModelCatalogLoaded {
+        request_id,
+        harness: HarnessKind::Codex,
+        models: vec![catalog_model(
+            "default-model",
+            true,
+            &[],
+            ThinkingEffort::Default,
+        )],
+    });
+    presenter.drain_events();
+    assert_eq!(
+        presenter.model.title_generation.effort,
+        ThinkingEffort::Default
+    );
+    let saved: TitleGenerationSettings = serde_json::from_str(
+        &presenter
+            .storage
+            .setting("title_generation")
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(saved.effort, ThinkingEffort::Default);
+    assert_eq!(presenter.model.selected_harness, HarnessKind::Claude);
+    assert_eq!(presenter.model.effort, ThinkingEffort::Default);
 }
 
 #[test]
