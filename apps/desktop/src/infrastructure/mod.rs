@@ -5,4 +5,5 @@ pub(crate) mod harness_installation;
 mod paths;
 pub(crate) mod runner_client;
 pub(crate) mod storage;
+pub(crate) mod update_installation;
 pub(crate) mod updates;

@@ -1,6 +1,6 @@
 # Nexus Agent ADE
 
-Nexus Agent 是一个面向 Linux、macOS 和 Windows 的本地桌面应用，用统一时间线驱动本机已安装的 Claude Code、Codex CLI 或 Oh My Pi（OMP）。当前版本是 `0.1.0-alpha.1`。
+Nexus Agent 是一个面向 Linux、macOS 和 Windows 的本地桌面应用，用统一时间线驱动本机已安装的 Claude Code、Codex CLI 或 Oh My Pi（OMP）。应用内显示当前构建的完整发布标签，与对应的 GitHub Release 和安装包一致。
 
 ## 当前能力
 
@@ -133,13 +133,17 @@ Desktop 已内置 Runner，无需单独配置。Release 同时附带 `SHA256SUMS
 
 维护者发布时，先更新根目录 `Cargo.toml` 的 `workspace.package.version` 和 `Cargo.lock`，完成检查后再推送对应的 `v<版本>` 标签（例如 `v0.1.0-alpha.2`）。[Release 工作流](.github/workflows/release.yml) 会校验标签与应用版本一致，重新构建内嵌 Web Client，在四个目标上检查、测试、构建和打包；全部成功后才创建 GitHub Release，上传压缩包、校验和及自动生成的发布说明。含预发布标识的版本会标记为 Pre-release。
 
-Nightly 每 4 小时定时检查默认分支 `main` 的最新提交（cron：`0 */4 * * *`，UTC 每天 00:00、04:00、08:00、12:00、16:00、20:00，北京时间也为这六个时刻）。若该提交尚未发布 Nightly，则执行同一套检查和四平台打包流程，全部成功后自动发布一个 Nightly 预发布版；已经发布过的提交会跳过构建和发布。向 `main` 推送新提交（包括合并 PR）仅触发 CI，Nightly 等待下一次定时运行。标签及压缩包文件名使用 `nightly-YYYY-MM-DD-<Unix秒时间戳>-<12位提交SHA>`，例如 `nightly-2026-09-06-1788673923-6bbbdd981018`。日期与时间戳取自该提交的提交者时间，日期按 UTC 计算；同一提交重跑工作流时保持相同标签。Nightly 标签指向本次构建的完整提交 SHA，始终标记为 Pre-release，不占用 Latest；不同提交的发布独立执行。应用与 macOS bundle 的基础版本继续沿用 `Cargo.toml`，无需为每次 Nightly 修改版本文件。
+Nightly 每 4 小时定时检查默认分支 `main` 的最新提交（cron：`0 */4 * * *`，UTC 每天 00:00、04:00、08:00、12:00、16:00、20:00，北京时间也为这六个时刻）。若该提交尚未发布 Nightly，则执行同一套检查和四平台打包流程，全部成功后自动发布一个 Nightly 预发布版；已经发布过的提交会跳过构建和发布。向 `main` 推送新提交（包括合并 PR）仅触发 CI，Nightly 等待下一次定时运行。标签及压缩包文件名使用 `nightly-YYYY-MM-DD-<Unix秒时间戳>-<12位提交SHA>`，例如 `nightly-2026-09-06-1788673923-6bbbdd981018`。日期与时间戳取自该提交的提交者时间，日期按 UTC 计算；同一提交重跑工作流时保持相同标签。Nightly 标签指向本次构建的完整提交 SHA，始终标记为 Pre-release，不占用 Latest；不同提交的发布独立执行。Cargo 包版本和 macOS 的数字基础版本继续沿用 `Cargo.toml`，应用内显示完整 Nightly 标签，无需为每次 Nightly 修改版本文件。
 
 如需立即构建 Nightly，在 GitHub 仓库的 **Actions → Release → Run workflow** 中选择分支（通常为 `main`）并运行，即可手动触发该分支最新提交的构建。手动运行同样会跳过已经发布过 Nightly 的提交。
 
-在 **设置 → 通用 → 软件更新** 中可选择 **Release** 或 **Nightly** 频道，并手动检查更新。默认频道跟随当前安装包：Release 比较 `v<版本>` 的语义版本（包括 Alpha 等版本号预发布），Nightly 比较 `nightly-…` 标签中的提交时间，两者互不混入。主动切换频道后，检查更新会下载该频道的最新版本。发布工作流通过 `NEXUS_RELEASE_TAG` 将完整发布标签编译进应用；本地构建未指定时使用 `v<Cargo 版本>`。
+在 **设置 → 通用 → 软件更新** 中可选择 **Release** 或 **Nightly** 频道，并手动检查更新。默认频道跟随当前安装包：Release 比较 `v<版本>` 的语义版本（包括 Alpha 等版本号预发布），Nightly 比较 `nightly-…` 标签中的提交时间，两者互不混入。主动切换频道后，检查更新会展示该频道的最新版本。发布工作流通过 `NEXUS_RELEASE_TAG` 将完整发布标签编译进应用；设置页、更新检查和 `nexus-desktop --version` 共用此标签。本地构建优先使用显式指定的标签，否则使用当前提交上的版本标签或按提交生成的 Nightly 标签；没有 Git 元数据的源码包才回退到 `v<Cargo 版本>`。macOS 的系统版本字段保留数字格式，构建编号使用发布工作流运行编号，完整标签另存于 bundle 元数据。
 
-应用默认启动时检查所选频道，发现更新后在后台自动下载当前操作系统及架构对应的压缩包，可关闭「启动时检查更新」。更新包保存在应用数据目录的 `updates/<频道>/` 下，通过文件大小和 GitHub 提供的 SHA-256 校验后才显示「更新已下载」；重复检查会复用已校验的下载，失败可点击「检查更新」重试。下载期间仍可使用应用。点击「打开下载位置」后解压更新包，退出应用再替换安装；此功能不自动替换程序或重启，也不修改会话数据。网络、GitHub 限流或平台包缺失会在设置中显示错误。
+应用默认启动时检查所选频道，可关闭「启动时检查更新」。发现新版本后在侧栏提示，并在设置中展示完整版本标签、GitHub Release 的 Markdown 更新日志和完整发布说明链接。检查只读取发布信息；点击「更新并重启」后才开始下载对应操作系统及架构的压缩包。更新包保存在应用数据目录的 `updates/<频道>/` 下，校验文件大小和 GitHub 提供的 SHA-256；再次下载时复用已校验的缓存。
+
+下载期间仍可使用应用。校验成功后，等待当前任务和 Harness 安装操作结束，再自动解压、退出、安装并重启；准备安装期间暂停启动新任务。macOS 替换整个 `.app`，Windows/Linux 替换 Desktop 和 Runner 程序文件，保留其他文件及会话数据。更新通过独立进程等待原程序退出，替换或重启失败时回滚到旧程序并展示错误。网络、校验和安装错误可在设置中查看，安装进程日志保存在 `updates/installation.log`；恢复失败时保留安装现场供排查。
+
+自动安装要求应用所在目录可写；macOS 需要从已解压的 `.app` 中运行。开发目录中的裸 macOS 可执行文件和只读安装位置会显示安装错误。
 
 ## Remote Control
 

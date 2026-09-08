@@ -3,7 +3,10 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read as _, Write as _},
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver},
+    sync::{
+        Arc,
+        mpsc::{self, Receiver},
+    },
     time::{Duration, Instant},
 };
 
@@ -18,7 +21,7 @@ use smol::io::AsyncReadExt as _;
 
 use crate::{
     i18n::LocalizedText,
-    model::updates::{UpdateChannel, UpdateState, installed_tag},
+    model::updates::{UpdateAsset, UpdateChannel, UpdatePackage, UpdateState, installed_tag},
 };
 
 const RELEASES_URL: &str = "https://api.github.com/repos/ji233-Sun/nexus-agent/releases";
@@ -77,21 +80,9 @@ impl ReleaseVersion {
 struct Release {
     tag_name: String,
     draft: bool,
-    assets: Vec<Asset>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Asset {
-    name: String,
-    browser_download_url: String,
-    size: u64,
-    digest: Option<String>,
-}
-
-#[derive(Debug)]
-struct Package {
-    tag: String,
-    asset: Asset,
+    #[serde(default)]
+    body: Option<String>,
+    assets: Vec<UpdateAsset>,
 }
 
 fn platform_asset_suffix(os: &str, arch: &str, abi: &str) -> Result<&'static str> {
@@ -141,7 +132,7 @@ fn select_release(
     Ok(selected.map(|(_, release)| release))
 }
 
-fn select_package(release: Release, suffix: &str) -> Result<Package> {
+fn select_package(release: Release, suffix: &str) -> Result<UpdatePackage> {
     let name = format!("nexus-agent-{}-{suffix}", release.tag_name);
     let asset = release
         .assets
@@ -163,8 +154,9 @@ fn select_package(release: Release, suffix: &str) -> Result<Package> {
         digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()),
         "Invalid update package SHA-256 digest"
     );
-    Ok(Package {
+    Ok(UpdatePackage {
         tag: release.tag_name,
+        notes: release.body.unwrap_or_default(),
         asset,
     })
 }
@@ -208,7 +200,7 @@ async fn find_package(
     current_tag: &str,
     channel: UpdateChannel,
     suffix: &str,
-) -> Result<Option<Package>> {
+) -> Result<Option<UpdatePackage>> {
     let mut selected = None;
     for page in 1..=MAX_PAGES {
         let url = format!("{RELEASES_URL}?per_page={PAGE_SIZE}&page={page}");
@@ -242,12 +234,12 @@ async fn find_package(
 
 pub(crate) fn failure(error: anyhow::Error) -> UpdateState {
     UpdateState::Failed(LocalizedText::new(
-        "检查或下载更新失败：{error}",
+        "更新失败：{error}",
         &[("error", format!("{error:#}"))],
     ))
 }
 
-pub(crate) fn spawn(channel: UpdateChannel) -> Result<Receiver<UpdateState>> {
+pub(crate) fn spawn_check(channel: UpdateChannel) -> Result<Receiver<UpdateState>> {
     let (sender, receiver) = mpsc::channel();
     std::thread::Builder::new()
         .name("nexus-updates".into())
@@ -258,17 +250,44 @@ pub(crate) fn spawn(channel: UpdateChannel) -> Result<Receiver<UpdateState>> {
                     env!("CARGO_PKG_VERSION")
                 ))?;
                 let suffix = current_asset_suffix()?;
+                check(&http, installed_tag(), channel, suffix).await
+            });
+            let _ = sender.send(result.unwrap_or_else(failure));
+        })?;
+    Ok(receiver)
+}
+
+async fn check(
+    http: &dyn HttpClient,
+    current_tag: &str,
+    channel: UpdateChannel,
+    suffix: &str,
+) -> Result<UpdateState> {
+    let Some(package) = find_package(http, current_tag, channel, suffix).await? else {
+        return Ok(UpdateState::UpToDate);
+    };
+    Ok(UpdateState::Available(Arc::new(package)))
+}
+
+pub(crate) fn spawn_download(
+    package: Arc<UpdatePackage>,
+    channel: UpdateChannel,
+) -> Result<Receiver<UpdateState>> {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("nexus-update-download".into())
+        .spawn(move || {
+            let result = smol::block_on(async {
+                let http = reqwest_client::ReqwestClient::user_agent(concat!(
+                    "Nexus-Agent/",
+                    env!("CARGO_PKG_VERSION")
+                ))?;
                 let directory = super::paths::data_directory()?
                     .join("updates")
                     .join(channel.as_str());
-                check_and_download(
-                    &http,
-                    installed_tag(),
-                    channel,
-                    suffix,
-                    &directory,
-                    |state| sender.send(state).context("Update task was closed"),
-                )
+                download(&http, package, &directory, |state| {
+                    sender.send(state).context("Update task was closed")
+                })
                 .await
             });
             let _ = sender.send(result.unwrap_or_else(failure));
@@ -276,39 +295,40 @@ pub(crate) fn spawn(channel: UpdateChannel) -> Result<Receiver<UpdateState>> {
     Ok(receiver)
 }
 
-async fn check_and_download(
+async fn download(
     http: &dyn HttpClient,
-    current_tag: &str,
-    channel: UpdateChannel,
-    suffix: &str,
+    package: Arc<UpdatePackage>,
     directory: &Path,
     mut progress: impl FnMut(UpdateState) -> Result<()>,
 ) -> Result<UpdateState> {
-    let Some(package) = find_package(http, current_tag, channel, suffix).await? else {
-        return Ok(UpdateState::UpToDate);
-    };
-    progress(UpdateState::Downloading {
-        tag: package.tag.clone(),
-        received: 0,
-        total: package.asset.size,
-    })?;
     let mut last_progress = Instant::now();
     let path = download_package(http, &package, directory, |received| {
         if received == package.asset.size || last_progress.elapsed() >= Duration::from_millis(100) {
             progress(UpdateState::Downloading {
-                tag: package.tag.clone(),
+                package: package.clone(),
                 received,
-                total: package.asset.size,
             })?;
             last_progress = Instant::now();
         }
         Ok(())
     })
     .await?;
-    Ok(UpdateState::Ready {
-        tag: package.tag,
-        path,
-    })
+    Ok(UpdateState::Ready { package, path })
+}
+
+pub(crate) fn spawn_install(
+    package: Arc<UpdatePackage>,
+    path: PathBuf,
+) -> Result<Receiver<UpdateState>> {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("nexus-update-install".into())
+        .spawn(move || {
+            let result = super::update_installation::prepare_and_launch(&package, &path)
+                .map(|()| UpdateState::Restarting(package));
+            let _ = sender.send(result.unwrap_or_else(failure));
+        })?;
+    Ok(receiver)
 }
 
 // Partial files never become installable packages; errors drop this guard.
@@ -320,7 +340,7 @@ impl Drop for PartialDownload {
     }
 }
 
-fn cached_package_matches(path: &Path, size: u64, digest: &str) -> Result<bool> {
+pub(super) fn cached_package_matches(path: &Path, size: u64, digest: &str) -> Result<bool> {
     let mut file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -343,7 +363,7 @@ fn cached_package_matches(path: &Path, size: u64, digest: &str) -> Result<bool> 
 
 async fn download_package(
     http: &dyn HttpClient,
-    package: &Package,
+    package: &UpdatePackage,
     directory: &Path,
     mut progress: impl FnMut(u64) -> Result<()>,
 ) -> Result<PathBuf> {
@@ -441,6 +461,7 @@ mod tests {
             "tag_name": tag,
             "draft": false,
             "prerelease": tag.contains('-'),
+            "body": "## Changes\n\n- Fix application updates.",
             "assets": [{
                 "name": name,
                 "browser_download_url": format!("{DOWNLOADS_URL}/{tag}/{name}"),
@@ -669,7 +690,7 @@ mod tests {
     }
 
     #[test]
-    fn checks_downloads_verifies_and_reuses_cache_then_repairs_corruption() {
+    fn checks_without_downloading_then_downloads_verifies_and_repairs_cache() {
         let directory = tempfile::tempdir().unwrap();
         let downloads = Arc::new(AtomicUsize::new(0));
         let count = downloads.clone();
@@ -687,12 +708,27 @@ mod tests {
                 Ok(Response::builder().body(body.into())?)
             }
         });
-        let mut progress = Vec::new();
-        let state = smol::block_on(check_and_download(
+        let state = smol::block_on(check(
             http.as_ref(),
             "v1.0.0",
             UpdateChannel::Release,
             SUFFIX,
+        ))
+        .unwrap();
+        let UpdateState::Available(package) = state else {
+            panic!("expected an available update")
+        };
+        assert_eq!(downloads.load(AtomicOrdering::SeqCst), 0);
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
+        assert_eq!(package.notes, "## Changes\n\n- Fix application updates.");
+        assert_eq!(
+            package.release_url(),
+            "https://github.com/ji233-Sun/nexus-agent/releases/tag/v1.0.1"
+        );
+        let mut progress = Vec::new();
+        let state = smol::block_on(download(
+            http.as_ref(),
+            package,
             directory.path(),
             |state| {
                 progress.push(state);
@@ -700,18 +736,15 @@ mod tests {
             },
         ))
         .unwrap();
-        let UpdateState::Ready { tag, path } = state else {
+        let UpdateState::Ready { package, path } = state else {
             panic!("expected verified package")
         };
-        assert_eq!(tag, "v1.0.1");
+        assert_eq!(package.tag, "v1.0.1");
+        assert_eq!(package.notes, "## Changes\n\n- Fix application updates.");
         assert_eq!(fs::read(&path).unwrap(), b"abc");
         assert!(matches!(
             progress.last(),
-            Some(UpdateState::Downloading {
-                received: 3,
-                total: 3,
-                ..
-            })
+            Some(UpdateState::Downloading { received: 3, .. })
         ));
         let package = select_package(release("v1.0.1"), SUFFIX).unwrap();
         assert_eq!(
