@@ -1436,6 +1436,9 @@ impl NexusView {
                     .gap_2()
                     .text_size(px(12.))
                     .text_color(rgb(colors.muted))
+                    .cursor_pointer()
+                    .hover(|style| style.text_color(rgb(colors.text)))
+                    .on_click(cx.listener(Self::choose_project))
                     .when_some(path, |element, path| {
                         element.tooltip(move |window, cx| {
                             let path = path.clone();
