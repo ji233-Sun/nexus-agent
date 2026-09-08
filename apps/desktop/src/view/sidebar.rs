@@ -1574,6 +1574,61 @@ mod tests {
     #[gpui::test]
     fn appearance_controls_and_system_changes_preserve_workspace_state(cx: &mut TestAppContext) {
         let (view, cx) = scroll_test_view(cx);
+        let assert_preview_corners = |cx: &mut gpui::VisualTestContext| {
+            for selector in [
+                "appearance-theme-preview-system",
+                "appearance-theme-preview-light",
+                "appearance-theme-preview-dark",
+            ] {
+                let bounds = cx.debug_bounds(selector).expect(selector);
+                cx.update(|window, _| {
+                    let bounds = bounds.scale(window.scale_factor());
+                    let quads = window.painted_quads();
+                    let border = quads.iter().find(|quad| quad.bounds == bounds).unwrap();
+                    let inner = gpui::Bounds::from_corners(
+                        bounds.origin + point(border.border_widths.left, border.border_widths.top),
+                        bounds.bottom_right()
+                            - point(border.border_widths.right, border.border_widths.bottom),
+                    );
+                    let left = quads
+                        .iter()
+                        .find(|quad| {
+                            quad.bounds.origin == inner.origin
+                                && quad.bounds.bottom() == inner.bottom()
+                        })
+                        .unwrap();
+                    let right = quads
+                        .iter()
+                        .find(|quad| {
+                            quad.bounds.top() == inner.top()
+                                && quad.bounds.bottom_right() == inner.bottom_right()
+                        })
+                        .unwrap();
+                    assert_eq!(left.bounds.right(), right.bounds.left());
+                    let radii = border
+                        .corner_radii
+                        .map(|radius| *radius - border.border_widths.top);
+                    assert_eq!(
+                        left.corner_radii,
+                        gpui::Corners {
+                            top_left: radii.top_left,
+                            bottom_left: radii.bottom_left,
+                            ..Default::default()
+                        },
+                        "{selector}: left background must meet the rounded border without gaps"
+                    );
+                    assert_eq!(
+                        right.corner_radii,
+                        gpui::Corners {
+                            top_right: radii.top_right,
+                            bottom_right: radii.bottom_right,
+                            ..Default::default()
+                        },
+                        "{selector}: right background must meet the rounded border without gaps"
+                    );
+                });
+            }
+        };
         let task = view.read_with(cx, |view, _| view.presenter.model().selected_task);
         view.update_in(cx, |view, window, cx| {
             view.timeline_scroll.set_offset(point(px(0.), px(-120.)));
@@ -1594,6 +1649,7 @@ mod tests {
         ] {
             cx.simulate_resize(size);
             cx.run_until_parked();
+            assert_preview_corners(cx);
             let page = cx.debug_bounds("settings-page").unwrap();
             let navigation = cx.debug_bounds("settings-navigation").unwrap();
             let content = cx.debug_bounds("settings-content-appearance").unwrap();
@@ -1620,8 +1676,12 @@ mod tests {
                         .unwrap()
                         .contains(&bounds.center())
                 );
+                cx.simulate_mouse_move(bounds.center(), None, Default::default());
+                cx.run_until_parked();
+                assert_preview_corners(cx);
                 cx.simulate_click(bounds.center(), Default::default());
                 cx.run_until_parked();
+                assert_preview_corners(cx);
                 view.read_with(cx, |view, cx| {
                     assert_eq!(view.presenter.model().appearance.theme, theme);
                     assert_eq!(view.presenter.model().selected_task, task);
@@ -1664,6 +1724,7 @@ mod tests {
                 cx.notify();
             });
             cx.run_until_parked();
+            assert_preview_corners(cx);
             cx.update(|_, cx| {
                 assert_eq!(
                     cx.global::<ResolvedAppearance>().dark,
