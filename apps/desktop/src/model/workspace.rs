@@ -28,10 +28,16 @@ pub(crate) struct Workspace {
     pub(crate) repository: Option<String>,
     pub(crate) kind: WorkspaceKind,
     pub(crate) managed: bool,
+    #[serde(default)]
+    pub(crate) external: bool,
     pub(crate) base_sha: Option<String>,
     pub(crate) branch: Option<String>,
     pub(crate) merge_target: Option<String>,
     pub(crate) status: WorkspaceStatus,
+    #[serde(default)]
+    pub(crate) merge: Option<MergeState>,
+    #[serde(default)]
+    pub(crate) initialization: Option<InitializationLog>,
 }
 
 impl Workspace {
@@ -44,12 +50,55 @@ impl Workspace {
             repository: None,
             kind: WorkspaceKind::Local,
             managed: false,
+            external: false,
             base_sha: None,
             branch: None,
             merge_target: None,
             status: WorkspaceStatus::Ready,
+            merge: None,
+            initialization: None,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct MergeState {
+    pub(crate) source_sha: String,
+    pub(crate) target_sha: String,
+    pub(crate) target_branch: String,
+    pub(crate) target_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct InitializationLog {
+    pub(crate) command: String,
+    pub(crate) output: String,
+    pub(crate) running: bool,
+    pub(crate) success: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkspaceReview {
+    pub(crate) workspace_id: Uuid,
+    pub(crate) head: String,
+    pub(crate) branch: Option<String>,
+    pub(crate) committed: String,
+    pub(crate) staged: String,
+    pub(crate) unstaged: String,
+    pub(crate) untracked: Vec<(String, String)>,
+    pub(crate) dirty_paths: Vec<String>,
+    pub(crate) target_branches: Vec<String>,
+    pub(crate) conflicts: Vec<String>,
+    pub(crate) resolution_diff: String,
+    pub(crate) resolution_staged: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MergePlan {
+    pub(crate) workspace_id: Uuid,
+    pub(crate) source_branch: String,
+    pub(crate) state: MergeState,
+    pub(crate) diff: String,
 }
 
 #[derive(Debug, Clone)]

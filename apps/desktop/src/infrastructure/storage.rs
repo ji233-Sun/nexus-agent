@@ -173,6 +173,27 @@ impl Storage {
                  WHERE cwd IS NULL;
              PRAGMA user_version = 7;",
         )?;
+        let legacy_tasks = {
+            let mut statement = storage
+                .connection
+                .prepare("SELECT id, workspace_id FROM tasks WHERE workspace_id = project_id")?;
+            statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (task_id, workspace_id) in legacy_tasks {
+            if let Some(mut workspace) = storage.workspace(Uuid::parse_str(&workspace_id)?)? {
+                workspace.id = Uuid::parse_str(&task_id)?;
+                workspace.task_id = Some(workspace.id);
+                storage.save_workspace(&workspace)?;
+                storage.connection.execute(
+                    "UPDATE tasks SET workspace_id = ?1 WHERE id = ?1",
+                    [&task_id],
+                )?;
+            }
+        }
         storage.recover_interrupted()?;
         Ok(storage)
     }
@@ -189,6 +210,24 @@ impl Storage {
              WHERE status IN ('starting', 'running', 'cancelling')",
             [&now],
         )?;
+        let records = {
+            let mut statement = self.connection.prepare("SELECT record FROM workspaces")?;
+            statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for record in records {
+            let mut workspace: Workspace = serde_json::from_str(&record)?;
+            if let Some(log) = &mut workspace.initialization
+                && log.running
+            {
+                log.running = false;
+                log.success = false;
+                log.output
+                    .push_str("\n上次初始化期间应用退出，请检查目录后重试。\n");
+                self.save_workspace(&workspace)?;
+            }
+        }
         Ok(())
     }
 
@@ -246,6 +285,11 @@ impl Storage {
                 OR EXISTS (
                     SELECT 1 FROM tasks
                     WHERE tasks.project_id = projects.id AND archived_at IS NOT NULL
+                )
+                OR EXISTS (
+                    SELECT 1 FROM workspaces WHERE workspaces.project_id = projects.id
+                    AND json_extract(record, '$.managed') = 1
+                    AND json_extract(record, '$.status') <> 'removed'
                 )
              ORDER BY last_opened_at DESC",
         )?;
@@ -396,7 +440,7 @@ impl Storage {
             permission_mode,
             harness_version,
         } = request;
-        let workspace = if let Some(task_id) = task_id {
+        let mut workspace = if let Some(task_id) = task_id {
             self.task_workspace(task_id)?
                 .ok_or_else(|| anyhow!("任务缺少执行目录"))?
         } else {
@@ -408,6 +452,11 @@ impl Storage {
         }
         if workspace_id.is_some_and(|id| id != workspace.id) {
             return Err(anyhow!("任务开始后不能更换执行目录"));
+        }
+        if task_id.is_none() && !workspace.managed && workspace.task_id.is_none() {
+            workspace.id = Uuid::new_v4();
+            workspace.task_id = Some(workspace.id);
+            self.save_workspace(&workspace)?;
         }
         let existing_task = task_id;
         let task_id = task_id.or(workspace.task_id).unwrap_or_else(Uuid::new_v4);
@@ -614,9 +663,17 @@ impl Storage {
     }
 
     fn ensure_local_workspace(&self, project: &Project) -> Result<()> {
-        if self.workspace(project.id)?.is_none() {
-            self.save_workspace(&Workspace::local(project))?;
+        let mut workspace = Workspace::local(project);
+        let path = Path::new(&project.canonical_path);
+        if let Ok(common) = super::git::repository(path) {
+            workspace.external = super::git::git(path, &["rev-parse", "--absolute-git-dir"])
+                .ok()
+                .and_then(|git_dir| Path::new(git_dir.trim_end()).canonicalize().ok())
+                .is_some_and(|git_dir| git_dir != common);
+            workspace.repository = Some(common.to_string_lossy().into_owned());
+            workspace.branch = super::git::current_branch(path);
         }
+        self.save_workspace(&workspace)?;
         Ok(())
     }
 

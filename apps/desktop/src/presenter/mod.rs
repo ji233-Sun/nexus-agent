@@ -13,7 +13,6 @@ use crate::{
     infrastructure::{
         codex_history::Client as CodexHistoryClient,
         credentials::{CredentialStore, SystemCredentialStore},
-        git::is_git_dirty,
         storage::Storage,
     },
     model::{
@@ -69,6 +68,7 @@ pub(crate) struct Presenter {
     update_events: Option<std::sync::mpsc::Receiver<UpdateState>>,
     installation_worker: Option<crate::infrastructure::harness_installation::Worker>,
     workspace_events: Option<std::sync::mpsc::Receiver<workspace::WorkspaceEvent>>,
+    workspace_cancel: Option<tokio::sync::watch::Sender<bool>>,
     worktree_root: Result<std::path::PathBuf>,
 }
 
@@ -257,6 +257,7 @@ impl Presenter {
             update_events: None,
             installation_worker: None,
             workspace_events: None,
+            workspace_cancel: None,
             worktree_root: crate::infrastructure::paths::worktree_directory(),
         };
         if let Some(runner) = &presenter.runner {
@@ -370,7 +371,7 @@ impl Presenter {
     }
 
     pub(crate) fn new_task(&mut self) {
-        if self.model.selected_project.is_none() || self.model.workspace_busy {
+        if self.model.selected_project.is_none() {
             return;
         }
         self.model.fresh_conversation();
@@ -384,16 +385,13 @@ impl Presenter {
         self.model.status = "已准备好新任务。".into();
         self.model.permission_mode =
             load_permission_mode(&self.storage, self.model.selected_harness);
+        self.refresh_model_catalog();
     }
 
     pub(crate) fn select_project(&mut self, project: Project) {
-        if self.model.workspace_busy {
-            return;
-        }
         self.model.fresh_conversation();
         self.model.permission_mode =
             load_permission_mode(&self.storage, self.model.selected_harness);
-        self.model.project_dirty = is_git_dirty(Path::new(&project.canonical_path));
         self.model.selected_project = Some(project);
         self.model.selected_task = None;
         self.reset_workspace_draft();
@@ -432,9 +430,6 @@ impl Presenter {
     }
 
     pub(crate) fn select_task(&mut self, task_id: Uuid) {
-        if self.model.workspace_busy {
-            return;
-        }
         if self.model.selected_task != Some(task_id) {
             let existing = self
                 .model

@@ -207,6 +207,8 @@ pub(crate) struct AppModel {
     pub(crate) projects: Vec<Project>,
     pub(crate) archived_tasks: Vec<TaskSummary>,
     pub(crate) workspace_busy: bool,
+    pub(crate) workspace_operation_context: Option<Uuid>,
+    pub(crate) workspace_operation_paths: Vec<std::path::PathBuf>,
     pub(crate) harnesses: BTreeMap<HarnessKind, HarnessProbe>,
     pub(crate) codex_threads: Vec<ThreadSummary>,
     pub(crate) codex_history_loading: bool,
@@ -222,8 +224,12 @@ pub(crate) struct AppModel {
 pub(crate) struct ConversationState {
     pub(crate) workspace_retry: bool,
     pub(crate) pending_workspace_start: Option<workspace::PendingWorkspaceStart>,
+    pub(crate) workspace_review: Option<workspace::WorkspaceReview>,
+    pub(crate) merge_plan: Option<workspace::MergePlan>,
+    pub(crate) selected_changes: std::collections::BTreeSet<String>,
     pub(crate) id: Uuid,
     pub(crate) active_run_started_at: Option<std::time::Instant>,
+    pub(crate) active_checkout: Option<std::path::PathBuf>,
     pub(crate) catalog_project: Option<Uuid>,
     pub(crate) title_model_catalog: ModelCatalogState,
     pub(crate) selected_project: Option<Project>,
@@ -289,26 +295,36 @@ impl AppModel {
     pub(crate) fn occupied_run_slots(&self) -> usize {
         self.all_conversations()
             .filter(|conversation| {
-                conversation.active_run.is_some() || conversation.pending_workspace_start.is_some()
+                conversation.active_run.is_some()
+                    || (conversation.pending_workspace_start.is_some()
+                        && !conversation.workspace_retry)
             })
             .count()
     }
 
+    pub(crate) fn workspace_locked(&self, path: &std::path::Path) -> bool {
+        self.workspace_operation_paths
+            .iter()
+            .any(|locked| locked == path)
+    }
+
     pub(crate) fn task_running(&self, task_id: Uuid) -> bool {
-        self.all_conversations()
-            .any(|conversation| conversation.active_task == Some(task_id))
+        self.all_conversations().any(|conversation| {
+            conversation.active_task == Some(task_id)
+                || (conversation.pending_workspace_start.is_some()
+                    && !conversation.workspace_retry
+                    && conversation
+                        .selected_workspace
+                        .as_ref()
+                        .and_then(|workspace| workspace.task_id)
+                        == Some(task_id))
+        })
     }
 
     pub(crate) fn checkout_running(&self, path: &std::path::Path) -> bool {
         self.all_conversations()
             .filter(|conversation| conversation.active_run.is_some())
-            .filter_map(|conversation| conversation.selected_workspace.as_ref())
-            .any(|workspace| {
-                crate::infrastructure::git::checkout_path(std::path::Path::new(&workspace.path))
-                    .ok()
-                    .as_deref()
-                    == Some(path)
-            })
+            .any(|conversation| conversation.active_checkout.as_deref() == Some(path))
     }
 
     pub(crate) fn activate_conversation(&mut self, id: Uuid) {
@@ -329,7 +345,12 @@ impl AppModel {
             permission_mode: self.permission_mode,
             model_override: self.model_override.clone(),
             model_override_name: self.model_override_name.clone(),
-            model_catalog: self.model_catalog.clone(),
+            model_catalog: match &self.model_catalog {
+                ModelCatalogState::Loading { models, .. } => {
+                    ModelCatalogState::Ready(models.clone())
+                }
+                catalog => catalog.clone(),
+            },
             effort: self.effort,
             executable: self.executable.clone(),
             active_provider_profiles: self.active_provider_profiles.clone(),
@@ -340,6 +361,7 @@ impl AppModel {
         if previous.selected_task.is_some()
             || previous.active_run.is_some()
             || previous.pending_workspace_start.is_some()
+            || self.workspace_operation_context == Some(previous.id)
         {
             self.conversations.insert(previous.id, previous);
         }
@@ -378,7 +400,9 @@ impl AppModel {
         self.selected_project.is_some()
             && self.active_run.is_none()
             && self.occupied_run_slots() < 2
-            && !self.workspace_busy
+            && self
+                .working_directory()
+                .is_none_or(|path| !self.workspace_locked(std::path::Path::new(path)))
             && self
                 .selected_workspace
                 .as_ref()

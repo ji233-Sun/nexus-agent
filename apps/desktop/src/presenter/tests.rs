@@ -104,7 +104,7 @@ pub(crate) fn fixture() -> (Presenter, FakeRunner, tempfile::TempDir) {
     (presenter, runner, directory)
 }
 
-fn finish_workspace_operation(presenter: &mut Presenter) {
+pub(crate) fn finish_workspace_operation(presenter: &mut Presenter) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while presenter.model.workspace_busy {
         assert!(Instant::now() < deadline, "workspace operation timed out");
@@ -122,14 +122,84 @@ fn start_test_worktree(presenter: &mut Presenter, runner: &FakeRunner, prompt: &
     last_start(runner)
 }
 
-#[test]
-fn concurrent_worktree_tasks_isolate_output_approvals_queue_and_cancellation() {
-    use crate::infrastructure::git;
-    let (directory, project) = git::tests::repository_fixture();
+pub(crate) fn worktree_fixture(
+    prompt: &str,
+) -> (Presenter, FakeRunner, tempfile::TempDir, StartRun) {
+    let (directory, project) = crate::infrastructure::git::tests::repository_fixture();
     let (mut presenter, runner, _fixture) = fixture();
     presenter.worktree_root = Ok(directory.path().canonicalize().unwrap().join("worktrees"));
     presenter.open_project(Path::new(&project.canonical_path));
-    let first = start_test_worktree(&mut presenter, &runner, "first");
+    let start = start_test_worktree(&mut presenter, &runner, prompt);
+    (presenter, runner, directory, start)
+}
+
+#[test]
+fn failed_worktree_creation_can_correct_and_keep_a_custom_branch_on_retry() {
+    use crate::{
+        infrastructure::git,
+        model::workspace::{WorkspaceKind, WorkspaceStatus},
+    };
+    let (directory, project) = git::tests::repository_fixture();
+    let project_path = Path::new(&project.canonical_path);
+    git::git(project_path, &["branch", "feat/existing"]).unwrap();
+    std::fs::write(
+        project_path.join("tracked.txt"),
+        "original checkout changes\n",
+    )
+    .unwrap();
+    let (mut presenter, runner, _fixture) = fixture();
+    presenter.worktree_root = Ok(directory.path().canonicalize().unwrap().join("worktrees"));
+    presenter.open_project(project_path);
+    presenter.new_task();
+    assert!(presenter.model.project_dirty);
+    presenter.select_workspace_kind(WorkspaceKind::Worktree);
+    presenter.configure_workspace("HEAD".into(), "feat/existing".into());
+    assert!(presenter.submit("retry task", "claude"));
+    finish_workspace_operation(&mut presenter);
+    assert!(presenter.model.workspace_retry);
+    assert_eq!(presenter.model.occupied_run_slots(), 0);
+    let failed = presenter.model.selected_workspace.clone().unwrap();
+    assert_eq!(failed.status, WorkspaceStatus::Missing);
+    presenter.configure_workspace("HEAD".into(), "feat/custom-retry".into());
+    assert!(presenter.retry_workspace_start());
+    finish_workspace_operation(&mut presenter);
+    assert_eq!(presenter.model.occupied_run_slots(), 1);
+    let pending_workspace = presenter.model.selected_workspace.as_ref().unwrap().id;
+    assert!(!presenter.cleanup_workspace(pending_workspace, "main".into()));
+    emit_current_catalog(&presenter, &runner, claude_aliases());
+    presenter.drain_events();
+    let started = last_start(&runner);
+    assert_eq!(
+        git::current_branch(Path::new(&started.cwd)).as_deref(),
+        Some("feat/custom-retry")
+    );
+    assert_ne!(failed.task_id, Some(started.task_id));
+    assert_eq!(
+        presenter
+            .storage
+            .workspace(failed.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        WorkspaceStatus::Missing
+    );
+    assert!(presenter.cleanup_workspace(failed.id, "main".into()));
+    finish_workspace_operation(&mut presenter);
+    assert_eq!(
+        presenter
+            .storage
+            .workspace(failed.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        WorkspaceStatus::Removed
+    );
+    assert_eq!(presenter.model.active_run, Some(started.run_id));
+}
+
+#[test]
+fn concurrent_worktree_tasks_isolate_output_approvals_queue_and_cancellation() {
+    let (mut presenter, runner, _directory, first) = worktree_fixture("first");
     assert!(presenter.submit("first follow-up", "claude"));
     presenter.new_task();
     let second = start_test_worktree(&mut presenter, &runner, "second");
@@ -211,6 +281,116 @@ fn a_second_local_task_cannot_write_to_an_active_checkout() {
 }
 
 #[test]
+fn initialization_records_logs_locks_its_directory_and_allows_another_checkout_to_run() {
+    use crate::infrastructure::git;
+    let (directory, project) = git::tests::repository_fixture();
+    let (mut presenter, runner, _fixture) = fixture();
+    presenter.worktree_root = Ok(directory.path().canonicalize().unwrap().join("worktrees"));
+    presenter.open_project(Path::new(&project.canonical_path));
+    let task = start_test_worktree(&mut presenter, &runner, "setup task");
+    runner.emit(Event::RunSessionStarted {
+        run_id: task.run_id,
+        session_id: "setup-session".into(),
+    });
+    runner.emit(Event::RunExited {
+        run_id: task.run_id,
+        status: RunStatus::Completed,
+        exit_code: Some(0),
+    });
+    presenter.drain_events();
+    let workspace = presenter.model.selected_workspace.clone().unwrap();
+    let script = if cfg!(windows) {
+        "echo initialized> init.txt & echo diagnostic 1>&2"
+    } else {
+        "printf initialized > init.txt; printf diagnostic >&2"
+    };
+    assert!(presenter.initialize_workspace(workspace.id, script.into()));
+    assert!(!presenter.submit("locked", "claude"));
+    assert!(!presenter.cleanup_workspace(workspace.id, "main".into()));
+    presenter.open_project(Path::new(&project.canonical_path));
+    // The initialization lock only covers its worktree, even while logs are streaming.
+    presenter.model.workspace_draft.kind = crate::model::workspace::WorkspaceKind::Local;
+    assert!(presenter.submit("independent checkout", "claude"));
+    let other = last_start(&runner);
+    finish_workspace_operation(&mut presenter);
+    assert_eq!(presenter.model.selected_task, Some(other.task_id));
+    let saved = presenter.storage.workspace(workspace.id).unwrap().unwrap();
+    let log = saved.initialization.unwrap();
+    assert!(log.success);
+    assert!(!log.running);
+    assert!(log.output.contains("diagnostic"));
+    assert!(Path::new(&task.cwd).join("init.txt").exists());
+    assert!(!Path::new(&project.canonical_path).join("init.txt").exists());
+    assert!(presenter.initialize_workspace(workspace.id, "exit 7".into()));
+    finish_workspace_operation(&mut presenter);
+    assert!(
+        !presenter
+            .storage
+            .workspace(workspace.id)
+            .unwrap()
+            .unwrap()
+            .initialization
+            .unwrap()
+            .success
+    );
+}
+
+#[test]
+fn external_worktree_local_tasks_can_only_detach_their_own_association() {
+    use crate::{infrastructure::git, model::workspace::WorkspaceStatus};
+    let (directory, project) = git::tests::repository_fixture();
+    let external = directory.path().join("external");
+    git::git(
+        Path::new(&project.canonical_path),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "external",
+            external.to_str().unwrap(),
+        ],
+    )
+    .unwrap();
+    let (mut presenter, runner, _fixture) = fixture();
+    presenter.open_project(&external);
+    assert!(presenter.submit("external task", "claude"));
+    let start = last_start(&runner);
+    runner.emit(Event::RunExited {
+        run_id: start.run_id,
+        status: RunStatus::Completed,
+        exit_code: Some(0),
+    });
+    presenter.drain_events();
+    presenter.reload_workspaces();
+    let workspace = presenter
+        .storage
+        .task_workspace(start.task_id)
+        .unwrap()
+        .unwrap();
+    assert!(workspace.external);
+    assert!(!workspace.managed);
+    assert!(presenter.cleanup_workspace(workspace.id, String::new()));
+    finish_workspace_operation(&mut presenter);
+    assert_eq!(
+        presenter
+            .storage
+            .workspace(workspace.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        WorkspaceStatus::Removed
+    );
+    assert!(external.join("tracked.txt").exists());
+    assert!(external.join(".git").exists());
+    presenter.new_task();
+    assert!(presenter.submit("new association", "claude"));
+    assert_ne!(
+        presenter.model.selected_workspace.as_ref().unwrap().id,
+        workspace.id
+    );
+}
+
+#[test]
 fn worktree_task_binds_cwd_session_and_preserves_history_after_cleanup() {
     use crate::{
         infrastructure::git,
@@ -256,6 +436,17 @@ fn worktree_task_binds_cwd_session_and_preserves_history_after_cleanup() {
     let resumed = last_start(&runner);
     assert_eq!(resumed.cwd, start.cwd);
     assert_eq!(resumed.session_id.as_deref(), Some("isolated-session"));
+    git::git(
+        Path::new(&project.canonical_path),
+        &["worktree", "remove", &workspace.path],
+    )
+    .unwrap();
+    presenter.reload_workspaces();
+    assert_eq!(
+        presenter.model.selected_workspace.as_ref().unwrap().status,
+        WorkspaceStatus::Missing
+    );
+    assert!(!presenter.cleanup_workspace(workspace.id, "main".into()));
     runner.emit(Event::RunExited {
         run_id: resumed.run_id,
         status: RunStatus::Completed,
@@ -3836,6 +4027,40 @@ fn catalog_context_changes_ignore_late_responses_and_keep_missing_model_names() 
         presenter.select_catalog_model(None);
         assert!(presenter.model().catalog_selection_is_valid());
     }
+
+    let (mut presenter, runner, _directory) = fixture();
+    assert!(presenter.submit("first context", "claude"));
+    let first = last_start(&runner);
+    runner.emit(Event::RunExited {
+        run_id: first.run_id,
+        status: RunStatus::Completed,
+        exit_code: Some(0),
+    });
+    presenter.drain_events();
+    let previous_context = presenter.model.conversation.id;
+    assert!(presenter.refresh_model_catalog());
+    let previous_request = current_catalog_request_id(&presenter);
+    presenter.new_task();
+    let current_request = current_catalog_request_id(&presenter);
+    assert_ne!(previous_request, current_request);
+    runner.emit(Event::ModelCatalogLoaded {
+        request_id: previous_request,
+        harness: HarnessKind::Claude,
+        models: vec![],
+    });
+    presenter.drain_events();
+    assert_eq!(current_catalog_request_id(&presenter), current_request);
+    assert!(
+        !presenter.model.conversations[&previous_context]
+            .model_catalog
+            .accepts(previous_request)
+    );
+    emit_current_catalog(&presenter, &runner, claude_aliases());
+    presenter.drain_events();
+    assert_eq!(
+        presenter.model.model_catalog.models().unwrap().len(),
+        claude_aliases().len()
+    );
 }
 
 #[test]

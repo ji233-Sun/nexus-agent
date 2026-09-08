@@ -510,6 +510,7 @@ impl Presenter {
                 let _ = self.storage.finish_run(run_id, status, exit_code);
                 self.model.streaming_text.clear();
                 self.model.active_run = None;
+                self.model.active_checkout = None;
                 self.model.run_cancelling = false;
                 self.model.steering_message = None;
                 self.model.active_run_started_at = None;
@@ -569,7 +570,6 @@ impl Presenter {
             .as_ref()
             .is_some_and(|pending| pending.context_id == self.model.conversation.id)
             && !self.model.workspace_retry
-            && !self.model.workspace_busy
             && self
                 .model
                 .selected_workspace
@@ -905,7 +905,6 @@ impl Presenter {
     ) -> bool {
         if self.model.active_run.is_some()
             || self.model.harness_manager.operating.is_some()
-            || self.model.workspace_busy
             || self.model.occupied_run_slots() >= 2
         {
             return false;
@@ -1009,15 +1008,19 @@ impl Presenter {
         } else {
             self.storage.workspace(project.id)
         };
-        let workspace = match workspace.and_then(|workspace| {
+        let (workspace, checkout) = match workspace.and_then(|workspace| {
             let workspace = workspace.ok_or_else(|| anyhow::anyhow!("任务缺少绑定目录"))?;
             git::validate_workspace(&workspace)?;
             let checkout = git::checkout_path(std::path::Path::new(&workspace.path))?;
             anyhow::ensure!(
+                !self.model.workspace_locked(&checkout),
+                "此目录正在执行 Worktree 操作，请等待完成"
+            );
+            anyhow::ensure!(
                 !self.model.checkout_running(&checkout),
                 "此 checkout 已有任务运行，请等待结束或使用独立 Worktree"
             );
-            Ok(workspace)
+            Ok((workspace, checkout))
         }) {
             Ok(workspace) => workspace,
             Err(error) => {
@@ -1066,13 +1069,19 @@ impl Presenter {
                 return false;
             }
             self.model.active_run = Some(run_id);
+            self.model.active_checkout = Some(checkout);
             self.model.active_run_started_at = Some(Instant::now());
             self.model.active_run_elapsed_seconds = Some(0);
             self.model.active_task = Some(task_id);
             self.model.active_harness = Some(harness);
             self.model.active_permission_mode = Some(permission_mode);
             self.model.selected_task = Some(task_id);
-            self.model.selected_workspace = Some(workspace);
+            self.model.selected_workspace = self
+                .storage
+                .task_workspace(task_id)
+                .ok()
+                .flatten()
+                .or(Some(workspace));
             self.model.selected_codex_thread = None;
             self.model.codex_history_messages.clear();
             self.model.codex_thread_loading = false;

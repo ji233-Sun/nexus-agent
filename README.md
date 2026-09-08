@@ -16,10 +16,11 @@ Nexus Agent 是一个面向 Linux、macOS 和 Windows 的本地桌面应用，�
 - 取消和关闭时清理 Harness 进程树：Unix 先中断再超时终止，Windows 使用系统 `taskkill /T /F`。
 - SQLite 持久化 Nexus 发起的项目、任务、Run 和最终消息；启动时将遗留运行标为 `Interrupted`。
 - 当前任务中的后续消息追加为新一轮 Run，并复用同一个 Harness Session；重新打开任务后仍可继续对话，点击“新建任务”才开始独立会话。
-- 运行中发送的消息默认排队，每轮成功结束后按顺序发送一条；输入区可查看和移除排队消息。停止、运行失败或轮次结束时已切换到其他任务，都会暂停自动发送，返回原任务后可手动继续。队列属于原任务，仅保留在当前应用内，退出应用后不恢复；归档时保留，永久删除对话时清理。
+- 运行中发送的消息默认排队，每轮成功结束后按顺序发送一条；输入区可查看和移除排队消息。切换聊天后后台任务仍会继续发送自己的队列；停止或运行失败后暂停自动发送，可返回原任务手动继续。队列属于原任务，仅保留在当前应用内，退出应用后不恢复；归档时保留，永久删除对话时清理。
 - 点击排队消息上的 **Steer**，在下一次工具调用结束后介入当前轮次；同批并行工具全部结束后才会发送。收到 Harness 回执后，消息才从队列移入当前对话。如果本轮不再调用工具，消息会优先作为下一轮发送；停止、失败或送达结果未确认时保留消息并暂停自动发送。
 - 在本机回环地址提供带令牌鉴权的 Remote Control 服务，并内置 React Web Client，可通过 FRP TCP 转发后远程查看会话、发起任务和取消运行。
-- 提示项目中的未提交修改，但不创建 Worktree，也不执行 Git 写操作。
+- 新任务可选本地或独立 Worktree，按项目记忆模式；最多两个独立 checkout 并发，任务目录、Session、队列和审批互相隔离。
+- 查看完整任务变更，选择文件提交到任务分支，预览并合入本地分支；支持合并冲突处理、初始化日志和安全清理目录。
 
 输入区的权限选择按 Harness 分别记忆，默认“自动编辑”。每轮发送时保存所选权限；重新打开会话会恢复该会话最后一轮的选择，新建任务使用该 Harness 最近选择的模式。运行中调整权限只影响下一条消息。排队消息各自保留发送时的权限；权限与当前轮次不同的消息需等到下一轮发送，不能通过 Steer 改变当前轮次权限。
 
@@ -44,6 +45,18 @@ OMP 通过 `omp --mode rpc --approval-mode <模式>` 运行，Prompt 与 Steer �
 Provider Profile 的名称、Base URL、环境变量名和默认模型保存在 `nexus.db`；API Key 持久化时只保存在系统凭据库（macOS Keychain、Windows Credential Manager 或 Linux Secret Service），不会写入数据库、命令参数、运行记录或 Debug 输出。选中的配置只在单次 Harness 子进程中注入，不修改全局 shell 环境。系统凭据库不可用时 Nexus 会显示错误，不会退回明文存储。配置 `CODEX_API_KEY` 时，Nexus 会在 Codex App Server 内完成仅存于该进程内存的 API Key 登录，不改写 CLI 的持久登录凭据；DeepSeek 等 Provider 可按目标 Harness 要求填写自己的环境变量名。
 
 Codex 原有历史通过 CLI 自带的实验性 `codex app-server` 协议读取，不复制到 Nexus 数据库，也不会被 Nexus 修改。若独立 CLI 无法读取 Desktop 创建的新版分页会话，Nexus 会自动尝试 Desktop 内置的 Codex。Nexus 自己完成或失败的任务继续保存在 `nexus.db` 中。
+
+## 任务 Worktree
+
+在新任务输入区选择「本地 / Worktree」。Git 项目默认本地模式，之后按项目记忆选择；非 Git 项目仅支持本地。Worktree 可在发送前修改基准和新分支名，默认使用已提交的 `HEAD` 与 `feat/nx-<短 ID>`。首次发送时才在应用数据目录的 `worktrees/<项目 ID>/<任务 ID>` 创建目录，并保存具体基准 SHA。未提交修改不会带入，自动标题不会重命名目录或分支。
+
+任务开始后固定目录与 Harness Session，侧栏仍属于原项目，输入区可查看实际分支并复制目录。两个独立 checkout 可以同时运行，同一任务和同一 checkout 串行；切换聊天不会串接消息、队列或审批。重启后沿用任务绑定，缺失或已清理的目录不会回退到原项目目录。
+
+「查看变更」显示相对创建基准的已提交变更、暂存、未暂存和未跟踪文件。选择文件并确认提交后，填写本地目标分支、预览并确认合入。未选中的暂存文件保持原状。合入要求源、目标目录干净且没有活动任务；目标分支若未被 checkout，会在原项目目录切换到该分支。合并按正常 Git 语义执行，冲突文件和目标路径会显示在审查窗口；在目标目录编辑并暂存后刷新、继续，或中止合并。预览后分支或文件发生变化时，需要重新审查。
+
+「管理 Worktree」保留已删除聊天的目录记录。可显式执行初始化命令、查看日志、停止或重试；命令只在所选目录运行，超过 15 分钟会停止，日志保留最近 1 MiB。依赖、构建产物和 `.env` 不会自动复制。缺失目录可显式从保留的任务分支恢复。
+
+清理仅删除 Nexus 创建的目录，保留聊天历史和任务分支。运行中、存在未提交修改、未跟踪或被忽略文件，或提交尚未合入指定本地分支时，会拒绝清理并显示原因。已有的外部 Worktree 使用本地模式，只能解除任务关联，保留全部文件。归档或删除聊天不会自动删除目录；清理后的聊天保持只读，需要新建任务继续工作。
 
 ## 环境要求
 
@@ -200,13 +213,13 @@ React Remote Web ── authenticated HTTP/WebSocket ──┐
 - `crates/harness-codex`：Codex CLI 探测、非交互启动参数和 JSONL 事件解码。
 - `crates/harness-omp`：Oh My Pi 探测、受控写入模式和 JSON 事件解码。
 - `apps/runner/src/transport.rs`：JSONL 命令读取、协议版本校验和事件写出。
-- `apps/runner/src/application`：命令调度、运行独占、取消和统一事件转换。
+- `apps/runner/src/application`：命令调度、双任务并发、任务与 checkout 互斥、取消和统一事件转换。
 - `apps/runner/src/infrastructure`：Harness 适配器选择、子进程执行和平台相关的进程树清理。
 - `apps/desktop/src/bootstrap.rs`：窗口、主题、存储和 Runner 的启动装配。
 - `apps/desktop/src/model`：界面状态、历史消息数据和提交可用性，不依赖 GPUI。
 - `apps/desktop/src/presenter`：项目选择、配置、提交、远程命令、事件处理和持久化协调，不依赖 GPUI；通过 `RunnerPort` 注入真实或测试 Runner。
 - `apps/desktop/src/view`：GPUI 渲染、控件状态和事件转交，按侧栏、时间线、设置、组件和主题拆分。
-- `apps/desktop/src/infrastructure`：平台数据目录、SQLite、系统凭据库、Runner 进程通信、Codex 历史和 Git 状态读取。
+- `apps/desktop/src/infrastructure`：平台数据目录、SQLite、系统凭据库、Runner 进程通信、Codex 历史、Worktree 生命周期和本地 Git 成果接收。
 - `apps/desktop/src/remote_control.rs`：带令牌鉴权的 HTTP/WebSocket 服务及静态资源托管。
 - `apps/remote-web`：React + Vite 静态 Remote Client，生产构建产物嵌入 Desktop。
 
@@ -262,4 +275,4 @@ node --test ".github/scripts/resolve-conflicts.test.mjs"
 
 ## 当前边界
 
-这个 Alpha 的 Remote Control 仅包含单机 TCP、令牌鉴权和静态 Web Client，不包含 UDP、内置 TLS、FRP 自动配置、云端 Control Plane 或多设备账户。它同样不包含 Worktree 管理、Git 提交、附件、多 Agent、从 Nexus 续聊 Codex 原有会话、签名或公证。桌面审批支持上述工具/权限请求，尚不支持 Codex 的 MCP elicitation 表单或自由文本问答。Codex 历史浏览依赖当前 CLI 的实验性 `app-server` 协议。Codex CLI 的 `--json` 模式会实时提供生命周期和工具事件，但 Assistant 文本按完成消息输出，不提供 token 级文本增量。模型与思考层级是否可用取决于本机 CLI 版本和账户权限。
+这个 Alpha 的 Remote Control 仅包含单机 TCP、令牌鉴权和静态 Web Client，不包含 UDP、内置 TLS、FRP 自动配置、云端 Control Plane 或多设备账户。它同样不包含 Git 自动 Push / PR / Rebase / Cherry-pick、附件、从 Nexus 续聊 Codex 原有会话、签名或公证。桌面审批支持上述工具/权限请求，尚不支持 Codex 的 MCP elicitation 表单或自由文本问答。Codex 历史浏览依赖当前 CLI 的实验性 `app-server` 协议。Codex CLI 的 `--json` 模式会实时提供生命周期和工具事件，但 Assistant 文本按完成消息输出，不提供 token 级文本增量。模型与思考层级是否可用取决于本机 CLI 版本和账户权限。
