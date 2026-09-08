@@ -802,6 +802,12 @@ impl NexusView {
     fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_open = !self.settings_open;
         if self.settings_open {
+            if matches!(
+                self.presenter.model().title_model_catalog,
+                ModelCatalogState::Idle
+            ) {
+                self.presenter.refresh_title_model_catalog();
+            }
             self.focus_handle.focus(window, cx);
         } else {
             self.focus_prompt(window, cx);
@@ -2421,6 +2427,13 @@ mod catalog_model_tests {
         cx.update(theme::configure_theme);
         let (presenter, runner, _directory) = fixture();
         let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
+        view.update_in(cx, |view, window, cx| {
+            view.toggle_settings(window, cx);
+            assert!(matches!(
+                view.presenter.model().title_model_catalog,
+                ModelCatalogState::Loading { .. }
+            ));
+        });
         for (width, height, language) in [
             (1040., 680., Language::Chinese),
             (1280., 800., Language::English),
@@ -2482,6 +2495,13 @@ mod catalog_model_tests {
             cx.simulate_keystrokes("enter");
             cx.run_until_parked();
             assert!(cx.debug_bounds("title-model-picker-surface").is_none());
+            let effort_bounds = cx.debug_bounds("title-effort").unwrap();
+            assert!(effort_bounds.right() <= px(width));
+            assert!(effort_bounds.bottom() <= px(height));
+            click_debug(cx, "title-effort");
+            cx.run_until_parked();
+            cx.simulate_keystrokes("down down enter");
+            cx.run_until_parked();
             view.read_with(cx, |view, _| {
                 assert_eq!(
                     view.presenter.model().title_generation.model.as_deref(),
@@ -2489,7 +2509,20 @@ mod catalog_model_tests {
                 );
                 assert_eq!(view.presenter.model().selected_harness, HarnessKind::Claude);
                 assert!(view.presenter.model().model_override.is_none());
+                assert_eq!(
+                    view.presenter.model().title_generation.effort,
+                    ThinkingEffort::XHigh
+                );
+                assert_eq!(view.presenter.model().effort, ThinkingEffort::Default);
             });
+            click_debug(cx, "title-effort");
+            cx.run_until_parked();
+            cx.simulate_keystrokes("down enter");
+            cx.run_until_parked();
+            assert_eq!(
+                view.read_with(cx, |view, _| view.presenter.model().title_generation.effort),
+                ThinkingEffort::Default
+            );
             let trigger = cx.debug_bounds("title-model").unwrap();
             assert!(trigger.right() <= px(width));
             assert!(trigger.size.width <= px(320.));
