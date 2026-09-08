@@ -36,6 +36,7 @@ pub(crate) struct Workspace {
     pub(crate) status: WorkspaceStatus,
     #[serde(default)]
     pub(crate) merge: Option<MergeState>,
+    // Preserve historical initialization logs when saving existing workspace records.
     #[serde(default)]
     pub(crate) initialization: Option<InitializationLog>,
 }
@@ -106,17 +107,14 @@ pub(crate) struct WorkspaceDraft {
     pub(crate) task_id: Uuid,
     pub(crate) kind: WorkspaceKind,
     pub(crate) base: String,
-    pub(crate) branch: String,
 }
 
 impl Default for WorkspaceDraft {
     fn default() -> Self {
-        let task_id = Uuid::new_v4();
         Self {
-            task_id,
+            task_id: Uuid::new_v4(),
             kind: WorkspaceKind::Local,
-            base: "HEAD".into(),
-            branch: format!("feat/nx-{}", &task_id.simple().to_string()[..8]),
+            base: String::new(),
         }
     }
 }

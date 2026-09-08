@@ -1421,6 +1421,8 @@ impl NexusView {
             .mb_2()
             .px_3()
             .flex()
+            .items_center()
+            .gap_2()
             .child(
                 // Recreate tooltip state when switching to a different execution directory.
                 div()
@@ -1430,7 +1432,7 @@ impl NexusView {
                     )))
                     .debug_selector(|| "composer-directory".into())
                     .min_w_0()
-                    .max_w_full()
+                    .flex_1()
                     .flex()
                     .items_center()
                     .gap_2()
@@ -1458,6 +1460,7 @@ impl NexusView {
                             .child(working_directory_label(model).to_owned()),
                     ),
             )
+            .child(self.render_workspace_controls(cx))
     }
 
     fn render_workspace(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1717,7 +1720,7 @@ impl NexusView {
                             .pb_4()
                             .child(self.render_user_asks(window, cx))
                             .child(self.render_working_directory(cx))
-                            .child(self.render_workspace_controls(cx))
+                            .child(self.render_workspace_hints(cx))
                             .child(
                                 div()
                                     .debug_selector(|| "composer-surface".into())
@@ -2058,6 +2061,85 @@ mod catalog_model_tests {
     }
 
     #[gpui::test]
+    fn worktree_selectors_share_the_directory_row_and_select_existing_branches(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::{infrastructure::git, model::workspace::WorkspaceKind};
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (_repository, project) = git::tests::repository_fixture();
+        let (mut presenter, _, _directory) = fixture();
+        presenter.open_project(Path::new(&project.canonical_path));
+        assert!(presenter.set_appearance(AppearanceSettings {
+            reduced_motion: true,
+            ..Default::default()
+        }));
+        let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
+        // Read branch choices when opening the menu, including branches added after render.
+        // Overflow the dropdown without exceeding Windows' Git ref lock-path limit.
+        let source = format!("release/{}", "long-branch-".repeat(6));
+        git::git(Path::new(&project.canonical_path), &["branch", &source]).unwrap();
+        for (language, width, height) in [
+            (Language::Chinese, 1040., 680.),
+            (Language::English, 1280., 800.),
+        ] {
+            cx.simulate_resize(gpui::size(px(width), px(height)));
+            view.update_in(cx, |view, window, cx| {
+                view.presenter.select_workspace_kind(WorkspaceKind::Local);
+                view.set_language(language, window, cx);
+                cx.notify();
+            });
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("workspace-base").is_none());
+            click_debug(cx, "workspace-mode");
+            cx.run_until_parked();
+            cx.simulate_keystrokes("down down enter");
+            cx.run_until_parked();
+            assert_eq!(
+                view.read_with(cx, |view, _| view.presenter.model().workspace_draft.kind),
+                WorkspaceKind::Worktree
+            );
+            click_debug(cx, "workspace-base");
+            cx.run_until_parked();
+            cx.simulate_keystrokes("down down enter");
+            cx.run_until_parked();
+            assert_eq!(
+                view.read_with(cx, |view, _| view
+                    .presenter
+                    .model()
+                    .workspace_draft
+                    .base
+                    .clone()),
+                source
+            );
+            let context = cx.debug_bounds("composer-context").unwrap();
+            let directory = cx.debug_bounds("composer-directory").unwrap();
+            let mode = cx.debug_bounds("workspace-mode").unwrap();
+            let base = cx.debug_bounds("workspace-base").unwrap();
+            let composer = cx.debug_bounds("composer-surface").unwrap();
+            assert!(
+                directory.center().y >= mode.center().y - px(1.)
+                    && directory.center().y <= mode.center().y + px(1.)
+            );
+            assert_eq!(mode.center().y, base.center().y);
+            assert!(directory.right() <= mode.left());
+            assert!(mode.right() <= base.left());
+            assert!(base.right() <= context.right());
+            assert_eq!(base.size.width, px(200.));
+            assert!(context.bottom() <= composer.top());
+            click_debug(cx, "workspace-mode");
+            cx.run_until_parked();
+            cx.simulate_keystrokes("down enter");
+            cx.run_until_parked();
+            assert_eq!(
+                view.read_with(cx, |view, _| view.presenter.model().workspace_draft.kind),
+                WorkspaceKind::Local
+            );
+            assert!(cx.debug_bounds("workspace-base").is_none());
+        }
+    }
+
+    #[gpui::test]
     fn worktree_review_requires_confirmation_and_commits_the_selected_file(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -2078,6 +2160,8 @@ mod catalog_model_tests {
         presenter.drain_events();
         let id = presenter.model().selected_workspace.as_ref().unwrap().id;
         let cwd = std::path::Path::new(&start.cwd);
+        // Opening a review must also notice a branch renamed after the run ended.
+        crate::infrastructure::git::git(cwd, &["branch", "-m", "fix/review-task"]).unwrap();
         std::fs::write(cwd.join("tracked.txt"), "reviewed content\n").unwrap();
         let before = crate::infrastructure::git::git(cwd, &["rev-parse", "HEAD"]).unwrap();
         let (root, cx) = cx.add_window_view(|window, cx| {

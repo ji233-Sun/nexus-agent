@@ -8,7 +8,7 @@ use std::{
 
 use crate::model::workspace::{Workspace, WorkspaceDraft, WorkspaceKind, WorkspaceStatus};
 pub(crate) mod changes;
-use anyhow::{Context as _, Result, bail, ensure};
+use anyhow::{Context as _, Result, ensure};
 
 type RepositoryLocks = Mutex<BTreeMap<PathBuf, Arc<Mutex<()>>>>;
 static REPOSITORY_LOCKS: LazyLock<RepositoryLocks> = LazyLock::new(Mutex::default);
@@ -78,9 +78,28 @@ pub(crate) fn checkout_path(path: &Path) -> Result<PathBuf> {
 }
 
 pub(crate) fn current_branch(path: &Path) -> Option<String> {
-    git(path, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+    git(path, &["symbolic-ref", "--quiet", "HEAD"])
         .ok()
-        .map(|value| value.trim_end().to_owned())
+        .and_then(|value| {
+            value
+                .trim_end()
+                .strip_prefix("refs/heads/")
+                .map(str::to_owned)
+        })
+}
+
+pub(crate) fn local_branches(path: &Path) -> Result<Vec<String>> {
+    Ok(git(
+        path,
+        &[
+            "for-each-ref",
+            "--format=%(refname:lstrip=2)",
+            "refs/heads/",
+        ],
+    )?
+    .lines()
+    .map(str::to_owned)
+    .collect())
 }
 
 fn with_repository<T>(path: &Path, operation: impl FnOnce() -> Result<T>) -> Result<T> {
@@ -145,7 +164,10 @@ pub(crate) fn planned_workspace(
         managed: true,
         external: false,
         base_sha: None,
-        branch: Some(draft.branch.clone()),
+        branch: Some(format!(
+            "feat/nx-{}",
+            &draft.task_id.simple().to_string()[..8]
+        )),
         merge_target: None,
         status: WorkspaceStatus::Creating,
         merge: None,
@@ -217,7 +239,7 @@ pub(crate) fn create_worktree(project: &Path, mut workspace: Workspace) -> Resul
 pub(crate) fn validate_workspace(workspace: &Workspace) -> Result<()> {
     ensure!(
         workspace.status == WorkspaceStatus::Ready,
-        "任务目录已清理、缺失或尚未创建，无法继续运行；请新建任务或显式恢复目录"
+        "任务目录已清理、缺失或尚未创建，无法继续运行；请新建任务"
     );
     let path = Path::new(&workspace.path);
     ensure!(
@@ -238,62 +260,6 @@ pub(crate) fn validate_workspace(workspace: &Workspace) -> Result<()> {
         );
     }
     Ok(())
-}
-
-pub(crate) fn restore_worktree(
-    root: &Path,
-    project: &Path,
-    mut workspace: Workspace,
-) -> Result<Workspace> {
-    with_repository(project, || {
-        ensure!(
-            workspace.managed && workspace.status == WorkspaceStatus::Missing,
-            "仅可显式恢复缺失的 Nexus Worktree"
-        );
-        let task = workspace.task_id.context("缺少目录归属")?;
-        let target = root
-            .join(workspace.project_id.to_string())
-            .join(task.to_string());
-        ensure!(
-            Path::new(&workspace.path) == target && !target.exists(),
-            "目录已存在或不属于 Nexus，拒绝覆盖"
-        );
-        ensure!(
-            repository(project)?.to_str() == workspace.repository.as_deref(),
-            "仓库身份已改变"
-        );
-        let branch = workspace.branch.as_deref().context("缺少任务分支")?;
-        let base = workspace.base_sha.as_deref().context("缺少原始创建基准")?;
-        std::fs::create_dir_all(target.parent().context("目录无父路径")?)?;
-        ensure!(
-            target
-                .parent()
-                .unwrap()
-                .canonicalize()?
-                .join(target.file_name().unwrap())
-                == target,
-            "目录被重定向，拒绝恢复"
-        );
-        let target_argument = git_path_argument(&workspace.path);
-        if checkouts(project)?.iter().any(|entry| entry.path == target) {
-            git(project, &["worktree", "remove", &target_argument])?;
-        }
-        if git(
-            project,
-            &["show-ref", "--verify", &format!("refs/heads/{branch}")],
-        )
-        .is_ok()
-        {
-            git(project, &["worktree", "add", &target_argument, branch])?;
-        } else {
-            git(
-                project,
-                &["worktree", "add", "-b", branch, &target_argument, base],
-            )?;
-        }
-        workspace.status = WorkspaceStatus::Ready;
-        Ok(workspace)
-    })
 }
 
 // Reconcile interrupted creation and external removal without deleting any files.
@@ -322,117 +288,22 @@ pub(crate) fn recover_workspace(project: &Path, mut workspace: Workspace) -> Wor
         workspace.status = WorkspaceStatus::Ready;
         if validate_workspace(&workspace).is_err() {
             workspace.status = WorkspaceStatus::Missing;
+        } else if entry.branch != workspace.branch
+            && entry.branch.is_some()
+            && local_branches(project).is_ok_and(|branches| {
+                !workspace
+                    .branch
+                    .as_ref()
+                    .is_some_and(|branch| branches.contains(branch))
+            })
+        {
+            // A rename removes the old ref. Keep the write guard for branch switches.
+            workspace.branch = entry.branch;
         }
     } else {
         workspace.status = WorkspaceStatus::Missing;
     }
     workspace
-}
-
-pub(crate) fn cleanup_worktree(
-    root: &Path,
-    project: &Path,
-    mut workspace: Workspace,
-    target: &str,
-) -> Result<Workspace> {
-    if !workspace.managed {
-        workspace.status = WorkspaceStatus::Removed;
-        return Ok(workspace);
-    }
-    with_repository(project, || {
-        let task = workspace.task_id.context("目录没有 Nexus 任务归属")?;
-        let expected = root
-            .join(workspace.project_id.to_string())
-            .join(task.to_string());
-        ensure!(
-            Path::new(&workspace.path) == expected,
-            "仅允许清理 Nexus 创建的任务目录"
-        );
-        ensure!(
-            workspace.repository.as_deref() == repository(project)?.to_str(),
-            "仓库身份已改变"
-        );
-        ensure!(workspace.merge.is_none(), "请先完成或中止已有合并");
-        let path = Path::new(&workspace.path);
-        let absent = match std::fs::symlink_metadata(path) {
-            Ok(_) => false,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
-            Err(error) => return Err(error.into()),
-        };
-        let entries = checkouts(project)?;
-        let entry = entries.iter().find(|entry| entry.path == path);
-        ensure!(entry.is_none_or(|entry| !entry.locked), "Worktree 被锁定");
-        if absent {
-            ensure!(
-                matches!(
-                    workspace.status,
-                    WorkspaceStatus::Missing | WorkspaceStatus::Ready
-                ),
-                "目录不处于可清理状态"
-            );
-        } else {
-            validate_workspace(&workspace)?;
-            ensure!(entry.is_some(), "Worktree 已解除关联");
-            let status = git(
-                path,
-                &[
-                    "status",
-                    "--porcelain=v1",
-                    "-z",
-                    "--untracked-files=all",
-                    "--ignored",
-                ],
-            )?;
-            ensure!(
-                status.is_empty(),
-                "存在未提交修改、未跟踪或被忽略文件，请先处理：\n{}",
-                status.replace('\0', "\n")
-            );
-            ensure!(
-                current_branch(path) == workspace.branch,
-                "实际分支与任务分支不一致，请先切回任务分支"
-            );
-        }
-        let branch = workspace.branch.as_deref().context("缺少任务分支")?;
-        ensure!(
-            branch != target,
-            "请选择接收成果的分支，不能以任务分支自身作为清理目标"
-        );
-        let target_ref = format!("refs/heads/{target}");
-        let target_sha = git(
-            project,
-            &[
-                "rev-parse",
-                "--verify",
-                "--end-of-options",
-                &format!("{target_ref}^{{commit}}"),
-            ],
-        )?;
-        let branch_ref = format!("refs/heads/{branch}");
-        if (!absent || git(project, &["show-ref", "--verify", &branch_ref]).is_ok())
-            && git(
-                project,
-                &[
-                    "merge-base",
-                    "--is-ancestor",
-                    &branch_ref,
-                    target_sha.trim(),
-                ],
-            )
-            .is_err()
-        {
-            bail!("任务仍有未合入 {target} 的提交，请先接收成果");
-        }
-        if entry.is_some() {
-            git(
-                project,
-                &["worktree", "remove", &git_path_argument(&workspace.path)],
-            )?;
-        }
-        workspace.status = WorkspaceStatus::Removed;
-        workspace.merge_target = Some(target.to_owned());
-        Ok(workspace)
-    })
 }
 
 pub(crate) fn is_git_dirty(path: &Path) -> bool {
@@ -557,7 +428,6 @@ pub(crate) mod tests {
             "unstaged\n"
         );
         assert_eq!(workspace.merge_target.as_deref(), Some("receive"));
-        cleanup_worktree(&root, path, workspace, "receive").unwrap();
     }
 
     #[test]
@@ -606,11 +476,10 @@ pub(crate) mod tests {
         let merged = changes::finish_merge(conflicted, &review, false).unwrap();
         assert_eq!(merged.merge_target.as_deref(), Some("main"));
         assert!(merged.merge.is_none());
-        cleanup_worktree(&root, path, merged, "main").unwrap();
     }
 
     #[test]
-    fn interrupted_creation_and_external_removal_require_explicit_recovery() {
+    fn interrupted_creation_and_external_removal_preserve_history_without_recreating_directories() {
         let (directory, project) = repository_fixture();
         let path = Path::new(&project.canonical_path);
         let root = directory
@@ -627,14 +496,11 @@ pub(crate) mod tests {
         let interrupted = recover_workspace(path, planned.clone());
         assert_eq!(interrupted.status, WorkspaceStatus::Missing);
         assert!(validate_workspace(&interrupted).is_err());
-        assert_eq!(
-            cleanup_worktree(&root, path, interrupted.clone(), "main")
-                .unwrap()
-                .status,
-            WorkspaceStatus::Removed
-        );
-        let ready = restore_worktree(&root, path, interrupted).unwrap();
-        assert_eq!(ready.base_sha, planned.base_sha);
+        assert!(!Path::new(&interrupted.path).exists());
+        let ready = create_worktree(path, planned.clone()).unwrap();
+        let recovered = recover_workspace(path, planned);
+        assert_eq!(recovered.status, WorkspaceStatus::Ready);
+        assert_eq!(recovered.base_sha, ready.base_sha);
         git(
             path,
             &["worktree", "remove", &git_path_argument(&ready.path)],
@@ -642,40 +508,18 @@ pub(crate) mod tests {
         .unwrap();
         let missing = recover_workspace(path, ready);
         assert_eq!(missing.status, WorkspaceStatus::Missing);
-        let restored = restore_worktree(&root, path, missing).unwrap();
-        validate_workspace(&restored).unwrap();
-        let removed = cleanup_worktree(&root, path, restored, "main").unwrap();
-        assert!(restore_worktree(&root, path, removed).is_err());
-
-        let ready = create(
-            path,
-            planned_workspace(&root, &project, &WorkspaceDraft::default()),
-        );
-        git(
-            Path::new(&ready.path),
-            &["commit", "--allow-empty", "-m", "unmerged task commit"],
-        )
-        .unwrap();
-        std::fs::remove_dir_all(&ready.path).unwrap();
-        let missing = recover_workspace(path, ready);
+        assert!(validate_workspace(&missing).is_err());
+        assert!(!Path::new(&missing.path).exists());
         assert!(
-            cleanup_worktree(&root, path, missing.clone(), "main")
-                .unwrap_err()
-                .to_string()
-                .contains("未合入")
-        );
-        git(
-            path,
-            &["merge", "--ff-only", missing.branch.as_deref().unwrap()],
-        )
-        .unwrap();
-        let removed = cleanup_worktree(&root, path, missing, "main").unwrap();
-        assert_eq!(removed.status, WorkspaceStatus::Removed);
-        assert!(
-            !checkouts(path)
-                .unwrap()
-                .iter()
-                .any(|entry| entry.path == Path::new(&removed.path))
+            git(
+                path,
+                &[
+                    "show-ref",
+                    "--verify",
+                    &format!("refs/heads/{}", missing.branch.unwrap())
+                ]
+            )
+            .is_ok()
         );
     }
 
@@ -710,59 +554,16 @@ pub(crate) mod tests {
             "uncommitted\n"
         );
         validate_workspace(&first).unwrap();
-        assert_eq!(
-            recover_workspace(path, first).status,
-            WorkspaceStatus::Ready
-        );
-    }
-
-    #[test]
-    fn cleanup_blocks_ignored_files_and_unmerged_commits_and_preserves_branch() {
-        let (directory, project) = repository_fixture();
-        let path = Path::new(&project.canonical_path);
-        let root = directory.path().canonicalize().unwrap().join("worktrees");
-        let workspace = create(
-            path,
-            planned_workspace(&root, &project, &WorkspaceDraft::default()),
-        );
-        let cwd = Path::new(&workspace.path);
-        std::fs::write(cwd.join(".gitignore"), ".env\n").unwrap();
-        git(cwd, &["add", ".gitignore"]).unwrap();
-        git(cwd, &["commit", "-m", "ignore env"]).unwrap();
-        assert!(
-            cleanup_worktree(&root, path, workspace.clone(), "main")
-                .unwrap_err()
-                .to_string()
-                .contains("未合入")
-        );
-        git(
-            path,
-            &["merge", "--ff-only", workspace.branch.as_deref().unwrap()],
-        )
-        .unwrap();
-        std::fs::write(cwd.join(".env"), "private").unwrap();
-        assert!(
-            cleanup_worktree(&root, path, workspace.clone(), "main")
-                .unwrap_err()
-                .to_string()
-                .contains("被忽略")
-        );
-        assert!(cwd.join(".env").exists());
-        std::fs::remove_file(cwd.join(".env")).unwrap();
-        let removed = cleanup_worktree(&root, path, workspace.clone(), "main").unwrap();
-        assert_eq!(removed.status, WorkspaceStatus::Removed);
-        assert!(!cwd.exists());
-        assert!(
-            git(
-                path,
-                &[
-                    "show-ref",
-                    "--verify",
-                    &format!("refs/heads/{}", workspace.branch.unwrap())
-                ]
-            )
-            .is_ok()
-        );
-        assert!(validate_workspace(&removed).is_err());
+        let first = recover_workspace(path, first);
+        assert_eq!(first.status, WorkspaceStatus::Ready);
+        let cwd = Path::new(&first.path);
+        git(cwd, &["checkout", "-b", "other-branch"]).unwrap();
+        let switched = recover_workspace(path, first.clone());
+        assert_eq!(switched.branch, first.branch);
+        assert!(changes::plan_merge(path, &switched, "main").is_err());
+        git(cwd, &["checkout", first.branch.as_deref().unwrap()]).unwrap();
+        git(cwd, &["branch", "-m", "fix/renamed-task"]).unwrap();
+        let renamed = recover_workspace(path, first);
+        assert_eq!(renamed.branch.as_deref(), Some("fix/renamed-task"));
     }
 }
