@@ -229,6 +229,20 @@ pub(crate) struct AppModel {
 }
 
 impl AppModel {
+    pub(crate) fn working_directory(&self) -> Option<&str> {
+        let cwd = if let Some(thread_id) = &self.selected_codex_thread {
+            self.codex_threads
+                .iter()
+                .find(|thread| &thread.id == thread_id)
+                .map(|thread| thread.cwd.as_str())
+        } else {
+            self.selected_project
+                .as_ref()
+                .map(|project| project.canonical_path.as_str())
+        };
+        cwd.filter(|path| !path.is_empty())
+    }
+
     pub(crate) fn status_text(&self) -> &str {
         self.status.render(self.language)
     }
