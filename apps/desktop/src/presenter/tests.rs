@@ -5,7 +5,10 @@ use crate::{
     infrastructure::{
         codex_history::Event as HistoryEvent, credentials::CredentialStore, storage::NewTaskRun,
     },
-    model::{UserAskSubmissionState, history::HistoryMessage},
+    model::{
+        UserAskSubmissionState,
+        history::{HistoryMessage, ThreadSummary},
+    },
 };
 use nexus_domain::{
     MessageKind, MessageRole, ModelDescriptor, ModelReasoningEffort, RunStatus, UserAskAnswer,
@@ -2272,6 +2275,9 @@ fn follow_up_resumes_the_saved_session_after_reopening_and_new_task_starts_fresh
             .harnesses
             .insert(harness, ready_probe(harness));
         assert!(presenter.submit("first question", harness.default_executable()));
+        let cwd = directory.path().canonicalize().unwrap();
+        assert_eq!(Path::new(&last_start(&runner).cwd), cwd);
+        assert_eq!(presenter.model().working_directory(), cwd.to_str());
         let task_id = presenter.model().active_task.unwrap();
         let first_run = presenter.model().active_run.unwrap();
         let first_message = presenter.model().messages[0].id;
@@ -2308,6 +2314,7 @@ fn follow_up_resumes_the_saved_session_after_reopening_and_new_task_starts_fresh
             .insert(harness, other_probe.clone());
         runner.0.borrow_mut().commands.clear();
         presenter.select_task(task_id);
+        assert_eq!(presenter.model().working_directory(), cwd.to_str());
         assert!(!presenter.submit("follow-up before probe", &saved_probe.executable));
         assert!(!presenter.model().can_submit());
         assert_eq!(presenter.model().executable, saved_probe.executable);
@@ -2369,6 +2376,10 @@ fn follow_up_resumes_the_saved_session_after_reopening_and_new_task_starts_fresh
             assert_eq!(request.prompt, "follow-up");
             assert_eq!(request.harness, harness);
             assert_eq!(request.executable, saved_probe.executable);
+            assert_eq!(
+                Some(request.cwd.as_str()),
+                presenter.model().working_directory()
+            );
         }
         // A failed continuation must not lose the saved session.
         runner.emit(Event::RunExited {
@@ -2395,12 +2406,17 @@ fn follow_up_resumes_the_saved_session_after_reopening_and_new_task_starts_fresh
         presenter.drain_events();
         presenter.new_task();
         assert!(presenter.submit("new question", harness.default_executable()));
+        assert_eq!(presenter.model().working_directory(), cwd.to_str());
         let state = runner.0.borrow();
         let Command::RunStart(request) = &state.commands.last().unwrap().command else {
             panic!("expected new task");
         };
         assert_ne!(request.task_id, task_id);
         assert!(request.session_id.is_none());
+        assert_eq!(
+            Some(request.cwd.as_str()),
+            presenter.model().working_directory()
+        );
         assert_eq!(presenter.model().tasks.len(), 2);
         assert_eq!(presenter.model().messages.len(), 1);
     }
@@ -3769,9 +3785,103 @@ fn selecting_a_saved_task_restores_its_configuration_and_messages() {
 }
 
 #[test]
+fn working_directory_follows_project_and_task_selection_during_background_runs() {
+    let (mut presenter, runner, directory) = fixture();
+    let mut conversations = Vec::new();
+    for parent in ["first", "第二个 项目"] {
+        let path = directory.path().join(parent).join("同名目录 nexus");
+        fs::create_dir_all(&path).unwrap();
+        presenter.open_project(&path);
+        assert!(!presenter.model().project_dirty);
+        assert_eq!(
+            presenter.model().working_directory(),
+            path.canonicalize().unwrap().to_str()
+        );
+        assert!(presenter.submit("first question", "claude"));
+        let start = last_start(&runner);
+        assert_eq!(
+            Some(start.cwd.as_str()),
+            presenter.model().working_directory()
+        );
+        conversations.push((
+            presenter.model().selected_project.clone().unwrap(),
+            start.task_id,
+        ));
+        runner.emit(Event::RunSessionStarted {
+            run_id: start.run_id,
+            session_id: start.task_id.to_string(),
+        });
+        runner.emit(Event::RunExited {
+            run_id: start.run_id,
+            status: RunStatus::Completed,
+            exit_code: Some(0),
+        });
+        presenter.drain_events();
+        assert_eq!(
+            Some(start.cwd.as_str()),
+            presenter.model().working_directory()
+        );
+    }
+    let (first_project, first_task) = &conversations[0];
+    let (second_project, second_task) = &conversations[1];
+    assert_eq!(first_project.display_name, second_project.display_name);
+    assert_ne!(first_project.canonical_path, second_project.canonical_path);
+    assert!(presenter.submit("background follow-up", "claude"));
+    let background = last_start(&runner);
+
+    presenter.select_project(first_project.clone());
+    presenter.select_task(*first_task);
+    runner.emit(Event::RunOutputDelta {
+        run_id: background.run_id,
+        text: "background output".into(),
+    });
+    presenter.drain_events();
+    assert_eq!(
+        presenter.model().working_directory(),
+        Some(first_project.canonical_path.as_str())
+    );
+    runner.emit(Event::RunExited {
+        run_id: background.run_id,
+        status: RunStatus::Completed,
+        exit_code: Some(0),
+    });
+    presenter.drain_events();
+    assert_eq!(presenter.model().selected_task, Some(*first_task));
+    assert_eq!(
+        presenter.model().working_directory(),
+        Some(first_project.canonical_path.as_str())
+    );
+    presenter.select_project(second_project.clone());
+    presenter.select_task(*second_task);
+    assert!(presenter.submit("resume second task", "claude"));
+    assert_eq!(last_start(&runner).cwd, second_project.canonical_path);
+    assert_eq!(
+        presenter.model().working_directory(),
+        Some(second_project.canonical_path.as_str())
+    );
+}
+
+#[test]
 fn history_responses_only_update_the_selected_thread() {
     let (mut presenter, _, _directory) = fixture();
+    let local_path = presenter.model().working_directory().unwrap().to_owned();
+    let history_path = Path::new(&local_path)
+        .join("Codex 历史")
+        .display()
+        .to_string();
+    presenter.handle_codex_history_event(HistoryEvent::ThreadsLoaded(Ok(vec![ThreadSummary {
+        id: "selected".into(),
+        title: "history".into(),
+        cwd: history_path.clone(),
+        source: "cli".into(),
+        updated_at: 0,
+        archived: false,
+    }])));
     presenter.select_codex_thread("selected".into());
+    assert_eq!(
+        presenter.model().working_directory(),
+        Some(history_path.as_str())
+    );
     presenter.model.codex_thread_loading = true;
     presenter.handle_codex_history_event(HistoryEvent::ThreadLoaded {
         thread_id: "previous".into(),
@@ -3779,6 +3889,10 @@ fn history_responses_only_update_the_selected_thread() {
     });
     assert!(presenter.model().codex_thread_loading);
     assert!(presenter.model().codex_history_messages.is_empty());
+    assert_eq!(
+        presenter.model().working_directory(),
+        Some(history_path.as_str())
+    );
     let message = HistoryMessage {
         role: MessageRole::Assistant,
         kind: MessageKind::Text,
@@ -3801,5 +3915,18 @@ fn history_responses_only_update_the_selected_thread() {
     assert_eq!(
         presenter.model().codex_history_messages[0].content,
         "read failed"
+    );
+    assert_eq!(
+        presenter.model().working_directory(),
+        Some(history_path.as_str())
+    );
+    presenter.model.codex_threads[0].cwd.clear();
+    assert_eq!(presenter.model().working_directory(), None);
+    presenter.select_codex_thread("missing-thread".into());
+    assert_eq!(presenter.model().working_directory(), None);
+    presenter.new_task();
+    assert_eq!(
+        presenter.model().working_directory(),
+        Some(local_path.as_str())
     );
 }

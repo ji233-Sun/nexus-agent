@@ -190,6 +190,8 @@
   "Ctrl Enter 发送消息 · Enter 换行": "Ctrl Enter to send · Enter for a new line",
   "Codex 历史 · {0}": "Codex history · {0}",
   "未选择项目": "No project selected",
+  "未选择目录": "No directory selected",
+  "未知目录": "Unknown directory",
   "Codex 原有会话": "Existing Codex session",
   "任务时间线": "Task timeline",
   "打开设置 · ⌘ ,": "Open settings · ⌘ ,",
