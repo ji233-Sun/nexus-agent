@@ -51,7 +51,7 @@ Nexus Agent 是一个面向 Linux、macOS 和 Windows 的本地桌面应用，�
 
 ## 快速开始
 
-Nightly 每 4 小时定时检查默认分支 `main` 的最新提交（cron：`0 */4 * * *`，UTC 每天 00:00、04:00、08:00、12:00、16:00、20:00，北京时间也为这六个时刻）。若该提交尚未发布 Nightly，则执行同一套检查和四平台打包流程，全部成功后自动发布一个 Nightly 预发布版；已经发布过的提交会跳过构建和发布。向 `main` 推送新提交（包括合并 PR）仅触发 CI，Nightly 等待下一次定时运行。标签及压缩包文件名使用 `nightly-YYYY-MM-DD-<Unix秒时间戳>-<12位提交SHA>`，例如 `nightly-2026-09-06-1788673923-6bbbdd981018`。日期与时间戳取自该提交的提交者时间，日期按 UTC 计算；同一提交重跑工作流时保持相同标签。Nightly 标签指向本次构建的完整提交 SHA，始终标记为 Pre-release，不占用 Latest；不同提交的发布独立执行。Cargo 包版本和 macOS 的数字基础版本继续沿用 `Cargo.toml`，应用内显示完整 Nightly 标签，无需为每次 Nightly 修改版本文件。
+Nightly 仅通过 **Actions → Release → Run workflow** 选择分支手动触发，不再定时检查或发版。手动运行时，若该提交尚未发布 Nightly，则执行同一套检查和四平台打包流程，全部成功后发布一个 Nightly 预发布版；已经发布过的提交会跳过构建和发布。向 `main` 推送新提交（包括合并 PR）仅触发 CI，不触发 Nightly。标签及压缩包文件名使用 `nightly-YYYY-MM-DD-<Unix秒时间戳>-<12位提交SHA>`，例如 `nightly-2026-09-06-1788673923-6bbbdd981018`。日期与时间戳取自该提交的提交者时间，日期按 UTC 计算；同一提交重跑工作流时保持相同标签。Nightly 标签指向本次构建的完整提交 SHA，始终标记为 Pre-release，不占用 Latest；不同提交的发布独立执行。Cargo 包版本和 macOS 的数字基础版本继续沿用 `Cargo.toml`，应用内显示完整 Nightly 标签，无需为每次 Nightly 修改版本文件。
 
 1. **准备一个 Harness。** 打开应用，在「设置 → 执行引擎 → Harness 管理」检查或安装要使用的 CLI。完成 CLI 登录，或配置对应的 [Provider Profile](docs/usage.md#模型与服务商)。
 2. **打开本地项目。** 选择工作目录，在输入区选好 Harness、模型和权限模式。
