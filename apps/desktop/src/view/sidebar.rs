@@ -687,6 +687,7 @@ mod tests {
         for index in 0..30 {
             storage
                 .create_task_run(NewTaskRun {
+                    workspace_id: None,
                     permission_mode: nexus_domain::PermissionMode::AutoEdit,
                     task_id: None,
                     project_id: project.id,

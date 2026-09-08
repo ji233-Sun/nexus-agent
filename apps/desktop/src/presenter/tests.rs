@@ -98,6 +98,80 @@ pub(crate) fn fixture() -> (Presenter, FakeRunner, tempfile::TempDir) {
     (presenter, runner, directory)
 }
 
+fn finish_workspace_operation(presenter: &mut Presenter) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while presenter.model.workspace_busy {
+        assert!(Instant::now() < deadline, "workspace operation timed out");
+        presenter.drain_events();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn worktree_task_binds_cwd_session_and_preserves_history_after_cleanup() {
+    use crate::{
+        infrastructure::git,
+        model::workspace::{WorkspaceKind, WorkspaceStatus},
+    };
+    let (directory, project) = git::tests::repository_fixture();
+    let (mut presenter, runner, _fixture) = fixture();
+    presenter.worktree_root = Ok(directory.path().canonicalize().unwrap().join("worktrees"));
+    presenter.open_project(Path::new(&project.canonical_path));
+    presenter.select_workspace_kind(WorkspaceKind::Worktree);
+    let branch = presenter.model.workspace_draft.branch.clone();
+    assert!(!presenter.worktree_root.as_ref().unwrap().exists());
+    assert!(presenter.submit("isolated task", "claude"));
+    finish_workspace_operation(&mut presenter);
+    let workspace = presenter.model.selected_workspace.clone().unwrap();
+    assert_eq!(workspace.status, WorkspaceStatus::Ready);
+    assert_eq!(workspace.branch.as_ref(), Some(&branch));
+    let ModelCatalogState::Loading { request_id, .. } = presenter.model.model_catalog else {
+        panic!("catalog must use new cwd")
+    };
+    runner.emit(Event::ModelCatalogLoaded {
+        request_id,
+        harness: HarnessKind::Claude,
+        models: claude_aliases(),
+    });
+    presenter.drain_events();
+    let start = last_start(&runner);
+    assert_eq!(start.cwd, workspace.path);
+    assert_eq!(start.task_id, workspace.task_id.unwrap());
+    assert_ne!(start.cwd, project.canonical_path);
+    runner.emit(Event::RunSessionStarted {
+        run_id: start.run_id,
+        session_id: "isolated-session".into(),
+    });
+    runner.emit(Event::RunExited {
+        run_id: start.run_id,
+        status: RunStatus::Completed,
+        exit_code: Some(0),
+    });
+    presenter.drain_events();
+    presenter.select_task(start.task_id);
+    assert!(presenter.submit("continue", "claude"));
+    let resumed = last_start(&runner);
+    assert_eq!(resumed.cwd, start.cwd);
+    assert_eq!(resumed.session_id.as_deref(), Some("isolated-session"));
+    runner.emit(Event::RunExited {
+        run_id: resumed.run_id,
+        status: RunStatus::Completed,
+        exit_code: Some(0),
+    });
+    presenter.drain_events();
+    assert!(presenter.cleanup_workspace(workspace.id, "main".into()));
+    finish_workspace_operation(&mut presenter);
+    assert_eq!(
+        presenter.model.selected_workspace.as_ref().unwrap().status,
+        WorkspaceStatus::Removed
+    );
+    assert!(!presenter.submit("must not run in project", "claude"));
+    assert_eq!(presenter.storage.messages(start.task_id).unwrap().len(), 2);
+    assert!(presenter.delete_task(start.task_id));
+    assert!(presenter.storage.workspace(workspace.id).unwrap().is_some());
+    assert!(!Path::new(&workspace.path).exists());
+}
+
 pub(crate) fn pending_update(presenter: &mut Presenter) -> std::sync::mpsc::Sender<UpdateState> {
     let (sender, receiver) = std::sync::mpsc::channel();
     presenter.update_events = Some(receiver);
@@ -589,6 +663,7 @@ fn conversation_actions_keep_active_and_archived_models_in_sync() {
         presenter
             .storage
             .create_task_run(NewTaskRun {
+                workspace_id: None,
                 permission_mode: nexus_domain::PermissionMode::AutoEdit,
                 task_id: None,
                 project_id: project.id,
@@ -665,6 +740,7 @@ fn archived_project_fixture() -> ArchivedProjectFixture {
     let archived_project = storage.open_project(&archived_project_path).unwrap();
     let archived_task = storage
         .create_task_run(NewTaskRun {
+            workspace_id: None,
             permission_mode: nexus_domain::PermissionMode::AutoEdit,
             task_id: None,
             project_id: archived_project.id,
@@ -687,6 +763,7 @@ fn archived_project_fixture() -> ArchivedProjectFixture {
         if index == 0 {
             let task = storage
                 .create_task_run(NewTaskRun {
+                    workspace_id: None,
                     permission_mode: nexus_domain::PermissionMode::AutoEdit,
                     task_id: None,
                     project_id: project.id,

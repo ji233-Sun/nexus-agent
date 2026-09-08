@@ -7,6 +7,7 @@ pub(crate) mod theme;
 mod timeline;
 mod tools;
 mod user_ask;
+mod workspace;
 
 use crate::{
     i18n::Language,
@@ -1704,6 +1705,7 @@ impl NexusView {
                             .pb_4()
                             .child(self.render_user_asks(window, cx))
                             .child(self.render_working_directory(cx))
+                            .child(self.render_workspace_controls(cx))
                             .child(
                                 div()
                                     .debug_selector(|| "composer-surface".into())

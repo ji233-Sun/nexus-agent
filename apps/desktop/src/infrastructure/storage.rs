@@ -1,5 +1,6 @@
 use std::{fs, path::Path, str::FromStr as _};
 
+use crate::model::workspace::{Workspace, WorkspaceStatus};
 use anyhow::{Context as _, Result, anyhow};
 use chrono::{DateTime, Utc};
 use nexus_domain::{
@@ -24,6 +25,7 @@ pub struct ConversationConfig {
 
 pub struct NewTaskRun<'a> {
     pub task_id: Option<Uuid>,
+    pub workspace_id: Option<Uuid>,
     pub project_id: Uuid,
     pub title: &'a str,
     pub prompt: &'a str,
@@ -136,8 +138,41 @@ impl Storage {
         if !table_has_column(&connection, "tasks", "archived_at")? {
             connection.execute("ALTER TABLE tasks ADD COLUMN archived_at TEXT", [])?;
         }
-        connection.execute_batch("PRAGMA user_version = 6;")?;
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS workspaces (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id),
+                record TEXT NOT NULL
+            );",
+        )?;
+        if !table_has_column(&connection, "tasks", "workspace_id")? {
+            connection.execute(
+                "ALTER TABLE tasks ADD COLUMN workspace_id TEXT REFERENCES workspaces(id)",
+                [],
+            )?;
+        }
+        if !table_has_column(&connection, "runs", "cwd")? {
+            connection.execute("ALTER TABLE runs ADD COLUMN cwd TEXT", [])?;
+        }
         let storage = Self { connection };
+        let projects = {
+            let mut statement = storage.connection.prepare(
+                "SELECT id, display_name, canonical_path, created_at, last_opened_at FROM projects",
+            )?;
+            statement
+                .query_map([], project_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for project in projects {
+            storage.ensure_local_workspace(&project)?;
+        }
+        storage.connection.execute_batch(
+            "UPDATE tasks SET workspace_id = project_id WHERE workspace_id IS NULL;
+             UPDATE runs SET cwd = (SELECT projects.canonical_path FROM tasks
+                 JOIN projects ON projects.id = tasks.project_id WHERE tasks.id = runs.task_id)
+                 WHERE cwd IS NULL;
+             PRAGMA user_version = 7;",
+        )?;
         storage.recover_interrupted()?;
         Ok(storage)
     }
@@ -195,7 +230,9 @@ impl Storage {
                 now.to_rfc3339()
             ],
         )?;
-        self.project(id)?.ok_or_else(|| anyhow!("项目保存失败"))
+        let project = self.project(id)?.ok_or_else(|| anyhow!("项目保存失败"))?;
+        self.ensure_local_workspace(&project)?;
+        Ok(project)
     }
 
     pub fn projects(&self) -> Result<Vec<Project>> {
@@ -217,7 +254,7 @@ impl Storage {
             .map_err(Into::into)
     }
 
-    fn project(&self, id: Uuid) -> Result<Option<Project>> {
+    pub(crate) fn project(&self, id: Uuid) -> Result<Option<Project>> {
         self.connection
             .query_row(
                 "SELECT id, display_name, canonical_path, created_at, last_opened_at
@@ -348,6 +385,7 @@ impl Storage {
     pub fn prepare_task_run(&mut self, request: NewTaskRun<'_>) -> Result<PendingTaskRun<'_>> {
         let NewTaskRun {
             task_id,
+            workspace_id,
             project_id,
             title,
             prompt,
@@ -358,8 +396,21 @@ impl Storage {
             permission_mode,
             harness_version,
         } = request;
+        let workspace = if let Some(task_id) = task_id {
+            self.task_workspace(task_id)?
+                .ok_or_else(|| anyhow!("任务缺少执行目录"))?
+        } else {
+            self.workspace(workspace_id.unwrap_or(project_id))?
+                .ok_or_else(|| anyhow!("项目缺少执行目录"))?
+        };
+        if workspace.project_id != project_id || workspace.status != WorkspaceStatus::Ready {
+            return Err(anyhow!("任务目录不属于项目或尚未就绪"));
+        }
+        if workspace_id.is_some_and(|id| id != workspace.id) {
+            return Err(anyhow!("任务开始后不能更换执行目录"));
+        }
         let existing_task = task_id;
-        let task_id = task_id.unwrap_or_else(Uuid::new_v4);
+        let task_id = task_id.or(workspace.task_id).unwrap_or_else(Uuid::new_v4);
         let run_id = Uuid::new_v4();
         let message_id = Uuid::new_v4();
         let now = Utc::now().to_rfc3339();
@@ -375,16 +426,16 @@ impl Storage {
             }
         } else {
             transaction.execute(
-                "INSERT INTO tasks(id, project_id, title, status, created_at, updated_at)
-                 VALUES(?1, ?2, ?3, 'starting', ?4, ?4)",
-                params![task_id.to_string(), project_id.to_string(), title, now],
+                "INSERT INTO tasks(id, project_id, title, status, created_at, updated_at, workspace_id)
+                 VALUES(?1, ?2, ?3, 'starting', ?4, ?4, ?5)",
+                params![task_id.to_string(), project_id.to_string(), title, now, workspace.id.to_string()],
             )?;
         }
         transaction.execute(
             "INSERT INTO runs(
                  id, task_id, status, harness_kind, executable, model, effort,
-                 harness_version, started_at, permission_mode
-             ) VALUES(?1, ?2, 'starting', ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 harness_version, started_at, permission_mode, cwd
+             ) VALUES(?1, ?2, 'starting', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 run_id.to_string(),
                 task_id.to_string(),
@@ -394,7 +445,8 @@ impl Storage {
                 effort.as_str(),
                 harness_version,
                 now,
-                permission_mode.as_str()
+                permission_mode.as_str(),
+                workspace.path
             ],
         )?;
         transaction.execute(
@@ -561,6 +613,61 @@ impl Storage {
             .map_err(Into::into)
     }
 
+    fn ensure_local_workspace(&self, project: &Project) -> Result<()> {
+        if self.workspace(project.id)?.is_none() {
+            self.save_workspace(&Workspace::local(project))?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn save_workspace(&self, workspace: &Workspace) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO workspaces(id, project_id, record) VALUES(?1, ?2, ?3)
+             ON CONFLICT(id) DO UPDATE SET record = excluded.record",
+            params![
+                workspace.id.to_string(),
+                workspace.project_id.to_string(),
+                serde_json::to_string(workspace)?
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn workspace(&self, id: Uuid) -> Result<Option<Workspace>> {
+        let record: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT record FROM workspaces WHERE id = ?1",
+                [id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        record
+            .map(|record| serde_json::from_str(&record).map_err(Into::into))
+            .transpose()
+    }
+
+    pub(crate) fn task_workspace(&self, task_id: Uuid) -> Result<Option<Workspace>> {
+        let record: Option<String> = self.connection.query_row(
+            "SELECT record FROM workspaces JOIN tasks ON tasks.workspace_id = workspaces.id WHERE tasks.id = ?1",
+            [task_id.to_string()], |row| row.get(0),
+        ).optional()?;
+        record
+            .map(|record| serde_json::from_str(&record).map_err(Into::into))
+            .transpose()
+    }
+
+    pub(crate) fn workspaces(&self, project_id: Uuid) -> Result<Vec<Workspace>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT record FROM workspaces WHERE project_id = ?1 ORDER BY rowid")?;
+        let records =
+            statement.query_map([project_id.to_string()], |row| row.get::<_, String>(0))?;
+        records
+            .map(|record| Ok(serde_json::from_str(&record?)?))
+            .collect()
+    }
+
     pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
         self.connection.execute(
             "INSERT INTO settings(key, value) VALUES(?1, ?2)
@@ -694,6 +801,7 @@ mod tests {
         let project = storage.open_project(&project_dir).unwrap();
         let (task_id, run_id) = storage
             .create_task_run(NewTaskRun {
+                workspace_id: None,
                 permission_mode: PermissionMode::Ask,
                 task_id: None,
                 project_id: project.id,
@@ -735,6 +843,17 @@ mod tests {
         assert_eq!(config.model, "sonnet");
         assert_eq!(config.effort, ThinkingEffort::High);
         assert_eq!(config.permission_mode, PermissionMode::Ask);
+        let workspace = storage.task_workspace(task_id).unwrap().unwrap();
+        assert_eq!(workspace.path, project.canonical_path);
+        let cwd: String = storage
+            .connection
+            .query_row(
+                "SELECT cwd FROM runs WHERE id = ?1",
+                [run_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cwd, workspace.path);
         let harness_version: String = storage
             .connection
             .query_row(
@@ -757,6 +876,7 @@ mod tests {
         let project = storage.open_project(&project_dir).unwrap();
         let (task_id, run_id) = storage
             .create_task_run(NewTaskRun {
+                workspace_id: None,
                 permission_mode: nexus_domain::PermissionMode::AutoEdit,
                 task_id: None,
                 project_id: project.id,
@@ -813,8 +933,20 @@ mod tests {
             .connection
             .execute("ALTER TABLE tasks DROP COLUMN archived_at", [])
             .unwrap();
+        storage
+            .connection
+            .execute("ALTER TABLE tasks DROP COLUMN workspace_id", [])
+            .unwrap();
+        storage
+            .connection
+            .execute("ALTER TABLE runs DROP COLUMN cwd", [])
+            .unwrap();
         drop(storage);
         let storage = Storage::open(&database).unwrap();
+        assert_eq!(
+            storage.task_workspace(task_id).unwrap().unwrap().path,
+            project.canonical_path
+        );
         assert_eq!(
             storage.messages(task_id).unwrap()[1].content,
             "project summary"
@@ -867,6 +999,7 @@ mod tests {
         let create_task = |storage: &mut Storage, title: &str| {
             storage
                 .create_task_run(NewTaskRun {
+                    workspace_id: None,
                     permission_mode: nexus_domain::PermissionMode::AutoEdit,
                     task_id: None,
                     project_id: project.id,

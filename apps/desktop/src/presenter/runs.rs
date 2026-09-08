@@ -1,6 +1,8 @@
 use super::{Presenter, executable_setting_key};
 use crate::i18n::{Language, LocalizedText, probe_status};
+use crate::infrastructure::git;
 use crate::infrastructure::storage::NewTaskRun;
+use crate::model::workspace::{WorkspaceKind, WorkspaceStatus};
 use crate::model::{
     ModelCatalogState, PendingUserAsk, QueuedMessage, ResolvedModelSelection,
     UserAskSubmissionState,
@@ -475,6 +477,7 @@ impl Presenter {
                     ),
                 };
                 self.reload_tasks();
+                self.refresh_workspace_branch();
                 if self.model.selected_task != task_id
                     && let Some(selected_task) = self.model.selected_task
                 {
@@ -507,6 +510,22 @@ impl Presenter {
                 }
             }
             _ => {}
+        }
+        if self.pending_workspace_start.is_some()
+            && !self.model.workspace_retry
+            && !self.model.workspace_busy
+            && self
+                .model
+                .selected_workspace
+                .as_ref()
+                .is_some_and(|workspace| workspace.status == WorkspaceStatus::Ready)
+            && !matches!(
+                self.model.model_catalog,
+                ModelCatalogState::Loading { .. } | ModelCatalogState::Idle
+            )
+            && self.model.active_run.is_none()
+        {
+            self.retry_workspace_start();
         }
     }
 
@@ -825,7 +844,10 @@ impl Presenter {
         configured_executable: &str,
         permission_mode: PermissionMode,
     ) -> bool {
-        if self.model.active_run.is_some() || self.model.harness_manager.operating.is_some() {
+        if self.model.active_run.is_some()
+            || self.model.harness_manager.operating.is_some()
+            || self.model.workspace_busy
+        {
             return false;
         }
         let Some(project) = self.model.selected_project.clone() else {
@@ -914,7 +936,33 @@ impl Presenter {
             .then(|| self.title_generation_configuration().ok())
             .flatten();
         let title = compact_task_title(&prompt).unwrap_or_else(|| "新任务".into());
+        if task_id.is_none()
+            && self.model.selected_workspace.is_none()
+            && self.model.workspace_draft.kind == WorkspaceKind::Worktree
+        {
+            return self.begin_worktree(&prompt, &configured_executable, permission_mode);
+        }
+        let workspace = if let Some(task_id) = task_id {
+            self.storage.task_workspace(task_id)
+        } else if let Some(workspace) = &self.model.selected_workspace {
+            Ok(Some(workspace.clone()))
+        } else {
+            self.storage.workspace(project.id)
+        };
+        let workspace = match workspace.and_then(|workspace| {
+            let workspace = workspace.ok_or_else(|| anyhow::anyhow!("任务缺少绑定目录"))?;
+            git::validate_workspace(&workspace)?;
+            git::checkout_path(std::path::Path::new(&workspace.path))?;
+            Ok(workspace)
+        }) {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                self.model.status = error.to_string().into();
+                return false;
+            }
+        };
         let Ok(pending_run) = self.storage.prepare_task_run(NewTaskRun {
+            workspace_id: Some(workspace.id),
             task_id,
             project_id: project.id,
             title: &title,
@@ -935,7 +983,7 @@ impl Presenter {
             run_id,
             task_id,
             session_id,
-            cwd: project.canonical_path,
+            cwd: workspace.path.clone(),
             prompt: prompt.clone(),
             harness,
             executable: executable.clone(),
@@ -960,6 +1008,7 @@ impl Presenter {
             self.model.active_harness = Some(harness);
             self.model.active_permission_mode = Some(permission_mode);
             self.model.selected_task = Some(task_id);
+            self.model.selected_workspace = Some(workspace);
             self.model.selected_codex_thread = None;
             self.model.codex_history_messages.clear();
             self.model.codex_thread_loading = false;

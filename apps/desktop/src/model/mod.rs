@@ -2,6 +2,7 @@ pub(crate) mod harness_installation;
 pub(crate) mod history;
 pub(crate) mod tools;
 pub(crate) mod updates;
+pub(crate) mod workspace;
 
 use crate::i18n::{Language, LocalizedText};
 use history::{HistoryMessage, ThreadSummary};
@@ -209,6 +210,13 @@ pub(crate) struct AppModel {
     pub(crate) tasks: Vec<TaskSummary>,
     pub(crate) archived_tasks: Vec<TaskSummary>,
     pub(crate) selected_task: Option<Uuid>,
+    pub(crate) selected_workspace: Option<workspace::Workspace>,
+    pub(crate) workspace_draft: workspace::WorkspaceDraft,
+    pub(crate) workspaces: Vec<workspace::Workspace>,
+    pub(crate) project_is_git: bool,
+    pub(crate) workspace_branch: Option<String>,
+    pub(crate) workspace_busy: bool,
+    pub(crate) workspace_retry: bool,
     pub(crate) messages: Vec<Message>,
     pub(crate) active_run: Option<Uuid>,
     pub(crate) run_cancelling: bool,
@@ -249,6 +257,10 @@ impl AppModel {
                 .iter()
                 .find(|thread| &thread.id == thread_id)
                 .map(|thread| thread.cwd.as_str())
+        } else if let Some(workspace) = &self.selected_workspace {
+            Some(workspace.path.as_str())
+        } else if self.selected_task.is_some() {
+            None
         } else {
             self.selected_project
                 .as_ref()
@@ -271,6 +283,11 @@ impl AppModel {
             .is_some_and(|profile| profile.credential_configured);
         self.selected_project.is_some()
             && self.active_run.is_none()
+            && !self.workspace_busy
+            && self
+                .selected_workspace
+                .as_ref()
+                .is_none_or(|workspace| workspace.status == workspace::WorkspaceStatus::Ready)
             && self.harness_manager.operating.is_none()
             && self
                 .selected_probe()

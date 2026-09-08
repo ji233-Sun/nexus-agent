@@ -3,6 +3,7 @@ mod history;
 mod remote;
 mod runs;
 mod updates;
+mod workspace;
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -68,6 +69,9 @@ pub(crate) struct Presenter {
     credentials: Box<dyn CredentialStore>,
     update_events: Option<std::sync::mpsc::Receiver<UpdateState>>,
     installation_worker: Option<crate::infrastructure::harness_installation::Worker>,
+    workspace_events: Option<std::sync::mpsc::Receiver<workspace::WorkspaceEvent>>,
+    pending_workspace_start: Option<workspace::PendingWorkspaceStart>,
+    worktree_root: Result<std::path::PathBuf>,
 }
 
 pub(crate) struct ProviderProfileDraft {
@@ -253,6 +257,9 @@ impl Presenter {
             credentials,
             update_events: None,
             installation_worker: None,
+            workspace_events: None,
+            pending_workspace_start: None,
+            worktree_root: crate::infrastructure::paths::worktree_directory(),
         };
         if let Some(runner) = &presenter.runner {
             let _ = runner.send(CommandEnvelope::new(Command::RunnerHello));
@@ -329,7 +336,9 @@ impl Presenter {
             .as_ref()
             .map(RemoteControl::drain_commands)
             .unwrap_or_default();
-        let mut changed = !runner_events.is_empty() || !history_events.is_empty();
+        let mut changed = self.drain_workspace_events()
+            || !runner_events.is_empty()
+            || !history_events.is_empty();
         for envelope in runner_events {
             if envelope.protocol_version != nexus_protocol::PROTOCOL_VERSION {
                 self.model.status = "Desktop 与 Runner 协议版本不匹配，请重启或更新应用。".into();
@@ -363,10 +372,14 @@ impl Presenter {
     }
 
     pub(crate) fn new_task(&mut self) {
-        if self.model.active_run.is_some() || self.model.selected_project.is_none() {
+        if self.model.active_run.is_some()
+            || self.model.selected_project.is_none()
+            || self.model.workspace_busy
+        {
             return;
         }
         self.model.selected_task = None;
+        self.reset_workspace_draft();
         self.model.selected_codex_thread = None;
         self.model.messages.clear();
         self.model.codex_history_messages.clear();
@@ -378,11 +391,16 @@ impl Presenter {
     }
 
     pub(crate) fn select_project(&mut self, project: Project) {
+        if self.model.workspace_busy {
+            return;
+        }
         self.model.permission_mode =
             load_permission_mode(&self.storage, self.model.selected_harness);
         self.model.project_dirty = is_git_dirty(Path::new(&project.canonical_path));
         self.model.selected_project = Some(project);
         self.model.selected_task = None;
+        self.reset_workspace_draft();
+        self.reload_workspaces();
         self.model.selected_codex_thread = None;
         self.model.messages.clear();
         self.model.codex_history_messages.clear();
@@ -417,7 +435,12 @@ impl Presenter {
     }
 
     pub(crate) fn select_task(&mut self, task_id: Uuid) {
+        if self.model.workspace_busy {
+            return;
+        }
         self.model.selected_task = Some(task_id);
+        self.model.selected_workspace = self.storage.task_workspace(task_id).ok().flatten();
+        self.reload_workspaces();
         self.model.selected_codex_thread = None;
         self.model.codex_history_messages.clear();
         self.model.codex_thread_loading = false;
@@ -831,7 +854,7 @@ impl Presenter {
     }
 
     pub(crate) fn refresh_title_model_catalog(&mut self) -> bool {
-        let Some(project) = self.model.selected_project.as_ref() else {
+        let Some(cwd) = self.model.working_directory().map(str::to_owned) else {
             self.model.title_model_catalog = ModelCatalogState::Idle;
             return false;
         };
@@ -849,7 +872,7 @@ impl Presenter {
             purpose: ModelCatalogPurpose::TitleGeneration,
             harness: configuration.harness,
             executable: configuration.executable,
-            cwd: project.canonical_path.clone(),
+            cwd,
             environment: configuration.environment,
         });
         let models = self
@@ -907,7 +930,7 @@ impl Presenter {
         }
         self.catalog_project = project_id;
         let harness = self.model.selected_harness;
-        let Some(project) = self.model.selected_project.as_ref() else {
+        let Some(cwd) = self.model.working_directory().map(str::to_owned) else {
             self.model.model_catalog = ModelCatalogState::Idle;
             return false;
         };
@@ -949,7 +972,7 @@ impl Presenter {
             purpose: ModelCatalogPurpose::Conversation,
             harness,
             executable: self.model.executable.clone(),
-            cwd: project.canonical_path.clone(),
+            cwd,
             environment,
         });
         let mut models = self
