@@ -395,6 +395,8 @@
   "未安装": "Not installed",
   "尚未扫描": "Not scanned yet",
   "版本未知": "Unknown version",
+  "最新版本": "Latest version",
+  "最新版本检测失败：{error}": "Latest version check failed: {error}",
   "安装来源": "Installation source",
   "实际路径": "Executable path",
   "无法保存 Harness 路径：{error}": "Could not save the harness path: {error}",

@@ -60,7 +60,7 @@ impl Presenter {
                 .find(|option| option.method == method)?
                 .command
                 .clone(),
-            None => installation.update.clone()?,
+            None => installation.available_update()?.clone(),
         };
         Some(MaintenanceRequest {
             harness,

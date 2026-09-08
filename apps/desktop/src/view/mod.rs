@@ -2142,6 +2142,12 @@ mod catalog_model_tests {
                 "harness-card-claude",
                 "harness-card-codex",
                 "harness-card-omp",
+                "harness-current-version-claude",
+                "harness-latest-version-claude",
+                "harness-current-version-codex",
+                "harness-latest-version-codex",
+                "harness-current-version-omp",
+                "harness-latest-version-omp",
             ] {
                 let bounds = cx.debug_bounds(selector).unwrap();
                 assert!(
@@ -2153,6 +2159,30 @@ mod catalog_model_tests {
             assert!(cx.debug_bounds("harness-install-codex").is_some());
             assert!(cx.debug_bounds("harness-update-omp").is_none());
             assert!(cx.debug_bounds("harness-install-claude").is_none());
+            for latest in [
+                Ok("1.0.0"),
+                Ok("0.9.0"),
+                Err("最新版本检测失败：网络不可用"),
+            ] {
+                view.update_in(cx, |view, _, cx| {
+                    crate::presenter::tests::seed_harness_installations(&mut view.presenter)
+                        .get_mut(&HarnessKind::Claude)
+                        .unwrap()
+                        .latest_version = latest
+                        .map(str::to_owned)
+                        .map_err(|error| error.to_owned().into());
+                    cx.notify();
+                });
+                cx.run_until_parked();
+                assert!(cx.debug_bounds("harness-update-claude").is_none());
+                assert!(cx.debug_bounds("harness-latest-version-claude").is_some());
+                assert!(cx.debug_bounds("harness-install-codex").is_some());
+            }
+            view.update_in(cx, |view, _, cx| {
+                crate::presenter::tests::seed_harness_installations(&mut view.presenter);
+                cx.notify();
+            });
+            cx.run_until_parked();
         }
         click_debug(cx, "harness-install-codex");
         cx.run_until_parked();

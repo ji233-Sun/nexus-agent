@@ -978,6 +978,8 @@ impl NexusView {
             let installed =
                 installation.is_some_and(|installation| installation.executable.is_some());
             let update = installation.and_then(|installation| installation.update.as_ref());
+            let update_available =
+                installation.is_some_and(|installation| installation.available_update().is_some());
             let options = installation
                 .map(|installation| installation.install_options.clone())
                 .unwrap_or_default();
@@ -988,13 +990,21 @@ impl NexusView {
                 .and_then(|installation| installation.version.clone())
                 .unwrap_or_else(|| {
                     locale
-                        .text(if installed {
+                        .text(if installation.is_none() {
+                            "尚未扫描"
+                        } else if installed {
                             "版本未知"
                         } else {
                             "未安装"
                         })
                         .into()
                 });
+            let latest_version = installation
+                .map(|installation| match &installation.latest_version {
+                    Ok(version) => version.clone(),
+                    Err(error) => error.render(locale).to_owned(),
+                })
+                .unwrap_or_else(|| locale.text("尚未扫描").into());
             let app = cx.entity();
             let actions = div()
                 .flex()
@@ -1023,18 +1033,24 @@ impl NexusView {
                                 cx.write_to_clipboard(ClipboardItem::new_string(display.clone()))
                             }),
                         )
-                        .child(
-                            Button::new(SharedString::from(format!("harness-update-{harness_id}")))
+                        .when(update_available, |element| {
+                            element.child(
+                                Button::new(SharedString::from(format!(
+                                    "harness-update-{harness_id}"
+                                )))
                                 .debug_selector(move || format!("harness-update-{harness_id}"))
                                 .outline()
                                 .small()
                                 .icon(IconName::RotateCw)
                                 .label(locale.text("更新"))
                                 .disabled(disabled)
-                                .on_click(cx.listener(move |app, _, window, cx| {
-                                    app.confirm_harness_maintenance(harness, None, window, cx)
-                                })),
-                        )
+                                .on_click(cx.listener(
+                                    move |app, _, window, cx| {
+                                        app.confirm_harness_maintenance(harness, None, window, cx)
+                                    },
+                                )),
+                            )
+                        })
                 })
                 .when(!options.is_empty(), |element| {
                     element.child(AnimatedDropdown::new(
@@ -1083,12 +1099,32 @@ impl NexusView {
                         .items_center()
                         .gap_3()
                         .child(harness_icon(harness, colors, 20.))
-                        .child(div().flex_1().child(harness.to_string()))
+                        .child(div().flex_1().child(harness.to_string())),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_6()
                         .child(
                             div()
-                                .text_size(px(12.))
-                                .text_color(rgb(colors.text_secondary))
-                                .child(version),
+                                .debug_selector(move || {
+                                    format!("harness-current-version-{harness_id}")
+                                })
+                                .child(label_value(colors, locale.text("当前版本"), version)),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .debug_selector(move || {
+                                    format!("harness-latest-version-{harness_id}")
+                                })
+                                .child(label_value(
+                                    colors,
+                                    locale.text("最新版本"),
+                                    latest_version,
+                                )),
                         ),
                 )
                 .child(label_value(colors, locale.text("安装来源"), source))
