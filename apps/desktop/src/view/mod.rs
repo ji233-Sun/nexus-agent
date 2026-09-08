@@ -461,7 +461,12 @@ impl NexusView {
                     .await;
                 if this
                     .update_in(cx, |app, window, cx| {
+                        let executable = app.presenter.model().executable.clone();
+                        let untouched = app.executable_input.read(cx).value() == executable;
                         app.poll_events(Instant::now(), cx);
+                        if untouched && app.presenter.model().executable != executable {
+                            app.sync_executable(window, cx);
+                        }
                         app.sync_approval_dialog(window, cx);
                     })
                     .is_err()
@@ -576,6 +581,9 @@ impl NexusView {
     }
 
     fn poll_events(&mut self, now: Instant, cx: &mut Context<Self>) {
+        if self.presenter.drain_installation_events() {
+            cx.notify();
+        }
         if self.presenter.drain_update_events() {
             cx.notify();
         }
@@ -882,6 +890,7 @@ impl NexusView {
     fn probe(&mut self, _: &gpui::ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
         let executable = self.executable_input.read(cx).value().to_string();
         self.presenter.probe(&executable);
+        self.presenter.scan_harness_installations();
         self.presenter.notify_remote_changed();
         cx.notify();
     }
@@ -2034,6 +2043,54 @@ mod catalog_model_tests {
     fn click_debug(cx: &mut gpui::VisualTestContext, selector: &'static str) {
         let point = cx.debug_bounds(selector).unwrap().center();
         cx.simulate_click(point, Default::default());
+    }
+
+    #[gpui::test]
+    fn harness_settings_show_versions_sources_and_only_available_actions(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (mut presenter, _, _directory) = fixture();
+        crate::presenter::tests::seed_harness_installations(&mut presenter);
+        let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
+        for (width, height, language) in [
+            (1040., 680., Language::Chinese),
+            (1280., 900., Language::English),
+        ] {
+            cx.simulate_resize(gpui::size(px(width), px(height)));
+            view.update_in(cx, |view, window, cx| {
+                view.settings_open = true;
+                view.settings_section = SettingsSection::Agent;
+                view.set_language(language, window, cx);
+                view.reduced_motion = true;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            for selector in [
+                "harness-card-claude",
+                "harness-card-codex",
+                "harness-card-omp",
+            ] {
+                let bounds = cx.debug_bounds(selector).unwrap();
+                assert!(
+                    bounds.left() >= px(0.) && bounds.right() <= px(width),
+                    "{selector}: {bounds:?}"
+                );
+            }
+            assert!(cx.debug_bounds("harness-update-claude").is_some());
+            assert!(cx.debug_bounds("harness-install-codex").is_some());
+            assert!(cx.debug_bounds("harness-update-omp").is_none());
+            assert!(cx.debug_bounds("harness-install-claude").is_none());
+        }
+        click_debug(cx, "harness-install-codex");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(cx, |view, _| view.presenter.model().selected_harness),
+            HarnessKind::Claude
+        );
     }
 
     #[test]

@@ -634,6 +634,11 @@ mod tests {
         cx.simulate_resize(gpui::size(px(1040.), px(680.)));
         view.update_in(cx, |view, window, cx| view.toggle_settings(window, cx));
         cx.run_until_parked();
+        view.update_in(cx, |view, _, cx| {
+            view.settings_scroll.scroll_to_bottom();
+            cx.notify();
+        });
+        cx.run_until_parked();
         let channel_button = cx.debug_bounds("update-channel-nightly").unwrap().center();
         cx.simulate_click(channel_button, Default::default());
         assert_eq!(

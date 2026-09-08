@@ -4394,6 +4394,7 @@ dependencies = [
  "gpui-pre-reqwest-client",
  "keyring",
  "nexus-domain",
+ "nexus-harness-core",
  "nexus-protocol",
  "nexus-runner",
  "rfd",

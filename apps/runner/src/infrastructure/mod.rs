@@ -1,3 +1,3 @@
 pub(crate) mod harness;
 pub(crate) mod process;
-mod process_tree;
+pub(crate) mod process_tree;

@@ -1,3 +1,4 @@
+mod harness_installation;
 mod history;
 mod remote;
 mod runs;
@@ -66,6 +67,7 @@ pub(crate) struct Presenter {
     remote_control_error: Option<String>,
     credentials: Box<dyn CredentialStore>,
     update_events: Option<std::sync::mpsc::Receiver<UpdateState>>,
+    installation_worker: Option<crate::infrastructure::harness_installation::Worker>,
 }
 
 pub(crate) struct ProviderProfileDraft {
@@ -250,6 +252,7 @@ impl Presenter {
             remote_control_error,
             credentials,
             update_events: None,
+            installation_worker: None,
         };
         if let Some(runner) = &presenter.runner {
             let _ = runner.send(CommandEnvelope::new(Command::RunnerHello));
@@ -547,7 +550,7 @@ impl Presenter {
     }
 
     pub(crate) fn probe(&mut self, executable: &str) {
-        if self.model.active_run.is_some() {
+        if self.model.active_run.is_some() || self.model.harness_manager.busy {
             return;
         }
         let executable = executable.trim().to_owned();
@@ -560,6 +563,7 @@ impl Presenter {
         }
         self.model.executable = executable.clone();
         self.model.harnesses.remove(&harness);
+        self.model.harness_manager.installations.remove(&harness);
         if let Some(runner) = &self.runner {
             let _ = runner.send(CommandEnvelope::new(Command::HarnessProbe {
                 harness,

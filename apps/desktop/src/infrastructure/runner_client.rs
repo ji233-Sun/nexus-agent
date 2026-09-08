@@ -21,6 +21,10 @@ pub struct RunnerClient {
 impl RunnerClient {
     pub fn spawn() -> Result<Self> {
         let mut command = runner_command()?;
+        command.env(
+            "PATH",
+            env::join_paths(nexus_harness_core::executable_search_paths())?,
+        );
         let executable = command.get_program().to_string_lossy().into_owned();
         let mut child = command
             .stdin(Stdio::piped())

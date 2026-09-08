@@ -109,33 +109,141 @@ pub trait LineDecoder: Send {
 }
 
 pub fn resolve_executable(configured: &str) -> Option<PathBuf> {
-    let mut directories: Vec<PathBuf> = env::var_os("PATH")
-        .map(|paths| env::split_paths(&paths).collect())
-        .unwrap_or_default();
-    let home = if cfg!(windows) {
-        env::var_os("USERPROFILE").or_else(|| env::var_os("HOME"))
-    } else {
-        env::var_os("HOME")
-    };
-    if let Some(home) = home {
-        directories.push(PathBuf::from(home).join(".local/bin"));
-    }
-    if cfg!(windows) {
-        if let Some(app_data) = env::var_os("APPDATA") {
-            directories.push(PathBuf::from(app_data).join("npm"));
-        }
-    } else {
-        if cfg!(target_os = "macos") {
-            directories.push(PathBuf::from("/opt/homebrew/bin"));
-        }
-        directories.push(PathBuf::from("/usr/local/bin"));
-    }
     let extensions =
         cfg!(windows).then(|| env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into()));
-    resolve_in_paths(configured, directories, extensions.as_deref())
+    resolve_in_paths(configured, executable_search_paths(), extensions.as_deref())
 }
 
-fn resolve_in_paths(
+// GUI launches may not inherit the shell's PATH. Use the same search directories
+// for discovery and child processes so Node/Bun shebangs can also find their runtime.
+pub fn executable_search_paths() -> Vec<PathBuf> {
+    search_paths(env::consts::OS, |key| env::var_os(key))
+}
+
+fn search_paths(
+    os: &str,
+    mut variable: impl FnMut(&str) -> Option<std::ffi::OsString>,
+) -> Vec<PathBuf> {
+    let mut directories: Vec<PathBuf> = variable("PATH")
+        .map(|paths| env::split_paths(&paths).collect())
+        .unwrap_or_default();
+    let mut path = |key| {
+        variable(key)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    };
+    let home = if os == "windows" {
+        path("USERPROFILE").or_else(|| path("HOME"))
+    } else {
+        path("HOME")
+    };
+    for (key, suffix) in [
+        ("VP_HOME", "bin"),
+        ("BUN_INSTALL", "bin"),
+        ("PNPM_HOME", ""),
+        ("PNPM_HOME", "bin"),
+        (
+            "NPM_CONFIG_PREFIX",
+            if os == "windows" { "" } else { "bin" },
+        ),
+        ("VOLTA_HOME", "bin"),
+        ("NVM_BIN", ""),
+        ("FNM_MULTISHELL_PATH", "bin"),
+        ("MISE_DATA_DIR", "shims"),
+        ("ASDF_DATA_DIR", "shims"),
+        ("PI_INSTALL_DIR", ""),
+        ("CODEX_INSTALL_DIR", ""),
+    ] {
+        if let Some(directory) = path(key) {
+            directories.push(directory.join(suffix));
+        }
+    }
+    if let Some(home) = &home {
+        for suffix in [
+            ".local/bin",
+            ".vite-plus/bin",
+            ".bun/bin",
+            ".local/share/pnpm",
+            ".local/share/pnpm/bin",
+            "Library/pnpm",
+            "Library/pnpm/bin",
+            ".npm-global/bin",
+            ".yarn/bin",
+            ".config/yarn/global/node_modules/.bin",
+            ".volta/bin",
+            ".local/share/mise/shims",
+            ".asdf/shims",
+            ".nvm/current/bin",
+            ".fnm/aliases/default/bin",
+            ".local/share/fnm/aliases/default/bin",
+            "Library/Application Support/fnm/aliases/default/bin",
+            ".nix-profile/bin",
+        ] {
+            directories.push(home.join(suffix));
+        }
+    }
+    if os == "windows" {
+        if let Some(app_data) = path("APPDATA") {
+            directories.push(app_data.join("npm"));
+        }
+        if let Some(local) = path("LOCALAPPDATA") {
+            directories.push(local.join("pnpm"));
+            directories.push(local.join("pnpm/bin"));
+            directories.push(local.join("omp"));
+            directories.push(local.join("Programs/OpenAI/Codex/bin"));
+            directories.push(local.join("Microsoft/WinGet/Links"));
+            directories.push(local.join("Microsoft/WindowsApps"));
+        }
+        if let Some(scoop) =
+            path("SCOOP").or_else(|| path("USERPROFILE").map(|home| home.join("scoop")))
+        {
+            directories.push(scoop.join("shims"));
+        }
+    } else {
+        if os == "macos" {
+            directories.push(PathBuf::from("/opt/homebrew/bin"));
+        }
+        directories.extend(
+            [
+                "/home/linuxbrew/.linuxbrew/bin",
+                "/usr/local/bin",
+                "/usr/bin",
+                "/bin",
+            ]
+            .map(PathBuf::from),
+        );
+    }
+    // nvm normally exports NVM_BIN from a shell startup file. Finder/Desktop
+    // launches still need to discover its installed versions when it is absent.
+    if let Some(nvm) = path("NVM_DIR").or_else(|| home.map(|home| home.join(".nvm"))) {
+        let preferred = std::fs::read_to_string(nvm.join("alias/default")).unwrap_or_default();
+        let preferred = preferred.trim().trim_start_matches('v');
+        let mut versions = std::fs::read_dir(nvm.join("versions/node"))
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        versions.sort_by_cached_key(|path| {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            let name = name.trim_start_matches('v');
+            let preferred = !preferred.is_empty()
+                && (name == preferred || name.starts_with(&format!("{preferred}.")));
+            let version = name
+                .split('.')
+                .map(|part| part.parse::<u64>().unwrap_or(0))
+                .collect::<Vec<_>>();
+            std::cmp::Reverse((preferred, version))
+        });
+        directories.extend(versions.into_iter().map(|version| version.join("bin")));
+    }
+    let mut seen = std::collections::HashSet::new();
+    directories
+        .retain(|directory| !directory.as_os_str().is_empty() && seen.insert(directory.clone()));
+    directories
+}
+
+pub fn resolve_in_paths(
     configured: &str,
     directories: impl IntoIterator<Item = PathBuf>,
     extensions: Option<&str>,
@@ -156,7 +264,7 @@ fn resolve_in_paths(
 }
 
 fn executable_candidates(path: PathBuf, extensions: Option<&str>) -> Vec<PathBuf> {
-    let mut candidates = vec![path.clone()];
+    let mut candidates = Vec::new();
     if path.extension().is_none()
         && let Some(extensions) = extensions
     {
@@ -169,6 +277,8 @@ fn executable_candidates(path: PathBuf, extensions: Option<&str>) -> Vec<PathBuf
             }
         }
     }
+    // npm writes an extensionless Unix script beside its Windows .cmd shim.
+    candidates.push(path);
     candidates
 }
 
@@ -226,6 +336,7 @@ mod tests {
         std::fs::create_dir(&first).unwrap();
         std::fs::create_dir(&second).unwrap();
         executable(&first.join("codex.cmd"));
+        executable(&first.join("codex"));
         executable(&second.join("codex.exe"));
         assert_eq!(
             resolve_in_paths("codex", [first.clone(), second], Some(".EXE;.CMD")),
@@ -234,6 +345,90 @@ mod tests {
         assert_eq!(
             resolve_in_paths("codex.cmd", [first.clone()], Some(".EXE;.CMD")),
             Some(first.join("codex.cmd"))
+        );
+    }
+
+    #[test]
+    fn gui_search_finds_global_managers_and_honors_custom_homes() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path();
+        let vp = home.join("custom-vp");
+        for os in ["macos", "linux", "windows"] {
+            let paths = search_paths(os, |key| match key {
+                "HOME" | "USERPROFILE" => Some(home.as_os_str().into()),
+                "VP_HOME" => Some(vp.as_os_str().into()),
+                "PNPM_HOME" => Some(home.join("custom-pnpm").into_os_string()),
+                "APPDATA" => Some(home.join("AppData/Roaming").into_os_string()),
+                "LOCALAPPDATA" => Some(home.join("AppData/Local").into_os_string()),
+                _ => None,
+            });
+            for suffix in [
+                ".local/bin",
+                ".vite-plus/bin",
+                ".bun/bin",
+                ".volta/bin",
+                ".asdf/shims",
+                ".nix-profile/bin",
+            ] {
+                assert!(paths.contains(&home.join(suffix)), "{os}: {suffix}");
+            }
+            assert!(paths.contains(&vp.join("bin")));
+            assert!(paths.contains(&home.join("custom-pnpm")));
+            if os == "windows" {
+                assert!(paths.contains(&home.join("AppData/Roaming/npm")));
+                assert!(paths.contains(&home.join("AppData/Local/Microsoft/WinGet/Links")));
+                assert!(paths.contains(&home.join("scoop/shims")));
+            }
+        }
+        std::fs::create_dir_all(vp.join("bin")).unwrap();
+        executable(&vp.join("bin/codex"));
+        let paths = search_paths("linux", |key| {
+            (key == "VP_HOME").then(|| vp.as_os_str().into())
+        });
+        assert_eq!(
+            resolve_in_paths("codex", paths, None),
+            Some(vp.join("bin/codex"))
+        );
+    }
+
+    #[test]
+    fn inherited_path_precedes_fallbacks_without_duplicates_or_empty_entries() {
+        let directory = tempfile::tempdir().unwrap();
+        let bin = directory.path().join(".bun/bin");
+        let paths = search_paths("linux", |key| match key {
+            "HOME" => Some(directory.path().as_os_str().into()),
+            "PATH" => Some(env::join_paths([&bin, &bin]).unwrap()),
+            "PNPM_HOME" => Some("".into()),
+            _ => None,
+        });
+        assert_eq!(paths.first(), Some(&bin));
+        assert_eq!(paths.iter().filter(|path| **path == bin).count(), 1);
+        assert!(paths.iter().all(|path| !path.as_os_str().is_empty()));
+    }
+
+    #[test]
+    fn nvm_gui_fallback_prefers_the_configured_default_then_newer_versions() {
+        let directory = tempfile::tempdir().unwrap();
+        let nvm = directory.path().join(".nvm");
+        for version in ["v9.0.0", "v22.1.0", "v24.2.0"] {
+            std::fs::create_dir_all(nvm.join("versions/node").join(version).join("bin")).unwrap();
+        }
+        std::fs::create_dir(nvm.join("alias")).unwrap();
+        std::fs::write(nvm.join("alias/default"), "22").unwrap();
+        let paths = search_paths("linux", |key| {
+            (key == "HOME").then(|| directory.path().as_os_str().into())
+        });
+        let versions = paths
+            .iter()
+            .filter(|path| path.starts_with(nvm.join("versions")))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            versions,
+            vec![
+                &nvm.join("versions/node/v22.1.0/bin"),
+                &nvm.join("versions/node/v24.2.0/bin"),
+                &nvm.join("versions/node/v9.0.0/bin")
+            ]
         );
     }
 

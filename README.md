@@ -5,7 +5,7 @@ Nexus Agent 是一个面向 Linux、macOS 和 Windows 的本地桌面应用，�
 ## 当前能力
 
 - 选择本地项目并记录最近项目。
-- 启动时自动探测 Claude Code、Codex CLI 与 OMP 的可执行文件、版本和登录状态，仍可手动覆盖路径。
+- 启动时自动探测 Claude Code、Codex CLI 与 OMP 的可执行文件、版本和登录状态；设置页可扫描安装来源、安装和更新，仍可手动覆盖路径。
 - 通过 Codex 本地 `app-server` 只读浏览 CLI、Desktop 及已归档的原有会话。
 - 管理多个 Provider Profile，在任务输入区快捷切换 API Key、Base URL 和默认模型。
 - 为 Claude Code 选择 `默认 / Sonnet / Opus / Haiku` 模型；Codex 与 OMP 可使用 CLI 默认模型或当前 Profile 的模型。
@@ -99,6 +99,22 @@ Desktop 默认以独立子进程运行内置 Runner，确保两者始终使用�
 | Windows | `%LOCALAPPDATA%/Nexus Agent/nexus.db`，缺省时使用 `%USERPROFILE%/AppData/Local/Nexus Agent/nexus.db` |
 
 Windows 的程序探测支持 `PATHEXT` 中的 `.exe`、`.com`、`.bat` 和 `.cmd`，包括 npm 安装生成的命令入口。
+
+在 **设置 → 执行引擎 → Harness 管理** 中，可以同时查看三个 Harness 的当前版本、实际路径和安装来源，点击「重新扫描」刷新。未安装时从「安装」菜单选择本机可用的安装器；已安装时，「更新」沿用拥有该可执行文件的安装器。执行前显示具体命令，也可复制更新命令。
+
+| 安装来源 | 安装与更新方式 |
+| --- | --- |
+| 官方安装器 | Claude Code 使用 `claude update`；Codex 重跑官方安装器并保留安装目录；OMP 使用 `omp update`，首次安装固定使用官方二进制模式 |
+| npm / pnpm / Yarn Classic / Bun / Vite+ (`vp`) | 使用对应的全局包管理命令；npm 固定原 prefix，Bun、Yarn、Vite+ 保留各自的安装目录；pnpm 按其查询出的全局目录识别安装 |
+| Homebrew | 区分 Formula / Cask，并校验 Homebrew 前缀；支持 OMP 的 `can1357/tap/omp` |
+| WinGet / Scoop / Volta | 识别已有安装并通过原管理器更新；WinGet 也可用于首次安装 Claude Code / Codex |
+| Nix / mise / asdf / Linux 系统包 / 应用内置 / 自定义来源 | 显示可检测的版本、路径和来源，通过原配置、终端或安装文档完成更新 |
+
+扫描优先遵循 `PATH`，同时查找官方安装目录、Node 版本管理器及全局包管理器目录，包括自定义 `VP_HOME`、`BUN_INSTALL`、`PNPM_HOME`。Windows 优先选择可执行扩展名，避免误运行 npm 的 Unix 同名脚本。包管理器发现的有效入口若不在 `PATH` 中，会保存到已有可执行路径设置；手动指定但不存在的路径需先修正或恢复命令名。解析来源时同时检查入口和真实路径：Vite+ 的代理入口按 `vp` 处理，Homebrew Node 下的 npm 全局包仍按 npm 更新，共用 `bin` 目录不会被当作安装来源的证据。
+
+安装和更新在后台执行，任务运行期间禁用，完成后重新检测版本及运行环境。版本输出无效、命令失败或超时会显示诊断，可取消或重试；取消、超时和关闭应用时清理安装进程树。不会在启动或扫描时自动安装、更新，也不会为来源不明的文件猜测更新命令。当前页面展示正在使用的版本，不主动查询远端最新版本。
+
+来源判定参考 [t3code 的维护逻辑](https://github.com/pingdotgg/t3code/blob/main/apps/server/src/provider/providerMaintenance.ts)，安装命令依据 [Claude Code](https://code.claude.com/docs/en/setup)、[Codex CLI](https://developers.openai.com/codex/cli/)、[OMP](https://github.com/can1357/oh-my-pi#install) 和 [Vite+ 全局包管理](https://viteplus.dev/guide/install)说明。
 
 应用内可切换 Harness 并修改各自的可执行文件路径。Claude 模型与通用思考层级会持久化：Claude 分别转换为 `--model` 与 `--effort` 参数，Codex 通过 `model_reasoning_effort` 配置覆盖思考层级，OMP 使用 `--thinking`；OMP 不支持 `Max`，因此会映射为其最高层级 `xhigh`。三个 Harness 的 Prompt 都通过子进程 stdin 传递，不会出现在进程参数中。
 

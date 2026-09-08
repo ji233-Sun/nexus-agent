@@ -1,3 +1,4 @@
+pub(crate) mod harness_installation;
 pub(crate) mod history;
 pub(crate) mod tools;
 pub(crate) mod updates;
@@ -202,6 +203,7 @@ pub(crate) struct AppModel {
     pub(crate) title_generation: TitleGenerationSettings,
     pub(crate) title_model_catalog: ModelCatalogState,
     pub(crate) updates: updates::UpdateModel,
+    pub(crate) harness_manager: harness_installation::HarnessManager,
     pub(crate) projects: Vec<Project>,
     pub(crate) selected_project: Option<Project>,
     pub(crate) tasks: Vec<TaskSummary>,
@@ -269,6 +271,7 @@ impl AppModel {
             .is_some_and(|profile| profile.credential_configured);
         self.selected_project.is_some()
             && self.active_run.is_none()
+            && self.harness_manager.operating.is_none()
             && self
                 .selected_probe()
                 .is_some_and(|probe| probe.available && (probe.authenticated || profile_ready))

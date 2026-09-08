@@ -105,6 +105,211 @@ pub(crate) fn pending_update(presenter: &mut Presenter) -> std::sync::mpsc::Send
     sender
 }
 
+pub(crate) fn seed_harness_installations(presenter: &mut Presenter) {
+    use crate::model::harness_installation::{
+        HarnessInstallation, InstallMethod, InstallOption, MaintenanceCommand,
+    };
+    for harness in HarnessKind::ALL {
+        let command = MaintenanceCommand {
+            program: "/fake/installer".into(),
+            args: vec!["install".into()],
+            environment: BTreeMap::new(),
+        };
+        let installed = harness != HarnessKind::Codex;
+        presenter.model.harness_manager.installations.insert(
+            harness,
+            HarnessInstallation {
+                configured: harness.default_executable().into(),
+                executable: installed
+                    .then(|| format!("/fake/{}{}", "long-directory/".repeat(12), harness).into()),
+                discovered_from_manager: false,
+                version: installed.then(|| "1.0.0".into()),
+                source: if harness == HarnessKind::Omp {
+                    "自定义 / 未知来源".into()
+                } else {
+                    "Vite+ (vp)".into()
+                },
+                diagnostic: None,
+                update: (harness == HarnessKind::Claude).then(|| command.clone()),
+                install_options: if installed {
+                    vec![]
+                } else {
+                    vec![InstallOption {
+                        method: InstallMethod::VitePlus,
+                        command,
+                    }]
+                },
+            },
+        );
+    }
+}
+
+#[test]
+fn harness_management_guards_running_tasks_stale_settings_and_unowned_installs() {
+    use crate::model::harness_installation::InstallMethod;
+    let (mut presenter, _, _directory) = fixture();
+    seed_harness_installations(&mut presenter);
+    assert!(
+        presenter
+            .harness_maintenance_request(HarnessKind::Claude, None)
+            .is_some()
+    );
+    assert!(
+        presenter
+            .harness_maintenance_request(HarnessKind::Codex, Some(InstallMethod::VitePlus))
+            .is_some()
+    );
+    assert!(
+        presenter
+            .harness_maintenance_request(HarnessKind::Omp, None)
+            .is_none()
+    );
+    presenter.model.harness_manager.busy = true;
+    assert!(
+        presenter
+            .harness_maintenance_request(HarnessKind::Claude, None)
+            .is_none()
+    );
+    presenter.model.harness_manager.operating = Some(HarnessKind::Claude);
+    assert!(!presenter.model.can_submit());
+    assert!(!presenter.submit("must wait for installer", "claude"));
+    presenter.model.harness_manager.busy = false;
+    presenter.model.harness_manager.operating = None;
+    presenter.model.executable = "/changed/claude".into();
+    assert!(
+        presenter
+            .harness_maintenance_request(HarnessKind::Claude, None)
+            .is_none()
+    );
+    presenter.model.executable = "claude".into();
+    assert!(presenter.submit("running task", "claude"));
+    assert!(
+        presenter
+            .harness_maintenance_request(HarnessKind::Codex, Some(InstallMethod::VitePlus))
+            .is_none()
+    );
+}
+
+#[test]
+fn harness_installation_events_refresh_versions_and_probes_without_switching_harnesses() {
+    use crate::infrastructure::harness_installation::{Event as InstallationEvent, Worker};
+    let (mut presenter, runner, _directory) = fixture();
+    seed_harness_installations(&mut presenter);
+    let request = presenter
+        .harness_maintenance_request(HarnessKind::Claude, None)
+        .unwrap();
+    presenter.select_harness(HarnessKind::Omp, "claude");
+    let selected = presenter.model.selected_harness;
+    let executable = presenter.model.executable.clone();
+    let project = presenter.model.selected_project.as_ref().unwrap().id;
+    for failed in [false, true] {
+        let (send, worker) = Worker::test_channel();
+        presenter.installation_worker = Some(worker);
+        presenter.model.harness_manager.busy = true;
+        presenter.model.harness_manager.operating = Some(HarnessKind::Claude);
+        let mut installation =
+            presenter.model.harness_manager.installations[&HarnessKind::Claude].clone();
+        installation.version = Some("2.0.0".into());
+        send.send(InstallationEvent::Scanned(
+            HarnessKind::Claude,
+            installation,
+        ))
+        .unwrap();
+        send.send(InstallationEvent::Finished {
+            request: Some(request.clone()),
+            result: if failed { Err("失败".into()) } else { Ok(()) },
+        })
+        .unwrap();
+        assert!(presenter.drain_installation_events());
+        assert!(!presenter.model.harness_manager.busy);
+        assert!(presenter.model.harness_manager.operating.is_none());
+        assert_eq!(
+            presenter.model.harness_manager.installations[&HarnessKind::Claude]
+                .version
+                .as_deref(),
+            Some("2.0.0")
+        );
+        assert_eq!(presenter.model.selected_harness, selected);
+        assert_eq!(presenter.model.executable, executable);
+        assert_eq!(
+            presenter.model.selected_project.as_ref().unwrap().id,
+            project
+        );
+        assert!(runner.0.borrow().commands.iter().any(|command| matches!(&command.command, Command::HarnessProbe { harness: HarnessKind::Claude, executable } if executable == "claude")));
+        assert!(!presenter.drain_installation_events());
+    }
+}
+
+#[test]
+fn harness_scan_ignores_stale_paths_and_recovers_from_disconnected_workers() {
+    use crate::infrastructure::harness_installation::{Event as InstallationEvent, Worker};
+    let (mut presenter, _, _directory) = fixture();
+    seed_harness_installations(&mut presenter);
+    let mut stale = presenter.model.harness_manager.installations[&HarnessKind::Claude].clone();
+    stale.configured = "old-path".into();
+    stale.version = Some("obsolete".into());
+    let (send, worker) = Worker::test_channel();
+    presenter.installation_worker = Some(worker);
+    presenter.model.harness_manager.busy = true;
+    send.send(InstallationEvent::Scanned(HarnessKind::Claude, stale))
+        .unwrap();
+    drop(send);
+    assert!(presenter.drain_installation_events());
+    assert!(!presenter.model.harness_manager.busy);
+    assert!(presenter.installation_worker.is_none());
+    assert_eq!(
+        presenter.model.harness_manager.installations[&HarnessKind::Claude]
+            .version
+            .as_deref(),
+        Some("1.0.0")
+    );
+    assert!(
+        presenter
+            .model
+            .harness_manager
+            .message
+            .as_ref()
+            .unwrap()
+            .render(Language::Chinese)
+            .contains("中断")
+    );
+}
+
+#[test]
+fn harness_scan_adopts_a_verified_manager_path_and_reprobes_it() {
+    use crate::infrastructure::harness_installation::{Event as InstallationEvent, Worker};
+    let (mut presenter, runner, directory) = fixture();
+    seed_harness_installations(&mut presenter);
+    let mut installation =
+        presenter.model.harness_manager.installations[&HarnessKind::Claude].clone();
+    let discovered = directory.path().join("custom global/bin/claude");
+    installation.executable = Some(discovered.clone());
+    installation.discovered_from_manager = true;
+    let (send, worker) = Worker::test_channel();
+    presenter.installation_worker = Some(worker);
+    send.send(InstallationEvent::Scanned(
+        HarnessKind::Claude,
+        installation,
+    ))
+    .unwrap();
+    send.send(InstallationEvent::Finished {
+        request: None,
+        result: Ok(()),
+    })
+    .unwrap();
+    assert!(presenter.drain_installation_events());
+    assert_eq!(presenter.model.executable, discovered.display().to_string());
+    assert_eq!(
+        presenter
+            .storage
+            .setting("claude_executable")
+            .unwrap()
+            .as_deref(),
+        Some(discovered.to_str().unwrap())
+    );
+    assert!(runner.0.borrow().commands.iter().any(|command| matches!(&command.command, Command::HarnessProbe { harness: HarnessKind::Claude, executable } if executable == discovered.to_str().unwrap())));
+}
+
 #[test]
 fn update_preferences_restore_and_invalid_values_follow_the_installed_channel() {
     let directory = tempfile::tempdir().unwrap();

@@ -10,3 +10,6 @@ pub async fn run() -> anyhow::Result<()> {
     )
     .await
 }
+pub use infrastructure::process_tree::{
+    configure as configure_child_process, terminate as terminate_child_process,
+};
