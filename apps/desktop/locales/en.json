@@ -433,8 +433,6 @@
   "Worktree": "Worktree",
   "重试任务": "Retry task",
   "目录不可用；历史仍可阅读，请新建任务": "Directory unavailable; history is readable. Start a new task.",
-  "首次发送时创建目录；依赖和 .env 不会自动复制。": "The directory is created on first send. Dependencies and .env are not copied.",
-  "当前目录有未提交修改，这些修改不会带入新任务。": "This checkout has uncommitted changes. They will not be included in the new task.",
   "工作区模式": "Workspace mode",
   "选择来源分支": "Select source branch",
   "来源分支": "Source branch",

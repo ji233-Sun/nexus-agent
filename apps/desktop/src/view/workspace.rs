@@ -23,7 +23,20 @@ impl NexusView {
                 .small()
                 .ghost()
                 .h(px(COMPACT_CONTROL_HEIGHT))
-                .label(locale.text(match draft.kind {
+                .child(
+                    gpui::svg()
+                        .data(match draft.kind {
+                            WorkspaceKind::Local => {
+                                include_bytes!("../../assets/icons/monitor.svg").as_slice()
+                            }
+                            WorkspaceKind::Worktree => {
+                                include_bytes!("../../assets/icons/git-fork.svg").as_slice()
+                            }
+                        })
+                        .size(px(14.))
+                        .flex_none(),
+                )
+                .child(locale.text(match draft.kind {
                     WorkspaceKind::Local => "本地",
                     WorkspaceKind::Worktree => "Worktree",
                 }))
@@ -108,6 +121,12 @@ impl NexusView {
                 .ghost()
                 .h(px(COMPACT_CONTROL_HEIGHT))
                 .max_w(px(200.))
+                .child(
+                    gpui::svg()
+                        .data(include_bytes!("../../assets/icons/git-branch.svg").as_slice())
+                        .size(px(14.))
+                        .flex_none(),
+                )
                 .child(div().min_w_0().truncate().child(if draft.base.is_empty() {
                     locale.text("选择来源分支").to_owned()
                 } else {
@@ -173,7 +192,7 @@ impl NexusView {
         row
     }
 
-    pub(super) fn render_workspace_hints(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_workspace_hints(&self, _cx: &mut Context<Self>) -> impl IntoElement {
         let model = self.presenter.model();
         let locale = model.language;
         let creating =
@@ -182,36 +201,22 @@ impl NexusView {
             .selected_workspace
             .as_ref()
             .is_some_and(|workspace| workspace.status != WorkspaceStatus::Ready);
-        let mut hints = div();
+        let hints = div();
         if model.selected_project.is_none()
             || model.selected_codex_thread.is_some()
-            || (!creating && !unavailable)
+            || creating
+            || !unavailable
         {
             return hints;
         }
-        hints = hints
+        hints
             .w_full()
             .max_w(px(CONTENT_WIDTH))
             .mx_auto()
             .mb_2()
             .px_3()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .text_size(px(12.));
-        if creating {
-            hints = hints.child(locale.text("首次发送时创建目录；依赖和 .env 不会自动复制。"));
-            if model.project_dirty {
-                hints = hints.child(
-                    div()
-                        .text_color(rgb(palette(cx).warning))
-                        .child(locale.text("当前目录有未提交修改，这些修改不会带入新任务。")),
-                );
-            }
-        } else if unavailable {
-            hints = hints.child(locale.text("目录不可用；历史仍可阅读，请新建任务"));
-        }
-        hints
+            .text_size(px(12.))
+            .child(locale.text("目录不可用；历史仍可阅读，请新建任务"))
     }
 
     pub(super) fn open_workspace_review(
