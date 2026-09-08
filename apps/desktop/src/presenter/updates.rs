@@ -51,13 +51,66 @@ impl Presenter {
         if self.update_events.is_some() || self.model.updates.state.is_busy() {
             return;
         }
-        match updates::spawn(self.model.updates.channel) {
+        match updates::spawn_check(self.model.updates.channel) {
             Ok(events) => {
                 self.update_events = Some(events);
                 self.model.updates.state = UpdateState::Checking;
             }
             Err(error) => self.model.updates.state = updates::failure(error),
         }
+    }
+
+    pub(crate) fn download_update(&mut self) {
+        let UpdateState::Available(package) = &self.model.updates.state else {
+            return;
+        };
+        if self.update_events.is_some() {
+            return;
+        }
+        let package = package.clone();
+        match updates::spawn_download(package.clone(), self.model.updates.channel) {
+            Ok(events) => {
+                self.update_events = Some(events);
+                self.model.updates.state = UpdateState::Downloading {
+                    package,
+                    received: 0,
+                };
+            }
+            Err(error) => self.model.updates.state = updates::failure(error),
+        }
+    }
+
+    pub(crate) fn install_update_when_idle(&mut self) -> bool {
+        if self.update_events.is_some()
+            || self.model.active_run.is_some()
+            || self.model.harness_manager.busy
+        {
+            return false;
+        }
+        let UpdateState::Ready { package, path } = &self.model.updates.state else {
+            return false;
+        };
+        let package = package.clone();
+        match updates::spawn_install(package.clone(), path.clone()) {
+            Ok(events) => {
+                self.update_events = Some(events);
+                self.model.updates.state = UpdateState::Installing(package);
+            }
+            Err(error) => self.model.updates.state = updates::failure(error),
+        }
+        true
+    }
+
+    pub(crate) fn shutdown_for_update(&mut self) {
+        // Release the embedded Runner and server before the installer restarts the app.
+        self.runner.take();
+        self.remote_control.take();
+        self.codex_history_client.take();
+        self.installation_worker.take();
+    }
+
+    pub(crate) fn report_update_error(&mut self, error: String) {
+        self.model.updates.state = updates::failure(anyhow::anyhow!(error));
     }
 
     pub(crate) fn drain_update_events(&mut self) -> bool {
@@ -70,7 +123,7 @@ impl Presenter {
                 Ok(state) => {
                     self.model.updates.state = state;
                     changed = true;
-                    if !self.model.updates.state.is_busy() {
+                    if !self.model.updates.state.has_worker() {
                         self.update_events = None;
                         return true;
                     }

@@ -280,6 +280,10 @@ impl NexusView {
             ApprovalLayer
         });
         let settings_pane = cx.new(|cx| WorkspacePane::new(owner, PaneKind::Settings, cx));
+        let settings_open = matches!(
+            presenter.model().updates.state,
+            crate::model::updates::UpdateState::Failed(_)
+        );
         let mut view = Self {
             presenter,
             prompt_input,
@@ -309,7 +313,7 @@ impl NexusView {
             collapsed_projects: HashSet::new(),
             codex_history_open: false,
             codex_history_visible_count: sidebar::HISTORY_PAGE_SIZE,
-            settings_open: false,
+            settings_open,
             settings_section: SettingsSection::General,
             reduced_motion: false,
             editing_provider_profile,
@@ -598,6 +602,16 @@ impl NexusView {
         if self.presenter.refresh_run_elapsed(now) {
             // Clock ticks are not new output: preserve scroll and skip remote broadcasts.
             self.timeline_pane.update(cx, |_, cx| cx.notify());
+        }
+        if self.presenter.install_update_when_idle() {
+            cx.notify();
+        }
+        if matches!(
+            self.presenter.model().updates.state,
+            crate::model::updates::UpdateState::Restarting(_)
+        ) {
+            self.presenter.shutdown_for_update();
+            cx.quit();
         }
     }
 

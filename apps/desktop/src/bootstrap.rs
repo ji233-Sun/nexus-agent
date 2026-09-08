@@ -1,5 +1,5 @@
 use crate::{
-    infrastructure::{runner_client::RunnerClient, storage::Storage},
+    infrastructure::{runner_client::RunnerClient, storage::Storage, update_installation},
     presenter::{Presenter, RunnerPort},
     view::{NexusView, theme},
 };
@@ -12,7 +12,7 @@ use std::path::Path;
 
 pub(crate) const RUNNER_MODE_ARG: &str = "--nexus-runner";
 
-fn create_presenter() -> Presenter {
+fn create_presenter(update_error: Option<String>) -> Presenter {
     let (storage, storage_error) = match Storage::open_default() {
         Ok(storage) => (storage, None),
         Err(error) => (
@@ -26,30 +26,41 @@ fn create_presenter() -> Presenter {
     let runner = RunnerClient::spawn().map(|runner| Box::new(runner) as Box<dyn RunnerPort>);
     let mut presenter = Presenter::new(storage, runner, storage_error);
     presenter.scan_harness_installations();
-    if presenter.model().updates.check_on_startup {
+    if let Some(error) = update_error {
+        presenter.report_update_error(error);
+    } else if presenter.model().updates.check_on_startup {
         presenter.check_for_updates();
     }
     presenter
 }
 
 pub(crate) fn run() -> anyhow::Result<()> {
-    if std::env::args_os()
-        .nth(1)
+    let mut arguments = std::env::args_os().skip(1);
+    let argument = arguments.next();
+    if argument
+        .as_ref()
+        .is_some_and(|arg| arg == update_installation::APPLY_UPDATE_ARG)
+    {
+        return update_installation::apply_from_args(arguments);
+    }
+    if argument
+        .as_ref()
         .is_some_and(|arg| arg == "--version" || arg == "-V")
     {
         println!("{}", crate::model::updates::installed_tag());
         return Ok(());
     }
-    if std::env::args_os()
-        .nth(1)
-        .is_some_and(|arg| arg == RUNNER_MODE_ARG)
-    {
+    if argument.as_ref().is_some_and(|arg| arg == RUNNER_MODE_ARG) {
         return nexus_runner::run();
     }
+    let update_error = argument
+        .filter(|arg| arg == update_installation::UPDATE_ERROR_ARG)
+        .and_then(|_| arguments.next())
+        .map(|error| error.to_string_lossy().into_owned());
 
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
-        .run(|cx: &mut App| {
+        .run(move |cx: &mut App| {
             gpui_kit::init(cx);
             theme::configure_theme(cx);
             let window_background = cx.global::<theme::ResolvedAppearance>().window_background();
@@ -68,7 +79,7 @@ pub(crate) fn run() -> anyhow::Result<()> {
                     ..Default::default()
                 };
                 cx.open_window(options, |window, cx| {
-                    let presenter = create_presenter();
+                    let presenter = create_presenter(update_error);
                     let view = cx.new(|cx| NexusView::new(presenter, window, cx));
                     cx.new(|cx| Root::new(view, window, cx).bg(rgba(0x00000000)))
                 })?;

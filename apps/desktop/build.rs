@@ -1,4 +1,4 @@
-use std::{env, process::Command};
+use std::{env, path::Path, process::Command};
 
 fn git(arguments: &[&str]) -> Option<String> {
     let output = Command::new("git")
@@ -26,7 +26,9 @@ fn main() {
     .into_iter()
     .flatten()
     {
-        if let Some(path) = git(&["rev-parse", "--git-path", &reference]) {
+        if let Some(path) = git(&["rev-parse", "--git-path", &reference])
+            && Path::new(&path).exists()
+        {
             println!("cargo::rerun-if-changed={path}");
         }
     }
