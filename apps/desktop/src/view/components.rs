@@ -4,9 +4,10 @@ use gpui_kit::{
     base::{PopoverState, Popup, Presence, Transition, transition},
     component::menu::PopupMenu,
 };
+use std::sync::{Arc, LazyLock};
 
-pub(super) fn harness_icon(harness: HarnessKind, colors: Palette, size: f32) -> gpui::Svg {
-    // Brand SVGs from LobeHub Icons; see assets/harness/LICENSE.
+pub(super) fn harness_icon(harness: HarnessKind, colors: Palette, size: f32) -> AnyElement {
+    // Claude/Codex: assets/harness/LICENSE; OMP: assets/harness/OMP_LICENSE.
     let (icon, color): (&[u8], _) = match harness {
         HarnessKind::Claude => (
             include_bytes!("../../assets/harness/claude.svg"),
@@ -16,16 +17,26 @@ pub(super) fn harness_icon(harness: HarnessKind, colors: Palette, size: f32) -> 
             include_bytes!("../../assets/harness/codex.svg"),
             rgb(colors.text),
         ),
-        HarnessKind::Omp => (
-            include_bytes!("../../assets/harness/omp.svg"),
-            rgb(0xf97316),
-        ),
+        HarnessKind::Omp => {
+            static ICON: LazyLock<Arc<gpui::Image>> = LazyLock::new(|| {
+                Arc::new(gpui::Image::from_bytes(
+                    gpui::ImageFormat::Svg,
+                    include_bytes!("../../assets/harness/omp.svg").to_vec(),
+                ))
+            });
+            // GPUI's SVG element uses an alpha mask; images preserve the brand gradient.
+            return gpui::img(ICON.clone())
+                .size(px(size))
+                .flex_none()
+                .into_any_element();
+        }
     };
     gpui::svg()
         .data(icon)
         .size(px(size))
         .flex_none()
         .text_color(color)
+        .into_any_element()
 }
 
 fn control_transition(reduced_motion: bool) -> Transition {

@@ -148,7 +148,7 @@ Windows Release 的 GPUI shader 编译还需要 Windows SDK 的 `fxc.exe`，可�
 
 ### Nightly
 
-默认分支 main 每 4 小时检查一次（`0 */4 * * *`）。同一提交已发布过 Nightly 时跳过构建；新提交需要通过完整检查与打包流程才会发布。推送 main 只触发 CI，Nightly 等待定时运行；也可在 **Actions → Release → Run workflow** 中选择分支立即触发。
+Nightly 仅在 **Actions → Release → Run workflow** 中选择分支手动触发，不再定时检查或发版。同一提交已发布过 Nightly 时跳过构建；新提交需要通过完整检查与打包流程才会发布。推送 main 只触发 CI，不触发 Nightly。
 
 标签与包名使用 `nightly-YYYY-MM-DD-<Unix 秒时间戳>-<12 位提交 SHA>`，日期按 UTC 计算，日期与时间戳都取自该提交的提交者时间。同一提交重跑保持相同标签，标签指向完整构建 SHA，不同提交的发布独立执行。
 

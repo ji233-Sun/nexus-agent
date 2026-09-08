@@ -1,8 +1,6 @@
 name: Release
 
 on:
-  schedule:
-    - cron: "0 */4 * * *"
   push:
     tags: ["v*"]
   workflow_dispatch:
