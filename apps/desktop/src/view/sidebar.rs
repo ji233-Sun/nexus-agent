@@ -1579,9 +1579,16 @@ mod tests {
             let content = cx.debug_bounds("settings-content-appearance").unwrap();
             let settings_scroll = view.read_with(cx, |view, _| view.settings_scroll.clone());
             assert!(navigation.right() <= settings_scroll.bounds().left());
-            assert!(content.left() >= settings_scroll.bounds().left());
+            assert_eq!(
+                content.left(),
+                cx.debug_bounds("settings-breadcrumb-label").unwrap().left()
+            );
             assert!(content.right() <= page.right());
             assert_eq!(settings_scroll.max_offset().x, px(0.));
+            assert_eq!(
+                cx.debug_bounds("appearance-glass").unwrap().left(),
+                cx.debug_bounds("reduce-motion").unwrap().left()
+            );
             for (selector, theme) in [
                 ("appearance-theme-dark", ThemePreference::Dark),
                 ("appearance-theme-light", ThemePreference::Light),
@@ -1731,6 +1738,13 @@ mod tests {
                         .update(cx, |input, cx| input.focus(window, cx));
                 }
             });
+            if section == SettingsSection::Providers {
+                cx.run_until_parked();
+                let harness = cx.debug_bounds("settings-provider-harness").unwrap();
+                let profile = cx.debug_bounds("settings-provider-profile").unwrap();
+                assert_eq!(harness.left(), profile.left());
+                assert_eq!(harness.size, profile.size);
+            }
             if section == SettingsSection::General {
                 for (selector, language, prompt_placeholder, group_title) in [
                     (

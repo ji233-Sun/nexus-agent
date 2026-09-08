@@ -1065,14 +1065,23 @@ impl NexusView {
         let button_id = id;
         Button::new(id)
             .icon(IconName::Bot)
-            .label(selected.to_string())
             .disabled(model.active_run.is_some())
             .small()
             .when(compact, |button| {
-                button.ghost().h(px(COMPACT_CONTROL_HEIGHT)).max_w(px(180.))
+                button
+                    .ghost()
+                    .h(px(COMPACT_CONTROL_HEIGHT))
+                    .max_w(px(180.))
+                    .label(selected.to_string())
             })
             .when(!compact, |button| {
-                button.outline().w_full().h(px(CONTROL_HEIGHT))
+                button
+                    .debug_selector(move || id.into())
+                    .outline()
+                    .w_full()
+                    .h(px(CONTROL_HEIGHT))
+                    .accessibility_label(selected.to_string())
+                    .child(settings::control_label(selected.to_string()))
             })
             .map(|button| {
                 AnimatedDropdown::new(button_id, button, self.reduced_motion, move |menu, _, _| {
@@ -1119,14 +1128,23 @@ impl NexusView {
         let button_id = id;
         Button::new(button_id)
             .icon(IconName::Globe)
-            .label(selected_name)
             .disabled(model.active_run.is_some())
             .small()
             .when(compact, |button| {
-                button.ghost().h(px(COMPACT_CONTROL_HEIGHT)).max_w(px(180.))
+                button
+                    .ghost()
+                    .h(px(COMPACT_CONTROL_HEIGHT))
+                    .max_w(px(180.))
+                    .label(selected_name.clone())
             })
             .when(!compact, |button| {
-                button.outline().w_full().h(px(CONTROL_HEIGHT))
+                button
+                    .debug_selector(move || id.into())
+                    .outline()
+                    .w_full()
+                    .h(px(CONTROL_HEIGHT))
+                    .accessibility_label(selected_name.clone())
+                    .child(settings::control_label(selected_name))
             })
             .map(|button| {
                 AnimatedDropdown::new(button_id, button, self.reduced_motion, move |menu, _, _| {
@@ -2434,6 +2452,27 @@ mod catalog_model_tests {
                 cx.notify();
             });
             cx.run_until_parked();
+            let content = cx.debug_bounds("settings-content-general").unwrap();
+            let breadcrumb = cx.debug_bounds("settings-breadcrumb-label").unwrap();
+            assert_eq!(content.left(), breadcrumb.left());
+            let harness = cx.debug_bounds("title-harness").unwrap();
+            let model = cx.debug_bounds("title-model").unwrap();
+            assert_eq!(model.left(), harness.left());
+            assert_eq!(model.size, harness.size);
+            for (first, second) in [
+                ("language-zh-CN", "language-en"),
+                ("update-channel-release", "update-channel-nightly"),
+            ] {
+                let first = cx.debug_bounds(first).unwrap();
+                let second = cx.debug_bounds(second).unwrap();
+                assert_eq!(first.left(), harness.left());
+                assert_eq!(second.right(), harness.right());
+                assert_eq!(first.size, second.size);
+            }
+            assert_eq!(
+                cx.debug_bounds("update-check-on-startup").unwrap().left(),
+                harness.left()
+            );
             click_debug(cx, "title-harness");
             cx.run_until_parked();
             cx.simulate_keystrokes("down down down enter");
@@ -2492,7 +2531,7 @@ mod catalog_model_tests {
             });
             let trigger = cx.debug_bounds("title-model").unwrap();
             assert!(trigger.right() <= px(width));
-            assert!(trigger.size.width <= px(320.));
+            assert_eq!(trigger.size, harness.size);
             click_debug(cx, "title-model");
             cx.run_until_parked();
             cx.simulate_keystrokes("escape");
