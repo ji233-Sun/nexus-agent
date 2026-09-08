@@ -3,9 +3,7 @@ use std::path::PathBuf;
 use crate::i18n::{Language, LocalizedText};
 
 pub(crate) fn installed_tag() -> &'static str {
-    option_env!("NEXUS_RELEASE_TAG")
-        .filter(|tag| !tag.is_empty())
-        .unwrap_or(concat!("v", env!("CARGO_PKG_VERSION")))
+    env!("NEXUS_RELEASE_TAG")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

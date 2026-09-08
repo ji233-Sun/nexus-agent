@@ -35,6 +35,13 @@ fn create_presenter() -> Presenter {
 pub(crate) fn run() -> anyhow::Result<()> {
     if std::env::args_os()
         .nth(1)
+        .is_some_and(|arg| arg == "--version" || arg == "-V")
+    {
+        println!("{}", crate::model::updates::installed_tag());
+        return Ok(());
+    }
+    if std::env::args_os()
+        .nth(1)
         .is_some_and(|arg| arg == RUNNER_MODE_ARG)
     {
         return nexus_runner::run();

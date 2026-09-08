@@ -6,6 +6,19 @@ use std::{
 use nexus_protocol::{Command, CommandEnvelope, Event, EventEnvelope, PROTOCOL_VERSION};
 
 #[test]
+fn desktop_reports_the_compiled_build_tag_without_starting_the_app() {
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_nexus-desktop"))
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        env!("NEXUS_RELEASE_TAG")
+    );
+}
+
+#[test]
 fn desktop_serves_the_current_runner_protocol() {
     let mut child = ProcessCommand::new(env!("CARGO_BIN_EXE_nexus-desktop"))
         .arg("--nexus-runner")
