@@ -456,6 +456,8 @@ pub(crate) mod tests {
         git(&path, &["init", "-b", "main"]).unwrap();
         git(&path, &["config", "user.name", "Nexus Test"]).unwrap();
         git(&path, &["config", "user.email", "nexus@example.invalid"]).unwrap();
+        // Fixture bytes must not depend on the host's Git line-ending policy.
+        git(&path, &["config", "core.autocrlf", "false"]).unwrap();
         std::fs::write(path.join("tracked.txt"), "base\n").unwrap();
         git(&path, &["add", "."]).unwrap();
         git(&path, &["commit", "-m", "base"]).unwrap();
