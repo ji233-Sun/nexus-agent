@@ -92,6 +92,7 @@ impl ToolCategory {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct ToolDetail {
     pub(crate) title: String,
     pub(crate) text: String,
