@@ -1,282 +1,96 @@
-# Nexus Agent ADE
+<p align="center">
+  <img src="docs/assets/readme-hero.svg" width="1200" alt="Nexus Agent — 统一管理你的本地编码 Agent，支持 Claude Code、Codex CLI 和 Oh My Pi。">
+</p>
 
-Nexus Agent 是一个面向 Linux、macOS 和 Windows 的本地桌面应用，用统一时间线驱动本机已安装的 Claude Code、Codex CLI 或 Oh My Pi（OMP）。应用内显示当前构建的完整发布标签，与对应的 GitHub Release 和安装包一致。
+<p align="center">
+  <a href="https://github.com/ji233-Sun/nexus-agent/actions/workflows/ci.yml"><img src="https://github.com/ji233-Sun/nexus-agent/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/ji233-Sun/nexus-agent/releases"><img src="https://img.shields.io/badge/channel-Alpha%20%2F%20Nightly-477AF5?style=flat-square" alt="Alpha / Nightly"></a>
+  <img src="https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-303030?style=flat-square" alt="macOS / Linux / Windows">
+</p>
 
-## 当前能力
+<p align="center">
+  <a href="https://github.com/ji233-Sun/nexus-agent/releases"><strong>下载应用</strong></a> ·
+  <a href="#快速开始">快速开始</a> ·
+  <a href="docs/usage.md">使用指南</a> ·
+  <a href="docs/development.md">参与开发</a>
+</p>
 
-- 选择本地项目并记录最近项目。
-- 启动时自动探测 Claude Code、Codex CLI 与 OMP 的可执行文件、版本和登录状态；设置页可扫描安装来源、安装和更新，仍可手动覆盖路径。
-- 通过 Codex 本地 `app-server` 只读浏览 CLI、Desktop 及已归档的原有会话。
-- 管理多个 Provider Profile，在任务输入区快捷切换 API Key、Base URL 和默认模型。
-- 为 Claude Code 选择 `默认 / Sonnet / Opus / Haiku` 模型；Codex 与 OMP 可使用 CLI 默认模型或当前 Profile 的模型。
-- 配置 `Low / Medium / High / XHigh / Max` 思考层级。
-- 为每轮消息选择并记忆权限模式（请求授权 / 自动编辑 / YOLO），在桌面弹窗中处理运行期间的授权请求。
-- 通过 JSON Lines Runner 启动 Harness，显示文本、工具调用、状态和错误。
-- 用当前 Harness 异步生成简洁任务标题；生成失败时保留首条 Prompt 的本地回退标题。
-- 取消和关闭时清理 Harness 进程树：Unix 先中断再超时终止，Windows 使用系统 `taskkill /T /F`。
-- SQLite 持久化 Nexus 发起的项目、任务、Run 和最终消息；启动时将遗留运行标为 `Interrupted`。
-- 当前任务中的后续消息追加为新一轮 Run，并复用同一个 Harness Session；重新打开任务后仍可继续对话，点击“新建任务”才开始独立会话。
-- 运行中发送的消息默认排队，每轮成功结束后按顺序发送一条；输入区可查看和移除排队消息。切换聊天后后台任务仍会继续发送自己的队列；停止或运行失败后暂停自动发送，可返回原任务手动继续。队列属于原任务，仅保留在当前应用内，退出应用后不恢复；归档时保留，永久删除对话时清理。
-- 点击排队消息上的 **Steer**，在下一次工具调用结束后介入当前轮次；同批并行工具全部结束后才会发送。收到 Harness 回执后，消息才从队列移入当前对话。如果本轮不再调用工具，消息会优先作为下一轮发送；停止、失败或送达结果未确认时保留消息并暂停自动发送。
-- 在本机回环地址提供带令牌鉴权的 Remote Control 服务，并内置 React Web Client，可通过 FRP TCP 转发后远程查看会话、发起任务和取消运行。
-- 新任务可选本地或独立 Worktree，按项目记忆模式；最多两个独立 checkout 并发，任务目录、Session、队列和审批互相隔离。
-- 查看完整任务变更，选择文件提交到任务分支，预览并合入本地分支；支持合并冲突处理、初始化日志和安全清理目录。
+---
 
-输入区的权限选择按 Harness 分别记忆，默认“自动编辑”。每轮发送时保存所选权限；重新打开会话会恢复该会话最后一轮的选择，新建任务使用该 Harness 最近选择的模式。运行中调整权限只影响下一条消息。排队消息各自保留发送时的权限；权限与当前轮次不同的消息需等到下一轮发送，不能通过 Steer 改变当前轮次权限。
+**Nexus Agent** 是一款基于 Rust 与 GPUI 的原生桌面应用。在一个工作区里选择项目、切换本地编码 Agent、跟进工具执行，并继续已有任务的会话。
 
-| 权限模式 | Claude Code | Codex | OMP |
-| --- | --- | --- | --- |
-| 请求授权 | `default` | `read-only` + `on-request` | `always-ask` |
-| 自动编辑 | `acceptEdits` | `workspace-write` + `on-request` | `write` |
-| YOLO | `bypassPermissions` | `danger-full-access` + `never` | `yolo` |
+支持 **Claude Code、Codex CLI 和 Oh My Pi（OMP）**，提供简体中文与 English 界面。
 
-“请求授权”让编辑或受限操作按 CLI 策略请求批准；“自动编辑”允许文件编辑，其余受限操作按需授权。Codex 在工作区沙箱内的命令可以直接执行。YOLO 自动允许操作，Codex 同时关闭自身沙箱；CLI 的强制策略仍然有效。
+## 核心能力
 
-Claude Code 通过 `--print --input-format stream-json --output-format stream-json --replay-user-messages --permission-prompt-tool stdio` 收发消息，并将工具审批请求交给桌面弹窗。允许时保留原始工具输入，拒绝时将拒绝结果返回 CLI；参见[官方权限文档](https://code.claude.com/docs/en/agent-sdk/permissions)。
-
-Codex 通过[官方 App Server 协议](https://learn.chatgpt.com/docs/app-server)运行，使用 `thread/start` / `thread/resume` 和 `turn/start`，Steer 通过带当前轮次 ID 的 `turn/steer` 注入。支持命令执行、文件变更和额外文件系统/网络权限审批；额外权限的批准仅作用于当前轮次。支持非 Git 项目，Prompt 由 stdin 传入。
-
-OMP 通过 `omp --mode rpc --approval-mode <模式>` 运行，Prompt 与 Steer 同样由 stdin 传入，授权使用 RPC 的选择/确认弹窗。Claude Code 与 OMP 的后续轮次均通过 `--resume <SESSION_ID>` 继续原会话。
-
-审批弹窗显示所属任务和操作详情，可允许、拒绝或停止任务。回复只发送给对应运行中的请求；停止、CLI 撤销请求、超时或轮次结束后，旧请求失效。后台标题生成不继承 YOLO：Claude Code / OMP 继续禁用工具，Codex 保留只读沙箱。
-
-三个 Harness 均保存原生 Session，Nexus 在自己的数据库中记录 Session ID、各轮运行状态和消息。旧版本关闭了原生 Session 保存，因此旧任务可能只能浏览历史；缺少 Session ID 时会提示无法续聊。继续对话需使用原任务的 Harness，切换 Harness 请新建任务。
-
-Provider Profile 的名称、Base URL、环境变量名和默认模型保存在 `nexus.db`；API Key 持久化时只保存在系统凭据库（macOS Keychain、Windows Credential Manager 或 Linux Secret Service），不会写入数据库、命令参数、运行记录或 Debug 输出。选中的配置只在单次 Harness 子进程中注入，不修改全局 shell 环境。系统凭据库不可用时 Nexus 会显示错误，不会退回明文存储。配置 `CODEX_API_KEY` 时，Nexus 会在 Codex App Server 内完成仅存于该进程内存的 API Key 登录，不改写 CLI 的持久登录凭据；DeepSeek 等 Provider 可按目标 Harness 要求填写自己的环境变量名。
-
-Codex 原有历史通过 CLI 自带的实验性 `codex app-server` 协议读取，不复制到 Nexus 数据库，也不会被 Nexus 修改。若独立 CLI 无法读取 Desktop 创建的新版分页会话，Nexus 会自动尝试 Desktop 内置的 Codex。Nexus 自己完成或失败的任务继续保存在 `nexus.db` 中。
-
-## 任务 Worktree
-
-在新任务输入区选择「本地 / Worktree」。Git 项目默认本地模式，之后按项目记忆选择；非 Git 项目仅支持本地。Worktree 可在发送前修改基准和新分支名，默认使用已提交的 `HEAD` 与 `feat/nx-<短 ID>`。首次发送时才在应用数据目录的 `worktrees/<项目 ID>/<任务 ID>` 创建目录，并保存具体基准 SHA。未提交修改不会带入，自动标题不会重命名目录或分支。
-
-任务开始后固定目录与 Harness Session，侧栏仍属于原项目，输入区可查看实际分支并复制目录。两个独立 checkout 可以同时运行，同一任务和同一 checkout 串行；切换聊天不会串接消息、队列或审批。重启后沿用任务绑定，缺失或已清理的目录不会回退到原项目目录。
-
-「查看变更」显示相对创建基准的已提交变更、暂存、未暂存和未跟踪文件。选择文件并确认提交后，填写本地目标分支、预览并确认合入。未选中的暂存文件保持原状。合入要求源、目标目录干净且没有活动任务；目标分支若未被 checkout，会在原项目目录切换到该分支。合并按正常 Git 语义执行，冲突文件和目标路径会显示在审查窗口；在目标目录编辑并暂存后刷新、继续，或中止合并。预览后分支或文件发生变化时，需要重新审查。
-
-「管理 Worktree」保留已删除聊天的目录记录。可显式执行初始化命令、查看日志、停止或重试；命令只在所选目录运行，超过 15 分钟会停止，日志保留最近 1 MiB。依赖、构建产物和 `.env` 不会自动复制。缺失目录可显式从保留的任务分支恢复。
-
-清理仅删除 Nexus 创建的目录，保留聊天历史和任务分支。运行中、存在未提交修改、未跟踪或被忽略文件，或提交尚未合入指定本地分支时，会拒绝清理并显示原因。已有的外部 Worktree 使用本地模式，只能解除任务关联，保留全部文件。归档或删除聊天不会自动删除目录；清理后的聊天保持只读，需要新建任务继续工作。
-
-## 环境要求
-
-- Linux（X11 或 Wayland）、macOS 或 Windows（MSVC 工具链）
-- Rust 1.98 或更高版本（GPUI Kit 0.6 使用新版 GPUI）
-- 已安装至少一种 Harness，并已完成 CLI 登录或在 Nexus 中配置对应的 Provider Profile
-
-```bash
-claude --version
-claude auth status --json
-
-codex --version
-codex login status
-
-omp --version
-omp models --json
-```
-
-macOS 构建需要 Xcode 与命令行工具。Windows 构建需要 Visual Studio 的 C++ 桌面开发组件、Windows SDK 和 CMake。Linux 构建依赖可参照 [GPUI/Zed Linux 构建说明](https://zed.dev/docs/development/linux)；Ubuntu/Debian 安装命令为：
-
-```bash
-sudo apt-get install -y clang cmake pkg-config \
-  libfontconfig1-dev libfreetype6-dev libwayland-dev libx11-xcb-dev \
-  libxkbcommon-x11-dev libssl-dev libvulkan1 libglib2.0-dev
-```
-
-Linux 运行界面需要可用的 Vulkan 驱动和桌面会话，目录选择需要 XDG Desktop Portal 及对应桌面后端。单元测试与内置 Runner 测试不需要显示服务或真实 Harness 登录。
-
-## 启动指南
-
-使用 rustup 管理 Rust。仓库的 `rust-toolchain.toml` 固定使用 Rust 1.98.1；在项目目录执行 Cargo 命令时会自动选择该版本，首次运行需要联网下载工具链。此配置不修改其他项目使用的全局默认版本。
-
-```bash
-cargo run -p nexus-desktop
-```
-
-默认开发构建已开启编译优化，保留调试信息和运行时检查，避免未优化的布局与文本渲染拖慢滚动。首次构建依赖会更久，后续仍可增量编译。评估最终发布性能请使用 `cargo run -p nexus-desktop --release --locked`。
-
-可用现有长消息场景对比滚动的 CPU 处理耗时：
-
-```bash
-cargo test -p nexus-desktop --locked scroll_frame_cost -- --ignored --nocapture
-```
-
-该测试模拟触控板输入，报告侧栏和消息区的耗时中位数与 P95；测试平台不执行 GPU 呈现，结果不代表屏幕实际帧率。
-
-Desktop 默认以独立子进程运行内置 Runner，确保两者始终使用相同协议版本。若需要改用外部 Runner，可通过 `NEXUS_RUNNER_PATH` 指定其完整路径。应用数据保存在：
-
-| 系统 | 数据库路径 |
+| 会话与项目 | 配置与控制 |
 | --- | --- |
-| macOS | `~/Library/Application Support/Nexus Agent/nexus.db` |
-| Linux | `$XDG_DATA_HOME/nexus-agent/nexus.db`，默认 `~/.local/share/nexus-agent/nexus.db` |
-| Windows | `%LOCALAPPDATA%/Nexus Agent/nexus.db`，缺省时使用 `%USERPROFILE%/AppData/Local/Nexus Agent/nexus.db` |
+| **统一时间线**<br>把回答、工具调用、执行状态和错误放在同一处，随时查看任务进展。 | **自由选择 Harness**<br>切换 Claude Code、Codex CLI 或 OMP，查看可用模型与思考层级。 |
+| **原生会话续聊**<br>任务绑定原生 Session，重新打开后继续；也可只读浏览 Codex 原有历史。 | **多套服务商配置**<br>管理 API Key、Base URL 和默认模型，密钥保存在系统凭据库。 |
+| **排队与 Steer**<br>运行中补充消息，排队等待下一轮，或在工具调用后介入当前任务。 | **明确的执行权限**<br>选择授权模式，在桌面处理审批；内置 Remote Web 可查看进展和停止运行。 |
+| **Worktree 隔离**<br>为任务创建独立目录，最多两个 checkout 并发，消息、队列与审批分别归属各自任务。 | **本地成果接收**<br>审查完整变更、选择文件提交，再预览并合入本地分支；提供初始化与安全清理。 |
 
-Windows 的程序探测支持 `PATHEXT` 中的 `.exe`、`.com`、`.bat` 和 `.cmd`，包括 npm 安装生成的命令入口。
+## 下载
 
-在 **设置 → 执行引擎 → Harness 管理** 中，可以同时查看三个 Harness 的当前版本、实际路径和安装来源，点击「重新扫描」刷新。未安装时从「安装」菜单选择本机可用的安装器；已安装时，「更新」沿用拥有该可执行文件的安装器。执行前显示具体命令，也可复制更新命令。
+**[前往 GitHub Releases →](https://github.com/ji233-Sun/nexus-agent/releases)**
 
-| 安装来源 | 安装与更新方式 |
-| --- | --- |
-| 官方安装器 | Claude Code 使用 `claude update`；Codex 重跑官方安装器并保留安装目录；OMP 使用 `omp update`，首次安装固定使用官方二进制模式 |
-| npm / pnpm / Yarn Classic / Bun / Vite+ (`vp`) | 使用对应的全局包管理命令；npm 固定原 prefix，Bun、Yarn、Vite+ 保留各自的安装目录；pnpm 按其查询出的全局目录识别安装 |
-| Homebrew | 区分 Formula / Cask，并校验 Homebrew 前缀；支持 OMP 的 `can1357/tap/omp` |
-| WinGet / Scoop / Volta | 识别已有安装并通过原管理器更新；WinGet 也可用于首次安装 Claude Code / Codex |
-| Nix / mise / asdf / Linux 系统包 / 应用内置 / 自定义来源 | 显示可检测的版本、路径和来源，通过原配置、终端或安装文档完成更新 |
+在对应发布版本的 **Assets** 中选择与你的系统和架构匹配的压缩包：
 
-扫描优先遵循 `PATH`，同时查找官方安装目录、Node 版本管理器及全局包管理器目录，包括自定义 `VP_HOME`、`BUN_INSTALL`、`PNPM_HOME`。Windows 优先选择可执行扩展名，避免误运行 npm 的 Unix 同名脚本。包管理器发现的有效入口若不在 `PATH` 中，会保存到已有可执行路径设置；手动指定但不存在的路径需先修正或恢复命令名。解析来源时同时检查入口和真实路径：Vite+ 的代理入口按 `vp` 处理，Homebrew Node 下的 npm 全局包仍按 npm 更新，共用 `bin` 目录不会被当作安装来源的证据。
-
-安装和更新在后台执行，任务运行期间禁用，完成后重新检测版本及运行环境。版本输出无效、命令失败或超时会显示诊断，可取消或重试；取消、超时和关闭应用时清理安装进程树。不会在启动或扫描时自动安装、更新，也不会为来源不明的文件猜测更新命令。当前页面展示正在使用的版本，不主动查询远端最新版本。
-
-来源判定参考 [t3code 的维护逻辑](https://github.com/pingdotgg/t3code/blob/main/apps/server/src/provider/providerMaintenance.ts)，安装命令依据 [Claude Code](https://code.claude.com/docs/en/setup)、[Codex CLI](https://developers.openai.com/codex/cli/)、[OMP](https://github.com/can1357/oh-my-pi#install) 和 [Vite+ 全局包管理](https://viteplus.dev/guide/install)说明。
-
-应用内可切换 Harness 并修改各自的可执行文件路径。Claude 模型与通用思考层级会持久化：Claude 分别转换为 `--model` 与 `--effort` 参数，Codex 通过 `model_reasoning_effort` 配置覆盖思考层级，OMP 使用 `--thinking`；OMP 不支持 `Max`，因此会映射为其最高层级 `xhigh`。三个 Harness 的 Prompt 都通过子进程 stdin 传递，不会出现在进程参数中。
-
-## 下载与发布
-
-[GitHub Releases](https://github.com/ji233-Sun/nexus-agent/releases) 提供以下压缩包，每个文件名都包含版本和目标架构：
-
-| 平台 | 目标架构 | 安装方式 |
+| 平台 | 文件名中的目标架构 | 安装 |
 | --- | --- | --- |
-| macOS Apple Silicon | `aarch64-apple-darwin` | 解压 ZIP，将 `Nexus Agent.app` 移入“应用程序” |
-| macOS Intel | `x86_64-apple-darwin` | 解压 ZIP，将 `Nexus Agent.app` 移入“应用程序” |
-| Linux | `x86_64-unknown-linux-gnu` | 解压 TAR.GZ，运行 `nexus-desktop`；需要上述 GUI 运行依赖 |
-| Windows | `x86_64-pc-windows-msvc` | 解压 ZIP，运行 `nexus-desktop.exe` |
+| macOS · Apple Silicon | `aarch64-apple-darwin` | 解压 ZIP，将 `Nexus Agent.app` 移入「应用程序」 |
+| macOS · Intel | `x86_64-apple-darwin` | 解压 ZIP，将 `Nexus Agent.app` 移入「应用程序」 |
+| Linux · x86_64 | `x86_64-unknown-linux-gnu` | 解压 TAR.GZ，运行 `nexus-desktop`；查看[运行依赖](docs/development.md#环境要求) |
+| Windows · x64 | `x86_64-pc-windows-msvc` | 解压 ZIP，运行 `nexus-desktop.exe` |
 
-Desktop 已内置 Runner，无需单独配置。Release 同时附带 `SHA256SUMS.txt`。macOS 应用只有本地临时签名，没有开发者签名或 Apple 公证；macOS 与 Windows 首次启动时可能需要按系统提示允许运行。
+安装包已内置 Runner。发布页同时提供 `SHA256SUMS.txt` 校验文件。
 
-维护者发布时，先更新根目录 `Cargo.toml` 的 `workspace.package.version` 和 `Cargo.lock`，完成检查后再推送对应的 `v<版本>` 标签（例如 `v0.1.0-alpha.2`）。[Release 工作流](.github/workflows/release.yml) 会校验标签与应用版本一致，重新构建内嵌 Web Client，在四个目标上检查、测试、构建和打包；全部成功后才创建 GitHub Release，上传压缩包、校验和及自动生成的发布说明。含预发布标识的版本会标记为 Pre-release。
+> [!NOTE]
+> 项目处于 Alpha 阶段，当前基础版本为 `0.1.0-alpha.1`，应用内显示当前构建的完整发布标签。Nightly 提供通过检查的新构建；本页说明以当前 main 为准，下载包能力请结合对应版本查看。macOS 包采用本地临时签名，尚未获得 Apple 公证。
 
-Nightly 每 4 小时定时检查默认分支 `main` 的最新提交（cron：`0 */4 * * *`，UTC 每天 00:00、04:00、08:00、12:00、16:00、20:00，北京时间也为这六个时刻）。若该提交尚未发布 Nightly，则执行同一套检查和四平台打包流程，全部成功后自动发布一个 Nightly 预发布版；已经发布过的提交会跳过构建和发布。向 `main` 推送新提交（包括合并 PR）仅触发 CI，Nightly 等待下一次定时运行。标签及压缩包文件名使用 `nightly-YYYY-MM-DD-<Unix秒时间戳>-<12位提交SHA>`，例如 `nightly-2026-09-06-1788673923-6bbbdd981018`。日期与时间戳取自该提交的提交者时间，日期按 UTC 计算；同一提交重跑工作流时保持相同标签。Nightly 标签指向本次构建的完整提交 SHA，始终标记为 Pre-release，不占用 Latest；不同提交的发布独立执行。Cargo 包版本和 macOS 的数字基础版本继续沿用 `Cargo.toml`，应用内显示完整 Nightly 标签，无需为每次 Nightly 修改版本文件。
+## 快速开始
 
-如需立即构建 Nightly，在 GitHub 仓库的 **Actions → Release → Run workflow** 中选择分支（通常为 `main`）并运行，即可手动触发该分支最新提交的构建。手动运行同样会跳过已经发布过 Nightly 的提交。
+1. **准备一个 Harness。** 打开应用，在「设置 → 执行引擎 → Harness 管理」检查或安装要使用的 CLI。完成 CLI 登录，或配置对应的 [Provider Profile](docs/usage.md#模型与服务商)。
+2. **打开本地项目。** 选择工作目录，按需使用本地或 Worktree 模式，再选好 Harness、模型和权限模式。
+3. **发送你的任务。** 从时间线查看执行过程，按需回复审批或补充消息；之后打开同一任务即可继续会话。
 
-在 **设置 → 通用 → 软件更新** 中可选择 **Release** 或 **Nightly** 频道，并手动检查更新。默认频道跟随当前安装包：Release 比较 `v<版本>` 的语义版本（包括 Alpha 等版本号预发布），Nightly 比较 `nightly-…` 标签中的提交时间，两者互不混入。主动切换频道后，检查更新会展示该频道的最新版本。发布工作流通过 `NEXUS_RELEASE_TAG` 将完整发布标签编译进应用；设置页、更新检查和 `nexus-desktop --version` 共用此标签。本地构建优先使用显式指定的标签，否则使用当前提交上的版本标签或按提交生成的 Nightly 标签；没有 Git 元数据的源码包才回退到 `v<Cargo 版本>`。macOS 的系统版本字段保留数字格式，构建编号使用发布工作流运行编号，完整标签另存于 bundle 元数据。
+小提示：`⌘ / Ctrl K` 搜索会话，`⌘ / Ctrl N` 新建任务，`⌘ / Ctrl Enter` 发送消息。
 
-应用默认启动时检查所选频道，可关闭「启动时检查更新」。发现新版本后在侧栏提示，并在设置中展示完整版本标签、GitHub Release 的 Markdown 更新日志和完整发布说明链接。检查只读取发布信息；点击「更新并重启」后才开始下载对应操作系统及架构的压缩包。更新包保存在应用数据目录的 `updates/<频道>/` 下，校验文件大小和 GitHub 提供的 SHA-256；再次下载时复用已校验的缓存。
+<details>
+<summary><strong>从源码运行</strong></summary>
 
-下载期间仍可使用应用。校验成功后，等待当前任务和 Harness 安装操作结束，再自动解压、退出、安装并重启；准备安装期间暂停启动新任务。macOS 替换整个 `.app`，Windows/Linux 替换 Desktop 和 Runner 程序文件，保留其他文件及会话数据。更新通过独立进程等待原程序退出，替换或重启失败时回滚到旧程序并展示错误。网络、校验和安装错误可在设置中查看，安装进程日志保存在 `updates/installation.log`；恢复失败时保留安装现场供排查。
+准备 rustup 和对应平台的[构建依赖](docs/development.md#环境要求)，然后运行：
 
-自动安装要求应用所在目录可写；macOS 需要从已解压的 `.app` 中运行。开发目录中的裸 macOS 可执行文件和只读安装位置会显示安装错误。
-
-## Remote Control
-
-Desktop 启动后默认在 `127.0.0.1:3210` 提供 HTTP/WebSocket 服务。设置页面的 `REMOTE CONTROL` 区域会显示服务地址，并提供“复制链接”和“复制令牌”按钮。访问令牌保存在现有 SQLite `settings` 表中；API 请求必须使用 Bearer Token，WebSocket 使用页面生成的临时连接参数。
-
-直接在本机打开复制的链接即可进入内置 React 页面。通过 FRP 时，创建一个 TCP 代理，将公网端口转发到本机 `127.0.0.1:3210`，再把链接中的主机和端口替换成 FRP 公网地址。令牌放在 URL Fragment（`#token=...`）中，不会随 HTTP 请求发送；页面读取后会立即清除地址栏 Fragment，并只在当前标签页的 `sessionStorage` 中保留令牌。
-
-远程页面可以：
-
-- 浏览 Nexus 自己保存的项目、会话和消息；Codex CLI/Desktop 的只读导入历史不通过 Remote API 暴露。
-- 使用 Desktop 当前选择的 Harness、模型和思考层级发起任务。
-- 发起任务时使用 Desktop 当前选择的权限模式；需要授权时在 Desktop 弹窗中处理，Remote Web 暂不提供审批入口。
-- 通过 WebSocket 接收状态变化和流式输出，并取消当前运行。
-
-默认只监听回环地址，不直接暴露给局域网。端口冲突时可以在启动 Desktop 前设置 `NEXUS_REMOTE_ADDR`，例如 `127.0.0.1:4310`。本版本不内置 TLS 或 FRP 配置；公网暴露时应优先使用支持 HTTPS/WSS 的入口，并妥善保管访问令牌。
-
-修改远程页面后需要重新生成 Desktop 内嵌的静态资源：
-
-```bash
-cd apps/remote-web
-npm ci
-npm run build
-cd ../..
-cargo build --workspace
+```sh
+git clone https://github.com/ji233-Sun/nexus-agent.git
+cd nexus-agent
+cargo run -p nexus-desktop --locked
 ```
 
-## 架构
+仓库会自动选择 Rust 1.98.1。更多构建、测试和架构说明见[开发指南](docs/development.md)。
 
-桌面 UI 基于 [GPUI Kit 0.6](https://github.com/longbridge/gpui-kit)，使用其 Sidebar 导航、图标资源、Button、Input / Textarea、下拉菜单、Switch 和 Markdown 组件，统一石墨灰主题与控件交互。点击侧栏底部或任务顶部的“设置”进入独立设置页面，管理执行环境、远程访问和交互偏好；点击“返回工作区”恢复原任务、输入草稿和滚动位置。界面保留 `⌘/Ctrl K` 搜索、`⌘/Ctrl N` 新任务、`⌘/Ctrl ,` 切换设置和 `⌘/Ctrl Enter` 发送快捷键。
+</details>
 
-桌面端默认使用简体中文，可在 **设置 → 通用 → 界面语言** 切换为 **English**，立即生效并在重启后保留。切换会更新界面、菜单、占位文字和应用状态提示，保留当前任务与输入草稿；用户内容、Agent 输出、原始诊断和 Remote Web 内容保持原样。
+## 继续了解
 
-桌面 UI 使用 MVP（Model–View–Presenter），Runner 使用分层架构。两个进程的入口只负责启动装配，业务逻辑放在独立模块中。
-
-```text
-React Remote Web ── authenticated HTTP/WebSocket ──┐
-                                                   ▼
-                                      nexus-desktop
-                                        View (GPUI) ──▶ Presenter ──▶ Model
-                                             └────────读取 Model────────┘
-                                                        │
-                         SQLite / 系统凭据库 / RunnerClient / Codex 历史
-                                                        │ versioned JSONL over stdio
-                                                        ▼
-                                      nexus-runner
-                                        Transport ──▶ Application ──▶ Infrastructure
-                                        JSONL         调度、独占、取消   Harness / 进程组
-                                                        │
-                                                        ├── stream-json ──▶ Claude Code
-                                                        ├── app-server ──▶ Codex CLI
-                                                        └── --mode rpc ──▶ Oh My Pi
-```
-
-- `crates/domain`：领域状态、模型和思考层级。
-- `crates/protocol`：Desktop 与 Runner 的版本化 JSONL 协议。
-- `crates/harness-core`：Harness 共用的启动规格、事件和可执行文件解析。
-- `crates/harness-claude`：Claude Code 探测、启动参数和事件解码。
-- `crates/harness-codex`：Codex CLI 探测、非交互启动参数和 JSONL 事件解码。
-- `crates/harness-omp`：Oh My Pi 探测、受控写入模式和 JSON 事件解码。
-- `apps/runner/src/transport.rs`：JSONL 命令读取、协议版本校验和事件写出。
-- `apps/runner/src/application`：命令调度、双任务并发、任务与 checkout 互斥、取消和统一事件转换。
-- `apps/runner/src/infrastructure`：Harness 适配器选择、子进程执行和平台相关的进程树清理。
-- `apps/desktop/src/bootstrap.rs`：窗口、主题、存储和 Runner 的启动装配。
-- `apps/desktop/src/model`：界面状态、历史消息数据和提交可用性，不依赖 GPUI。
-- `apps/desktop/src/presenter`：项目选择、配置、提交、远程命令、事件处理和持久化协调，不依赖 GPUI；通过 `RunnerPort` 注入真实或测试 Runner。
-- `apps/desktop/src/view`：GPUI 渲染、控件状态和事件转交，按侧栏、时间线、设置、组件和主题拆分。
-- `apps/desktop/src/infrastructure`：平台数据目录、SQLite、系统凭据库、Runner 进程通信、Codex 历史、Worktree 生命周期和本地 Git 成果接收。
-- `apps/desktop/src/remote_control.rs`：带令牌鉴权的 HTTP/WebSocket 服务及静态资源托管。
-- `apps/remote-web`：React + Vite 静态 Remote Client，生产构建产物嵌入 Desktop。
-
-View 只能通过 Presenter 的只读 `model()` 获取业务状态，通过 Presenter 方法发起操作。SQLite 格式保持向后兼容；Desktop 与 Runner 使用配对的版本化 JSONL 协议，并拒绝不匹配的外置 Runner。已有领域与 Harness crate 继续复用，不额外引入框架或空 crate。
-
-## 验证
-
-```bash
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --locked
-cargo build --workspace --release --locked
-cd apps/remote-web && npm ci && npm run typecheck && npm run build
-```
-
-测试中的 Fake Claude / Fake Codex 只验证进程和协议闭环，不发起真实模型请求。
-Presenter 单元测试使用内存 SQLite 与 Fake Runner，不打开 GPUI 窗口；Runner 单元测试覆盖任务独占、取消、事件转换和协议传输。
-
-[GitHub Actions CI](.github/workflows/ci.yml) 在 push、pull request 和手动触发时，分别使用 Ubuntu、macOS、Windows runner 执行以上检查。工具链固定为 Rust 1.98.1，依赖使用 `Cargo.lock`；缓存按平台和工具链区分。原生 Rust Fake Harness 的启动、流式输出、取消和关闭测试在三个系统上运行；Codex 历史的 shell fixture 测试目前在 Unix 系统上运行。
-
-CI 验证构建和自动化行为；窗口显示、输入法、目录选择、真实 CLI 登录以及发布包仍需在各系统上人工验收。生成发布构建可运行 `cargo build --workspace --release --locked`；Windows Release 的 GPUI shader 编译还需要 Windows SDK 的 `fxc.exe`（可通过 `GPUI_FXC_PATH` 指定）。
-
-## 按指令解决 PR 冲突
-
-[Resolve PR conflicts 工作流](.github/workflows/resolve-conflicts.yml) 在收到 PR 评论 `/resolve-conflicts` 后，使用 DeepSeek 尝试解决合并冲突。评论中只填写这一条命令。PR 创建或追加提交不会自动调用模型，也不会启动自动审查。
-
-启用时，将工作流合并到默认分支，并在仓库 **Settings → Secrets and variables → Actions** 中添加 `DEEPSEEK_API_KEY`。模型固定使用 `deepseek-v4-flash`，费用由对应的 DeepSeek API 账户承担；不需要 Qodo 或 OpenAI 凭据。执行前会检查评论者当前拥有 `write`、`maintain` 或 `admin` 权限。
-
-处理过程如下：
-
-1. 固定 PR 与默认分支的提交 SHA，在临时 runner 中准备合并。
-2. 将存在冲突的文件上下文发给 DeepSeek，模型只返回各冲突区的替换内容。脚本保留冲突区外的合并结果，检查替换结构、Git 索引和 `git diff --check`。
-3. 在独立任务中重新检查权限和两端 SHA，将带有两个父提交的合并提交写回原 PR 分支。采用普通推送，不强制覆盖分支；期间分支发生变化时停止写回。
-4. 显式触发现有 CI，检查格式、Clippy、测试和构建，并在 PR 下报告结果及工作流链接。CI 在写回后运行，请等待通过后再合并 PR。工作流不会自动合并 PR。
-
-模型任务只有仓库读权限，写回任务持有必要的 GitHub 写权限。两个任务均执行默认分支上的控制脚本，不执行 PR 中的程序或安装 PR 的依赖；只有后续 CI 执行项目检查。
-
-当前支持同仓库、目标为默认分支的开放非草稿 PR，以及最多 10 个、每个不超过 128 KiB 的 UTF-8 普通文本冲突。Fork PR、修改了 GitHub 工作流或本地 Action 的 PR，以及二进制、删除、重命名、权限、符号链接和锁文件冲突需要人工处理。模型无法给出完整有效结果时停止，不推送部分修改。模型解决文本冲突不代表业务语义必然正确，仍需查看 diff 和 CI 结果。
-
-处理脚本仅使用 Node.js 24 的内置模块；回归测试使用临时 Git 仓库和模拟 API，不产生模型费用：
-
-```bash
-node --test ".github/scripts/resolve-conflicts.test.mjs"
-```
+| 你想了解 | 文档 |
+| --- | --- |
+| 独立目录、并发、成果接收与清理 | [任务 Worktree](docs/usage.md#任务-worktree) |
+| 续聊、排队消息与 Steer | [会话与消息](docs/usage.md#会话与消息) |
+| 模型、服务商和密钥保存 | [模型与服务商](docs/usage.md#模型与服务商) |
+| 三种权限模式和桌面审批 | [权限与审批](docs/usage.md#权限与审批) |
+| Harness 安装、版本检测和应用更新 | [安装与更新](docs/usage.md#安装与更新) |
+| 浏览器远程访问与 FRP | [远程访问](docs/usage.md#远程访问) |
+| 数据保存位置和当前限制 | [数据目录](docs/usage.md#数据目录) · [已知限制](docs/usage.md#已知限制) |
+| 架构、测试、发布和维护 | [开发与维护](docs/development.md) |
 
 ## 致谢
 
-[Vercel Design MD](https://github.com/educlopez/design-bites/blob/main/design-mds/vercel.com/DESIGN.md)
+Nexus 的原生界面基于 [GPUI Kit](https://github.com/longbridge/gpui-kit)。感谢 [Vercel Design MD](https://github.com/educlopez/design-bites/blob/main/design-mds/vercel.com/DESIGN.md)、[Synara](https://github.com/Emanuele-web04/synara) 与 [t3code](https://github.com/pingdotgg/t3code) 提供的设计和实现参考。
 
-[Synara](https://github.com/Emanuele-web04/synara)
+---
 
-[t3code](https://github.com/pingdotgg/t3code)
-
-## 当前边界
-
-这个 Alpha 的 Remote Control 仅包含单机 TCP、令牌鉴权和静态 Web Client，不包含 UDP、内置 TLS、FRP 自动配置、云端 Control Plane 或多设备账户。它同样不包含 Git 自动 Push / PR / Rebase / Cherry-pick、附件、从 Nexus 续聊 Codex 原有会话、签名或公证。桌面审批支持上述工具/权限请求，尚不支持 Codex 的 MCP elicitation 表单或自由文本问答。Codex 历史浏览依赖当前 CLI 的实验性 `app-server` 协议。Codex CLI 的 `--json` 模式会实时提供生命周期和工具事件，但 Assistant 文本按完成消息输出，不提供 token 级文本增量。模型与思考层级是否可用取决于本机 CLI 版本和账户权限。
+<p align="center">
+  <a href="https://github.com/ji233-Sun/nexus-agent/issues/new">报告问题或提出建议</a> ·
+  <a href="https://github.com/ji233-Sun/nexus-agent/pulls">查看贡献</a>
+</p>

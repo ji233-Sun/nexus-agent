@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="360" viewBox="0 0 1200 360" fill="none" role="img" aria-labelledby="title description">
+  <title id="title">Nexus Agent</title>
+  <desc id="description">A native workspace for Claude Code, Codex CLI and Oh My Pi, using the Nexus graphite, white and blue identity.</desc>
+  <defs>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientTransform="translate(973 178) scale(355 300)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#477AF5" stop-opacity=".13"/>
+      <stop offset="1" stop-color="#477AF5" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect x="1" y="1" width="1198" height="358" rx="24" fill="#111214" stroke="#303236" stroke-width="2"/>
+  <rect x="2" y="2" width="1196" height="356" rx="23" fill="url(#glow)"/>
+  <path d="M720 1V359M800 1V359M880 1V359M960 1V359M1040 1V359M1120 1V359M680 100H1198M680 180H1198M680 260H1198" stroke="#F5F5F5" stroke-opacity=".035"/>
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+    <rect x="64" y="55" width="24" height="3" rx="1.5" fill="#477AF5"/>
+    <text x="102" y="61" fill="#A9ADB6" font-size="12" font-weight="600" letter-spacing="2.5">NATIVE AGENT WORKSPACE</text>
+    <text x="60" y="155" fill="#F5F5F5" font-size="70" font-weight="650" letter-spacing="-3">Nexus Agent</text>
+    <text x="64" y="205" fill="#B6BAC4" font-family="'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="23">统一管理你的本地编码 Agent。</text>
+    <g fill="#1B1D22" stroke="#343842">
+      <rect x="64" y="258" width="149" height="38" rx="19"/>
+      <rect x="225" y="258" width="134" height="38" rx="19"/>
+      <rect x="371" y="258" width="127" height="38" rx="19"/>
+    </g>
+    <g fill="#D8DBE3" font-size="14" font-weight="500" text-anchor="middle">
+      <text x="138.5" y="282">Claude Code</text>
+      <text x="292" y="282">Codex CLI</text>
+      <text x="434.5" y="282">Oh My Pi</text>
+    </g>
+  </g>
+  <path d="M716 108H754L796 150H825M686 180H825M716 252H754L796 210H825" stroke="#477AF5" stroke-opacity=".55" stroke-width="2"/>
+  <g fill="#477AF5">
+    <circle cx="716" cy="108" r="4"/>
+    <circle cx="686" cy="180" r="4"/>
+    <circle cx="716" cy="252" r="4"/>
+  </g>
+  <!-- The mark and tile retain the proportions of apps/desktop/assets/brand/nexus-icon.svg. -->
+  <g transform="translate(802 27) scale(.6)">
+    <rect x="32" y="32" width="448" height="448" rx="106" fill="#151515"/>
+    <rect x="33" y="33" width="446" height="446" rx="105" stroke="#303030" stroke-width="2"/>
+    <g stroke-width="64" stroke-linejoin="round">
+      <path d="M148 364V148L218 218" stroke="#F5F5F5"/>
+      <path d="M230 230L282 282" stroke="#477AF5"/>
+      <path d="M364 148V364L294 294" stroke="#F5F5F5"/>
+    </g>
+  </g>
+</svg>
