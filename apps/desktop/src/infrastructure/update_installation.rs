@@ -691,7 +691,7 @@ mod tests {
         {
             let invalid_archive = base.join("invalid.zip");
             checked_output(powershell()
-                .arg("$ErrorActionPreference = 'Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; $zip = [System.IO.Compression.ZipFile]::Open($env:NEXUS_UPDATE_ARCHIVE, [System.IO.Compression.ZipArchiveMode]::Create); try { [void]$zip.CreateEntry('../outside') } finally { $zip.Dispose() }")
+                .arg("$ErrorActionPreference = 'Stop'; Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem; $zip = [System.IO.Compression.ZipFile]::Open($env:NEXUS_UPDATE_ARCHIVE, [System.IO.Compression.ZipArchiveMode]::Create); try { [void]$zip.CreateEntry('../outside') } finally { $zip.Dispose() }")
                 .env("NEXUS_UPDATE_ARCHIVE", &invalid_archive)).unwrap();
             let invalid_staging = base.join("invalid-staging");
             fs::create_dir(&invalid_staging).unwrap();
