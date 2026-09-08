@@ -1392,12 +1392,12 @@ mod tests {
             ["add", "-g", "--trust", "@oh-my-pi/pi-coding-agent@latest"]
         );
         assert_eq!(
-            command.environment["BUN_INSTALL_GLOBAL_DIR"],
-            environment.home.join("custom-global").display().to_string()
+            Path::new(&command.environment["BUN_INSTALL_GLOBAL_DIR"]),
+            environment.home.join("custom-global")
         );
         assert_eq!(
-            command.environment["BUN_INSTALL_BIN"],
-            environment.home.join("custom-bin").display().to_string()
+            Path::new(&command.environment["BUN_INSTALL_BIN"]),
+            environment.home.join("custom-bin")
         );
     }
 
