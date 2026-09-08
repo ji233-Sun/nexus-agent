@@ -438,7 +438,11 @@ fn worktree_task_binds_cwd_session_and_preserves_history_after_cleanup() {
     assert_eq!(resumed.session_id.as_deref(), Some("isolated-session"));
     git::git(
         Path::new(&project.canonical_path),
-        &["worktree", "remove", &workspace.path],
+        &[
+            "worktree",
+            "remove",
+            &git::git_path_argument(&workspace.path),
+        ],
     )
     .unwrap();
     presenter.reload_workspaces();

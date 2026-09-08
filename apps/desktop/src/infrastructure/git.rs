@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::BTreeMap,
     path::{Path, PathBuf},
     process::Command as SystemCommand,
@@ -37,6 +38,24 @@ pub(crate) fn git(path: &Path, args: &[&str]) -> Result<String> {
         String::from_utf8_lossy(&output.stderr).trim()
     );
     String::from_utf8(output.stdout).context("Git 返回了无法显示的路径或内容")
+}
+
+pub(crate) fn git_path_argument(path: &str) -> Cow<'_, str> {
+    // Git for Windows rewrites verbatim paths to //?/..., breaking worktree creation.
+    // Keep canonical paths for identity checks and adapt only explicit CLI path arguments.
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+
+        if let Some(Component::Prefix(prefix)) = Path::new(path).components().next() {
+            match prefix.kind() {
+                Prefix::VerbatimDisk(_) => return Cow::Borrowed(&path[4..]),
+                Prefix::VerbatimUNC(..) => return Cow::Owned(format!(r"\\{}", &path[8..])),
+                _ => {}
+            }
+        }
+    }
+    Cow::Borrowed(path)
 }
 
 pub(crate) fn repository(path: &Path) -> Result<PathBuf> {
@@ -186,7 +205,7 @@ pub(crate) fn create_worktree(project: &Path, mut workspace: Workspace) -> Resul
                 "add",
                 "-b",
                 workspace.branch.as_deref().context("缺少任务分支")?,
-                &workspace.path,
+                &git_path_argument(&workspace.path),
                 workspace.base_sha.as_deref().context("缺少创建基准 SHA")?,
             ],
         )?;
@@ -255,8 +274,9 @@ pub(crate) fn restore_worktree(
                 == target,
             "目录被重定向，拒绝恢复"
         );
+        let target_argument = git_path_argument(&workspace.path);
         if checkouts(project)?.iter().any(|entry| entry.path == target) {
-            git(project, &["worktree", "remove", &workspace.path])?;
+            git(project, &["worktree", "remove", &target_argument])?;
         }
         if git(
             project,
@@ -264,11 +284,11 @@ pub(crate) fn restore_worktree(
         )
         .is_ok()
         {
-            git(project, &["worktree", "add", &workspace.path, branch])?;
+            git(project, &["worktree", "add", &target_argument, branch])?;
         } else {
             git(
                 project,
-                &["worktree", "add", "-b", branch, &workspace.path, base],
+                &["worktree", "add", "-b", branch, &target_argument, base],
             )?;
         }
         workspace.status = WorkspaceStatus::Ready;
@@ -404,7 +424,10 @@ pub(crate) fn cleanup_worktree(
             bail!("任务仍有未合入 {target} 的提交，请先接收成果");
         }
         if entry.is_some() {
-            git(project, &["worktree", "remove", &workspace.path])?;
+            git(
+                project,
+                &["worktree", "remove", &git_path_argument(&workspace.path)],
+            )?;
         }
         workspace.status = WorkspaceStatus::Removed;
         workspace.merge_target = Some(target.to_owned());
@@ -588,7 +611,11 @@ pub(crate) mod tests {
     fn interrupted_creation_and_external_removal_require_explicit_recovery() {
         let (directory, project) = repository_fixture();
         let path = Path::new(&project.canonical_path);
-        let root = directory.path().canonicalize().unwrap().join("worktrees");
+        let root = directory
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("worktrees 中文 空格");
         let planned = resolve_workspace(
             path,
             planned_workspace(&root, &project, &WorkspaceDraft::default()),
@@ -606,7 +633,11 @@ pub(crate) mod tests {
         );
         let ready = restore_worktree(&root, path, interrupted).unwrap();
         assert_eq!(ready.base_sha, planned.base_sha);
-        git(path, &["worktree", "remove", &ready.path]).unwrap();
+        git(
+            path,
+            &["worktree", "remove", &git_path_argument(&ready.path)],
+        )
+        .unwrap();
         let missing = recover_workspace(path, ready);
         assert_eq!(missing.status, WorkspaceStatus::Missing);
         let restored = restore_worktree(&root, path, missing).unwrap();
