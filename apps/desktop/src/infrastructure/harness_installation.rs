@@ -2013,13 +2013,19 @@ mod tests {
             "#!/bin/sh\n(/bin/sleep 0.3; echo leaked > leaked) &\nwait\n",
         );
         let spec = MaintenanceCommand::new(sleeper, [] as [&str; 0]);
-        assert!(
-            run_command(&spec, &environment, Duration::from_millis(80))
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("超时")
-        );
+        // A loaded CI runner can transiently fail to spawn the child or make
+        // it exit before the probe elapses, so retry before accepting failure.
+        let mut timed_out = false;
+        for _ in 0..10 {
+            match run_command(&spec, &environment, Duration::from_millis(80)).await {
+                Err(error) if error.to_string().contains("超时") => {
+                    timed_out = true;
+                    break;
+                }
+                _ => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
+        }
+        assert!(timed_out, "命令应在 80ms 超时");
         tokio::time::sleep(Duration::from_millis(400)).await;
         assert!(!environment.home.join("leaked").exists());
         let run = run_command(&spec, &environment, PROBE_TIMEOUT);

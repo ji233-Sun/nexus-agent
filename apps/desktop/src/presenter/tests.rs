@@ -105,7 +105,9 @@ pub(crate) fn fixture() -> (Presenter, FakeRunner, tempfile::TempDir) {
 }
 
 pub(crate) fn finish_workspace_operation(presenter: &mut Presenter) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // Git subprocesses are slow on Windows CI, especially while the whole
+    // test suite runs in parallel, so only fail on a genuinely stuck operation.
+    let deadline = Instant::now() + Duration::from_secs(120);
     while presenter.model.workspace_busy {
         assert!(Instant::now() < deadline, "workspace operation timed out");
         presenter.drain_events();
@@ -911,7 +913,9 @@ fn update_installation_waits_for_all_tasks_and_workspace_work_and_blocks_new_ope
     );
     presenter.scan_harness_installations();
     assert!(!presenter.model.harness_manager.busy);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    // The install thread only reads a missing archive, but Windows CI can be
+    // slow to schedule it while the rest of the suite runs in parallel.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     while presenter.update_events.is_some() {
         assert!(std::time::Instant::now() < deadline);
         presenter.drain_update_events();
