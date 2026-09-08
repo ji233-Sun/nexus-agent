@@ -436,8 +436,74 @@ impl NexusView {
                                 })),
                         ),
                 ),
+                settings_row(
+                    colors,
+                    locale.text("思考档位"),
+                    locale.text("仅用于生成对话标题，支持的档位由模型提供。"),
+                    self.title_effort_selector(cx),
+                ),
             ],
         )
+    }
+
+    fn title_effort_selector(&self, cx: &mut Context<Self>) -> AnyElement {
+        let model = self.presenter.model();
+        let locale = model.language;
+        let selected = model.title_generation.effort;
+        let mut efforts = vec![ThinkingEffort::Default];
+        if let Some(descriptor) = model.title_catalog_model(model.title_generation.model.as_deref())
+        {
+            efforts.extend(
+                descriptor
+                    .supported_reasoning_efforts
+                    .iter()
+                    .map(|option| option.effort),
+            );
+        }
+        let supported = efforts.len() > 1;
+        let button = Button::new("title-effort")
+            .debug_selector(|| "title-effort".into())
+            .outline()
+            .small()
+            .w_full()
+            .h(px(CONTROL_HEIGHT))
+            .icon(IconName::Cpu)
+            .label(locale.effort(selected))
+            .accessibility_label(locale.text("标题生成思考档位"))
+            .tooltip(if supported {
+                locale.text("标题生成思考档位")
+            } else {
+                locale.text("刷新模型目录后可选择支持的思考档位。")
+            })
+            .disabled(!supported && selected.is_default());
+        if !supported && selected.is_default() {
+            return button.into_any_element();
+        }
+        let app = cx.entity();
+        AnimatedDropdown::new(
+            "title-effort",
+            button,
+            self.reduced_motion,
+            move |menu, _, _| {
+                efforts
+                    .iter()
+                    .copied()
+                    .fold(menu.min_w(px(180.)), |menu, effort| {
+                        let app = app.clone();
+                        menu.item(
+                            PopupMenuItem::new(locale.effort(effort))
+                                .checked(effort == selected)
+                                .on_click(move |_, _, cx| {
+                                    app.update(cx, |app, cx| {
+                                        app.presenter.select_title_effort(effort);
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                    })
+            },
+        )
+        .into_any_element()
     }
 
     fn render_update_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {

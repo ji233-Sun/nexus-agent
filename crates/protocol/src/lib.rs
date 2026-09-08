@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -104,8 +104,14 @@ pub struct TitleGenerationConfig {
     pub harness: HarnessKind,
     pub executable: String,
     pub model: Option<String>,
+    #[serde(default = "default_title_effort")]
+    pub effort: ThinkingEffort,
     #[serde(default)]
     pub environment: Vec<EnvironmentVariable>,
+}
+
+fn default_title_effort() -> ThinkingEffort {
+    ThinkingEffort::Default
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -397,6 +403,7 @@ mod tests {
             harness: HarnessKind::Claude,
             executable: "/opt/bin/claude".into(),
             model: Some("haiku".into()),
+            effort: ThinkingEffort::Low,
             environment: vec![EnvironmentVariable {
                 name: "ANTHROPIC_API_KEY".into(),
                 value: "title-secret-value".into(),
@@ -434,6 +441,20 @@ mod tests {
         assert_eq!(request.environment[0].name, "OPENAI_API_KEY");
         assert_eq!(request.environment[0].value, "secret-value");
         assert_eq!(request.title_generation, Some(title_generation));
+
+        let mut legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
+        legacy["payload"]["title_generation"]
+            .as_object_mut()
+            .unwrap()
+            .remove("effort");
+        let decoded: CommandEnvelope = serde_json::from_value(legacy).unwrap();
+        let Command::RunStart(request) = decoded.command else {
+            panic!("expected run.start")
+        };
+        assert_eq!(
+            request.title_generation.unwrap().effort,
+            ThinkingEffort::Default
+        );
     }
 
     #[test]

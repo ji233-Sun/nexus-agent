@@ -180,6 +180,7 @@ impl Presenter {
             .unwrap_or_else(|| TitleGenerationSettings {
                 harness: selected_harness,
                 model: model_override.clone(),
+                ..TitleGenerationSettings::default()
             });
         let _ = storage.set_setting(
             "title_generation",
@@ -724,7 +725,7 @@ impl Presenter {
         }
         if !self.set_title_generation(TitleGenerationSettings {
             harness,
-            model: None,
+            ..TitleGenerationSettings::default()
         }) {
             return false;
         }
@@ -746,10 +747,48 @@ impl Presenter {
         }) {
             return false;
         }
+        let effort = self.model.title_generation.effort;
+        let effort = if self
+            .model
+            .title_catalog_model(model.as_deref())
+            .is_some_and(|descriptor| descriptor.supports_effort(&effort))
+        {
+            effort
+        } else {
+            ThinkingEffort::Default
+        };
         self.set_title_generation(TitleGenerationSettings {
             harness: self.model.title_generation.harness,
             model,
+            effort,
         })
+    }
+
+    pub(crate) fn select_title_effort(&mut self, effort: ThinkingEffort) -> bool {
+        if !effort.is_default()
+            && self
+                .model
+                .title_catalog_model(self.model.title_generation.model.as_deref())
+                .is_none_or(|model| !model.supports_effort(&effort))
+        {
+            return false;
+        }
+        self.set_title_generation(TitleGenerationSettings {
+            effort,
+            ..self.model.title_generation.clone()
+        })
+    }
+
+    fn normalize_title_effort(&mut self) {
+        let settings = &self.model.title_generation;
+        if !settings.effort.is_default()
+            && self
+                .model
+                .title_catalog_model(settings.model.as_deref())
+                .is_none_or(|model| !model.supports_effort(&settings.effort))
+        {
+            self.select_title_effort(ThinkingEffort::Default);
+        }
     }
 
     fn set_title_generation(&mut self, settings: TitleGenerationSettings) -> bool {
@@ -782,6 +821,7 @@ impl Presenter {
             harness: settings.harness,
             executable,
             model,
+            effort: settings.effort,
             environment: self.provider_launch_configuration(settings.harness)?,
         })
     }
