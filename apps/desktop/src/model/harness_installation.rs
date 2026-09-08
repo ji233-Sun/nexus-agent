@@ -50,10 +50,23 @@ pub(crate) struct HarnessInstallation {
     pub(crate) executable: Option<PathBuf>,
     pub(crate) discovered_from_manager: bool,
     pub(crate) version: Option<String>,
+    pub(crate) latest_version: Result<String, LocalizedText>,
     pub(crate) source: LocalizedText,
     pub(crate) diagnostic: Option<LocalizedText>,
     pub(crate) update: Option<MaintenanceCommand>,
     pub(crate) install_options: Vec<InstallOption>,
+}
+
+impl HarnessInstallation {
+    pub(crate) fn available_update(&self) -> Option<&MaintenanceCommand> {
+        let current = semver::Version::parse(self.version.as_deref()?).ok()?;
+        let latest = semver::Version::parse(self.latest_version.as_ref().ok()?).ok()?;
+        if latest.cmp_precedence(&current).is_gt() {
+            self.update.as_ref()
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

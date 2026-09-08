@@ -8,8 +8,10 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, bail, ensure};
+use gpui_kit::http_client::{AsyncBody, HttpClient, HttpRequestExt as _, Request};
 use nexus_domain::HarnessKind;
 use nexus_harness_core::{executable_search_paths, resolve_executable, resolve_in_paths};
+use smol::io::AsyncReadExt as _;
 use tokio::{io::AsyncReadExt as _, process::Command, sync::watch};
 
 use crate::{
@@ -957,6 +959,52 @@ fn installed_version(output: &str) -> Option<String> {
     })
 }
 
+async fn latest_version(
+    harness: HarnessKind,
+    http: &dyn HttpClient,
+    cancellation: &watch::Receiver<bool>,
+) -> Result<String> {
+    ensure!(!*cancellation.borrow(), "操作已取消");
+    let mut cancellation = cancellation.clone();
+    let lookup = async {
+        let url = format!(
+            "https://registry.npmjs.org/{}/latest",
+            package(harness).replace('/', "%2F")
+        );
+        let mut response = http
+            .send(
+                Request::get(url)
+                    .header("Accept", "application/json")
+                    .timeout(PROBE_TIMEOUT)
+                    .body(AsyncBody::default())?,
+            )
+            .await?;
+        ensure!(
+            response.status().is_success(),
+            "npm registry returned HTTP {}",
+            response.status()
+        );
+        let mut body = Vec::new();
+        response
+            .body_mut()
+            .take((MAX_OUTPUT + 1) as u64)
+            .read_to_end(&mut body)
+            .await?;
+        ensure!(body.len() <= MAX_OUTPUT, "npm metadata is too large");
+        let metadata: serde_json::Value = serde_json::from_slice(&body)?;
+        let version = metadata["version"]
+            .as_str()
+            .context("npm metadata has no version")?;
+        Ok(semver::Version::parse(version)?.to_string())
+    };
+    tokio::select! {
+        result = tokio::time::timeout(PROBE_TIMEOUT, lookup) => {
+            result.context("最新版本检测超时")?
+        }
+        _ = cancellation.changed() => bail!("操作已取消"),
+    }
+}
+
 fn real_command(executable: &Path) -> PathBuf {
     // Scoop's .exe launcher has a .shim sidecar rather than a symlink.
     if let Ok(sidecar) = fs::read_to_string(executable.with_extension("shim"))
@@ -995,6 +1043,7 @@ async fn scan_one(
         executable,
         discovered_from_manager,
         version: None,
+        latest_version: Err("尚未扫描".into()),
         source: "未安装".into(),
         diagnostic: None,
         update: None,
@@ -1078,6 +1127,10 @@ pub(crate) fn spawn(
                     .build()?;
                 let environment = Environment::current(cancellation)?;
                 runtime.block_on(async {
+                    let http = reqwest_client::ReqwestClient::user_agent(concat!(
+                        "Nexus-Agent/",
+                        env!("CARGO_PKG_VERSION")
+                    ))?;
                     let managers = managers(&environment).await;
                     if let Some(request) = &request {
                         execute_request(request, &environment, &managers).await?;
@@ -1091,11 +1144,19 @@ pub(crate) fn spawn(
                         |(harness, configured)| {
                             let environment = &environment;
                             let managers = refreshed.as_deref().unwrap_or(&managers);
+                            let http = &http;
                             async move {
-                                (
-                                    harness,
-                                    scan_one(harness, configured, environment, managers).await,
-                                )
+                                let (mut installation, latest) = tokio::join!(
+                                    scan_one(harness, configured, environment, managers),
+                                    latest_version(harness, http, &environment.cancel),
+                                );
+                                installation.latest_version = latest.map_err(|error| {
+                                    LocalizedText::new(
+                                        "最新版本检测失败：{error}",
+                                        &[("error", format!("{error:#}"))],
+                                    )
+                                });
+                                (harness, installation)
                             }
                         },
                     ))
@@ -1237,6 +1298,7 @@ async fn run_command(
 mod tests {
     use super::*;
     use crate::i18n::Language;
+    use gpui_kit::http_client::{FakeHttpClient, RequestTimeout, Response};
 
     fn fixture() -> (tempfile::TempDir, watch::Sender<bool>, Environment) {
         let directory = tempfile::tempdir().unwrap();
@@ -1295,6 +1357,85 @@ mod tests {
         }
         assert!(installed_version("installation successful").is_none());
         assert!(installed_version("").is_none());
+    }
+
+    #[tokio::test]
+    async fn latest_version_reads_the_latest_tag_for_each_harness() {
+        let (_cancel, cancellation) = watch::channel(false);
+        for (harness, path, version) in [
+            (
+                HarnessKind::Claude,
+                "/@anthropic-ai%2Fclaude-code/latest",
+                "2.1.263",
+            ),
+            (HarnessKind::Codex, "/@openai%2Fcodex/latest", "0.153.4"),
+            (
+                HarnessKind::Omp,
+                "/@oh-my-pi%2Fpi-coding-agent/latest",
+                "18.1.14",
+            ),
+        ] {
+            let http = FakeHttpClient::create(move |request| async move {
+                assert_eq!(request.uri().host(), Some("registry.npmjs.org"));
+                assert_eq!(request.uri().path(), path);
+                assert_eq!(
+                    request.extensions().get::<RequestTimeout>().unwrap().0,
+                    PROBE_TIMEOUT
+                );
+                Ok(Response::builder()
+                    .body(serde_json::json!({"version": version}).to_string().into())?)
+            });
+            assert_eq!(
+                latest_version(harness, http.as_ref(), &cancellation)
+                    .await
+                    .unwrap(),
+                version
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn latest_version_rejects_failed_or_invalid_registry_responses() {
+        let (_cancel, cancellation) = watch::channel(false);
+        for (status, body) in [
+            (503, "unavailable".into()),
+            (429, "rate limited".into()),
+            (200, "not JSON".into()),
+            (200, "{}".into()),
+            (200, r#"{"version":"invalid"}"#.into()),
+            (200, r#"{"version":123}"#.into()),
+            (200, "x".repeat(MAX_OUTPUT + 1)),
+        ] {
+            let http = FakeHttpClient::create(move |_| {
+                let body = body.clone();
+                async move { Ok(Response::builder().status(status).body(body.into())?) }
+            });
+            assert!(
+                latest_version(HarnessKind::Claude, http.as_ref(), &cancellation)
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn latest_version_cancels_an_unresponsive_registry_request() {
+        let (cancel, cancellation) = watch::channel(false);
+        let http = FakeHttpClient::create(move |_| {
+            let cancel = cancel.clone();
+            async move {
+                cancel.send(true).unwrap();
+                std::future::pending().await
+            }
+        });
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            latest_version(HarnessKind::Codex, http.as_ref(), &cancellation),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(error.to_string().contains("取消"));
     }
 
     #[cfg(unix)]

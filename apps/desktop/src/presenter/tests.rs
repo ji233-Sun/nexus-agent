@@ -105,7 +105,9 @@ pub(crate) fn pending_update(presenter: &mut Presenter) -> std::sync::mpsc::Send
     sender
 }
 
-pub(crate) fn seed_harness_installations(presenter: &mut Presenter) {
+pub(crate) fn seed_harness_installations(
+    presenter: &mut Presenter,
+) -> &mut BTreeMap<HarnessKind, crate::model::harness_installation::HarnessInstallation> {
     use crate::model::harness_installation::{
         HarnessInstallation, InstallMethod, InstallOption, MaintenanceCommand,
     };
@@ -124,6 +126,7 @@ pub(crate) fn seed_harness_installations(presenter: &mut Presenter) {
                     .then(|| format!("/fake/{}{}", "long-directory/".repeat(12), harness).into()),
                 discovered_from_manager: false,
                 version: installed.then(|| "1.0.0".into()),
+                latest_version: Ok("2.0.0".into()),
                 source: if harness == HarnessKind::Omp {
                     "自定义 / 未知来源".into()
                 } else {
@@ -140,6 +143,44 @@ pub(crate) fn seed_harness_installations(presenter: &mut Presenter) {
                     }]
                 },
             },
+        );
+    }
+    &mut presenter.model.harness_manager.installations
+}
+
+#[test]
+fn harness_updates_require_a_verified_newer_version() {
+    let (mut presenter, _, _directory) = fixture();
+    seed_harness_installations(&mut presenter);
+    for (current, latest, available) in [
+        (Some("1.0.0"), Some("2.0.0"), true),
+        (Some("1.0.0"), Some("1.0.0"), false),
+        (Some("2.0.0"), Some("1.0.0"), false),
+        (Some("1.9.0"), Some("1.10.0"), true),
+        (Some("1.0.0-alpha.2"), Some("1.0.0-alpha.10"), true),
+        (Some("1.0.0-alpha.2"), Some("1.0.0"), true),
+        (Some("1.0.0"), Some("1.0.0-alpha.2"), false),
+        (Some("1.0.0+local"), Some("1.0.0+release"), false),
+        (Some("1.0.0"), None, false),
+        (None, Some("2.0.0"), false),
+        (Some("unknown"), Some("2.0.0"), false),
+    ] {
+        let installation = presenter
+            .model
+            .harness_manager
+            .installations
+            .get_mut(&HarnessKind::Claude)
+            .unwrap();
+        installation.version = current.map(str::to_owned);
+        installation.latest_version = latest
+            .map(str::to_owned)
+            .ok_or_else(|| "最新版本检测失败：网络不可用".to_owned().into());
+        assert_eq!(
+            presenter
+                .harness_maintenance_request(HarnessKind::Claude, None)
+                .is_some(),
+            available,
+            "current: {current:?}, latest: {latest:?}"
         );
     }
 }
@@ -210,6 +251,7 @@ fn harness_installation_events_refresh_versions_and_probes_without_switching_har
         let mut installation =
             presenter.model.harness_manager.installations[&HarnessKind::Claude].clone();
         installation.version = Some("2.0.0".into());
+        installation.latest_version = Ok("2.0.0".into());
         send.send(InstallationEvent::Scanned(
             HarnessKind::Claude,
             installation,
@@ -228,6 +270,18 @@ fn harness_installation_events_refresh_versions_and_probes_without_switching_har
                 .version
                 .as_deref(),
             Some("2.0.0")
+        );
+        assert_eq!(
+            presenter.model.harness_manager.installations[&HarnessKind::Claude]
+                .latest_version
+                .as_deref()
+                .unwrap(),
+            "2.0.0"
+        );
+        assert!(
+            presenter
+                .harness_maintenance_request(HarnessKind::Claude, None)
+                .is_none()
         );
         assert_eq!(presenter.model.selected_harness, selected);
         assert_eq!(presenter.model.executable, executable);
