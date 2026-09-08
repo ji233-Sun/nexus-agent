@@ -109,30 +109,109 @@ pub trait LineDecoder: Send {
 }
 
 pub fn resolve_executable(configured: &str) -> Option<PathBuf> {
-    let mut directories: Vec<PathBuf> = env::var_os("PATH")
-        .map(|paths| env::split_paths(&paths).collect())
-        .unwrap_or_default();
-    let home = if cfg!(windows) {
-        env::var_os("USERPROFILE").or_else(|| env::var_os("HOME"))
-    } else {
-        env::var_os("HOME")
-    };
-    if let Some(home) = home {
-        directories.push(PathBuf::from(home).join(".local/bin"));
-    }
-    if cfg!(windows) {
-        if let Some(app_data) = env::var_os("APPDATA") {
-            directories.push(PathBuf::from(app_data).join("npm"));
-        }
-    } else {
-        if cfg!(target_os = "macos") {
-            directories.push(PathBuf::from("/opt/homebrew/bin"));
-        }
-        directories.push(PathBuf::from("/usr/local/bin"));
-    }
     let extensions =
         cfg!(windows).then(|| env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into()));
-    resolve_in_paths(configured, directories, extensions.as_deref())
+    resolve_in_paths(configured, executable_search_paths(), extensions.as_deref())
+}
+
+// GUI launches may not inherit the shell's PATH. Use the same search directories
+// for discovery and child processes so Node/Bun shebangs can also find their runtime.
+pub fn executable_search_paths() -> Vec<PathBuf> {
+    search_paths(env::consts::OS, |key| env::var_os(key))
+}
+
+fn search_paths(
+    os: &str,
+    mut variable: impl FnMut(&str) -> Option<std::ffi::OsString>,
+) -> Vec<PathBuf> {
+    let mut directories: Vec<PathBuf> = variable("PATH")
+        .map(|paths| env::split_paths(&paths).collect())
+        .unwrap_or_default();
+    let mut path = |key| {
+        variable(key)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    };
+    let home = if os == "windows" {
+        path("USERPROFILE").or_else(|| path("HOME"))
+    } else {
+        path("HOME")
+    };
+    for (key, suffix) in [
+        ("VP_HOME", "bin"),
+        ("BUN_INSTALL", "bin"),
+        ("PNPM_HOME", ""),
+        (
+            "NPM_CONFIG_PREFIX",
+            if os == "windows" { "" } else { "bin" },
+        ),
+        ("VOLTA_HOME", "bin"),
+        ("NVM_BIN", ""),
+        ("FNM_MULTISHELL_PATH", "bin"),
+        ("MISE_DATA_DIR", "shims"),
+        ("ASDF_DATA_DIR", "shims"),
+        ("PI_INSTALL_DIR", ""),
+        ("CODEX_INSTALL_DIR", ""),
+    ] {
+        if let Some(directory) = path(key) {
+            directories.push(directory.join(suffix));
+        }
+    }
+    if let Some(home) = home {
+        for suffix in [
+            ".local/bin",
+            ".vite-plus/bin",
+            ".bun/bin",
+            ".local/share/pnpm",
+            "Library/pnpm",
+            ".npm-global/bin",
+            ".yarn/bin",
+            ".config/yarn/global/node_modules/.bin",
+            ".volta/bin",
+            ".local/share/mise/shims",
+            ".asdf/shims",
+            ".nvm/current/bin",
+            ".fnm/aliases/default/bin",
+            ".local/share/fnm/aliases/default/bin",
+            "Library/Application Support/fnm/aliases/default/bin",
+            ".nix-profile/bin",
+        ] {
+            directories.push(home.join(suffix));
+        }
+    }
+    if os == "windows" {
+        if let Some(app_data) = path("APPDATA") {
+            directories.push(app_data.join("npm"));
+        }
+        if let Some(local) = path("LOCALAPPDATA") {
+            directories.push(local.join("pnpm"));
+            directories.push(local.join("omp"));
+            directories.push(local.join("Microsoft/WinGet/Links"));
+            directories.push(local.join("Microsoft/WindowsApps"));
+        }
+        if let Some(scoop) =
+            path("SCOOP").or_else(|| path("USERPROFILE").map(|home| home.join("scoop")))
+        {
+            directories.push(scoop.join("shims"));
+        }
+    } else {
+        if os == "macos" {
+            directories.push(PathBuf::from("/opt/homebrew/bin"));
+        }
+        directories.extend(
+            [
+                "/home/linuxbrew/.linuxbrew/bin",
+                "/usr/local/bin",
+                "/usr/bin",
+                "/bin",
+            ]
+            .map(PathBuf::from),
+        );
+    }
+    let mut seen = std::collections::HashSet::new();
+    directories
+        .retain(|directory| !directory.as_os_str().is_empty() && seen.insert(directory.clone()));
+    directories
 }
 
 fn resolve_in_paths(
@@ -156,7 +235,7 @@ fn resolve_in_paths(
 }
 
 fn executable_candidates(path: PathBuf, extensions: Option<&str>) -> Vec<PathBuf> {
-    let mut candidates = vec![path.clone()];
+    let mut candidates = Vec::new();
     if path.extension().is_none()
         && let Some(extensions) = extensions
     {
@@ -169,6 +248,8 @@ fn executable_candidates(path: PathBuf, extensions: Option<&str>) -> Vec<PathBuf
             }
         }
     }
+    // npm writes an extensionless Unix script beside its Windows .cmd shim.
+    candidates.push(path);
     candidates
 }
 
@@ -226,6 +307,7 @@ mod tests {
         std::fs::create_dir(&first).unwrap();
         std::fs::create_dir(&second).unwrap();
         executable(&first.join("codex.cmd"));
+        executable(&first.join("codex"));
         executable(&second.join("codex.exe"));
         assert_eq!(
             resolve_in_paths("codex", [first.clone(), second], Some(".EXE;.CMD")),
@@ -235,6 +317,64 @@ mod tests {
             resolve_in_paths("codex.cmd", [first.clone()], Some(".EXE;.CMD")),
             Some(first.join("codex.cmd"))
         );
+    }
+
+    #[test]
+    fn gui_search_finds_global_managers_and_honors_custom_homes() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path();
+        let vp = home.join("custom-vp");
+        for os in ["macos", "linux", "windows"] {
+            let paths = search_paths(os, |key| match key {
+                "HOME" | "USERPROFILE" => Some(home.as_os_str().into()),
+                "VP_HOME" => Some(vp.as_os_str().into()),
+                "PNPM_HOME" => Some(home.join("custom-pnpm").into_os_string()),
+                "APPDATA" => Some(home.join("AppData/Roaming").into_os_string()),
+                "LOCALAPPDATA" => Some(home.join("AppData/Local").into_os_string()),
+                _ => None,
+            });
+            for suffix in [
+                ".local/bin",
+                ".vite-plus/bin",
+                ".bun/bin",
+                ".volta/bin",
+                ".asdf/shims",
+                ".nix-profile/bin",
+            ] {
+                assert!(paths.contains(&home.join(suffix)), "{os}: {suffix}");
+            }
+            assert!(paths.contains(&vp.join("bin")));
+            assert!(paths.contains(&home.join("custom-pnpm")));
+            if os == "windows" {
+                assert!(paths.contains(&home.join("AppData/Roaming/npm")));
+                assert!(paths.contains(&home.join("AppData/Local/Microsoft/WinGet/Links")));
+                assert!(paths.contains(&home.join("scoop/shims")));
+            }
+        }
+        std::fs::create_dir_all(vp.join("bin")).unwrap();
+        executable(&vp.join("bin/codex"));
+        let paths = search_paths("linux", |key| {
+            (key == "VP_HOME").then(|| vp.as_os_str().into())
+        });
+        assert_eq!(
+            resolve_in_paths("codex", paths, None),
+            Some(vp.join("bin/codex"))
+        );
+    }
+
+    #[test]
+    fn inherited_path_precedes_fallbacks_without_duplicates_or_empty_entries() {
+        let directory = tempfile::tempdir().unwrap();
+        let bin = directory.path().join(".bun/bin");
+        let paths = search_paths("linux", |key| match key {
+            "HOME" => Some(directory.path().as_os_str().into()),
+            "PATH" => Some(env::join_paths([&bin, &bin]).unwrap()),
+            "PNPM_HOME" => Some("".into()),
+            _ => None,
+        });
+        assert_eq!(paths.first(), Some(&bin));
+        assert_eq!(paths.iter().filter(|path| **path == bin).count(), 1);
+        assert!(paths.iter().all(|path| !path.as_os_str().is_empty()));
     }
 
     #[test]
