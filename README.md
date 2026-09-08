@@ -8,6 +8,8 @@
   <img src="https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-303030?style=flat-square" alt="macOS / Linux / Windows">
 </p>
 
+Nexus Agent 是一个面向 Linux、macOS 和 Windows 的本地桌面应用，用统一时间线驱动本机已安装的 Claude Code、Codex CLI 或 Oh My Pi（OMP）。应用内显示当前构建的完整发布标签，与对应的 GitHub Release 和安装包一致。
+
 <p align="center">
   <a href="https://github.com/ji233-Sun/nexus-agent/releases"><strong>下载应用</strong></a> ·
   <a href="#快速开始">快速开始</a> ·
@@ -49,6 +51,8 @@
 
 ## 快速开始
 
+Nightly 每 4 小时定时检查默认分支 `main` 的最新提交（cron：`0 */4 * * *`，UTC 每天 00:00、04:00、08:00、12:00、16:00、20:00，北京时间也为这六个时刻）。若该提交尚未发布 Nightly，则执行同一套检查和四平台打包流程，全部成功后自动发布一个 Nightly 预发布版；已经发布过的提交会跳过构建和发布。向 `main` 推送新提交（包括合并 PR）仅触发 CI，Nightly 等待下一次定时运行。标签及压缩包文件名使用 `nightly-YYYY-MM-DD-<Unix秒时间戳>-<12位提交SHA>`，例如 `nightly-2026-09-06-1788673923-6bbbdd981018`。日期与时间戳取自该提交的提交者时间，日期按 UTC 计算；同一提交重跑工作流时保持相同标签。Nightly 标签指向本次构建的完整提交 SHA，始终标记为 Pre-release，不占用 Latest；不同提交的发布独立执行。Cargo 包版本和 macOS 的数字基础版本继续沿用 `Cargo.toml`，应用内显示完整 Nightly 标签，无需为每次 Nightly 修改版本文件。
+
 1. **准备一个 Harness。** 打开应用，在「设置 → 执行引擎 → Harness 管理」检查或安装要使用的 CLI。完成 CLI 登录，或配置对应的 [Provider Profile](docs/usage.md#模型与服务商)。
 2. **打开本地项目。** 选择工作目录，在输入区选好 Harness、模型和权限模式。
 3. **发送你的任务。** 从时间线查看执行过程，按需回复审批或补充消息；之后打开同一任务即可继续会话。
@@ -57,6 +61,14 @@
 
 <details>
 <summary><strong>从源码运行</strong></summary>
+
+在 **设置 → 通用 → 软件更新** 中可选择 **Release** 或 **Nightly** 频道，并手动检查更新。默认频道跟随当前安装包：Release 比较 `v<版本>` 的语义版本（包括 Alpha 等版本号预发布），Nightly 比较 `nightly-…` 标签中的提交时间，两者互不混入。主动切换频道后，检查更新会展示该频道的最新版本。发布工作流通过 `NEXUS_RELEASE_TAG` 将完整发布标签编译进应用；设置页、更新检查和 `nexus-desktop --version` 共用此标签。本地构建优先使用显式指定的标签，否则使用当前提交上的版本标签或按提交生成的 Nightly 标签；没有 Git 元数据的源码包才回退到 `v<Cargo 版本>`。macOS 的系统版本字段保留数字格式，构建编号使用发布工作流运行编号，完整标签另存于 bundle 元数据。
+
+应用默认启动时检查所选频道，可关闭「启动时检查更新」。发现新版本后在侧栏提示，并在设置中展示完整版本标签、GitHub Release 的 Markdown 更新日志和完整发布说明链接。检查只读取发布信息；点击「更新并重启」后才开始下载对应操作系统及架构的压缩包。更新包保存在应用数据目录的 `updates/<频道>/` 下，校验文件大小和 GitHub 提供的 SHA-256；再次下载时复用已校验的缓存。
+
+下载期间仍可使用应用。校验成功后，等待当前任务和 Harness 安装操作结束，再自动解压、退出、安装并重启；准备安装期间暂停启动新任务。macOS 替换整个 `.app`，Windows/Linux 替换 Desktop 和 Runner 程序文件，保留其他文件及会话数据。更新通过独立进程等待原程序退出，替换或重启失败时回滚到旧程序并展示错误。网络、校验和安装错误可在设置中查看，安装进程日志保存在 `updates/installation.log`；恢复失败时保留安装现场供排查。
+
+自动安装要求应用所在目录可写；macOS 需要从已解压的 `.app` 中运行。开发目录中的裸 macOS 可执行文件和只读安装位置会显示安装错误。
 
 准备 rustup 和对应平台的[构建依赖](docs/development.md#环境要求)，然后运行：
 

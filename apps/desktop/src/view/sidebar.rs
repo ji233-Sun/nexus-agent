@@ -582,11 +582,19 @@ impl NexusView {
                                                 .gap_2()
                                                 .child(Icon::new(IconName::Settings2))
                                                 .child(locale.text("设置"))
-                                                .when(matches!(model.updates.state, crate::model::updates::UpdateState::Ready { .. }), |element| {
+                                                .when(model.updates.state.package().is_some(), |element| {
                                                     element.child(div()
                                                         .debug_selector(|| "update-ready-badge".into())
                                                         .text_size(px(11.)).text_color(rgb(colors.accent))
-                                                        .child(locale.text("更新已下载")))
+                                                        .child(locale.text(if matches!(model.updates.state, crate::model::updates::UpdateState::Available(_)) {
+                                                            "发现新版本"
+                                                        } else if model.updates.state.is_installing() {
+                                                            "正在安装更新"
+                                                        } else if matches!(model.updates.state, crate::model::updates::UpdateState::Ready { .. }) {
+                                                            "等待安装"
+                                                        } else {
+                                                            "正在下载更新"
+                                                        })))
                                                 }),
                                         )
                                         .child(status_dot(
@@ -603,7 +611,7 @@ impl NexusView {
                                         )),
                                 )
                                 .on_click(cx.listener(|app, _, window, cx| {
-                                    if matches!(app.presenter.model().updates.state, crate::model::updates::UpdateState::Ready { .. }) {
+                                    if app.presenter.model().updates.state.package().is_some() {
                                         app.settings_section = SettingsSection::General;
                                     }
                                     app.toggle_settings(window, cx)
@@ -623,12 +631,12 @@ mod tests {
     use std::path::Path;
 
     #[gpui::test]
-    fn software_update_settings_follow_progress_and_show_download_completion(
+    fn software_update_settings_show_release_notes_and_installation_progress(
         cx: &mut TestAppContext,
     ) {
         use crate::{
             model::updates::{UpdateChannel, UpdateState},
-            presenter::tests::pending_update,
+            presenter::tests::{pending_update, update_package},
         };
         let (view, cx) = scroll_test_view(cx);
         cx.simulate_resize(gpui::size(px(1040.), px(680.)));
@@ -658,10 +666,7 @@ mod tests {
             UpdateChannel::Nightly
         );
         sender
-            .send(UpdateState::Ready {
-                tag: "nightly-test".into(),
-                path: Path::new("update.zip").to_path_buf(),
-            })
+            .send(UpdateState::Available(update_package()))
             .unwrap();
         view.update_in(cx, |view, window, cx| {
             view.poll_events(Instant::now(), cx);
@@ -669,10 +674,24 @@ mod tests {
             view.set_language(Language::English, window, cx);
         });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("reveal-update").is_some());
+        assert!(cx.debug_bounds("download-update").is_some());
+        assert!(cx.debug_bounds("release-notes").is_some());
+        assert!(cx.debug_bounds("release-notes-link").is_some());
+        let sender = view.update_in(cx, |view, _, cx| {
+            let sender = pending_update(&mut view.presenter);
+            sender
+                .send(UpdateState::Installing(update_package()))
+                .unwrap();
+            view.poll_events(Instant::now(), cx);
+            sender
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("download-update").is_none());
+        assert!(cx.debug_bounds("release-notes").is_some());
         view.update_in(cx, |view, window, cx| view.toggle_settings(window, cx));
         cx.run_until_parked();
         assert!(cx.debug_bounds("update-ready-badge").is_some());
+        drop(sender);
     }
 
     fn scroll_test_view(

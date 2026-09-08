@@ -271,6 +271,7 @@ impl AppModel {
             .is_some_and(|profile| profile.credential_configured);
         self.selected_project.is_some()
             && self.active_run.is_none()
+            && !self.updates.state.is_installing()
             && self.harness_manager.operating.is_none()
             && self
                 .selected_probe()
