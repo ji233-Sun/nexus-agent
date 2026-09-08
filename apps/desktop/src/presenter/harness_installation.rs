@@ -24,7 +24,7 @@ impl Presenter {
     }
 
     pub(crate) fn scan_harness_installations(&mut self) {
-        if self.model.harness_manager.busy {
+        if self.model.harness_manager.busy || self.model.updates.state.is_installing() {
             return;
         }
         match installation::spawn(self.configured_harnesses(), None) {
@@ -42,7 +42,10 @@ impl Presenter {
         harness: HarnessKind,
         method: Option<InstallMethod>,
     ) -> Option<MaintenanceRequest> {
-        if self.model.harness_manager.busy || self.model.active_run_count() > 0 {
+        if self.model.harness_manager.busy
+            || self.model.active_run_count() > 0
+            || self.model.updates.state.is_installing()
+        {
             return None;
         }
         let installation = self.model.harness_manager.installations.get(&harness)?;

@@ -521,7 +521,7 @@ impl NexusView {
                     colors,
                     locale.text("当前版本"),
                     locale.text("此应用的构建标签。"),
-                    installed_tag(),
+                    div().debug_selector(|| "installed-version".into()).w_full().child(installed_tag()),
                 ),
                 settings_row(
                     colors,
@@ -554,7 +554,7 @@ impl NexusView {
                 settings_row(
                     colors,
                     locale.text("启动时检查更新"),
-                    locale.text("检查所选频道，发现新版本后自动下载更新包。"),
+                    locale.text("自动检查所选频道，点击更新后才会下载并安装。"),
                     div()
                         .debug_selector(|| "update-check-on-startup".into())
                         .child(
@@ -598,25 +598,48 @@ impl NexusView {
                                     })),
                             )
                             .when(
-                                matches!(updates.state, UpdateState::Ready { .. }),
+                                matches!(updates.state, UpdateState::Available(_)),
                                 |element| {
                                     element.child(
-                                        Button::new("reveal-update")
-                                            .debug_selector(|| "reveal-update".into())
+                                        Button::new("download-update")
+                                            .debug_selector(|| "download-update".into())
                                             .primary()
                                             .small()
-                                            .label(locale.text("打开下载位置"))
+                                            .label(locale.text("更新并重启"))
                                             .on_click(cx.listener(|app, _, _, cx| {
-                                                if let UpdateState::Ready { path, .. } =
-                                                    &app.presenter.model().updates.state
-                                                {
-                                                    cx.reveal_path(path);
-                                                }
+                                                app.presenter.download_update();
+                                                cx.notify();
                                             })),
                                     )
                                 },
                             ),
-                    ),
+                    )
+                    .when_some(updates.state.package(), |element, package| {
+                        let url = package.release_url();
+                        element.child(
+                            div().w_full().min_w_0().flex().flex_col().gap_3()
+                                .child(div().flex().items_center().justify_between()
+                                    .child(section_label(colors, locale.text("更新日志")))
+                                    .child(Button::new("release-notes-link")
+                                        .debug_selector(|| "release-notes-link".into())
+                                        .ghost().small().label(locale.text("完整发布说明"))
+                                        .on_click(move |_, _, cx| cx.open_url(&url))))
+                                .child(div().text_size(px(12.)).text_color(rgb(colors.muted)).child(package.tag.clone()))
+                                .child(div().id("release-notes-scroll")
+                                    .debug_selector(|| "release-notes".into())
+                                    .max_h(px(260.)).overflow_y_scroll().p_4()
+                                    .border_1().border_color(rgb(colors.border)).rounded(px(CONTROL_RADIUS))
+                                    .child(TextView::markdown("release-notes-markdown", if package.notes.trim().is_empty() {
+                                        locale.text("此版本未提供更新日志，可查看完整发布说明。").to_owned()
+                                    } else {
+                                        package.notes.clone()
+                                    }).text_size(px(13.))))
+                                .when(matches!(updates.state, UpdateState::Available(_)), |element| {
+                                    element.child(div().text_size(px(12.)).text_color(rgb(colors.muted))
+                                        .child(locale.text("更新包校验后会自动安装并重启；运行中的任务结束后再安装。")))
+                                }),
+                        )
+                    }),
             ],
         )
     }

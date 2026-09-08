@@ -176,7 +176,9 @@ jobs:
             <key>CFBundleIconFile</key><string>nexus-icon.icns</string>
             <key>CFBundlePackageType</key><string>APPL</string>
             <key>CFBundleShortVersionString</key><string>$short_version</string>
-            <key>CFBundleVersion</key><string>$short_version</string>
+            <key>CFBundleVersion</key><string>$GITHUB_RUN_NUMBER</string>
+            <key>CFBundleGetInfoString</key><string>Nexus Agent $RELEASE_TAG</string>
+            <key>NexusReleaseTag</key><string>$RELEASE_TAG</string>
             <key>NSHighResolutionCapable</key><true/>
           </dict></plist>
           EOF

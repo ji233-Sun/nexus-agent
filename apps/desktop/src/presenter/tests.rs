@@ -477,6 +477,20 @@ pub(crate) fn pending_update(presenter: &mut Presenter) -> std::sync::mpsc::Send
     sender
 }
 
+pub(crate) fn update_package() -> std::sync::Arc<crate::model::updates::UpdatePackage> {
+    use crate::model::updates::{UpdateAsset, UpdatePackage};
+    std::sync::Arc::new(UpdatePackage {
+        tag: "v1.0.0".into(),
+        notes: "## Changes\n\n- Fix application updates.".into(),
+        asset: UpdateAsset {
+            name: "nexus-agent-v1.0.0-aarch64-apple-darwin.zip".into(),
+            browser_download_url: "https://github.com/ji233-Sun/nexus-agent/releases/download/v1.0.0/nexus-agent-v1.0.0-aarch64-apple-darwin.zip".into(),
+            size: 24,
+            digest: Some(format!("sha256:{}", "0".repeat(64))),
+        },
+    })
+}
+
 pub(crate) fn seed_harness_installations(
     presenter: &mut Presenter,
 ) -> &mut BTreeMap<HarnessKind, crate::model::harness_installation::HarnessInstallation> {
@@ -786,9 +800,8 @@ fn update_events_guard_concurrency_and_preserve_conversations_through_completion
     presenter.check_for_updates();
     sender
         .send(UpdateState::Downloading {
-            tag: "v1.0.0".into(),
+            package: update_package(),
             received: 12,
-            total: 24,
         })
         .unwrap();
     assert!(presenter.drain_update_events());
@@ -804,13 +817,14 @@ fn update_events_guard_concurrency_and_preserve_conversations_through_completion
     assert!(!presenter.drain_update_events());
     sender
         .send(UpdateState::Ready {
-            tag: "v1.0.0".into(),
+            package: update_package(),
             path: directory.path().join("update.zip"),
         })
         .unwrap();
     assert!(presenter.drain_update_events());
     assert!(presenter.update_events.is_none());
-    assert!(presenter.set_update_channel(channel));
+    assert!(!presenter.set_update_channel(channel));
+    assert!(!presenter.install_update_when_idle());
     assert!(matches!(
         presenter.model().updates.state,
         UpdateState::Ready { .. }
@@ -826,6 +840,60 @@ fn update_events_guard_concurrency_and_preserve_conversations_through_completion
     assert_eq!(presenter.model().active_run, run);
     assert_eq!(presenter.model().status, status);
     assert!(!presenter.drain_update_events());
+}
+
+#[test]
+fn update_installation_waits_for_all_tasks_and_workspace_work_and_blocks_new_operations() {
+    let (mut presenter, runner, directory, run) = worktree_fixture("finish before updating");
+    seed_harness_installations(&mut presenter);
+    presenter.model.updates.state = UpdateState::Ready {
+        package: update_package(),
+        path: directory.path().join("missing-update.zip"),
+    };
+    presenter.new_task();
+    assert!(presenter.model.active_run.is_none());
+    assert!(!presenter.install_update_when_idle());
+    runner.emit(Event::RunExited {
+        run_id: run.run_id,
+        status: RunStatus::Completed,
+        exit_code: Some(0),
+    });
+    presenter.drain_events();
+    assert_eq!(presenter.model.active_run_count(), 0);
+    assert!(presenter.initialize_workspace(run.task_id, "echo initialized".into()));
+    assert!(!presenter.install_update_when_idle());
+    finish_workspace_operation(&mut presenter);
+    presenter.model.harness_manager.busy = true;
+    assert!(!presenter.install_update_when_idle());
+    presenter.model.harness_manager.busy = false;
+    assert!(presenter.install_update_when_idle());
+    assert!(matches!(
+        presenter.model.updates.state,
+        UpdateState::Installing(_)
+    ));
+    assert!(!presenter.model().can_submit());
+    assert!(!presenter.submit("Do not interrupt installation", "claude"));
+    assert!(!presenter.initialize_workspace(run.task_id, "echo too late".into()));
+    assert!(!presenter.cleanup_workspace(run.task_id, "main".into()));
+    assert!(!presenter.restore_workspace_directory(run.task_id));
+    assert!(
+        presenter
+            .harness_maintenance_request(HarnessKind::Claude, None)
+            .is_none()
+    );
+    presenter.scan_harness_installations();
+    assert!(!presenter.model.harness_manager.busy);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while presenter.update_events.is_some() {
+        assert!(std::time::Instant::now() < deadline);
+        presenter.drain_update_events();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(matches!(
+        presenter.model.updates.state,
+        UpdateState::Failed(_)
+    ));
+    assert!(presenter.model.active_run.is_none());
 }
 
 #[test]

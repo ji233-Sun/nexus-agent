@@ -315,6 +315,10 @@ impl Presenter {
 
     fn workspace_for_write(&self, id: Uuid) -> Result<Workspace> {
         anyhow::ensure!(!self.model.workspace_busy, "请等待当前 Worktree 操作完成");
+        anyhow::ensure!(
+            !self.model.updates.state.is_installing(),
+            "正在安装应用更新，重启后可继续任务。"
+        );
         let workspace = self
             .storage
             .workspace(id)?
@@ -565,7 +569,7 @@ impl Presenter {
     }
 
     pub(crate) fn cleanup_workspace(&mut self, id: Uuid, target: String) -> bool {
-        if self.model.workspace_busy {
+        if self.model.workspace_busy || self.model.updates.state.is_installing() {
             return false;
         }
         let Some(workspace) = self
@@ -609,7 +613,7 @@ impl Presenter {
     }
 
     pub(crate) fn restore_workspace_directory(&mut self, id: Uuid) -> bool {
-        if self.model.workspace_busy {
+        if self.model.workspace_busy || self.model.updates.state.is_installing() {
             return false;
         }
         let Ok(Some(workspace)) = self.storage.workspace(id) else {

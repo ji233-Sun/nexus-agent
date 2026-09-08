@@ -903,6 +903,10 @@ impl Presenter {
         configured_executable: &str,
         permission_mode: PermissionMode,
     ) -> bool {
+        if self.model.updates.state.is_installing() {
+            self.model.status = "正在安装应用更新，重启后可继续任务。".into();
+            return false;
+        }
         if self.model.active_run.is_some()
             || self.model.harness_manager.operating.is_some()
             || self.model.occupied_run_slots() >= 2

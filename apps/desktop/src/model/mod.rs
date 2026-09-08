@@ -407,6 +407,7 @@ impl AppModel {
                 .selected_workspace
                 .as_ref()
                 .is_none_or(|workspace| workspace.status == workspace::WorkspaceStatus::Ready)
+            && !self.updates.state.is_installing()
             && self.harness_manager.operating.is_none()
             && self
                 .selected_probe()

@@ -1,11 +1,11 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
+
+use serde::Deserialize;
 
 use crate::i18n::{Language, LocalizedText};
 
 pub(crate) fn installed_tag() -> &'static str {
-    option_env!("NEXUS_RELEASE_TAG")
-        .filter(|tag| !tag.is_empty())
-        .unwrap_or(concat!("v", env!("CARGO_PKG_VERSION")))
+    env!("NEXUS_RELEASE_TAG")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,27 +48,75 @@ impl Default for UpdateChannel {
     }
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct UpdateAsset {
+    pub(crate) name: String,
+    pub(crate) browser_download_url: String,
+    pub(crate) size: u64,
+    pub(crate) digest: Option<String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct UpdatePackage {
+    pub(crate) tag: String,
+    pub(crate) notes: String,
+    pub(crate) asset: UpdateAsset,
+}
+
+impl UpdatePackage {
+    pub(crate) fn release_url(&self) -> String {
+        format!(
+            "https://github.com/ji233-Sun/nexus-agent/releases/tag/{}",
+            self.tag
+        )
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) enum UpdateState {
     #[default]
     Idle,
     Checking,
     UpToDate,
+    Available(Arc<UpdatePackage>),
     Downloading {
-        tag: String,
+        package: Arc<UpdatePackage>,
         received: u64,
-        total: u64,
     },
     Ready {
-        tag: String,
+        package: Arc<UpdatePackage>,
         path: PathBuf,
     },
+    Installing(Arc<UpdatePackage>),
+    Restarting(Arc<UpdatePackage>),
     Failed(LocalizedText),
 }
 
 impl UpdateState {
     pub(crate) fn is_busy(&self) -> bool {
-        matches!(self, Self::Checking | Self::Downloading { .. })
+        self.has_worker() || matches!(self, Self::Ready { .. } | Self::Restarting(_))
+    }
+
+    pub(crate) fn has_worker(&self) -> bool {
+        matches!(
+            self,
+            Self::Checking | Self::Downloading { .. } | Self::Installing(_)
+        )
+    }
+
+    pub(crate) fn is_installing(&self) -> bool {
+        matches!(self, Self::Installing(_) | Self::Restarting(_))
+    }
+
+    pub(crate) fn package(&self) -> Option<&UpdatePackage> {
+        match self {
+            Self::Available(package)
+            | Self::Downloading { package, .. }
+            | Self::Ready { package, .. }
+            | Self::Installing(package)
+            | Self::Restarting(package) => Some(package),
+            _ => None,
+        }
     }
 
     pub(crate) fn message(&self, language: Language) -> String {
@@ -76,24 +124,30 @@ impl UpdateState {
             Self::Idle => language.text("尚未检查更新").into(),
             Self::Checking => language.text("正在检查更新…").into(),
             Self::UpToDate => language.text("此频道暂无可用更新。").into(),
-            Self::Downloading {
-                tag,
-                received,
-                total,
-            } => language.format(
+            Self::Available(package) => language.format(
+                "发现新版本 {tag}，点击更新后下载并自动安装。",
+                &[("tag", package.tag.clone())],
+            ),
+            Self::Downloading { package, received } => language.format(
                 "正在下载 {tag}：{progress}%",
                 &[
-                    ("tag", tag.clone()),
+                    ("tag", package.tag.clone()),
                     (
                         "progress",
-                        (received.saturating_mul(100) / (*total).max(1)).to_string(),
+                        (received.saturating_mul(100) / package.asset.size.max(1)).to_string(),
                     ),
                 ],
             ),
-            Self::Ready { tag, .. } => language.format(
-                "{tag} 已下载并通过校验。解压后退出应用，再替换安装。",
-                &[("tag", tag.clone())],
+            Self::Ready { package, .. } => language.format(
+                "{tag} 已下载并通过校验，当前任务结束后将自动安装并重启。",
+                &[("tag", package.tag.clone())],
             ),
+            Self::Installing(package) => {
+                language.format("正在准备安装 {tag}…", &[("tag", package.tag.clone())])
+            }
+            Self::Restarting(package) => {
+                language.format("正在重启并安装 {tag}…", &[("tag", package.tag.clone())])
+            }
             Self::Failed(error) => error.render(language).into(),
         }
     }
