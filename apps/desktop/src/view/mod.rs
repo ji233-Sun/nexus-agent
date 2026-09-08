@@ -50,6 +50,7 @@ use pane::{PaneKind, WorkspacePane};
 use settings::SettingsSection;
 use std::{
     collections::{BTreeMap, HashSet},
+    path::Path,
     time::{Duration, Instant},
 };
 use theme::*;
@@ -1285,6 +1286,7 @@ impl NexusView {
                 .child(
                     div()
                         .id("message-queue")
+                        .debug_selector(|| "message-queue".into())
                         .max_h(px(160.))
                         .overflow_y_scroll()
                         .children(queued.into_iter().map(|message| {
@@ -1359,6 +1361,57 @@ impl NexusView {
                         })),
                 )
         })
+    }
+
+    fn render_working_directory(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let model = self.presenter.model();
+        let colors = palette(cx);
+        let path = model.working_directory().map(str::to_owned);
+        div()
+            .debug_selector(|| "composer-context".into())
+            .w_full()
+            .max_w(px(CONTENT_WIDTH))
+            .mx_auto()
+            .mb_2()
+            .px_3()
+            .flex()
+            .child(
+                // Recreate tooltip state when switching to a different execution directory.
+                div()
+                    .id(SharedString::from(format!(
+                        "composer-directory-{}",
+                        path.as_deref().unwrap_or_default()
+                    )))
+                    .debug_selector(|| "composer-directory".into())
+                    .min_w_0()
+                    .max_w_full()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(12.))
+                    .text_color(rgb(colors.muted))
+                    .when_some(path, |element, path| {
+                        element.tooltip(move |window, cx| {
+                            let path = path.clone();
+                            Tooltip::element(move |_, _| {
+                                div()
+                                    .debug_selector(|| "composer-directory-tooltip".into())
+                                    .max_w(px(CONTENT_WIDTH))
+                                    .whitespace_normal()
+                                    .child(path.clone())
+                            })
+                            .build(window, cx)
+                        })
+                    })
+                    .child(Icon::new(IconName::Folder).size(px(14.)).flex_none())
+                    .child(
+                        div()
+                            .debug_selector(|| "composer-directory-name".into())
+                            .min_w_0()
+                            .truncate()
+                            .child(working_directory_label(model).to_owned()),
+                    ),
+            )
     }
 
     fn render_workspace(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1617,6 +1670,7 @@ impl NexusView {
                             .pt_3()
                             .pb_4()
                             .child(self.render_user_asks(window, cx))
+                            .child(self.render_working_directory(cx))
                             .child(
                                 div()
                                     .debug_selector(|| "composer-surface".into())
@@ -1690,6 +1744,9 @@ impl NexusView {
                                                     })
                                                     .child(
                                                         Button::new("submit")
+                                                            .debug_selector(|| {
+                                                                "composer-submit".into()
+                                                            })
                                                             .primary()
                                                             .small()
                                                             .size(px(COMPACT_CONTROL_HEIGHT))
@@ -1818,6 +1875,17 @@ impl Render for NexusView {
     }
 }
 
+fn working_directory_label(model: &AppModel) -> &str {
+    match model.working_directory() {
+        Some(path) => Path::new(path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(path),
+        None if model.selected_codex_thread.is_some() => model.language.text("未知目录"),
+        None => model.language.text("未选择目录"),
+    }
+}
+
 fn provider_environment_defaults(harness: HarnessKind) -> (&'static str, &'static str) {
     match harness {
         HarnessKind::Claude => ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"),
@@ -1942,6 +2010,185 @@ mod catalog_model_tests {
     fn click_debug(cx: &mut gpui::VisualTestContext, selector: &'static str) {
         let point = cx.debug_bounds(selector).unwrap().center();
         cx.simulate_click(point, Default::default());
+    }
+
+    #[test]
+    fn working_directory_labels_preserve_paths_and_localize_empty_states() {
+        let (presenter, _, _directory) = fixture();
+        let mut model = AppModel::default();
+        for (language, no_directory, unknown) in [
+            (Language::Chinese, "未选择目录", "未知目录"),
+            (
+                Language::English,
+                "No directory selected",
+                "Unknown directory",
+            ),
+        ] {
+            model.language = language;
+            model.selected_project = None;
+            model.selected_codex_thread = None;
+            assert_eq!(working_directory_label(&model), no_directory);
+            model.selected_project = presenter.model().selected_project.clone();
+            let long_name = "中文 long directory ".repeat(30);
+            for name in ["nexus", "含 空格的目录", long_name.as_str()] {
+                let path = Path::new("workspace").join(name).display().to_string();
+                let project = model.selected_project.as_mut().unwrap();
+                project.canonical_path = path.clone();
+                project.display_name = "unrelated project alias".into();
+                assert_eq!(working_directory_label(&model), name);
+                assert_eq!(model.working_directory(), Some(path.as_str()));
+            }
+            let root = if cfg!(windows) { "C:\\" } else { "/" };
+            model.selected_project.as_mut().unwrap().canonical_path = root.into();
+            assert_eq!(working_directory_label(&model), root);
+
+            model.selected_codex_thread = Some("history".into());
+            assert_eq!(working_directory_label(&model), unknown);
+            model.codex_threads = vec![crate::model::history::ThreadSummary {
+                id: "history".into(),
+                title: "history".into(),
+                cwd: Path::new("history").join("独立目录").display().to_string(),
+                source: "cli".into(),
+                updated_at: 0,
+                archived: false,
+            }];
+            assert_eq!(working_directory_label(&model), "独立目录");
+            model.codex_threads[0].cwd.clear();
+            assert_eq!(working_directory_label(&model), unknown);
+            assert_eq!(model.working_directory(), None);
+            model.codex_threads.clear();
+        }
+    }
+
+    #[gpui::test]
+    fn working_directory_stays_above_composer_without_overlapping_queue_or_controls(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (mut presenter, runner, directory) = fixture();
+        let path = directory
+            .path()
+            .join("parent".repeat(35))
+            .join(format!("{}nexus", "目录 name ".repeat(15)));
+        std::fs::create_dir_all(&path).unwrap();
+        presenter.open_project(&path);
+        let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
+        for (theme, language, width, height) in [
+            (ThemePreference::Light, Language::Chinese, 1040., 680.),
+            (ThemePreference::Dark, Language::Chinese, 1040., 680.),
+            (ThemePreference::Light, Language::English, 1040., 680.),
+            (ThemePreference::Dark, Language::English, 1040., 680.),
+            (ThemePreference::Dark, Language::English, 1280., 800.),
+        ] {
+            cx.simulate_resize(gpui::size(px(width), px(height)));
+            view.update_in(cx, |view, window, cx| {
+                view.set_appearance(
+                    AppearanceSettings {
+                        theme,
+                        reduced_motion: true,
+                        ..Default::default()
+                    },
+                    window,
+                    cx,
+                );
+                view.set_language(language, window, cx);
+            });
+            for prompt in ["start task", "queued message"] {
+                cx.run_until_parked();
+                let context = cx.debug_bounds("composer-context").unwrap();
+                let directory = cx.debug_bounds("composer-directory").unwrap();
+                let name = cx.debug_bounds("composer-directory-name").unwrap();
+                let composer = cx.debug_bounds("composer-surface").unwrap();
+                let send = cx.debug_bounds("composer-submit").unwrap();
+                assert_eq!(context.left(), composer.left());
+                assert_eq!(context.right(), composer.right());
+                assert!(directory.top() > px(HEADER_HEIGHT));
+                assert!(directory.bottom() <= composer.top());
+                assert!(name.right() <= context.right());
+                assert!(name.size.height <= px(24.));
+                assert!(send.left() >= composer.left() && send.right() <= composer.right());
+                assert!(send.top() >= composer.top() && send.bottom() <= px(height));
+                view.update_in(cx, |view, window, cx| {
+                    view.prompt_input
+                        .update(cx, |input, cx| input.set_value(prompt, window, cx));
+                });
+                cx.run_until_parked();
+                click_debug(cx, "composer-submit");
+            }
+            cx.run_until_parked();
+            let queue = cx.debug_bounds("message-queue").unwrap();
+            let composer = cx.debug_bounds("composer-surface").unwrap();
+            let directory = cx.debug_bounds("composer-directory").unwrap();
+            let stop = cx.debug_bounds("composer-cancel").unwrap();
+            assert!(directory.bottom() <= composer.top());
+            assert!(queue.top() >= composer.top() && queue.bottom() <= stop.top());
+            assert!(stop.bottom() <= composer.bottom() && composer.bottom() <= px(height));
+            assert!(stop.right() <= cx.debug_bounds("composer-submit").unwrap().left());
+            cx.simulate_mouse_move(directory.center(), None, Default::default());
+            cx.executor().advance_clock(Duration::from_secs(1));
+            cx.run_until_parked();
+            let tooltip = cx.debug_bounds("composer-directory-tooltip").unwrap();
+            assert!(tooltip.left() >= px(0.) && tooltip.right() <= px(width));
+            assert!(tooltip.top() >= px(0.) && tooltip.bottom() <= px(height));
+            assert!(tooltip.size.height > px(24.));
+            click_debug(cx, "composer-cancel");
+            view.update(cx, |view, cx| {
+                let model = view.presenter.model();
+                assert!(model.run_cancelling);
+                assert_eq!(model.queued_messages.len(), 1);
+                let queued_id = model.queued_messages[0].id;
+                runner.emit(Event::RunExited {
+                    run_id: model.active_run.unwrap(),
+                    status: RunStatus::Cancelled,
+                    exit_code: None,
+                });
+                view.presenter.drain_events();
+                view.presenter.remove_queued_message(queued_id);
+                view.presenter.new_task();
+                cx.notify();
+            });
+        }
+        cx.run_until_parked();
+        let directory_bounds = cx.debug_bounds("composer-directory").unwrap();
+        cx.simulate_mouse_move(
+            gpui::point(
+                directory_bounds.left() + px(20.),
+                directory_bounds.center().y,
+            ),
+            None,
+            Default::default(),
+        );
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("composer-directory-tooltip").is_some());
+        view.update(cx, |view, cx| {
+            view.presenter.open_project(directory.path());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("composer-directory-tooltip").is_none());
+        let directory_bounds = cx.debug_bounds("composer-directory").unwrap();
+        cx.simulate_mouse_move(directory_bounds.center(), None, Default::default());
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("composer-directory-tooltip").is_some());
+        view.update(cx, |view, cx| {
+            view.presenter.select_codex_thread("missing-history".into());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("composer-directory").is_some());
+        assert!(cx.debug_bounds("composer-directory-tooltip").is_none());
+        assert!(cx.debug_bounds("message-queue").is_none());
+        assert!(cx.debug_bounds("composer-cancel").is_none());
+        view.update_in(cx, |view, window, cx| {
+            view.prompt_input
+                .update(cx, |input, cx| input.set_value("read only", window, cx));
+        });
+        cx.run_until_parked();
+        click_debug(cx, "composer-submit");
+        assert!(view.read_with(cx, |view, _| view.presenter.model().active_run.is_none()));
     }
 
     #[test]
