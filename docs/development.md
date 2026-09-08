@@ -80,13 +80,13 @@ flowchart TB
 - `crates/harness-codex`：Codex CLI 探测、App Server 启动配置和事件适配。
 - `crates/harness-omp`：Oh My Pi 探测、受控写入模式和 JSON 事件解码。
 - `apps/runner/src/transport.rs`：JSONL 命令读取、协议版本校验和事件写出。
-- `apps/runner/src/application`：命令调度、运行独占、取消和统一事件转换。
+- `apps/runner/src/application`：命令调度、双任务并发、任务与 checkout 互斥、取消和统一事件转换。
 - `apps/runner/src/infrastructure`：Harness 适配器选择、子进程执行和平台相关的进程树清理。
 - `apps/desktop/src/bootstrap.rs`：窗口、主题、存储和 Runner 的启动装配。
 - `apps/desktop/src/model`：界面状态、历史消息数据和提交可用性，不依赖 GPUI。
 - `apps/desktop/src/presenter`：项目选择、配置、提交、远程命令、事件处理和持久化协调，不依赖 GPUI；通过 `RunnerPort` 注入真实或测试 Runner。
 - `apps/desktop/src/view`：GPUI 渲染、控件状态和事件转交，按侧栏、时间线、设置、组件和主题拆分。
-- `apps/desktop/src/infrastructure`：平台数据目录、SQLite、系统凭据库、Runner 进程通信、Codex 历史和 Git 状态读取。
+- `apps/desktop/src/infrastructure`：平台数据目录、SQLite、系统凭据库、Runner 进程通信、Codex 历史、Worktree 生命周期和本地 Git 成果接收。
 - `apps/desktop/src/remote_control.rs`：带令牌鉴权的 HTTP/WebSocket 服务及静态资源托管。
 - `apps/remote-web`：React + Vite 静态 Remote Client，生产构建产物嵌入 Desktop。
 
@@ -152,7 +152,7 @@ Nightly 仅在 **Actions → Release → Run workflow** 中选择分支手动触
 
 标签与包名使用 `nightly-YYYY-MM-DD-<Unix 秒时间戳>-<12 位提交 SHA>`，日期按 UTC 计算，日期与时间戳都取自该提交的提交者时间。同一提交重跑保持相同标签，标签指向完整构建 SHA，不同提交的发布独立执行。
 
-Nightly 始终标记为 Pre-release，不占用 Latest；应用与 macOS bundle 的基础版本沿用 `Cargo.toml`，无需每次修改版本文件。发布时通过 `NEXUS_RELEASE_TAG` 将完整标签编译进应用，本地构建未指定时使用 `v<Cargo 版本>`。应用内频道与下载行为见[使用指南](usage.md#更新-nexus)。
+Nightly 始终标记为 Pre-release，不占用 Latest。Cargo 包版本和 macOS 的数字基础版本沿用 `Cargo.toml`，应用内显示完整 Nightly 标签，无需每次修改版本文件。发布时通过 `NEXUS_RELEASE_TAG` 编译完整标签；本地构建优先使用显式标签，否则使用当前提交的版本标签或生成 Nightly 标签，无 Git 元数据时回退到 `v<Cargo 版本>`。应用内频道、版本展示与安装行为见[使用指南](usage.md#更新-nexus)。
 
 ## 按指令解决 PR 冲突
 

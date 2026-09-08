@@ -93,7 +93,6 @@ impl NexusView {
                 let project_id = project.id;
                 let project = project.clone();
                 let new_task_project = project.clone();
-                let can_create_task = model.active_run.is_none();
                 let tasks: Vec<_> = model
                     .tasks
                     .iter()
@@ -101,7 +100,7 @@ impl NexusView {
                     .map(|task| {
                         let id = task.id;
                         let app = cx.entity().clone();
-                        let can_manage = model.active_run.is_none();
+                        let can_manage = !model.task_running(task.id) && !model.workspace_busy;
                         let reduced_motion = self.reduced_motion;
                         let color = run_status_color(colors, task.status);
                         let active = task.status.is_active();
@@ -248,13 +247,9 @@ impl NexusView {
                                             )
                                             .accessibility_label(locale.text("在此项目中新建对话"))
                                             .tooltip(locale.text("新建对话"))
-                                            .disabled(!can_create_task)
                                             .on_click(move |_, window, cx| {
                                                 cx.stop_propagation();
                                                 app.update(cx, |app, cx| {
-                                                    if app.presenter.model().active_run.is_some() {
-                                                        return;
-                                                    }
                                                     if !selected {
                                                         app.select_project(project.clone());
                                                     }
@@ -384,7 +379,7 @@ impl NexusView {
                                 )
                                 .tooltip(locale.text("在当前项目中开始新任务"))
                                 .disabled(
-                                    model.selected_project.is_none() || model.active_run.is_some(),
+                                    model.selected_project.is_none(),
                                 )
                                 .on_click(
                                     cx.listener(|app, _, window, cx| app.new_task(window, cx)),
@@ -706,6 +701,7 @@ mod tests {
         for index in 0..30 {
             storage
                 .create_task_run(NewTaskRun {
+                    workspace_id: None,
                     permission_mode: nexus_domain::PermissionMode::AutoEdit,
                     task_id: None,
                     project_id: project.id,

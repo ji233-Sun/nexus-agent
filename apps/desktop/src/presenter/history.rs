@@ -65,10 +65,7 @@ impl Presenter {
     }
 
     pub(crate) fn select_codex_thread(&mut self, thread_id: String) {
-        if self.model.active_run.is_some() {
-            self.model.status = "任务执行期间不能切换历史会话。".into();
-            return;
-        }
+        self.model.fresh_conversation();
         self.model.selected_task = None;
         self.model.selected_codex_thread = Some(thread_id.clone());
         self.model.messages.clear();

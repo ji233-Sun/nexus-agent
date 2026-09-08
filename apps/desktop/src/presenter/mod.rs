@@ -3,6 +3,7 @@ mod history;
 mod remote;
 mod runs;
 mod updates;
+mod workspace;
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -12,11 +13,11 @@ use crate::{
     infrastructure::{
         codex_history::Client as CodexHistoryClient,
         credentials::{CredentialStore, SystemCredentialStore},
-        git::is_git_dirty,
         storage::Storage,
     },
     model::{
-        AppModel, AppearanceSettings, ModelCatalogState, TitleGenerationSettings,
+        AppModel, AppearanceSettings, ConversationState, ModelCatalogState,
+        TitleGenerationSettings,
         updates::{UpdateChannel, UpdateModel, UpdateState},
     },
     remote_control::{RemoteCommand, RemoteControl, TOKEN_SETTING_KEY},
@@ -30,7 +31,7 @@ use nexus_protocol::{
     Command, CommandEnvelope, EnvironmentVariable, EventEnvelope, ModelCatalogPurpose,
     TitleGenerationConfig,
 };
-use std::{collections::BTreeMap, path::Path, str::FromStr as _, time::Instant};
+use std::{collections::BTreeMap, path::Path, str::FromStr as _};
 use uuid::Uuid;
 
 const PROVIDER_PROFILE_NAME_MAX_CHARS: usize = 48;
@@ -57,8 +58,6 @@ pub(crate) trait RunnerPort {
 
 pub(crate) struct Presenter {
     model: AppModel,
-    active_run_started_at: Option<Instant>,
-    catalog_project: Option<Uuid>,
     storage: Storage,
     runner: Option<Box<dyn RunnerPort>>,
     codex_history_client: Option<CodexHistoryClient>,
@@ -68,6 +67,9 @@ pub(crate) struct Presenter {
     credentials: Box<dyn CredentialStore>,
     update_events: Option<std::sync::mpsc::Receiver<UpdateState>>,
     installation_worker: Option<crate::infrastructure::harness_installation::Worker>,
+    workspace_events: Option<std::sync::mpsc::Receiver<workspace::WorkspaceEvent>>,
+    workspace_cancel: Option<tokio::sync::watch::Sender<bool>>,
+    worktree_root: Result<std::path::PathBuf>,
 }
 
 pub(crate) struct ProviderProfileDraft {
@@ -216,8 +218,6 @@ impl Presenter {
         let mut presenter = Self {
             storage,
             runner,
-            active_run_started_at: None,
-            catalog_project: None,
             model: AppModel {
                 language,
                 appearance,
@@ -225,25 +225,28 @@ impl Presenter {
                 updates,
                 projects,
                 archived_tasks,
-                selected_harness,
-                permission_mode,
-                model_override,
-                model_override_name,
-                effort,
-                executable,
                 provider_profiles,
-                active_provider_profiles,
-                status: storage_error
-                    .map(LocalizedText::from)
-                    .or_else(|| {
-                        credential_store_error.map(|error| {
-                            LocalizedText::new(
-                                "无法读取系统凭据库：{error}",
-                                &[("error", (error).to_string())],
-                            )
+                conversation: ConversationState {
+                    selected_harness,
+                    permission_mode,
+                    model_override,
+                    model_override_name,
+                    effort,
+                    executable,
+                    active_provider_profiles,
+                    status: storage_error
+                        .map(LocalizedText::from)
+                        .or_else(|| {
+                            credential_store_error.map(|error| {
+                                LocalizedText::new(
+                                    "无法读取系统凭据库：{error}",
+                                    &[("error", (error).to_string())],
+                                )
+                            })
                         })
-                    })
-                    .unwrap_or_else(|| "正在连接本地 Runner…".into()),
+                        .unwrap_or_else(|| "正在连接本地 Runner…".into()),
+                    ..ConversationState::default()
+                },
                 ..AppModel::default()
             },
             codex_history_client: None,
@@ -253,6 +256,9 @@ impl Presenter {
             credentials,
             update_events: None,
             installation_worker: None,
+            workspace_events: None,
+            workspace_cancel: None,
+            worktree_root: crate::infrastructure::paths::worktree_directory(),
         };
         if let Some(runner) = &presenter.runner {
             let _ = runner.send(CommandEnvelope::new(Command::RunnerHello));
@@ -329,7 +335,9 @@ impl Presenter {
             .as_ref()
             .map(RemoteControl::drain_commands)
             .unwrap_or_default();
-        let mut changed = !runner_events.is_empty() || !history_events.is_empty();
+        let mut changed = self.drain_workspace_events()
+            || !runner_events.is_empty()
+            || !history_events.is_empty();
         for envelope in runner_events {
             if envelope.protocol_version != nexus_protocol::PROTOCOL_VERSION {
                 self.model.status = "Desktop 与 Runner 协议版本不匹配，请重启或更新应用。".into();
@@ -363,10 +371,12 @@ impl Presenter {
     }
 
     pub(crate) fn new_task(&mut self) {
-        if self.model.active_run.is_some() || self.model.selected_project.is_none() {
+        if self.model.selected_project.is_none() {
             return;
         }
+        self.model.fresh_conversation();
         self.model.selected_task = None;
+        self.reset_workspace_draft();
         self.model.selected_codex_thread = None;
         self.model.messages.clear();
         self.model.codex_history_messages.clear();
@@ -375,14 +385,17 @@ impl Presenter {
         self.model.status = "已准备好新任务。".into();
         self.model.permission_mode =
             load_permission_mode(&self.storage, self.model.selected_harness);
+        self.refresh_model_catalog();
     }
 
     pub(crate) fn select_project(&mut self, project: Project) {
+        self.model.fresh_conversation();
         self.model.permission_mode =
             load_permission_mode(&self.storage, self.model.selected_harness);
-        self.model.project_dirty = is_git_dirty(Path::new(&project.canonical_path));
         self.model.selected_project = Some(project);
         self.model.selected_task = None;
+        self.reset_workspace_draft();
+        self.reload_workspaces();
         self.model.selected_codex_thread = None;
         self.model.messages.clear();
         self.model.codex_history_messages.clear();
@@ -417,11 +430,27 @@ impl Presenter {
     }
 
     pub(crate) fn select_task(&mut self, task_id: Uuid) {
+        if self.model.selected_task != Some(task_id) {
+            let existing = self
+                .model
+                .conversations
+                .values()
+                .find(|conversation| conversation.selected_task == Some(task_id))
+                .map(|conversation| conversation.id);
+            if let Some(id) = existing {
+                self.model.activate_conversation(id);
+            } else {
+                self.model.fresh_conversation();
+            }
+        }
         self.model.selected_task = Some(task_id);
+        self.model.selected_workspace = self.storage.task_workspace(task_id).ok().flatten();
+        self.reload_workspaces();
         self.model.selected_codex_thread = None;
         self.model.codex_history_messages.clear();
         self.model.codex_thread_loading = false;
         self.model.messages = self.storage.messages(task_id).unwrap_or_default();
+        self.reload_tasks();
         if self.model.active_run.is_some() {
             return;
         }
@@ -466,7 +495,7 @@ impl Presenter {
     }
 
     pub(crate) fn archive_task(&mut self, task_id: Uuid) -> bool {
-        if self.model.active_run.is_some() {
+        if self.model.task_running(task_id) || self.model.workspace_busy {
             return false;
         }
         if let Err(error) = self.storage.archive_task(task_id) {
@@ -483,7 +512,7 @@ impl Presenter {
     }
 
     pub(crate) fn restore_task(&mut self, task_id: Uuid) -> bool {
-        if self.model.active_run.is_some() {
+        if self.model.task_running(task_id) || self.model.workspace_busy {
             return false;
         }
         if let Err(error) = self.storage.restore_task(task_id) {
@@ -498,7 +527,7 @@ impl Presenter {
     }
 
     pub(crate) fn delete_task(&mut self, task_id: Uuid) -> bool {
-        if self.model.active_run.is_some() {
+        if self.model.task_running(task_id) || self.model.workspace_busy {
             return false;
         }
         if let Err(error) = self.storage.delete_task(task_id) {
@@ -512,6 +541,9 @@ impl Presenter {
         if self.model.selected_task == Some(task_id) {
             self.new_task();
         }
+        self.model
+            .conversations
+            .retain(|_, conversation| conversation.selected_task != Some(task_id));
         self.reload_projects();
         self.reload_tasks();
         self.model.status = "对话已删除。".into();
@@ -524,7 +556,14 @@ impl Presenter {
         }
         match self.storage.delete_archived_tasks() {
             Ok(count) => {
-                self.model.queued_messages.retain(|message| {
+                self.model.conversations.retain(|_, conversation| {
+                    !self
+                        .model
+                        .archived_tasks
+                        .iter()
+                        .any(|task| Some(task.id) == conversation.selected_task)
+                });
+                self.model.conversation.queued_messages.retain(|message| {
                     !self
                         .model
                         .archived_tasks
@@ -831,7 +870,7 @@ impl Presenter {
     }
 
     pub(crate) fn refresh_title_model_catalog(&mut self) -> bool {
-        let Some(project) = self.model.selected_project.as_ref() else {
+        let Some(cwd) = self.model.working_directory().map(str::to_owned) else {
             self.model.title_model_catalog = ModelCatalogState::Idle;
             return false;
         };
@@ -845,11 +884,12 @@ impl Presenter {
         };
         let request_id = Uuid::new_v4();
         let command = CommandEnvelope::new(Command::ModelCatalogRefresh {
+            context_id: Some(self.model.conversation.id),
             request_id,
             purpose: ModelCatalogPurpose::TitleGeneration,
             harness: configuration.harness,
             executable: configuration.executable,
-            cwd: project.canonical_path.clone(),
+            cwd,
             environment: configuration.environment,
         });
         let models = self
@@ -901,13 +941,13 @@ impl Presenter {
             .selected_project
             .as_ref()
             .map(|project| project.id);
-        let project_changed = self.catalog_project != project_id;
+        let project_changed = self.model.catalog_project != project_id;
         if project_changed {
             self.model.title_model_catalog = ModelCatalogState::Idle;
         }
-        self.catalog_project = project_id;
+        self.model.catalog_project = project_id;
         let harness = self.model.selected_harness;
-        let Some(project) = self.model.selected_project.as_ref() else {
+        let Some(cwd) = self.model.working_directory().map(str::to_owned) else {
             self.model.model_catalog = ModelCatalogState::Idle;
             return false;
         };
@@ -945,11 +985,12 @@ impl Presenter {
         };
         let request_id = Uuid::new_v4();
         let command = CommandEnvelope::new(Command::ModelCatalogRefresh {
+            context_id: Some(self.model.conversation.id),
             request_id,
             purpose: ModelCatalogPurpose::Conversation,
             harness,
             executable: self.model.executable.clone(),
-            cwd: project.canonical_path.clone(),
+            cwd,
             environment,
         });
         let mut models = self
@@ -1040,7 +1081,7 @@ impl Presenter {
     }
 
     pub(crate) fn save_provider_profile(&mut self, draft: ProviderProfileDraft) -> Option<Uuid> {
-        if self.model.active_run.is_some() {
+        if self.model.active_run_count() > 0 {
             return None;
         }
         let harness = self.model.selected_harness;
@@ -1184,7 +1225,7 @@ impl Presenter {
     }
 
     pub(crate) fn delete_provider_profile(&mut self, profile_id: Uuid) -> bool {
-        if self.model.active_run.is_some()
+        if self.model.active_run_count() > 0
             || !self
                 .model
                 .provider_profiles

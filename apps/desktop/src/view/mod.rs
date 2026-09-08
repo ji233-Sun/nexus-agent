@@ -7,6 +7,7 @@ pub(crate) mod theme;
 mod timeline;
 mod tools;
 mod user_ask;
+mod workspace;
 
 use crate::{
     i18n::Language,
@@ -59,9 +60,9 @@ use uuid::Uuid;
 gpui::actions!(nexus_view, [SearchSessions, NewTask, ToggleSettings]);
 
 // Render outside NexusView's update so dialog builders can read its current model.
-struct ApprovalLayer;
+struct DialogLayer;
 
-impl Render for ApprovalLayer {
+impl Render for DialogLayer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .absolute()
@@ -104,7 +105,7 @@ pub(crate) struct NexusView {
     reduced_motion: bool,
     editing_provider_profile: Option<Uuid>,
     approval_dialog: Option<(Uuid, Uuid)>,
-    approval_layer: Entity<ApprovalLayer>,
+    dialog_layer: Entity<DialogLayer>,
 }
 
 impl NexusView {
@@ -273,11 +274,11 @@ impl NexusView {
         let owner = cx.weak_entity();
         let sidebar_pane = cx.new(|cx| WorkspacePane::new(owner.clone(), PaneKind::Sidebar, cx));
         let timeline_pane = cx.new(|cx| WorkspacePane::new(owner.clone(), PaneKind::Timeline, cx));
-        let approval_layer = cx.new(|cx| {
+        let dialog_layer = cx.new(|cx| {
             if let Some(owner) = owner.upgrade() {
                 cx.observe(&owner, |_, _, cx| cx.notify()).detach();
             }
-            ApprovalLayer
+            DialogLayer
         });
         let settings_pane = cx.new(|cx| WorkspacePane::new(owner, PaneKind::Settings, cx));
         let settings_open = matches!(
@@ -318,7 +319,7 @@ impl NexusView {
             reduced_motion: false,
             editing_provider_profile,
             approval_dialog: None,
-            approval_layer,
+            dialog_layer,
         };
         view.refresh_appearance(window, cx);
         view.focus_handle.focus(window, cx);
@@ -630,9 +631,7 @@ impl NexusView {
     }
 
     fn new_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.presenter.model().active_run.is_some()
-            || self.presenter.model().selected_project.is_none()
-        {
+        if self.presenter.model().selected_project.is_none() {
             return;
         }
         self.presenter.new_task();
@@ -1499,7 +1498,7 @@ impl NexusView {
         let selected_profile_ready = model
             .selected_provider_profile()
             .is_some_and(|profile| profile.credential_configured);
-        let background_run = model.active_run.is_some() && model.active_task != model.selected_task;
+        let background_run = model.active_run.is_none() && model.active_run_count() > 0;
         let header_status_pending = model.active_run.is_some()
             || model.codex_thread_loading
             || (!history && matches!(model.model_catalog, ModelCatalogState::Loading { .. }));
@@ -1718,6 +1717,7 @@ impl NexusView {
                             .pb_4()
                             .child(self.render_user_asks(window, cx))
                             .child(self.render_working_directory(cx))
+                            .child(self.render_workspace_controls(cx))
                             .child(
                                 div()
                                     .debug_selector(|| "composer-surface".into())
@@ -1916,9 +1916,7 @@ impl Render for NexusView {
                         .cached(gpui::StyleRefinement::default().size_full()),
                 )
             })
-            .when(self.approval_dialog.is_some(), |element| {
-                element.child(self.approval_layer.clone())
-            })
+            .child(self.dialog_layer.clone())
     }
 }
 
@@ -2057,6 +2055,84 @@ mod catalog_model_tests {
     fn click_debug(cx: &mut gpui::VisualTestContext, selector: &'static str) {
         let point = cx.debug_bounds(selector).unwrap().center();
         cx.simulate_click(point, Default::default());
+    }
+
+    #[gpui::test]
+    fn worktree_review_requires_confirmation_and_commits_the_selected_file(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::presenter::tests::{finish_workspace_operation, worktree_fixture};
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (mut presenter, runner, _directory, start) = worktree_fixture("review task");
+        // Keep click targets fixed while testing the confirmation flow.
+        assert!(presenter.set_appearance(AppearanceSettings {
+            reduced_motion: true,
+            ..Default::default()
+        }));
+        runner.emit(Event::RunExited {
+            run_id: start.run_id,
+            status: RunStatus::Completed,
+            exit_code: Some(0),
+        });
+        presenter.drain_events();
+        let id = presenter.model().selected_workspace.as_ref().unwrap().id;
+        let cwd = std::path::Path::new(&start.cwd);
+        std::fs::write(cwd.join("tracked.txt"), "reviewed content\n").unwrap();
+        let before = crate::infrastructure::git::git(cwd, &["rev-parse", "HEAD"]).unwrap();
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| NexusView::new(presenter, window, cx));
+            gpui_kit::component::Root::new(view, window, cx)
+        });
+        let view = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<NexusView>().unwrap()
+        });
+        cx.simulate_resize(gpui::size(px(1040.), px(680.)));
+        view.update_in(cx, |view, window, cx| {
+            view.open_workspace_review(id, window, cx);
+            finish_workspace_operation(&mut view.presenter);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            let _ = window.draw(cx);
+        });
+        let content = cx.debug_bounds("workspace-review-content").unwrap();
+        assert!(content.size.height > px(0.));
+        click_debug(cx, "review-file-tracked.txt");
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            let _ = window.draw(cx);
+        });
+        click_debug(cx, "commit-workspace-files");
+        cx.simulate_prompt_answer("取消");
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            let _ = window.draw(cx);
+        });
+        assert_eq!(
+            crate::infrastructure::git::git(cwd, &["rev-parse", "HEAD"]).unwrap(),
+            before
+        );
+        click_debug(cx, "commit-workspace-files");
+        cx.simulate_prompt_answer("提交");
+        cx.run_until_parked();
+        view.update(cx, |view, cx| {
+            finish_workspace_operation(&mut view.presenter);
+            cx.notify();
+        });
+        assert_ne!(
+            crate::infrastructure::git::git(cwd, &["rev-parse", "HEAD"]).unwrap(),
+            before
+        );
+        assert!(
+            crate::infrastructure::git::git(cwd, &["status", "--porcelain"])
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[gpui::test]
@@ -2319,12 +2395,15 @@ mod catalog_model_tests {
     #[test]
     fn catalog_content_groups_providers_and_searches_provider_name_and_full_id() {
         let mut model = AppModel {
-            selected_harness: HarnessKind::Omp,
-            model_catalog: ModelCatalogState::Ready(vec![
-                omp_model("openai", "openai/shared-model"),
-                omp_model("bigmodel", "bigmodel/shared-model"),
-            ]),
-            ..AppModel::default()
+            conversation: crate::model::ConversationState {
+                selected_harness: HarnessKind::Omp,
+                model_catalog: ModelCatalogState::Ready(vec![
+                    omp_model("openai", "openai/shared-model"),
+                    omp_model("bigmodel", "bigmodel/shared-model"),
+                ]),
+                ..Default::default()
+            },
+            ..Default::default()
         };
         model.model_override = Some("bigmodel/shared-model".into());
 
@@ -2355,13 +2434,16 @@ mod catalog_model_tests {
     #[test]
     fn catalog_content_keeps_an_unavailable_full_selector_visible() {
         let model = AppModel {
-            selected_harness: HarnessKind::Omp,
-            model_override: Some("private-provider/custom-model".into()),
-            model_catalog: ModelCatalogState::Ready(vec![omp_model(
-                "public-provider",
-                "public-provider/custom-model",
-            )]),
-            ..AppModel::default()
+            conversation: crate::model::ConversationState {
+                selected_harness: HarnessKind::Omp,
+                model_override: Some("private-provider/custom-model".into()),
+                model_catalog: ModelCatalogState::Ready(vec![omp_model(
+                    "public-provider",
+                    "public-provider/custom-model",
+                )]),
+                ..Default::default()
+            },
+            ..Default::default()
         };
 
         let content = CatalogModelSelectContent::from_model(&model);
@@ -2383,10 +2465,13 @@ mod catalog_model_tests {
         let mut explicit = omp_model("provider", "explicit-model");
         explicit.display_name = "Chosen display name".into();
         let mut model = AppModel {
-            selected_harness: HarnessKind::Omp,
-            model_override: Some("explicit-model".into()),
-            model_override_name: Some(explicit.display_name.clone()),
-            model_catalog: ModelCatalogState::Ready(vec![default, explicit]),
+            conversation: crate::model::ConversationState {
+                selected_harness: HarnessKind::Omp,
+                model_override: Some("explicit-model".into()),
+                model_override_name: Some(explicit.display_name.clone()),
+                model_catalog: ModelCatalogState::Ready(vec![default, explicit]),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let content = CatalogModelSelectContent::from_model(&model);

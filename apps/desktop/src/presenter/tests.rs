@@ -1,4 +1,10 @@
-use std::{cell::RefCell, collections::HashMap, fs, rc::Rc, time::Duration};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    fs,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 use super::*;
 use crate::{
@@ -96,6 +102,372 @@ pub(crate) fn fixture() -> (Presenter, FakeRunner, tempfile::TempDir) {
         .insert(HarnessKind::Claude, ready_probe(HarnessKind::Claude));
     runner.0.borrow_mut().commands.clear();
     (presenter, runner, directory)
+}
+
+pub(crate) fn finish_workspace_operation(presenter: &mut Presenter) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while presenter.model.workspace_busy {
+        assert!(Instant::now() < deadline, "workspace operation timed out");
+        presenter.drain_events();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn start_test_worktree(presenter: &mut Presenter, runner: &FakeRunner, prompt: &str) -> StartRun {
+    presenter.select_workspace_kind(crate::model::workspace::WorkspaceKind::Worktree);
+    assert!(presenter.submit(prompt, "claude"));
+    finish_workspace_operation(presenter);
+    emit_current_catalog(presenter, runner, claude_aliases());
+    presenter.drain_events();
+    last_start(runner)
+}
+
+pub(crate) fn worktree_fixture(
+    prompt: &str,
+) -> (Presenter, FakeRunner, tempfile::TempDir, StartRun) {
+    let (directory, project) = crate::infrastructure::git::tests::repository_fixture();
+    let (mut presenter, runner, _fixture) = fixture();
+    presenter.worktree_root = Ok(directory.path().canonicalize().unwrap().join("worktrees"));
+    presenter.open_project(Path::new(&project.canonical_path));
+    let start = start_test_worktree(&mut presenter, &runner, prompt);
+    (presenter, runner, directory, start)
+}
+
+#[test]
+fn failed_worktree_creation_can_correct_and_keep_a_custom_branch_on_retry() {
+    use crate::{
+        infrastructure::git,
+        model::workspace::{WorkspaceKind, WorkspaceStatus},
+    };
+    let (directory, project) = git::tests::repository_fixture();
+    let project_path = Path::new(&project.canonical_path);
+    git::git(project_path, &["branch", "feat/existing"]).unwrap();
+    std::fs::write(
+        project_path.join("tracked.txt"),
+        "original checkout changes\n",
+    )
+    .unwrap();
+    let (mut presenter, runner, _fixture) = fixture();
+    presenter.worktree_root = Ok(directory.path().canonicalize().unwrap().join("worktrees"));
+    presenter.open_project(project_path);
+    presenter.new_task();
+    assert!(presenter.model.project_dirty);
+    presenter.select_workspace_kind(WorkspaceKind::Worktree);
+    presenter.configure_workspace("HEAD".into(), "feat/existing".into());
+    assert!(presenter.submit("retry task", "claude"));
+    finish_workspace_operation(&mut presenter);
+    assert!(presenter.model.workspace_retry);
+    assert_eq!(presenter.model.occupied_run_slots(), 0);
+    let failed = presenter.model.selected_workspace.clone().unwrap();
+    assert_eq!(failed.status, WorkspaceStatus::Missing);
+    presenter.configure_workspace("HEAD".into(), "feat/custom-retry".into());
+    assert!(presenter.retry_workspace_start());
+    finish_workspace_operation(&mut presenter);
+    assert_eq!(presenter.model.occupied_run_slots(), 1);
+    let pending_workspace = presenter.model.selected_workspace.as_ref().unwrap().id;
+    assert!(!presenter.cleanup_workspace(pending_workspace, "main".into()));
+    emit_current_catalog(&presenter, &runner, claude_aliases());
+    presenter.drain_events();
+    let started = last_start(&runner);
+    assert_eq!(
+        git::current_branch(Path::new(&started.cwd)).as_deref(),
+        Some("feat/custom-retry")
+    );
+    assert_ne!(failed.task_id, Some(started.task_id));
+    assert_eq!(
+        presenter
+            .storage
+            .workspace(failed.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        WorkspaceStatus::Missing
+    );
+    assert!(presenter.cleanup_workspace(failed.id, "main".into()));
+    finish_workspace_operation(&mut presenter);
+    assert_eq!(
+        presenter
+            .storage
+            .workspace(failed.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        WorkspaceStatus::Removed
+    );
+    assert_eq!(presenter.model.active_run, Some(started.run_id));
+}
+
+#[test]
+fn concurrent_worktree_tasks_isolate_output_approvals_queue_and_cancellation() {
+    let (mut presenter, runner, _directory, first) = worktree_fixture("first");
+    assert!(presenter.submit("first follow-up", "claude"));
+    presenter.new_task();
+    let second = start_test_worktree(&mut presenter, &runner, "second");
+    assert_eq!(presenter.model.active_run_count(), 2);
+    assert_ne!(first.cwd, second.cwd);
+    let approval_id = Uuid::new_v4();
+    runner.emit(Event::RunSessionStarted {
+        run_id: first.run_id,
+        session_id: "first-session".into(),
+    });
+    runner.emit(Event::RunOutputDelta {
+        run_id: first.run_id,
+        text: "first output".into(),
+    });
+    runner.emit(Event::RunOutputDelta {
+        run_id: second.run_id,
+        text: "second output".into(),
+    });
+    runner.emit(Event::RunApprovalRequested {
+        run_id: first.run_id,
+        request: nexus_protocol::ApprovalRequest {
+            request_id: approval_id,
+            title: "first approval".into(),
+            details: "first only".into(),
+            options: vec!["Approve".into()],
+        },
+    });
+    presenter.drain_events();
+    assert_eq!(presenter.model.selected_task, Some(second.task_id));
+    assert_eq!(presenter.model.streaming_text, "second output");
+    assert!(presenter.model.pending_approvals.is_empty());
+    presenter.new_task();
+    assert!(!presenter.submit("third must wait", "claude"));
+    presenter.select_task(first.task_id);
+    assert_eq!(presenter.model.streaming_text, "first output");
+    assert!(presenter.respond_approval(first.run_id, approval_id, Some(0)));
+    assert!(
+        matches!(runner.0.borrow().commands.last().unwrap().command, Command::RunApprovalRespond { run_id, .. } if run_id == first.run_id)
+    );
+    presenter.select_task(second.task_id);
+    presenter.cancel();
+    assert!(
+        matches!(runner.0.borrow().commands.last().unwrap().command, Command::RunCancel { run_id } if run_id == second.run_id)
+    );
+    runner.emit(Event::RunExited {
+        run_id: first.run_id,
+        status: RunStatus::Completed,
+        exit_code: Some(0),
+    });
+    presenter.drain_events();
+    let follow_up = last_start(&runner);
+    assert_eq!(follow_up.task_id, first.task_id);
+    assert_eq!(follow_up.cwd, first.cwd);
+    assert_eq!(follow_up.session_id.as_deref(), Some("first-session"));
+    assert_eq!(follow_up.prompt, "first follow-up");
+    assert_eq!(presenter.model.selected_task, Some(second.task_id));
+    assert!(presenter.model.run_cancelling);
+    runner.emit(Event::RunExited {
+        run_id: second.run_id,
+        status: RunStatus::Cancelled,
+        exit_code: None,
+    });
+    presenter.drain_events();
+    assert_eq!(presenter.model.active_run_count(), 1);
+    assert!(presenter.model.task_running(first.task_id));
+    assert!(!presenter.model.task_running(second.task_id));
+}
+
+#[test]
+fn a_second_local_task_cannot_write_to_an_active_checkout() {
+    let (mut presenter, runner, _directory) = fixture();
+    assert!(presenter.submit("first", "claude"));
+    let first = last_start(&runner);
+    presenter.new_task();
+    assert!(!presenter.submit("second", "claude"));
+    assert!(presenter.model.status_text().contains("checkout"));
+    assert_eq!(last_start(&runner).run_id, first.run_id);
+    assert_eq!(presenter.model.active_run_count(), 1);
+}
+
+#[test]
+fn initialization_records_logs_locks_its_directory_and_allows_another_checkout_to_run() {
+    use crate::infrastructure::git;
+    let (directory, project) = git::tests::repository_fixture();
+    let (mut presenter, runner, _fixture) = fixture();
+    presenter.worktree_root = Ok(directory.path().canonicalize().unwrap().join("worktrees"));
+    presenter.open_project(Path::new(&project.canonical_path));
+    let task = start_test_worktree(&mut presenter, &runner, "setup task");
+    runner.emit(Event::RunSessionStarted {
+        run_id: task.run_id,
+        session_id: "setup-session".into(),
+    });
+    runner.emit(Event::RunExited {
+        run_id: task.run_id,
+        status: RunStatus::Completed,
+        exit_code: Some(0),
+    });
+    presenter.drain_events();
+    let workspace = presenter.model.selected_workspace.clone().unwrap();
+    let script = if cfg!(windows) {
+        "echo initialized> init.txt & echo diagnostic 1>&2"
+    } else {
+        "printf initialized > init.txt; printf diagnostic >&2"
+    };
+    assert!(presenter.initialize_workspace(workspace.id, script.into()));
+    assert!(!presenter.submit("locked", "claude"));
+    assert!(!presenter.cleanup_workspace(workspace.id, "main".into()));
+    presenter.open_project(Path::new(&project.canonical_path));
+    // The initialization lock only covers its worktree, even while logs are streaming.
+    presenter.model.workspace_draft.kind = crate::model::workspace::WorkspaceKind::Local;
+    assert!(presenter.submit("independent checkout", "claude"));
+    let other = last_start(&runner);
+    finish_workspace_operation(&mut presenter);
+    assert_eq!(presenter.model.selected_task, Some(other.task_id));
+    let saved = presenter.storage.workspace(workspace.id).unwrap().unwrap();
+    let log = saved.initialization.unwrap();
+    assert!(log.success);
+    assert!(!log.running);
+    assert!(log.output.contains("diagnostic"));
+    assert!(Path::new(&task.cwd).join("init.txt").exists());
+    assert!(!Path::new(&project.canonical_path).join("init.txt").exists());
+    assert!(presenter.initialize_workspace(workspace.id, "exit 7".into()));
+    finish_workspace_operation(&mut presenter);
+    assert!(
+        !presenter
+            .storage
+            .workspace(workspace.id)
+            .unwrap()
+            .unwrap()
+            .initialization
+            .unwrap()
+            .success
+    );
+}
+
+#[test]
+fn external_worktree_local_tasks_can_only_detach_their_own_association() {
+    use crate::{infrastructure::git, model::workspace::WorkspaceStatus};
+    let (directory, project) = git::tests::repository_fixture();
+    let external = directory.path().join("external");
+    git::git(
+        Path::new(&project.canonical_path),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "external",
+            external.to_str().unwrap(),
+        ],
+    )
+    .unwrap();
+    let (mut presenter, runner, _fixture) = fixture();
+    presenter.open_project(&external);
+    assert!(presenter.submit("external task", "claude"));
+    let start = last_start(&runner);
+    runner.emit(Event::RunExited {
+        run_id: start.run_id,
+        status: RunStatus::Completed,
+        exit_code: Some(0),
+    });
+    presenter.drain_events();
+    presenter.reload_workspaces();
+    let workspace = presenter
+        .storage
+        .task_workspace(start.task_id)
+        .unwrap()
+        .unwrap();
+    assert!(workspace.external);
+    assert!(!workspace.managed);
+    assert!(presenter.cleanup_workspace(workspace.id, String::new()));
+    finish_workspace_operation(&mut presenter);
+    assert_eq!(
+        presenter
+            .storage
+            .workspace(workspace.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        WorkspaceStatus::Removed
+    );
+    assert!(external.join("tracked.txt").exists());
+    assert!(external.join(".git").exists());
+    presenter.new_task();
+    assert!(presenter.submit("new association", "claude"));
+    assert_ne!(
+        presenter.model.selected_workspace.as_ref().unwrap().id,
+        workspace.id
+    );
+}
+
+#[test]
+fn worktree_task_binds_cwd_session_and_preserves_history_after_cleanup() {
+    use crate::{
+        infrastructure::git,
+        model::workspace::{WorkspaceKind, WorkspaceStatus},
+    };
+    let (directory, project) = git::tests::repository_fixture();
+    let (mut presenter, runner, _fixture) = fixture();
+    presenter.worktree_root = Ok(directory.path().canonicalize().unwrap().join("worktrees"));
+    presenter.open_project(Path::new(&project.canonical_path));
+    presenter.select_workspace_kind(WorkspaceKind::Worktree);
+    let branch = presenter.model.workspace_draft.branch.clone();
+    assert!(!presenter.worktree_root.as_ref().unwrap().exists());
+    assert!(presenter.submit("isolated task", "claude"));
+    finish_workspace_operation(&mut presenter);
+    let workspace = presenter.model.selected_workspace.clone().unwrap();
+    assert_eq!(workspace.status, WorkspaceStatus::Ready);
+    assert_eq!(workspace.branch.as_ref(), Some(&branch));
+    let ModelCatalogState::Loading { request_id, .. } = presenter.model.model_catalog else {
+        panic!("catalog must use new cwd")
+    };
+    runner.emit(Event::ModelCatalogLoaded {
+        request_id,
+        harness: HarnessKind::Claude,
+        models: claude_aliases(),
+    });
+    presenter.drain_events();
+    let start = last_start(&runner);
+    assert_eq!(start.cwd, workspace.path);
+    assert_eq!(start.task_id, workspace.task_id.unwrap());
+    assert_ne!(start.cwd, project.canonical_path);
+    runner.emit(Event::RunSessionStarted {
+        run_id: start.run_id,
+        session_id: "isolated-session".into(),
+    });
+    runner.emit(Event::RunExited {
+        run_id: start.run_id,
+        status: RunStatus::Completed,
+        exit_code: Some(0),
+    });
+    presenter.drain_events();
+    presenter.select_task(start.task_id);
+    assert!(presenter.submit("continue", "claude"));
+    let resumed = last_start(&runner);
+    assert_eq!(resumed.cwd, start.cwd);
+    assert_eq!(resumed.session_id.as_deref(), Some("isolated-session"));
+    git::git(
+        Path::new(&project.canonical_path),
+        &[
+            "worktree",
+            "remove",
+            &git::git_path_argument(&workspace.path),
+        ],
+    )
+    .unwrap();
+    presenter.reload_workspaces();
+    assert_eq!(
+        presenter.model.selected_workspace.as_ref().unwrap().status,
+        WorkspaceStatus::Missing
+    );
+    assert!(!presenter.cleanup_workspace(workspace.id, "main".into()));
+    runner.emit(Event::RunExited {
+        run_id: resumed.run_id,
+        status: RunStatus::Completed,
+        exit_code: Some(0),
+    });
+    presenter.drain_events();
+    assert!(presenter.cleanup_workspace(workspace.id, "main".into()));
+    finish_workspace_operation(&mut presenter);
+    assert_eq!(
+        presenter.model.selected_workspace.as_ref().unwrap().status,
+        WorkspaceStatus::Removed
+    );
+    assert!(!presenter.submit("must not run in project", "claude"));
+    assert_eq!(presenter.storage.messages(start.task_id).unwrap().len(), 2);
+    assert!(presenter.delete_task(start.task_id));
+    assert!(presenter.storage.workspace(workspace.id).unwrap().is_some());
+    assert!(!Path::new(&workspace.path).exists());
 }
 
 pub(crate) fn pending_update(presenter: &mut Presenter) -> std::sync::mpsc::Sender<UpdateState> {
@@ -471,13 +843,26 @@ fn update_events_guard_concurrency_and_preserve_conversations_through_completion
 }
 
 #[test]
-fn update_installation_waits_for_harness_work_and_blocks_new_runs() {
-    let (mut presenter, _, directory) = fixture();
+fn update_installation_waits_for_all_tasks_and_workspace_work_and_blocks_new_operations() {
+    let (mut presenter, runner, directory, run) = worktree_fixture("finish before updating");
     seed_harness_installations(&mut presenter);
     presenter.model.updates.state = UpdateState::Ready {
         package: update_package(),
         path: directory.path().join("missing-update.zip"),
     };
+    presenter.new_task();
+    assert!(presenter.model.active_run.is_none());
+    assert!(!presenter.install_update_when_idle());
+    runner.emit(Event::RunExited {
+        run_id: run.run_id,
+        status: RunStatus::Completed,
+        exit_code: Some(0),
+    });
+    presenter.drain_events();
+    assert_eq!(presenter.model.active_run_count(), 0);
+    assert!(presenter.initialize_workspace(run.task_id, "echo initialized".into()));
+    assert!(!presenter.install_update_when_idle());
+    finish_workspace_operation(&mut presenter);
     presenter.model.harness_manager.busy = true;
     assert!(!presenter.install_update_when_idle());
     presenter.model.harness_manager.busy = false;
@@ -488,6 +873,9 @@ fn update_installation_waits_for_harness_work_and_blocks_new_runs() {
     ));
     assert!(!presenter.model().can_submit());
     assert!(!presenter.submit("Do not interrupt installation", "claude"));
+    assert!(!presenter.initialize_workspace(run.task_id, "echo too late".into()));
+    assert!(!presenter.cleanup_workspace(run.task_id, "main".into()));
+    assert!(!presenter.restore_workspace_directory(run.task_id));
     assert!(
         presenter
             .harness_maintenance_request(HarnessKind::Claude, None)
@@ -695,6 +1083,7 @@ fn conversation_actions_keep_active_and_archived_models_in_sync() {
         presenter
             .storage
             .create_task_run(NewTaskRun {
+                workspace_id: None,
                 permission_mode: nexus_domain::PermissionMode::AutoEdit,
                 task_id: None,
                 project_id: project.id,
@@ -712,6 +1101,7 @@ fn conversation_actions_keep_active_and_archived_models_in_sync() {
     let first_task = create_task(&mut presenter, "First conversation");
     let second_task = create_task(&mut presenter, "Second conversation");
     for task_id in [first_task, second_task] {
+        presenter.select_task(task_id);
         presenter
             .model
             .queued_messages
@@ -730,22 +1120,51 @@ fn conversation_actions_keep_active_and_archived_models_in_sync() {
     assert!(presenter.model().messages.is_empty());
     assert_eq!(presenter.model().tasks[0].id, second_task);
     assert_eq!(presenter.model().archived_tasks[0].id, first_task);
-    assert_eq!(presenter.model().queued_messages.len(), 2);
+    assert_eq!(
+        presenter
+            .model()
+            .all_conversations()
+            .map(|conversation| conversation.queued_messages.len())
+            .sum::<usize>(),
+        2
+    );
 
     assert!(presenter.restore_task(first_task));
     assert_eq!(presenter.model().tasks.len(), 2);
     assert!(presenter.model().archived_tasks.is_empty());
 
     presenter.model.active_run = Some(Uuid::new_v4());
+    presenter.model.active_task = Some(first_task);
     assert!(!presenter.delete_task(first_task));
     assert_eq!(presenter.model().tasks.len(), 2);
-    assert_eq!(presenter.model().queued_messages.len(), 2);
+    assert_eq!(
+        presenter
+            .model()
+            .all_conversations()
+            .map(|conversation| conversation.queued_messages.len())
+            .sum::<usize>(),
+        2
+    );
     presenter.model.active_run = None;
+    presenter.model.active_task = None;
 
     assert!(presenter.delete_task(first_task));
     assert_eq!(presenter.model().tasks.len(), 1);
-    assert_eq!(presenter.model().queued_messages.len(), 1);
-    assert_eq!(presenter.model().queued_messages[0].task_id, second_task);
+    assert_eq!(
+        presenter
+            .model()
+            .all_conversations()
+            .map(|conversation| conversation.queued_messages.len())
+            .sum::<usize>(),
+        1
+    );
+    assert!(
+        presenter
+            .model()
+            .all_conversations()
+            .flat_map(|conversation| &conversation.queued_messages)
+            .all(|message| message.task_id == second_task)
+    );
     assert!(presenter.archive_task(second_task));
     assert_eq!(presenter.model().archived_tasks.len(), 1);
     assert!(presenter.delete_archived_tasks());
@@ -771,6 +1190,7 @@ fn archived_project_fixture() -> ArchivedProjectFixture {
     let archived_project = storage.open_project(&archived_project_path).unwrap();
     let archived_task = storage
         .create_task_run(NewTaskRun {
+            workspace_id: None,
             permission_mode: nexus_domain::PermissionMode::AutoEdit,
             task_id: None,
             project_id: archived_project.id,
@@ -793,6 +1213,7 @@ fn archived_project_fixture() -> ArchivedProjectFixture {
         if index == 0 {
             let task = storage
                 .create_task_run(NewTaskRun {
+                    workspace_id: None,
                     permission_mode: nexus_domain::PermissionMode::AutoEdit,
                     task_id: None,
                     project_id: project.id,
@@ -1461,7 +1882,7 @@ fn invalid_submissions_never_create_tasks_or_send_commands() {
     }
     assert!(presenter.storage.tasks(project.id).unwrap().is_empty());
     assert!(runner.0.borrow().commands.is_empty());
-    assert!(presenter.active_run_started_at.is_none());
+    assert!(presenter.model.active_run_started_at.is_none());
     assert!(presenter.model().active_run_elapsed_seconds.is_none());
 }
 
@@ -2891,7 +3312,7 @@ fn send_failure_rolls_back_a_new_task_without_entering_busy_state() {
     runner.0.borrow_mut().fail_send = true;
     assert!(!presenter.submit("hello", "claude"));
     assert!(presenter.model().active_run.is_none());
-    assert!(presenter.active_run_started_at.is_none());
+    assert!(presenter.model.active_run_started_at.is_none());
     assert!(presenter.model().active_run_elapsed_seconds.is_none());
     assert_eq!(
         presenter.model().status_text(),
@@ -2916,7 +3337,7 @@ fn runner_events_update_timeline_and_persist_terminal_statuses() {
     ] {
         let (mut presenter, runner, _directory) = fixture();
         assert!(presenter.submit("hello", "claude"));
-        let started = presenter.active_run_started_at.unwrap();
+        let started = presenter.model.active_run_started_at.unwrap();
         assert!(presenter.refresh_run_elapsed(started + Duration::from_secs(5)));
         let run_id = presenter.model().active_run.unwrap();
         let task_id = presenter.model().active_task.unwrap();
@@ -2953,7 +3374,7 @@ fn runner_events_update_timeline_and_persist_terminal_statuses() {
         assert!(presenter.model().active_run.is_none());
         assert!(presenter.model().active_task.is_none());
         assert!(presenter.model().active_harness.is_none());
-        assert!(presenter.active_run_started_at.is_none());
+        assert!(presenter.model.active_run_started_at.is_none());
         assert!(presenter.model().active_run_elapsed_seconds.is_none());
         assert!(!presenter.refresh_run_elapsed(started + Duration::from_secs(10)));
         assert_eq!(presenter.model().tasks[0].status, status);
@@ -2967,7 +3388,7 @@ fn runner_events_update_timeline_and_persist_terminal_statuses() {
         assert_eq!(presenter.model().selected_task, Some(task_id));
         assert_eq!(presenter.model().tasks.len(), 1);
         assert_eq!(presenter.model().active_run_elapsed_seconds, Some(0));
-        assert!(presenter.active_run_started_at.unwrap() >= started);
+        assert!(presenter.model.active_run_started_at.unwrap() >= started);
     }
 }
 
@@ -2976,7 +3397,7 @@ fn run_elapsed_advances_without_output_and_only_changes_each_second() {
     let (mut presenter, runner, _directory) = fixture();
     assert!(!presenter.refresh_run_elapsed(Instant::now()));
     assert!(presenter.submit("hello", "claude"));
-    let started = presenter.active_run_started_at.unwrap();
+    let started = presenter.model.active_run_started_at.unwrap();
     let run_id = presenter.model().active_run.unwrap();
     assert_eq!(presenter.model().active_run_elapsed_seconds, Some(0));
     assert!(!presenter.refresh_run_elapsed(started + Duration::from_millis(999)));
@@ -2991,14 +3412,14 @@ fn run_elapsed_advances_without_output_and_only_changes_each_second() {
         text: "partial".into(),
     });
     assert!(presenter.drain_events());
-    assert_eq!(presenter.active_run_started_at, Some(started));
+    assert_eq!(presenter.model.active_run_started_at, Some(started));
     assert!(presenter.refresh_run_elapsed(started + Duration::from_secs(65)));
     assert_eq!(presenter.model().active_run_elapsed_seconds, Some(65));
 
     presenter.cancel();
     assert!(presenter.refresh_run_elapsed(started + Duration::from_secs(66)));
     assert_eq!(presenter.model().active_run_elapsed_seconds, Some(66));
-    assert_eq!(presenter.active_run_started_at, Some(started));
+    assert_eq!(presenter.model.active_run_started_at, Some(started));
     assert!(presenter.model().active_run.is_some());
 }
 
@@ -3007,7 +3428,7 @@ fn unrelated_run_events_cannot_replace_the_active_run() {
     let (mut presenter, runner, _directory) = fixture();
     assert!(presenter.submit("hello", "claude"));
     let active_run = presenter.model().active_run;
-    let started = presenter.active_run_started_at;
+    let started = presenter.model.active_run_started_at;
     let other_run = Uuid::new_v4();
     runner.emit(Event::RunStarted {
         run_id: other_run,
@@ -3032,7 +3453,7 @@ fn unrelated_run_events_cannot_replace_the_active_run() {
     });
     presenter.drain_events();
     assert_eq!(presenter.model().active_run, active_run);
-    assert_eq!(presenter.active_run_started_at, started);
+    assert_eq!(presenter.model.active_run_started_at, started);
     assert_eq!(presenter.model().active_run_elapsed_seconds, Some(0));
     assert_eq!(presenter.model().messages.len(), 1);
     assert!(presenter.model().streaming_text.is_empty());
@@ -3061,8 +3482,13 @@ fn active_run_locks_configuration_and_cancels_the_matching_run() {
     presenter.select_codex_thread("history".into());
     assert!(presenter.model().model_override.is_none());
     assert_eq!(presenter.model().effort, ThinkingEffort::Default);
-    assert_eq!(presenter.model().selected_task, task_id);
-    assert!(presenter.model().selected_codex_thread.is_none());
+    assert!(presenter.model().selected_task.is_none());
+    assert_eq!(
+        presenter.model().selected_codex_thread.as_deref(),
+        Some("history")
+    );
+    assert_eq!(presenter.model().active_run_count(), 1);
+    presenter.select_task(task_id.unwrap());
     presenter.cancel();
     assert!(matches!(runner.0.borrow().commands.last().unwrap().command,
         Command::RunCancel { run_id: id } if id == run_id));
@@ -3727,6 +4153,40 @@ fn catalog_context_changes_ignore_late_responses_and_keep_missing_model_names() 
         presenter.select_catalog_model(None);
         assert!(presenter.model().catalog_selection_is_valid());
     }
+
+    let (mut presenter, runner, _directory) = fixture();
+    assert!(presenter.submit("first context", "claude"));
+    let first = last_start(&runner);
+    runner.emit(Event::RunExited {
+        run_id: first.run_id,
+        status: RunStatus::Completed,
+        exit_code: Some(0),
+    });
+    presenter.drain_events();
+    let previous_context = presenter.model.conversation.id;
+    assert!(presenter.refresh_model_catalog());
+    let previous_request = current_catalog_request_id(&presenter);
+    presenter.new_task();
+    let current_request = current_catalog_request_id(&presenter);
+    assert_ne!(previous_request, current_request);
+    runner.emit(Event::ModelCatalogLoaded {
+        request_id: previous_request,
+        harness: HarnessKind::Claude,
+        models: vec![],
+    });
+    presenter.drain_events();
+    assert_eq!(current_catalog_request_id(&presenter), current_request);
+    assert!(
+        !presenter.model.conversations[&previous_context]
+            .model_catalog
+            .accepts(previous_request)
+    );
+    emit_current_catalog(&presenter, &runner, claude_aliases());
+    presenter.drain_events();
+    assert_eq!(
+        presenter.model.model_catalog.models().unwrap().len(),
+        claude_aliases().len()
+    );
 }
 
 #[test]
@@ -4166,9 +4626,9 @@ fn selecting_a_saved_task_restores_its_configuration_and_messages() {
         }
         assert!(presenter.submit("another task", "codex"));
         let run_id = presenter.model().active_run.unwrap();
-        presenter.select_task(task_id);
-        assert_eq!(presenter.model().selected_harness, HarnessKind::Codex);
         runner.0.borrow_mut().commands.clear();
+        presenter.select_task(task_id);
+        assert_eq!(presenter.model().selected_harness, HarnessKind::Claude);
 
         runner.emit(Event::RunExited {
             run_id,
@@ -4181,7 +4641,7 @@ fn selecting_a_saved_task_restores_its_configuration_and_messages() {
             .commands
             .iter()
             .map(|envelope| &envelope.command)
-            .filter(|command| matches!(command, Command::ModelCatalogRefresh { .. }))
+            .filter(|command| matches!(command, Command::ModelCatalogRefresh { context_id, .. } if *context_id == Some(presenter.model().conversation.id)))
             .collect::<Vec<_>>();
         assert_eq!(
             refreshes.len(),

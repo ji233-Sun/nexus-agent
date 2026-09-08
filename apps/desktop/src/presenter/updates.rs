@@ -82,7 +82,8 @@ impl Presenter {
 
     pub(crate) fn install_update_when_idle(&mut self) -> bool {
         if self.update_events.is_some()
-            || self.model.active_run.is_some()
+            || self.model.occupied_run_slots() > 0
+            || self.model.workspace_busy
             || self.model.harness_manager.busy
         {
             return false;

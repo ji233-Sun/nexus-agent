@@ -2,6 +2,12 @@ use std::{env, ffi::OsString, path::PathBuf};
 
 use anyhow::{Result, anyhow};
 
+pub(crate) fn worktree_directory() -> Result<PathBuf> {
+    let directory = data_directory()?.join("worktrees");
+    std::fs::create_dir_all(&directory)?;
+    Ok(directory.canonicalize()?)
+}
+
 pub(super) fn data_directory() -> Result<PathBuf> {
     data_directory_for(env::consts::OS, |key| env::var_os(key))
 }

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 13;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -47,6 +47,8 @@ pub enum Command {
     #[serde(rename = "model.catalog.refresh")]
     ModelCatalogRefresh {
         request_id: Uuid,
+        #[serde(default)]
+        context_id: Option<Uuid>,
         #[serde(default)]
         purpose: ModelCatalogPurpose,
         harness: HarnessKind,
@@ -496,6 +498,7 @@ mod tests {
     fn protocol_round_trip_preserves_model_catalog_request_context() {
         let request_id = Uuid::new_v4();
         let command = CommandEnvelope::new(Command::ModelCatalogRefresh {
+            context_id: None,
             request_id,
             purpose: ModelCatalogPurpose::TitleGeneration,
             harness: HarnessKind::Codex,
@@ -512,6 +515,7 @@ mod tests {
         assert!(!format!("{command:?}").contains("secret-value"));
         let decoded: CommandEnvelope = serde_json::from_str(&json).unwrap();
         let Command::ModelCatalogRefresh {
+            context_id: _,
             request_id: decoded_id,
             purpose,
             harness,

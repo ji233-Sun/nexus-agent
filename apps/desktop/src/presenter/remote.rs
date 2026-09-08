@@ -21,7 +21,9 @@ impl Presenter {
                 if reply.is_closed() {
                     return false;
                 }
-                let result = if self.model.active_run.is_some() {
+                let result = if prompt.trim().is_empty() {
+                    Err("Prompt 不能为空。".into())
+                } else if self.model.occupied_run_slots() >= 2 || self.model.workspace_busy {
                     Err("已有任务正在执行".into())
                 } else if let Some(project) = self
                     .model
@@ -39,6 +41,7 @@ impl Presenter {
                     {
                         self.select_project(project);
                     }
+                    self.new_task();
                     let executable = self.model.executable.clone();
                     if self.start_run(None, &prompt, &executable, self.model.permission_mode) {
                         Ok(())

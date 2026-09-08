@@ -43,7 +43,7 @@ impl Presenter {
         method: Option<InstallMethod>,
     ) -> Option<MaintenanceRequest> {
         if self.model.harness_manager.busy
-            || self.model.active_run.is_some()
+            || self.model.active_run_count() > 0
             || self.model.updates.state.is_installing()
         {
             return None;
@@ -135,7 +135,7 @@ impl Presenter {
                     {
                         if installation.discovered_from_manager
                             && installation.version.is_some()
-                            && self.model.active_run.is_none()
+                            && self.model.active_run_count() == 0
                             && let Some(path) = &installation.executable
                         {
                             let path = path.display().to_string();

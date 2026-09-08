@@ -526,6 +526,7 @@ mod tests {
         let project = storage.open_project(directory.path()).unwrap();
         let (task_id, run_id) = storage
             .create_task_run(NewTaskRun {
+                workspace_id: None,
                 permission_mode: nexus_domain::PermissionMode::AutoEdit,
                 task_id: None,
                 project_id: project.id,
@@ -849,13 +850,16 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let storage = Storage::open(Path::new(":memory:")).unwrap();
         let mut model = AppModel {
-            selected_project: Some(storage.open_project(directory.path()).unwrap()),
-            ..AppModel::default()
+            conversation: crate::model::ConversationState {
+                selected_project: Some(storage.open_project(directory.path()).unwrap()),
+                ..Default::default()
+            },
+            ..Default::default()
         };
         model.harnesses.insert(
-            model.selected_harness,
+            model.conversation.selected_harness,
             HarnessProbe {
-                harness: model.selected_harness,
+                harness: model.conversation.selected_harness,
                 available: true,
                 authenticated: true,
                 executable: "fake-agent".into(),

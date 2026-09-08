@@ -1,6 +1,8 @@
 use super::{Presenter, executable_setting_key};
 use crate::i18n::{Language, LocalizedText, probe_status};
+use crate::infrastructure::git;
 use crate::infrastructure::storage::NewTaskRun;
+use crate::model::workspace::{WorkspaceKind, WorkspaceStatus};
 use crate::model::{
     ModelCatalogState, PendingUserAsk, QueuedMessage, ResolvedModelSelection,
     UserAskSubmissionState,
@@ -16,6 +18,7 @@ use uuid::Uuid;
 impl Presenter {
     pub(crate) fn refresh_run_elapsed(&mut self, now: Instant) -> bool {
         let elapsed = self
+            .model
             .active_run_started_at
             .map(|started| now.saturating_duration_since(started).as_secs());
         if self.model.active_run_elapsed_seconds == elapsed {
@@ -26,6 +29,57 @@ impl Presenter {
     }
 
     pub(super) fn handle_event(&mut self, event: Event) {
+        let refresh_tasks = matches!(
+            event,
+            Event::TaskTitleGenerated { .. }
+                | Event::RunExited { .. }
+                | Event::RunStarted { .. }
+                | Event::RunStatusChanged { .. }
+        );
+        let selected = self.model.conversation.id;
+        let target = self
+            .model
+            .all_conversations()
+            .find(|conversation| match &event {
+                Event::ModelCatalogLoaded { request_id, .. }
+                | Event::ModelCatalogFailed { request_id, .. } => {
+                    conversation.model_catalog.accepts(*request_id)
+                        || conversation.title_model_catalog.accepts(*request_id)
+                }
+                Event::RunStarted { run_id, .. }
+                | Event::RunSessionStarted { run_id, .. }
+                | Event::RunOutputDelta { run_id, .. }
+                | Event::RunMessageCompleted { run_id, .. }
+                | Event::RunApprovalRequested { run_id, .. }
+                | Event::RunApprovalResolved { run_id, .. }
+                | Event::RunApprovalRejected { run_id, .. }
+                | Event::RunInputAccepted { run_id, .. }
+                | Event::RunInputRejected { run_id, .. }
+                | Event::RunUserAskRequested { run_id, .. }
+                | Event::RunUserAskAnswerRejected { run_id, .. }
+                | Event::RunUserAskAnswerSent { run_id, .. }
+                | Event::RunUserAskFinished { run_id, .. }
+                | Event::RunToolStarted { run_id, .. }
+                | Event::RunToolCompleted { run_id, .. }
+                | Event::RunStatusChanged { run_id, .. }
+                | Event::RunFailed { run_id, .. }
+                | Event::RunExited { run_id, .. } => conversation.active_run == Some(*run_id),
+                _ => false,
+            })
+            .map(|conversation| conversation.id);
+        if let Some(target) = target {
+            self.model.activate_conversation(target);
+        }
+        // Route through the owning task's state, then restore the visible task before
+        // notifying the view. Queue continuation therefore uses its own configuration.
+        self.handle_conversation_event(event);
+        self.model.activate_conversation(selected);
+        if refresh_tasks {
+            self.reload_tasks();
+        }
+    }
+
+    fn handle_conversation_event(&mut self, event: Event) {
         match event {
             Event::RunnerReady => {
                 self.model.status = LocalizedText::new(
@@ -456,9 +510,10 @@ impl Presenter {
                 let _ = self.storage.finish_run(run_id, status, exit_code);
                 self.model.streaming_text.clear();
                 self.model.active_run = None;
+                self.model.active_checkout = None;
                 self.model.run_cancelling = false;
                 self.model.steering_message = None;
-                self.active_run_started_at = None;
+                self.model.active_run_started_at = None;
                 self.model.active_run_elapsed_seconds = None;
                 self.model.active_task = None;
                 self.model.active_harness = None;
@@ -475,6 +530,7 @@ impl Presenter {
                     ),
                 };
                 self.reload_tasks();
+                self.refresh_workspace_branch();
                 if self.model.selected_task != task_id
                     && let Some(selected_task) = self.model.selected_task
                 {
@@ -493,7 +549,7 @@ impl Presenter {
                 if self.model.active_run.is_none()
                     && (pending_catalog_request
                         .is_some_and(|request_id| self.model.model_catalog.accepts(request_id))
-                        || self.catalog_project
+                        || self.model.catalog_project
                             != self
                                 .model
                                 .selected_project
@@ -507,6 +563,25 @@ impl Presenter {
                 }
             }
             _ => {}
+        }
+        if self
+            .model
+            .pending_workspace_start
+            .as_ref()
+            .is_some_and(|pending| pending.context_id == self.model.conversation.id)
+            && !self.model.workspace_retry
+            && self
+                .model
+                .selected_workspace
+                .as_ref()
+                .is_some_and(|workspace| workspace.status == WorkspaceStatus::Ready)
+            && !matches!(
+                self.model.model_catalog,
+                ModelCatalogState::Loading { .. } | ModelCatalogState::Idle
+            )
+            && self.model.active_run.is_none()
+        {
+            self.retry_workspace_start();
         }
     }
 
@@ -535,12 +610,15 @@ impl Presenter {
             if !self.model.can_queue() || prompt.trim().is_empty() {
                 return false;
             }
-            self.model.queued_messages.push_back(QueuedMessage {
-                id: Uuid::new_v4(),
-                task_id: self.model.active_task.unwrap(),
-                prompt: prompt.trim().to_owned(),
-                permission_mode: self.model.permission_mode,
-            });
+            self.model
+                .conversation
+                .queued_messages
+                .push_back(QueuedMessage {
+                    id: Uuid::new_v4(),
+                    task_id: self.model.conversation.active_task.unwrap(),
+                    prompt: prompt.trim().to_owned(),
+                    permission_mode: self.model.conversation.permission_mode,
+                });
             self.model.status = "消息已排队，将在当前轮次结束后依次发送。".into();
             return true;
         }
@@ -829,7 +907,10 @@ impl Presenter {
             self.model.status = "正在安装应用更新，重启后可继续任务。".into();
             return false;
         }
-        if self.model.active_run.is_some() || self.model.harness_manager.operating.is_some() {
+        if self.model.active_run.is_some()
+            || self.model.harness_manager.operating.is_some()
+            || self.model.occupied_run_slots() >= 2
+        {
             return false;
         }
         let Some(project) = self.model.selected_project.clone() else {
@@ -918,7 +999,41 @@ impl Presenter {
             .then(|| self.title_generation_configuration().ok())
             .flatten();
         let title = compact_task_title(&prompt).unwrap_or_else(|| "新任务".into());
+        if task_id.is_none()
+            && self.model.selected_workspace.is_none()
+            && self.model.workspace_draft.kind == WorkspaceKind::Worktree
+        {
+            return self.begin_worktree(&prompt, &configured_executable, permission_mode);
+        }
+        let workspace = if let Some(task_id) = task_id {
+            self.storage.task_workspace(task_id)
+        } else if let Some(workspace) = &self.model.selected_workspace {
+            Ok(Some(workspace.clone()))
+        } else {
+            self.storage.workspace(project.id)
+        };
+        let (workspace, checkout) = match workspace.and_then(|workspace| {
+            let workspace = workspace.ok_or_else(|| anyhow::anyhow!("任务缺少绑定目录"))?;
+            git::validate_workspace(&workspace)?;
+            let checkout = git::checkout_path(std::path::Path::new(&workspace.path))?;
+            anyhow::ensure!(
+                !self.model.workspace_locked(&checkout),
+                "此目录正在执行 Worktree 操作，请等待完成"
+            );
+            anyhow::ensure!(
+                !self.model.checkout_running(&checkout),
+                "此 checkout 已有任务运行，请等待结束或使用独立 Worktree"
+            );
+            Ok((workspace, checkout))
+        }) {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                self.model.status = error.to_string().into();
+                return false;
+            }
+        };
         let Ok(pending_run) = self.storage.prepare_task_run(NewTaskRun {
+            workspace_id: Some(workspace.id),
             task_id,
             project_id: project.id,
             title: &title,
@@ -939,7 +1054,7 @@ impl Presenter {
             run_id,
             task_id,
             session_id,
-            cwd: project.canonical_path,
+            cwd: workspace.path.clone(),
             prompt: prompt.clone(),
             harness,
             executable: executable.clone(),
@@ -958,12 +1073,19 @@ impl Presenter {
                 return false;
             }
             self.model.active_run = Some(run_id);
-            self.active_run_started_at = Some(Instant::now());
+            self.model.active_checkout = Some(checkout);
+            self.model.active_run_started_at = Some(Instant::now());
             self.model.active_run_elapsed_seconds = Some(0);
             self.model.active_task = Some(task_id);
             self.model.active_harness = Some(harness);
             self.model.active_permission_mode = Some(permission_mode);
             self.model.selected_task = Some(task_id);
+            self.model.selected_workspace = self
+                .storage
+                .task_workspace(task_id)
+                .ok()
+                .flatten()
+                .or(Some(workspace));
             self.model.selected_codex_thread = None;
             self.model.codex_history_messages.clear();
             self.model.codex_thread_loading = false;

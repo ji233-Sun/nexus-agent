@@ -26,6 +26,8 @@ use user_ask::PendingUserAsks;
 #[derive(Clone)]
 struct ActiveRun {
     id: Uuid,
+    task_id: Uuid,
+    checkout: PathBuf,
     cancel: watch::Sender<bool>,
     input: mpsc::UnboundedSender<RunInput>,
     user_asks: PendingUserAsks,
@@ -37,8 +39,8 @@ struct BackgroundTask {
 }
 
 pub(crate) struct Runner {
-    active: Arc<Mutex<Option<ActiveRun>>>,
-    catalog_tasks: BTreeMap<ModelCatalogPurpose, BackgroundTask>,
+    active: Arc<Mutex<BTreeMap<Uuid, ActiveRun>>>,
+    catalog_tasks: BTreeMap<(ModelCatalogPurpose, Option<Uuid>), BackgroundTask>,
     title_tasks: Vec<BackgroundTask>,
     emitter: Emitter,
 }
@@ -46,7 +48,7 @@ pub(crate) struct Runner {
 impl Runner {
     pub(crate) fn new(emitter: Emitter) -> Self {
         Self {
-            active: Arc::new(Mutex::new(None)),
+            active: Arc::new(Mutex::new(BTreeMap::new())),
             catalog_tasks: BTreeMap::new(),
             title_tasks: Vec::new(),
             emitter,
@@ -69,13 +71,14 @@ impl Runner {
             }
             Command::ModelCatalogRefresh {
                 request_id,
+                context_id,
                 purpose,
                 harness: kind,
                 executable,
                 cwd,
                 environment,
             } => {
-                if let Some(task) = self.catalog_tasks.remove(&purpose) {
+                if let Some(task) = self.catalog_tasks.remove(&(purpose, context_id)) {
                     let _ = task.cancel.send(true);
                     let _ = task.task.await;
                 }
@@ -125,7 +128,7 @@ impl Runner {
                                 }
                             });
                             self.catalog_tasks
-                                .insert(purpose, BackgroundTask { cancel, task });
+                                .insert((purpose, context_id), BackgroundTask { cancel, task });
                         }
                         _ => {
                             self.emitter
@@ -165,8 +168,8 @@ impl Runner {
                 let guard = self.active.lock().await;
                 let sent = !prompt.trim().is_empty()
                     && guard
-                        .as_ref()
-                        .filter(|run| run.id == run_id && !*run.cancel.borrow())
+                        .get(&run_id)
+                        .filter(|run| !*run.cancel.borrow())
                         .is_some_and(|run| {
                             run.input
                                 .send(RunInput::Steer(SteerInput { message_id, prompt }))
@@ -196,8 +199,8 @@ impl Runner {
             } => {
                 let guard = self.active.lock().await;
                 let sent = guard
-                    .as_ref()
-                    .filter(|run| run.id == run_id && !*run.cancel.borrow())
+                    .get(&run_id)
+                    .filter(|run| !*run.cancel.borrow())
                     .is_some_and(|run| {
                         run.input
                             .send(RunInput::Approval { request_id, option })
@@ -256,8 +259,8 @@ impl Runner {
 
     pub(crate) async fn shutdown(&mut self) {
         self.cancel_catalog_task().await;
-        let active_run = self.active.lock().await.clone();
-        if let Some(run) = active_run {
+        let active_runs = self.active.lock().await.clone();
+        for run in active_runs.values() {
             let _ = run.cancel.send(true);
             finish_user_asks(
                 run.id,
@@ -279,27 +282,10 @@ impl Runner {
 
 async fn start_run(
     request: StartRun,
-    active: Arc<Mutex<Option<ActiveRun>>>,
+    active: Arc<Mutex<BTreeMap<Uuid, ActiveRun>>>,
     emitter: Emitter,
 ) -> Option<PathBuf> {
     let mut guard = active.lock().await;
-    if guard.is_some() {
-        emitter
-            .send(Event::RunFailed {
-                run_id: request.run_id,
-                code: ErrorCode::RunAlreadyActive,
-                message: "已有 Agent 任务正在运行，请先等待或取消。".into(),
-            })
-            .await;
-        emitter
-            .send(Event::RunExited {
-                run_id: request.run_id,
-                status: RunStatus::Failed,
-                exit_code: None,
-            })
-            .await;
-        return None;
-    }
 
     if !environment_is_valid(&request.environment) {
         emitter
@@ -340,15 +326,45 @@ async fn start_run(
         }
     };
 
+    let checkout = checkout_directory(&cwd).await;
+    if guard.len() >= 2
+        || guard.contains_key(&request.run_id)
+        || guard
+            .values()
+            .any(|run| run.task_id == request.task_id || run.checkout == checkout)
+    {
+        emitter
+            .send(Event::RunFailed {
+                run_id: request.run_id,
+                code: ErrorCode::RunAlreadyActive,
+                message: "最多支持两个独立任务并发；同一任务或 checkout 必须等待当前运行结束。"
+                    .into(),
+            })
+            .await;
+        emitter
+            .send(Event::RunExited {
+                run_id: request.run_id,
+                status: RunStatus::Failed,
+                exit_code: None,
+            })
+            .await;
+        return None;
+    }
+
     let (cancel, cancel_rx) = watch::channel(false);
     let (input, input_rx) = mpsc::unbounded_channel();
     let user_asks = PendingUserAsks::default();
-    *guard = Some(ActiveRun {
-        id: request.run_id,
-        cancel,
-        input,
-        user_asks: user_asks.clone(),
-    });
+    guard.insert(
+        request.run_id,
+        ActiveRun {
+            id: request.run_id,
+            task_id: request.task_id,
+            checkout,
+            cancel,
+            input,
+            user_asks: user_asks.clone(),
+        },
+    );
     drop(guard);
 
     let run_id = request.run_id;
@@ -365,9 +381,7 @@ async fn start_run(
         )
         .await;
         let mut guard = active_for_task.lock().await;
-        if guard.as_ref().is_some_and(|run| run.id == run_id) {
-            *guard = None;
-        }
+        guard.remove(&run_id);
         drop(guard);
         emitter
             .send(Event::RunExited {
@@ -380,6 +394,22 @@ async fn start_run(
     Some(title_cwd)
 }
 
+async fn checkout_directory(cwd: &Path) -> PathBuf {
+    let output = tokio::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(cwd)
+        .output()
+        .await;
+    if let Ok(output) = output
+        && output.status.success()
+        && let Ok(root) = String::from_utf8(output.stdout)
+        && let Ok(root) = Path::new(root.trim_end_matches(['\r', '\n'])).canonicalize()
+    {
+        return root;
+    }
+    cwd.to_path_buf()
+}
+
 fn environment_is_valid(environment: &[EnvironmentVariable]) -> bool {
     let mut names = HashSet::new();
     environment
@@ -387,9 +417,9 @@ fn environment_is_valid(environment: &[EnvironmentVariable]) -> bool {
         .all(|variable| variable.has_safe_name() && names.insert(variable.name.as_str()))
 }
 
-async fn cancel_run(run_id: Uuid, active: &Mutex<Option<ActiveRun>>, emitter: &Emitter) {
+async fn cancel_run(run_id: Uuid, active: &Mutex<BTreeMap<Uuid, ActiveRun>>, emitter: &Emitter) {
     let guard = active.lock().await;
-    let Some(run) = guard.as_ref().filter(|run| run.id == run_id) else {
+    let Some(run) = guard.get(&run_id) else {
         return;
     };
     let first_request = !*run.cancel.borrow();
@@ -412,7 +442,7 @@ async fn answer_user_ask(
     run_id: Uuid,
     request_id: Uuid,
     answers: Vec<UserAskAnswer>,
-    active: &Mutex<Option<ActiveRun>>,
+    active: &Mutex<BTreeMap<Uuid, ActiveRun>>,
     emitter: &Emitter,
 ) {
     enum Route {
@@ -423,10 +453,7 @@ async fn answer_user_ask(
 
     let route = {
         let guard = active.lock().await;
-        let Some(run) = guard
-            .as_ref()
-            .filter(|run| run.id == run_id && !*run.cancel.borrow())
-        else {
+        let Some(run) = guard.get(&run_id).filter(|run| !*run.cancel.borrow()) else {
             drop(guard);
             emitter
                 .send(Event::RunUserAskAnswerRejected {
@@ -571,7 +598,7 @@ mod tests {
             Event::RunFailed { run_id: id, code: ErrorCode::ProjectNotFound, .. } if id == run_id));
         assert!(matches!(events.recv().await.unwrap().event,
             Event::RunExited { run_id: id, status: RunStatus::Failed, exit_code: None } if id == run_id));
-        assert!(runner.active.lock().await.is_none());
+        assert!(runner.active.lock().await.is_empty());
     }
 
     #[tokio::test]
@@ -592,7 +619,7 @@ mod tests {
             Event::RunFailed { run_id: id, code: ErrorCode::InvalidEnvironment, .. } if id == run_id));
         assert!(matches!(events.recv().await.unwrap().event,
             Event::RunExited { run_id: id, status: RunStatus::Failed, .. } if id == run_id));
-        assert!(runner.active.lock().await.is_none());
+        assert!(runner.active.lock().await.is_empty());
     }
 
     #[tokio::test]
@@ -601,6 +628,7 @@ mod tests {
         let (emitter, _events) = Emitter::channel();
         let mut runner = Runner::new(emitter);
         let command = |purpose| Command::ModelCatalogRefresh {
+            context_id: None,
             request_id: Uuid::new_v4(),
             purpose,
             harness: HarnessKind::Omp,
@@ -611,13 +639,13 @@ mod tests {
         runner
             .handle(command(ModelCatalogPurpose::Conversation))
             .await;
-        let conversation_cancel = runner.catalog_tasks[&ModelCatalogPurpose::Conversation]
+        let conversation_cancel = runner.catalog_tasks[&(ModelCatalogPurpose::Conversation, None)]
             .cancel
             .subscribe();
         runner
             .handle(command(ModelCatalogPurpose::TitleGeneration))
             .await;
-        let title_cancel = runner.catalog_tasks[&ModelCatalogPurpose::TitleGeneration]
+        let title_cancel = runner.catalog_tasks[&(ModelCatalogPurpose::TitleGeneration, None)]
             .cancel
             .subscribe();
         assert!(!*conversation_cancel.borrow());
@@ -666,24 +694,31 @@ mod tests {
             let mut runner = Runner::new(emitter);
             runner.handle(Command::RunStart(request)).await;
             assert!(runner.title_tasks.is_empty());
-            assert!(runner.active.lock().await.is_some());
+            assert!(!runner.active.lock().await.is_empty());
             runner.shutdown().await;
         }
     }
 
     #[tokio::test]
-    async fn second_run_is_rejected_without_replacing_active_run() {
+    async fn same_task_is_rejected_without_replacing_active_run() {
         let (emitter, mut events) = Emitter::channel();
         let mut runner = Runner::new(emitter);
         let active_id = Uuid::new_v4();
         let (cancel, receiver) = watch::channel(false);
-        *runner.active.lock().await = Some(ActiveRun {
-            id: active_id,
-            cancel,
-            input: mpsc::unbounded_channel().0,
-            user_asks: PendingUserAsks::default(),
-        });
-        let request = request("unused".into());
+        runner.active.lock().await.insert(
+            active_id,
+            ActiveRun {
+                id: active_id,
+                task_id: active_id,
+                checkout: PathBuf::from("unused"),
+                cancel,
+                input: mpsc::unbounded_channel().0,
+                user_asks: PendingUserAsks::default(),
+            },
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let mut request = request(directory.path().to_string_lossy().into_owned());
+        request.task_id = active_id;
         let rejected_id = request.run_id;
 
         runner.handle(Command::RunStart(request)).await;
@@ -691,7 +726,10 @@ mod tests {
             Event::RunFailed { run_id, code: ErrorCode::RunAlreadyActive, .. } if run_id == rejected_id));
         assert!(matches!(events.recv().await.unwrap().event,
             Event::RunExited { run_id, status: RunStatus::Failed, .. } if run_id == rejected_id));
-        assert_eq!(runner.active.lock().await.as_ref().unwrap().id, active_id);
+        assert_eq!(
+            runner.active.lock().await.values().next().unwrap().id,
+            active_id
+        );
         assert!(!*receiver.borrow());
     }
 
@@ -701,12 +739,17 @@ mod tests {
         let mut runner = Runner::new(emitter);
         let run_id = Uuid::new_v4();
         let (cancel, receiver) = watch::channel(false);
-        *runner.active.lock().await = Some(ActiveRun {
-            id: run_id,
-            cancel,
-            input: mpsc::unbounded_channel().0,
-            user_asks: PendingUserAsks::default(),
-        });
+        runner.active.lock().await.insert(
+            run_id,
+            ActiveRun {
+                id: run_id,
+                task_id: run_id,
+                checkout: PathBuf::from("unused"),
+                cancel,
+                input: mpsc::unbounded_channel().0,
+                user_asks: PendingUserAsks::default(),
+            },
+        );
 
         runner
             .handle(Command::RunCancel {
@@ -734,12 +777,17 @@ mod tests {
         let request_id = user_asks
             .register("native-ask".into(), user_ask_questions())
             .unwrap();
-        *runner.active.lock().await = Some(ActiveRun {
-            id: run_id,
-            cancel,
-            input,
-            user_asks,
-        });
+        runner.active.lock().await.insert(
+            run_id,
+            ActiveRun {
+                id: run_id,
+                task_id: run_id,
+                checkout: PathBuf::from("unused"),
+                cancel,
+                input,
+                user_asks,
+            },
+        );
 
         runner.handle(Command::RunCancel { run_id }).await;
         runner.handle(Command::RunCancel { run_id }).await;
@@ -779,12 +827,17 @@ mod tests {
         let run_id = Uuid::new_v4();
         let (cancel, _) = watch::channel(false);
         let (input, mut received) = mpsc::unbounded_channel();
-        *runner.active.lock().await = Some(ActiveRun {
-            id: run_id,
-            cancel: cancel.clone(),
-            input,
-            user_asks: PendingUserAsks::default(),
-        });
+        runner.active.lock().await.insert(
+            run_id,
+            ActiveRun {
+                id: run_id,
+                task_id: run_id,
+                checkout: PathBuf::from("unused"),
+                cancel: cancel.clone(),
+                input,
+                user_asks: PendingUserAsks::default(),
+            },
+        );
         let message_id = Uuid::new_v4();
         runner
             .handle(Command::RunSteer {
@@ -842,12 +895,17 @@ mod tests {
             .unwrap();
         let (cancel, _) = watch::channel(false);
         let (input, mut received) = mpsc::unbounded_channel();
-        *runner.active.lock().await = Some(ActiveRun {
-            id: run_id,
-            cancel,
-            input,
-            user_asks,
-        });
+        runner.active.lock().await.insert(
+            run_id,
+            ActiveRun {
+                id: run_id,
+                task_id: run_id,
+                checkout: PathBuf::from("unused"),
+                cancel,
+                input,
+                user_asks,
+            },
+        );
 
         for (wrong_run, wrong_request) in [(Uuid::new_v4(), request_id), (run_id, Uuid::new_v4())] {
             runner
@@ -902,12 +960,18 @@ mod tests {
         let request_id = user_asks
             .register("native-ask".into(), user_ask_questions())
             .unwrap();
-        *runner.active.lock().await = Some(ActiveRun {
-            id: Uuid::new_v4(),
-            cancel,
-            input: mpsc::unbounded_channel().0,
-            user_asks,
-        });
+        let run_id = Uuid::new_v4();
+        runner.active.lock().await.insert(
+            run_id,
+            ActiveRun {
+                id: run_id,
+                task_id: run_id,
+                checkout: PathBuf::from("unused"),
+                cancel,
+                input: mpsc::unbounded_channel().0,
+                user_asks,
+            },
+        );
 
         assert!(!runner.handle(Command::RunnerShutdown).await);
         runner.shutdown().await;

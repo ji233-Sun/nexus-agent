@@ -2,6 +2,7 @@ pub(crate) mod harness_installation;
 pub(crate) mod history;
 pub(crate) mod tools;
 pub(crate) mod updates;
+pub(crate) mod workspace;
 
 use crate::i18n::{Language, LocalizedText};
 use history::{HistoryMessage, ThreadSummary};
@@ -201,14 +202,44 @@ pub(crate) struct AppModel {
     pub(crate) language: Language,
     pub(crate) appearance: AppearanceSettings,
     pub(crate) title_generation: TitleGenerationSettings,
-    pub(crate) title_model_catalog: ModelCatalogState,
     pub(crate) updates: updates::UpdateModel,
     pub(crate) harness_manager: harness_installation::HarnessManager,
     pub(crate) projects: Vec<Project>,
+    pub(crate) archived_tasks: Vec<TaskSummary>,
+    pub(crate) workspace_busy: bool,
+    pub(crate) workspace_operation_context: Option<Uuid>,
+    pub(crate) workspace_operation_paths: Vec<std::path::PathBuf>,
+    pub(crate) harnesses: BTreeMap<HarnessKind, HarnessProbe>,
+    pub(crate) codex_threads: Vec<ThreadSummary>,
+    pub(crate) codex_history_loading: bool,
+    pub(crate) codex_history_error: Option<LocalizedText>,
+    pub(crate) provider_profiles: Vec<ProviderProfile>,
+    pub(crate) conversation: ConversationState,
+    pub(crate) conversations: BTreeMap<Uuid, ConversationState>,
+}
+
+// Each task owns its configuration, live output, queue and approval state. The
+// selected conversation lives here; switching moves it into the keyed collection.
+#[derive(Default)]
+pub(crate) struct ConversationState {
+    pub(crate) workspace_retry: bool,
+    pub(crate) pending_workspace_start: Option<workspace::PendingWorkspaceStart>,
+    pub(crate) workspace_review: Option<workspace::WorkspaceReview>,
+    pub(crate) merge_plan: Option<workspace::MergePlan>,
+    pub(crate) selected_changes: std::collections::BTreeSet<String>,
+    pub(crate) id: Uuid,
+    pub(crate) active_run_started_at: Option<std::time::Instant>,
+    pub(crate) active_checkout: Option<std::path::PathBuf>,
+    pub(crate) catalog_project: Option<Uuid>,
+    pub(crate) title_model_catalog: ModelCatalogState,
     pub(crate) selected_project: Option<Project>,
     pub(crate) tasks: Vec<TaskSummary>,
-    pub(crate) archived_tasks: Vec<TaskSummary>,
     pub(crate) selected_task: Option<Uuid>,
+    pub(crate) selected_workspace: Option<workspace::Workspace>,
+    pub(crate) workspace_draft: workspace::WorkspaceDraft,
+    pub(crate) workspaces: Vec<workspace::Workspace>,
+    pub(crate) project_is_git: bool,
+    pub(crate) workspace_branch: Option<String>,
     pub(crate) messages: Vec<Message>,
     pub(crate) active_run: Option<Uuid>,
     pub(crate) run_cancelling: bool,
@@ -223,13 +254,9 @@ pub(crate) struct AppModel {
     pub(crate) responding_approval: Option<Uuid>,
     pub(crate) streaming_text: String,
     pub(crate) status: LocalizedText,
-    pub(crate) harnesses: BTreeMap<HarnessKind, HarnessProbe>,
-    pub(crate) codex_threads: Vec<ThreadSummary>,
     pub(crate) selected_codex_thread: Option<String>,
     pub(crate) codex_history_messages: Vec<HistoryMessage>,
-    pub(crate) codex_history_loading: bool,
     pub(crate) codex_thread_loading: bool,
-    pub(crate) codex_history_error: Option<LocalizedText>,
     pub(crate) selected_harness: HarnessKind,
     pub(crate) project_dirty: bool,
     pub(crate) model_override: Option<String>,
@@ -238,17 +265,118 @@ pub(crate) struct AppModel {
     pub(crate) effort: ThinkingEffort,
     pub(crate) permission_mode: PermissionMode,
     pub(crate) executable: String,
-    pub(crate) provider_profiles: Vec<ProviderProfile>,
     pub(crate) active_provider_profiles: BTreeMap<HarnessKind, Uuid>,
 }
 
+impl std::ops::Deref for AppModel {
+    type Target = ConversationState;
+    fn deref(&self) -> &Self::Target {
+        &self.conversation
+    }
+}
+
+impl std::ops::DerefMut for AppModel {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.conversation
+    }
+}
+
 impl AppModel {
+    pub(crate) fn all_conversations(&self) -> impl Iterator<Item = &ConversationState> {
+        std::iter::once(&self.conversation).chain(self.conversations.values())
+    }
+
+    pub(crate) fn active_run_count(&self) -> usize {
+        self.all_conversations()
+            .filter(|conversation| conversation.active_run.is_some())
+            .count()
+    }
+
+    pub(crate) fn occupied_run_slots(&self) -> usize {
+        self.all_conversations()
+            .filter(|conversation| {
+                conversation.active_run.is_some()
+                    || (conversation.pending_workspace_start.is_some()
+                        && !conversation.workspace_retry)
+            })
+            .count()
+    }
+
+    pub(crate) fn workspace_locked(&self, path: &std::path::Path) -> bool {
+        self.workspace_operation_paths
+            .iter()
+            .any(|locked| locked == path)
+    }
+
+    pub(crate) fn task_running(&self, task_id: Uuid) -> bool {
+        self.all_conversations().any(|conversation| {
+            conversation.active_task == Some(task_id)
+                || (conversation.pending_workspace_start.is_some()
+                    && !conversation.workspace_retry
+                    && conversation
+                        .selected_workspace
+                        .as_ref()
+                        .and_then(|workspace| workspace.task_id)
+                        == Some(task_id))
+        })
+    }
+
+    pub(crate) fn checkout_running(&self, path: &std::path::Path) -> bool {
+        self.all_conversations()
+            .filter(|conversation| conversation.active_run.is_some())
+            .any(|conversation| conversation.active_checkout.as_deref() == Some(path))
+    }
+
+    pub(crate) fn activate_conversation(&mut self, id: Uuid) {
+        if self.conversation.id == id {
+            return;
+        }
+        if let Some(next) = self.conversations.remove(&id) {
+            let previous = std::mem::replace(&mut self.conversation, next);
+            self.conversations.insert(previous.id, previous);
+        }
+    }
+
+    pub(crate) fn fresh_conversation(&mut self) {
+        let next = ConversationState {
+            id: Uuid::new_v4(),
+            selected_project: self.selected_project.clone(),
+            selected_harness: self.selected_harness,
+            permission_mode: self.permission_mode,
+            model_override: self.model_override.clone(),
+            model_override_name: self.model_override_name.clone(),
+            model_catalog: match &self.model_catalog {
+                ModelCatalogState::Loading { models, .. } => {
+                    ModelCatalogState::Ready(models.clone())
+                }
+                catalog => catalog.clone(),
+            },
+            effort: self.effort,
+            executable: self.executable.clone(),
+            active_provider_profiles: self.active_provider_profiles.clone(),
+            tasks: self.tasks.clone(),
+            ..ConversationState::default()
+        };
+        let previous = std::mem::replace(&mut self.conversation, next);
+        if previous.selected_task.is_some()
+            || previous.active_run.is_some()
+            || previous.pending_workspace_start.is_some()
+            || self.workspace_operation_context == Some(previous.id)
+        {
+            self.conversations.insert(previous.id, previous);
+        }
+    }
+
     pub(crate) fn working_directory(&self) -> Option<&str> {
         let cwd = if let Some(thread_id) = &self.selected_codex_thread {
             self.codex_threads
                 .iter()
                 .find(|thread| &thread.id == thread_id)
                 .map(|thread| thread.cwd.as_str())
+        } else if let Some(workspace) = &self.selected_workspace {
+            Some(workspace.path.as_str())
+        } else if self.selected_task.is_some() {
+            None
         } else {
             self.selected_project
                 .as_ref()
@@ -271,6 +399,14 @@ impl AppModel {
             .is_some_and(|profile| profile.credential_configured);
         self.selected_project.is_some()
             && self.active_run.is_none()
+            && self.occupied_run_slots() < 2
+            && self
+                .working_directory()
+                .is_none_or(|path| !self.workspace_locked(std::path::Path::new(path)))
+            && self
+                .selected_workspace
+                .as_ref()
+                .is_none_or(|workspace| workspace.status == workspace::WorkspaceStatus::Ready)
             && !self.updates.state.is_installing()
             && self.harness_manager.operating.is_none()
             && self
