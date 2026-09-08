@@ -1,4 +1,10 @@
-use std::{cell::RefCell, collections::HashMap, fs, rc::Rc, time::Duration};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    fs,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 use super::*;
 use crate::{
@@ -105,6 +111,103 @@ fn finish_workspace_operation(presenter: &mut Presenter) {
         presenter.drain_events();
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn start_test_worktree(presenter: &mut Presenter, runner: &FakeRunner, prompt: &str) -> StartRun {
+    presenter.select_workspace_kind(crate::model::workspace::WorkspaceKind::Worktree);
+    assert!(presenter.submit(prompt, "claude"));
+    finish_workspace_operation(presenter);
+    emit_current_catalog(presenter, runner, claude_aliases());
+    presenter.drain_events();
+    last_start(runner)
+}
+
+#[test]
+fn concurrent_worktree_tasks_isolate_output_approvals_queue_and_cancellation() {
+    use crate::infrastructure::git;
+    let (directory, project) = git::tests::repository_fixture();
+    let (mut presenter, runner, _fixture) = fixture();
+    presenter.worktree_root = Ok(directory.path().canonicalize().unwrap().join("worktrees"));
+    presenter.open_project(Path::new(&project.canonical_path));
+    let first = start_test_worktree(&mut presenter, &runner, "first");
+    assert!(presenter.submit("first follow-up", "claude"));
+    presenter.new_task();
+    let second = start_test_worktree(&mut presenter, &runner, "second");
+    assert_eq!(presenter.model.active_run_count(), 2);
+    assert_ne!(first.cwd, second.cwd);
+    let approval_id = Uuid::new_v4();
+    runner.emit(Event::RunSessionStarted {
+        run_id: first.run_id,
+        session_id: "first-session".into(),
+    });
+    runner.emit(Event::RunOutputDelta {
+        run_id: first.run_id,
+        text: "first output".into(),
+    });
+    runner.emit(Event::RunOutputDelta {
+        run_id: second.run_id,
+        text: "second output".into(),
+    });
+    runner.emit(Event::RunApprovalRequested {
+        run_id: first.run_id,
+        request: nexus_protocol::ApprovalRequest {
+            request_id: approval_id,
+            title: "first approval".into(),
+            details: "first only".into(),
+            options: vec!["Approve".into()],
+        },
+    });
+    presenter.drain_events();
+    assert_eq!(presenter.model.selected_task, Some(second.task_id));
+    assert_eq!(presenter.model.streaming_text, "second output");
+    assert!(presenter.model.pending_approvals.is_empty());
+    presenter.new_task();
+    assert!(!presenter.submit("third must wait", "claude"));
+    presenter.select_task(first.task_id);
+    assert_eq!(presenter.model.streaming_text, "first output");
+    assert!(presenter.respond_approval(first.run_id, approval_id, Some(0)));
+    assert!(
+        matches!(runner.0.borrow().commands.last().unwrap().command, Command::RunApprovalRespond { run_id, .. } if run_id == first.run_id)
+    );
+    presenter.select_task(second.task_id);
+    presenter.cancel();
+    assert!(
+        matches!(runner.0.borrow().commands.last().unwrap().command, Command::RunCancel { run_id } if run_id == second.run_id)
+    );
+    runner.emit(Event::RunExited {
+        run_id: first.run_id,
+        status: RunStatus::Completed,
+        exit_code: Some(0),
+    });
+    presenter.drain_events();
+    let follow_up = last_start(&runner);
+    assert_eq!(follow_up.task_id, first.task_id);
+    assert_eq!(follow_up.cwd, first.cwd);
+    assert_eq!(follow_up.session_id.as_deref(), Some("first-session"));
+    assert_eq!(follow_up.prompt, "first follow-up");
+    assert_eq!(presenter.model.selected_task, Some(second.task_id));
+    assert!(presenter.model.run_cancelling);
+    runner.emit(Event::RunExited {
+        run_id: second.run_id,
+        status: RunStatus::Cancelled,
+        exit_code: None,
+    });
+    presenter.drain_events();
+    assert_eq!(presenter.model.active_run_count(), 1);
+    assert!(presenter.model.task_running(first.task_id));
+    assert!(!presenter.model.task_running(second.task_id));
+}
+
+#[test]
+fn a_second_local_task_cannot_write_to_an_active_checkout() {
+    let (mut presenter, runner, _directory) = fixture();
+    assert!(presenter.submit("first", "claude"));
+    let first = last_start(&runner);
+    presenter.new_task();
+    assert!(!presenter.submit("second", "claude"));
+    assert!(presenter.model.status_text().contains("checkout"));
+    assert_eq!(last_start(&runner).run_id, first.run_id);
+    assert_eq!(presenter.model.active_run_count(), 1);
 }
 
 #[test]
@@ -681,6 +784,7 @@ fn conversation_actions_keep_active_and_archived_models_in_sync() {
     let first_task = create_task(&mut presenter, "First conversation");
     let second_task = create_task(&mut presenter, "Second conversation");
     for task_id in [first_task, second_task] {
+        presenter.select_task(task_id);
         presenter
             .model
             .queued_messages
@@ -699,22 +803,51 @@ fn conversation_actions_keep_active_and_archived_models_in_sync() {
     assert!(presenter.model().messages.is_empty());
     assert_eq!(presenter.model().tasks[0].id, second_task);
     assert_eq!(presenter.model().archived_tasks[0].id, first_task);
-    assert_eq!(presenter.model().queued_messages.len(), 2);
+    assert_eq!(
+        presenter
+            .model()
+            .all_conversations()
+            .map(|conversation| conversation.queued_messages.len())
+            .sum::<usize>(),
+        2
+    );
 
     assert!(presenter.restore_task(first_task));
     assert_eq!(presenter.model().tasks.len(), 2);
     assert!(presenter.model().archived_tasks.is_empty());
 
     presenter.model.active_run = Some(Uuid::new_v4());
+    presenter.model.active_task = Some(first_task);
     assert!(!presenter.delete_task(first_task));
     assert_eq!(presenter.model().tasks.len(), 2);
-    assert_eq!(presenter.model().queued_messages.len(), 2);
+    assert_eq!(
+        presenter
+            .model()
+            .all_conversations()
+            .map(|conversation| conversation.queued_messages.len())
+            .sum::<usize>(),
+        2
+    );
     presenter.model.active_run = None;
+    presenter.model.active_task = None;
 
     assert!(presenter.delete_task(first_task));
     assert_eq!(presenter.model().tasks.len(), 1);
-    assert_eq!(presenter.model().queued_messages.len(), 1);
-    assert_eq!(presenter.model().queued_messages[0].task_id, second_task);
+    assert_eq!(
+        presenter
+            .model()
+            .all_conversations()
+            .map(|conversation| conversation.queued_messages.len())
+            .sum::<usize>(),
+        1
+    );
+    assert!(
+        presenter
+            .model()
+            .all_conversations()
+            .flat_map(|conversation| &conversation.queued_messages)
+            .all(|message| message.task_id == second_task)
+    );
     assert!(presenter.archive_task(second_task));
     assert_eq!(presenter.model().archived_tasks.len(), 1);
     assert!(presenter.delete_archived_tasks());
@@ -1432,7 +1565,7 @@ fn invalid_submissions_never_create_tasks_or_send_commands() {
     }
     assert!(presenter.storage.tasks(project.id).unwrap().is_empty());
     assert!(runner.0.borrow().commands.is_empty());
-    assert!(presenter.active_run_started_at.is_none());
+    assert!(presenter.model.active_run_started_at.is_none());
     assert!(presenter.model().active_run_elapsed_seconds.is_none());
 }
 
@@ -2862,7 +2995,7 @@ fn send_failure_rolls_back_a_new_task_without_entering_busy_state() {
     runner.0.borrow_mut().fail_send = true;
     assert!(!presenter.submit("hello", "claude"));
     assert!(presenter.model().active_run.is_none());
-    assert!(presenter.active_run_started_at.is_none());
+    assert!(presenter.model.active_run_started_at.is_none());
     assert!(presenter.model().active_run_elapsed_seconds.is_none());
     assert_eq!(
         presenter.model().status_text(),
@@ -2887,7 +3020,7 @@ fn runner_events_update_timeline_and_persist_terminal_statuses() {
     ] {
         let (mut presenter, runner, _directory) = fixture();
         assert!(presenter.submit("hello", "claude"));
-        let started = presenter.active_run_started_at.unwrap();
+        let started = presenter.model.active_run_started_at.unwrap();
         assert!(presenter.refresh_run_elapsed(started + Duration::from_secs(5)));
         let run_id = presenter.model().active_run.unwrap();
         let task_id = presenter.model().active_task.unwrap();
@@ -2924,7 +3057,7 @@ fn runner_events_update_timeline_and_persist_terminal_statuses() {
         assert!(presenter.model().active_run.is_none());
         assert!(presenter.model().active_task.is_none());
         assert!(presenter.model().active_harness.is_none());
-        assert!(presenter.active_run_started_at.is_none());
+        assert!(presenter.model.active_run_started_at.is_none());
         assert!(presenter.model().active_run_elapsed_seconds.is_none());
         assert!(!presenter.refresh_run_elapsed(started + Duration::from_secs(10)));
         assert_eq!(presenter.model().tasks[0].status, status);
@@ -2938,7 +3071,7 @@ fn runner_events_update_timeline_and_persist_terminal_statuses() {
         assert_eq!(presenter.model().selected_task, Some(task_id));
         assert_eq!(presenter.model().tasks.len(), 1);
         assert_eq!(presenter.model().active_run_elapsed_seconds, Some(0));
-        assert!(presenter.active_run_started_at.unwrap() >= started);
+        assert!(presenter.model.active_run_started_at.unwrap() >= started);
     }
 }
 
@@ -2947,7 +3080,7 @@ fn run_elapsed_advances_without_output_and_only_changes_each_second() {
     let (mut presenter, runner, _directory) = fixture();
     assert!(!presenter.refresh_run_elapsed(Instant::now()));
     assert!(presenter.submit("hello", "claude"));
-    let started = presenter.active_run_started_at.unwrap();
+    let started = presenter.model.active_run_started_at.unwrap();
     let run_id = presenter.model().active_run.unwrap();
     assert_eq!(presenter.model().active_run_elapsed_seconds, Some(0));
     assert!(!presenter.refresh_run_elapsed(started + Duration::from_millis(999)));
@@ -2962,14 +3095,14 @@ fn run_elapsed_advances_without_output_and_only_changes_each_second() {
         text: "partial".into(),
     });
     assert!(presenter.drain_events());
-    assert_eq!(presenter.active_run_started_at, Some(started));
+    assert_eq!(presenter.model.active_run_started_at, Some(started));
     assert!(presenter.refresh_run_elapsed(started + Duration::from_secs(65)));
     assert_eq!(presenter.model().active_run_elapsed_seconds, Some(65));
 
     presenter.cancel();
     assert!(presenter.refresh_run_elapsed(started + Duration::from_secs(66)));
     assert_eq!(presenter.model().active_run_elapsed_seconds, Some(66));
-    assert_eq!(presenter.active_run_started_at, Some(started));
+    assert_eq!(presenter.model.active_run_started_at, Some(started));
     assert!(presenter.model().active_run.is_some());
 }
 
@@ -2978,7 +3111,7 @@ fn unrelated_run_events_cannot_replace_the_active_run() {
     let (mut presenter, runner, _directory) = fixture();
     assert!(presenter.submit("hello", "claude"));
     let active_run = presenter.model().active_run;
-    let started = presenter.active_run_started_at;
+    let started = presenter.model.active_run_started_at;
     let other_run = Uuid::new_v4();
     runner.emit(Event::RunStarted {
         run_id: other_run,
@@ -3003,7 +3136,7 @@ fn unrelated_run_events_cannot_replace_the_active_run() {
     });
     presenter.drain_events();
     assert_eq!(presenter.model().active_run, active_run);
-    assert_eq!(presenter.active_run_started_at, started);
+    assert_eq!(presenter.model.active_run_started_at, started);
     assert_eq!(presenter.model().active_run_elapsed_seconds, Some(0));
     assert_eq!(presenter.model().messages.len(), 1);
     assert!(presenter.model().streaming_text.is_empty());
@@ -3032,8 +3165,13 @@ fn active_run_locks_configuration_and_cancels_the_matching_run() {
     presenter.select_codex_thread("history".into());
     assert!(presenter.model().model_override.is_none());
     assert_eq!(presenter.model().effort, ThinkingEffort::Default);
-    assert_eq!(presenter.model().selected_task, task_id);
-    assert!(presenter.model().selected_codex_thread.is_none());
+    assert!(presenter.model().selected_task.is_none());
+    assert_eq!(
+        presenter.model().selected_codex_thread.as_deref(),
+        Some("history")
+    );
+    assert_eq!(presenter.model().active_run_count(), 1);
+    presenter.select_task(task_id.unwrap());
     presenter.cancel();
     assert!(matches!(runner.0.borrow().commands.last().unwrap().command,
         Command::RunCancel { run_id: id } if id == run_id));
@@ -4137,9 +4275,9 @@ fn selecting_a_saved_task_restores_its_configuration_and_messages() {
         }
         assert!(presenter.submit("another task", "codex"));
         let run_id = presenter.model().active_run.unwrap();
-        presenter.select_task(task_id);
-        assert_eq!(presenter.model().selected_harness, HarnessKind::Codex);
         runner.0.borrow_mut().commands.clear();
+        presenter.select_task(task_id);
+        assert_eq!(presenter.model().selected_harness, HarnessKind::Claude);
 
         runner.emit(Event::RunExited {
             run_id,
@@ -4152,7 +4290,7 @@ fn selecting_a_saved_task_restores_its_configuration_and_messages() {
             .commands
             .iter()
             .map(|envelope| &envelope.command)
-            .filter(|command| matches!(command, Command::ModelCatalogRefresh { .. }))
+            .filter(|command| matches!(command, Command::ModelCatalogRefresh { context_id, .. } if *context_id == Some(presenter.model().conversation.id)))
             .collect::<Vec<_>>();
         assert_eq!(
             refreshes.len(),

@@ -756,7 +756,7 @@ impl NexusView {
         let locale = self.presenter.model().language;
         let colors = palette(cx);
         let model = self.presenter.model();
-        let active_run = model.active_run.is_some();
+        let active_run = model.active_run_count() > 0;
         let archived_count = model.archived_tasks.len();
         let archived_rows = if model.archived_tasks.is_empty() {
             vec![settings_row(
@@ -901,7 +901,7 @@ impl NexusView {
                         locale.text("可执行文件"),
                         locale.text("使用命令名或完整路径，修改后重新探测环境。"),
                         Input::new(&self.executable_input)
-                            .disabled(model.active_run.is_some() || model.harness_manager.busy)
+                            .disabled(model.active_run_count() > 0 || model.harness_manager.busy)
                             .small()
                             .min_h(px(CONTROL_HEIGHT))
                             .text_size(px(13.))
@@ -917,7 +917,7 @@ impl NexusView {
                             .h(px(CONTROL_HEIGHT))
                             .icon(IconName::RotateCw)
                             .label(locale.text("重新探测环境"))
-                            .disabled(model.active_run.is_some() || model.harness_manager.busy)
+                            .disabled(model.active_run_count() > 0 || model.harness_manager.busy)
                             .on_click(cx.listener(Self::probe)),
                     ),
                     div()
@@ -970,7 +970,7 @@ impl NexusView {
         let colors = palette(cx);
         let manager = &model.harness_manager;
         let disabled = manager.busy
-            || model.active_run.is_some()
+            || model.active_run_count() > 0
             || self.executable_input.read(cx).value().trim() != model.executable;
         let cards = HarnessKind::ALL.map(|harness| {
             let harness_id = harness.as_str();
@@ -1137,7 +1137,7 @@ impl NexusView {
                             .small()
                             .icon(IconName::RotateCw)
                             .label(locale.text("重新扫描"))
-                            .disabled(manager.busy || model.active_run.is_some())
+                            .disabled(manager.busy || model.active_run_count() > 0)
                             .on_click(cx.listener(Self::probe)),
                     )
                     .when(manager.busy, |element| {
@@ -1221,7 +1221,7 @@ impl NexusView {
         let locale = self.presenter.model().language;
         let colors = palette(cx);
         let model = self.presenter.model();
-        let active_run = model.active_run.is_some();
+        let active_run = model.active_run_count() > 0;
         let editing_profile = self.editing_provider_profile.and_then(|profile_id| {
             model
                 .provider_profiles

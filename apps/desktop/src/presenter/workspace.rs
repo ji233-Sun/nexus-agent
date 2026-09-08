@@ -1,4 +1,5 @@
 use super::Presenter;
+use crate::model::workspace::PendingWorkspaceStart;
 use crate::{
     infrastructure::git,
     model::workspace::{Workspace, WorkspaceDraft, WorkspaceKind, WorkspaceStatus},
@@ -7,12 +8,6 @@ use anyhow::Result;
 use nexus_domain::PermissionMode;
 use std::{path::Path, sync::mpsc};
 use uuid::Uuid;
-
-pub(super) struct PendingWorkspaceStart {
-    prompt: String,
-    executable: String,
-    permission: PermissionMode,
-}
 
 pub(super) enum WorkspaceEvent {
     Resolved(Result<Workspace>),
@@ -23,10 +18,10 @@ pub(super) enum WorkspaceEvent {
 impl Presenter {
     pub(super) fn reset_workspace_draft(&mut self) {
         self.model.selected_workspace = None;
-        self.pending_workspace_start = None;
+        self.model.pending_workspace_start = None;
         self.model.workspace_retry = false;
         self.model.workspace_draft = WorkspaceDraft::default();
-        if let Some(project) = &self.model.selected_project {
+        if let Some(project) = self.model.selected_project.clone() {
             self.model.project_is_git = git::repository(Path::new(&project.canonical_path)).is_ok();
             if self.model.project_is_git
                 && self
@@ -52,7 +47,7 @@ impl Presenter {
             return;
         }
         self.model.workspace_draft.kind = kind;
-        if let Some(project) = &self.model.selected_project {
+        if let Some(project) = self.model.selected_project.clone() {
             let value = if kind == WorkspaceKind::Worktree {
                 "worktree"
             } else {
@@ -93,9 +88,10 @@ impl Presenter {
                 recovered
             })
             .collect();
-        if let Some(selected) = &mut self.model.selected_workspace
+        if let Some(selected) = &mut self.model.conversation.selected_workspace
             && let Some(workspace) = self
                 .model
+                .conversation
                 .workspaces
                 .iter()
                 .find(|workspace| workspace.id == selected.id)
@@ -133,7 +129,8 @@ impl Presenter {
         };
         let workspace = git::planned_workspace(root, &project, &self.model.workspace_draft);
         let base = self.model.workspace_draft.base.clone();
-        self.pending_workspace_start = Some(PendingWorkspaceStart {
+        self.model.pending_workspace_start = Some(PendingWorkspaceStart {
+            context_id: self.model.conversation.id,
             prompt: prompt.trim().to_owned(),
             executable: executable.to_owned(),
             permission,
@@ -213,14 +210,22 @@ impl Presenter {
         };
         if let Err(error) = result {
             self.model.status = format!("Worktree 操作失败：{error}").into();
-            self.model.workspace_retry = self.pending_workspace_start.is_some();
+            self.model.workspace_retry = self.model.pending_workspace_start.is_some();
             self.reload_workspaces();
         }
         true
     }
 
     pub(crate) fn retry_workspace_start(&mut self) -> bool {
-        let Some(pending) = self.pending_workspace_start.take() else {
+        if self
+            .model
+            .pending_workspace_start
+            .as_ref()
+            .is_some_and(|pending| pending.context_id != self.model.conversation.id)
+        {
+            return false;
+        }
+        let Some(pending) = self.model.pending_workspace_start.take() else {
             return false;
         };
         self.model.workspace_retry = false;
@@ -247,14 +252,14 @@ impl Presenter {
             self.begin_worktree(&pending.prompt, &pending.executable, pending.permission)
         };
         if !started {
-            self.pending_workspace_start = Some(pending);
+            self.model.pending_workspace_start = Some(pending);
             self.model.workspace_retry = true;
         }
         started
     }
 
     pub(crate) fn cleanup_workspace(&mut self, id: Uuid, target: String) -> bool {
-        if self.model.workspace_busy || self.model.active_run.is_some() {
+        if self.model.workspace_busy {
             return false;
         }
         let Some(workspace) = self
@@ -269,6 +274,13 @@ impl Presenter {
         let Ok(Some(project)) = self.storage.project(workspace.project_id) else {
             return false;
         };
+        if git::checkout_path(Path::new(&workspace.path))
+            .ok()
+            .is_some_and(|path| self.model.checkout_running(&path))
+        {
+            self.model.status = "任务目录仍在运行，不能清理。".into();
+            return false;
+        }
         let Ok(root) = &self.worktree_root else {
             return false;
         };

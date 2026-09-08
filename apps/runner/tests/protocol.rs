@@ -186,6 +186,106 @@ async fn next_approval(runner: &mut TestRunner, run_id: Uuid) -> nexus_protocol:
 }
 
 #[tokio::test]
+async fn two_checkouts_run_together_and_cancel_and_approval_are_scoped() {
+    let fixtures = tempfile::tempdir().unwrap();
+    let executable = fake_harness(fixtures.path());
+    let first_dir = tempfile::tempdir().unwrap();
+    let second_dir = tempfile::tempdir().unwrap();
+    let third_dir = tempfile::tempdir().unwrap();
+    let mut first = request(
+        first_dir.path(),
+        executable.clone(),
+        HarnessKind::Claude,
+        "approval-round-trip",
+    );
+    first.title_generation = None;
+    let mut second = request(
+        second_dir.path(),
+        executable.clone(),
+        HarnessKind::Codex,
+        "approval-round-trip",
+    );
+    second.title_generation = None;
+    let mut runner = TestRunner::spawn();
+    runner.send(Command::RunStart(first.clone())).await;
+    let first_approval = next_approval(&mut runner, first.run_id).await;
+
+    let mut same_checkout = request(
+        first_dir.path(),
+        executable.clone(),
+        HarnessKind::Claude,
+        "must not launch",
+    );
+    same_checkout.title_generation = None;
+    runner.send(Command::RunStart(same_checkout.clone())).await;
+    let rejected = runner
+        .collect_run(same_checkout.run_id, RunStatus::Failed)
+        .await;
+    assert!(rejected.iter().any(|event| matches!(
+        event,
+        Event::RunFailed {
+            code: nexus_protocol::ErrorCode::RunAlreadyActive,
+            ..
+        }
+    )));
+
+    runner.send(Command::RunStart(second.clone())).await;
+    let second_approval = next_approval(&mut runner, second.run_id).await;
+    let mut third = request(
+        third_dir.path(),
+        executable,
+        HarnessKind::Claude,
+        "must wait",
+    );
+    third.title_generation = None;
+    runner.send(Command::RunStart(third.clone())).await;
+    let rejected = runner.collect_run(third.run_id, RunStatus::Failed).await;
+    assert!(rejected.iter().any(|event| matches!(
+        event,
+        Event::RunFailed {
+            code: nexus_protocol::ErrorCode::RunAlreadyActive,
+            ..
+        }
+    )));
+
+    runner
+        .send(Command::RunApprovalRespond {
+            run_id: second.run_id,
+            request_id: first_approval.request_id,
+            option: Some(0),
+        })
+        .await;
+    loop {
+        if let Event::RunApprovalRejected {
+            run_id, request_id, ..
+        } = runner.next().await
+        {
+            assert_eq!(run_id, second.run_id);
+            assert_eq!(request_id, first_approval.request_id);
+            break;
+        }
+    }
+    runner
+        .send(Command::RunCancel {
+            run_id: first.run_id,
+        })
+        .await;
+    runner.collect_run(first.run_id, RunStatus::Cancelled).await;
+    runner
+        .send(Command::RunApprovalRespond {
+            run_id: second.run_id,
+            request_id: second_approval.request_id,
+            option: Some(0),
+        })
+        .await;
+    let events = runner
+        .collect_run(second.run_id, RunStatus::Completed)
+        .await;
+    assert!(events.iter().any(|event| matches!(event, Event::RunMessageCompleted { run_id, text } if *run_id == second.run_id && text.contains("approved"))));
+    runner.shutdown().await;
+}
+
+#[tokio::test]
 async fn approval_round_trip_for_each_harness_rejects_invalid_and_duplicate_responses() {
     let fixtures = tempfile::tempdir().unwrap();
     let executable = fake_harness(fixtures.path());
@@ -556,6 +656,7 @@ async fn runner_routes_claude_alias_catalog_without_starting_a_run() {
     let mut runner = TestRunner::spawn();
     runner
         .send(Command::ModelCatalogRefresh {
+            context_id: None,
             purpose: Default::default(),
             request_id,
             harness: HarnessKind::Claude,
@@ -587,6 +688,7 @@ async fn runner_loads_all_codex_model_pages_and_reaps_the_app_server() {
     let mut runner = TestRunner::spawn();
     runner
         .send(Command::ModelCatalogRefresh {
+            context_id: None,
             purpose: Default::default(),
             request_id,
             harness: HarnessKind::Codex,
@@ -634,6 +736,7 @@ async fn runner_loads_omp_catalog_with_provider_context_and_reaps_the_command() 
     let mut runner = TestRunner::spawn();
     runner
         .send(Command::ModelCatalogRefresh {
+            context_id: None,
             purpose: Default::default(),
             request_id,
             harness: HarnessKind::Omp,
@@ -694,6 +797,7 @@ async fn omp_catalog_reports_command_json_and_empty_states_without_leaking_stder
         let request_id = Uuid::new_v4();
         runner
             .send(Command::ModelCatalogRefresh {
+                context_id: None,
                 purpose: Default::default(),
                 request_id,
                 harness: HarnessKind::Omp,
@@ -717,6 +821,7 @@ async fn omp_catalog_reports_command_json_and_empty_states_without_leaking_stder
     let request_id = Uuid::new_v4();
     runner
         .send(Command::ModelCatalogRefresh {
+            context_id: None,
             purpose: Default::default(),
             request_id,
             harness: HarnessKind::Omp,
@@ -743,6 +848,7 @@ async fn newer_omp_catalog_request_cancels_and_reaps_the_previous_command() {
     let stale_id = Uuid::new_v4();
     let current_id = Uuid::new_v4();
     let command = |request_id, environment| Command::ModelCatalogRefresh {
+        context_id: None,
         purpose: Default::default(),
         request_id,
         harness: HarnessKind::Omp,
@@ -777,6 +883,7 @@ async fn newer_catalog_requests_cancel_older_app_servers_without_stale_events() 
     let stale_id = Uuid::new_v4();
     let current_id = Uuid::new_v4();
     let command = |request_id, environment| Command::ModelCatalogRefresh {
+        context_id: None,
         purpose: Default::default(),
         request_id,
         harness: HarnessKind::Codex,
@@ -811,6 +918,7 @@ async fn catalog_request_errors_are_explicit_and_retriable() {
     let mut runner = TestRunner::spawn();
     runner
         .send(Command::ModelCatalogRefresh {
+            context_id: None,
             purpose: Default::default(),
             request_id,
             harness: HarnessKind::Codex,

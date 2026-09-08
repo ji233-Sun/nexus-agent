@@ -93,7 +93,7 @@ impl NexusView {
                 let project_id = project.id;
                 let project = project.clone();
                 let new_task_project = project.clone();
-                let can_create_task = model.active_run.is_none();
+                let can_create_task = !model.workspace_busy;
                 let tasks: Vec<_> = model
                     .tasks
                     .iter()
@@ -101,7 +101,7 @@ impl NexusView {
                     .map(|task| {
                         let id = task.id;
                         let app = cx.entity().clone();
-                        let can_manage = model.active_run.is_none();
+                        let can_manage = !model.task_running(task.id) && !model.workspace_busy;
                         let reduced_motion = self.reduced_motion;
                         let color = run_status_color(colors, task.status);
                         let active = task.status.is_active();
@@ -252,7 +252,7 @@ impl NexusView {
                                             .on_click(move |_, window, cx| {
                                                 cx.stop_propagation();
                                                 app.update(cx, |app, cx| {
-                                                    if app.presenter.model().active_run.is_some() {
+                                                    if app.presenter.model().workspace_busy {
                                                         return;
                                                     }
                                                     if !selected {
@@ -384,7 +384,7 @@ impl NexusView {
                                 )
                                 .tooltip(locale.text("在当前项目中开始新任务"))
                                 .disabled(
-                                    model.selected_project.is_none() || model.active_run.is_some(),
+                                    model.selected_project.is_none() || model.workspace_busy,
                                 )
                                 .on_click(
                                     cx.listener(|app, _, window, cx| app.new_task(window, cx)),

@@ -617,7 +617,7 @@ impl NexusView {
     }
 
     fn new_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.presenter.model().active_run.is_some()
+        if self.presenter.model().workspace_busy
             || self.presenter.model().selected_project.is_none()
         {
             return;
@@ -1486,7 +1486,7 @@ impl NexusView {
         let selected_profile_ready = model
             .selected_provider_profile()
             .is_some_and(|profile| profile.credential_configured);
-        let background_run = model.active_run.is_some() && model.active_task != model.selected_task;
+        let background_run = model.active_run.is_none() && model.active_run_count() > 0;
         let header_status_pending = model.active_run.is_some()
             || model.codex_thread_loading
             || (!history && matches!(model.model_catalog, ModelCatalogState::Loading { .. }));
@@ -2277,12 +2277,15 @@ mod catalog_model_tests {
     #[test]
     fn catalog_content_groups_providers_and_searches_provider_name_and_full_id() {
         let mut model = AppModel {
-            selected_harness: HarnessKind::Omp,
-            model_catalog: ModelCatalogState::Ready(vec![
-                omp_model("openai", "openai/shared-model"),
-                omp_model("bigmodel", "bigmodel/shared-model"),
-            ]),
-            ..AppModel::default()
+            conversation: crate::model::ConversationState {
+                selected_harness: HarnessKind::Omp,
+                model_catalog: ModelCatalogState::Ready(vec![
+                    omp_model("openai", "openai/shared-model"),
+                    omp_model("bigmodel", "bigmodel/shared-model"),
+                ]),
+                ..Default::default()
+            },
+            ..Default::default()
         };
         model.model_override = Some("bigmodel/shared-model".into());
 
@@ -2313,13 +2316,16 @@ mod catalog_model_tests {
     #[test]
     fn catalog_content_keeps_an_unavailable_full_selector_visible() {
         let model = AppModel {
-            selected_harness: HarnessKind::Omp,
-            model_override: Some("private-provider/custom-model".into()),
-            model_catalog: ModelCatalogState::Ready(vec![omp_model(
-                "public-provider",
-                "public-provider/custom-model",
-            )]),
-            ..AppModel::default()
+            conversation: crate::model::ConversationState {
+                selected_harness: HarnessKind::Omp,
+                model_override: Some("private-provider/custom-model".into()),
+                model_catalog: ModelCatalogState::Ready(vec![omp_model(
+                    "public-provider",
+                    "public-provider/custom-model",
+                )]),
+                ..Default::default()
+            },
+            ..Default::default()
         };
 
         let content = CatalogModelSelectContent::from_model(&model);
@@ -2341,10 +2347,13 @@ mod catalog_model_tests {
         let mut explicit = omp_model("provider", "explicit-model");
         explicit.display_name = "Chosen display name".into();
         let mut model = AppModel {
-            selected_harness: HarnessKind::Omp,
-            model_override: Some("explicit-model".into()),
-            model_override_name: Some(explicit.display_name.clone()),
-            model_catalog: ModelCatalogState::Ready(vec![default, explicit]),
+            conversation: crate::model::ConversationState {
+                selected_harness: HarnessKind::Omp,
+                model_override: Some("explicit-model".into()),
+                model_override_name: Some(explicit.display_name.clone()),
+                model_catalog: ModelCatalogState::Ready(vec![default, explicit]),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let content = CatalogModelSelectContent::from_model(&model);

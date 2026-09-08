@@ -71,3 +71,10 @@ impl Default for WorkspaceDraft {
         }
     }
 }
+
+pub(crate) struct PendingWorkspaceStart {
+    pub(crate) context_id: Uuid,
+    pub(crate) prompt: String,
+    pub(crate) executable: String,
+    pub(crate) permission: nexus_domain::PermissionMode,
+}
