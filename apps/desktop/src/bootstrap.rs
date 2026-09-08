@@ -25,6 +25,7 @@ fn create_presenter() -> Presenter {
 
     let runner = RunnerClient::spawn().map(|runner| Box::new(runner) as Box<dyn RunnerPort>);
     let mut presenter = Presenter::new(storage, runner, storage_error);
+    presenter.scan_harness_installations();
     if presenter.model().updates.check_on_startup {
         presenter.check_for_updates();
     }

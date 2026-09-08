@@ -824,7 +824,7 @@ impl Presenter {
         configured_executable: &str,
         permission_mode: PermissionMode,
     ) -> bool {
-        if self.model.active_run.is_some() {
+        if self.model.active_run.is_some() || self.model.harness_manager.operating.is_some() {
             return false;
         }
         let Some(project) = self.model.selected_project.clone() else {

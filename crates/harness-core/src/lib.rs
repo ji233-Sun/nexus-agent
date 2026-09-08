@@ -141,6 +141,7 @@ fn search_paths(
         ("VP_HOME", "bin"),
         ("BUN_INSTALL", "bin"),
         ("PNPM_HOME", ""),
+        ("PNPM_HOME", "bin"),
         (
             "NPM_CONFIG_PREFIX",
             if os == "windows" { "" } else { "bin" },
@@ -157,13 +158,15 @@ fn search_paths(
             directories.push(directory.join(suffix));
         }
     }
-    if let Some(home) = home {
+    if let Some(home) = &home {
         for suffix in [
             ".local/bin",
             ".vite-plus/bin",
             ".bun/bin",
             ".local/share/pnpm",
+            ".local/share/pnpm/bin",
             "Library/pnpm",
+            "Library/pnpm/bin",
             ".npm-global/bin",
             ".yarn/bin",
             ".config/yarn/global/node_modules/.bin",
@@ -185,7 +188,9 @@ fn search_paths(
         }
         if let Some(local) = path("LOCALAPPDATA") {
             directories.push(local.join("pnpm"));
+            directories.push(local.join("pnpm/bin"));
             directories.push(local.join("omp"));
+            directories.push(local.join("Programs/OpenAI/Codex/bin"));
             directories.push(local.join("Microsoft/WinGet/Links"));
             directories.push(local.join("Microsoft/WindowsApps"));
         }
@@ -208,13 +213,37 @@ fn search_paths(
             .map(PathBuf::from),
         );
     }
+    // nvm normally exports NVM_BIN from a shell startup file. Finder/Desktop
+    // launches still need to discover its installed versions when it is absent.
+    if let Some(nvm) = path("NVM_DIR").or_else(|| home.map(|home| home.join(".nvm"))) {
+        let preferred = std::fs::read_to_string(nvm.join("alias/default")).unwrap_or_default();
+        let preferred = preferred.trim().trim_start_matches('v');
+        let mut versions = std::fs::read_dir(nvm.join("versions/node"))
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        versions.sort_by_cached_key(|path| {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            let name = name.trim_start_matches('v');
+            let preferred = !preferred.is_empty()
+                && (name == preferred || name.starts_with(&format!("{preferred}.")));
+            let version = name
+                .split('.')
+                .map(|part| part.parse::<u64>().unwrap_or(0))
+                .collect::<Vec<_>>();
+            std::cmp::Reverse((preferred, version))
+        });
+        directories.extend(versions.into_iter().map(|version| version.join("bin")));
+    }
     let mut seen = std::collections::HashSet::new();
     directories
         .retain(|directory| !directory.as_os_str().is_empty() && seen.insert(directory.clone()));
     directories
 }
 
-fn resolve_in_paths(
+pub fn resolve_in_paths(
     configured: &str,
     directories: impl IntoIterator<Item = PathBuf>,
     extensions: Option<&str>,
@@ -375,6 +404,32 @@ mod tests {
         assert_eq!(paths.first(), Some(&bin));
         assert_eq!(paths.iter().filter(|path| **path == bin).count(), 1);
         assert!(paths.iter().all(|path| !path.as_os_str().is_empty()));
+    }
+
+    #[test]
+    fn nvm_gui_fallback_prefers_the_configured_default_then_newer_versions() {
+        let directory = tempfile::tempdir().unwrap();
+        let nvm = directory.path().join(".nvm");
+        for version in ["v9.0.0", "v22.1.0", "v24.2.0"] {
+            std::fs::create_dir_all(nvm.join("versions/node").join(version).join("bin")).unwrap();
+        }
+        std::fs::create_dir(nvm.join("alias")).unwrap();
+        std::fs::write(nvm.join("alias/default"), "22").unwrap();
+        let paths = search_paths("linux", |key| {
+            (key == "HOME").then(|| directory.path().as_os_str().into())
+        });
+        let versions = paths
+            .iter()
+            .filter(|path| path.starts_with(nvm.join("versions")))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            versions,
+            vec![
+                &nvm.join("versions/node/v22.1.0/bin"),
+                &nvm.join("versions/node/v24.2.0/bin"),
+                &nvm.join("versions/node/v9.0.0/bin")
+            ]
+        );
     }
 
     #[test]

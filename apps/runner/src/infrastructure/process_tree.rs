@@ -12,7 +12,7 @@ use {
     tokio::time::timeout,
 };
 
-pub(super) fn configure(command: &mut Command) {
+pub fn configure(command: &mut Command) {
     #[cfg(unix)]
     command.process_group(0);
     #[cfg(windows)]
@@ -32,7 +32,7 @@ pub(super) async fn cancel(child: &mut Child, pid: u32) -> io::Result<ExitStatus
     terminate(child, pid).await
 }
 
-pub(super) async fn terminate(child: &mut Child, pid: u32) -> io::Result<ExitStatus> {
+pub async fn terminate(child: &mut Child, pid: u32) -> io::Result<ExitStatus> {
     #[cfg(unix)]
     if pid > 0 {
         let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);

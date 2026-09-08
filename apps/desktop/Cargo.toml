@@ -14,6 +14,7 @@ gpui-kit.workspace = true
 gpui-pre-reqwest-client = "0.3.3"
 keyring.workspace = true
 nexus-domain = { path = "../../crates/domain" }
+nexus-harness-core = { path = "../../crates/harness-core" }
 nexus-protocol = { path = "../../crates/protocol" }
 nexus-runner = { path = "../runner" }
 rfd.workspace = true

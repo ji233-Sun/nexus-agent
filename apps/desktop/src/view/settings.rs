@@ -1,5 +1,7 @@
 use super::*;
 use crate::i18n::probe_status;
+use crate::infrastructure::harness_installation::documentation;
+use crate::model::harness_installation::{InstallMethod, MaintenanceRequest};
 use crate::model::updates::{UpdateChannel, UpdateState, installed_tag};
 use gpui_kit::component::scroll::ScrollableElement as _;
 
@@ -804,81 +806,340 @@ impl NexusView {
             (None, _) => locale.text("尚未探测").into(),
         };
 
-        settings_group(
-            colors,
-            locale.text("执行环境"),
-            [
-                settings_row(
-                    colors,
-                    locale.text("执行引擎"),
-                    locale.text("选择用于运行任务的本地 Agent。"),
-                    self.harness_selector("settings-harness", false, cx),
-                ),
-                settings_row(
-                    colors,
-                    locale.text("可执行文件"),
-                    locale.text("使用命令名或完整路径，修改后重新探测环境。"),
-                    Input::new(&self.executable_input)
+        div()
+            .flex()
+            .flex_col()
+            .gap_8()
+            .child(self.render_harness_management(cx))
+            .child(settings_group(
+                colors,
+                locale.text("执行环境"),
+                [
+                    settings_row(
+                        colors,
+                        locale.text("执行引擎"),
+                        locale.text("选择用于运行任务的本地 Agent。"),
+                        self.harness_selector("settings-harness", false, cx),
+                    ),
+                    settings_row(
+                        colors,
+                        locale.text("可执行文件"),
+                        locale.text("使用命令名或完整路径，修改后重新探测环境。"),
+                        Input::new(&self.executable_input)
+                            .disabled(model.active_run.is_some() || model.harness_manager.busy)
+                            .small()
+                            .min_h(px(CONTROL_HEIGHT))
+                            .text_size(px(13.))
+                            .prefix(Icon::new(IconName::SquareTerminal).small()),
+                    ),
+                    settings_row(
+                        colors,
+                        locale.text("环境检测"),
+                        locale.text("检查可执行文件、版本和登录状态。"),
+                        Button::new("probe")
+                            .outline()
+                            .small()
+                            .h(px(CONTROL_HEIGHT))
+                            .icon(IconName::RotateCw)
+                            .label(locale.text("重新探测环境"))
+                            .disabled(model.active_run.is_some() || model.harness_manager.busy)
+                            .on_click(cx.listener(Self::probe)),
+                    ),
+                    div()
+                        .p_5()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex()
+                                .items_start()
+                                .gap_2()
+                                .text_size(px(12.))
+                                .text_color(rgb(colors.text_secondary))
+                                .child(status_dot(harness_color))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .whitespace_normal()
+                                        .child(harness_status),
+                                ),
+                        )
+                        .when_some(
+                            probe.and_then(|probe| probe.version.clone()),
+                            |element, version| {
+                                element.child(label_value(colors, locale.text("版本"), version))
+                            },
+                        )
+                        .when_some(
+                            probe.filter(|probe| {
+                                locale == Language::English
+                                    && (!probe.available || !probe.authenticated)
+                            }),
+                            |element, probe| {
+                                element.child(label_value(
+                                    colors,
+                                    locale.text("原始诊断"),
+                                    probe.message.clone(),
+                                ))
+                            },
+                        ),
+                ],
+            ))
+    }
+
+    fn render_harness_management(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let model = self.presenter.model();
+        let locale = model.language;
+        let colors = palette(cx);
+        let manager = &model.harness_manager;
+        let disabled = manager.busy
+            || model.active_run.is_some()
+            || self.executable_input.read(cx).value().trim() != model.executable;
+        let cards = HarnessKind::ALL.map(|harness| {
+            let harness_id = harness.as_str();
+            let installation = manager.installations.get(&harness);
+            let installed =
+                installation.is_some_and(|installation| installation.executable.is_some());
+            let update = installation.and_then(|installation| installation.update.as_ref());
+            let options = installation
+                .map(|installation| installation.install_options.clone())
+                .unwrap_or_default();
+            let source = installation
+                .map(|installation| installation.source.render(locale).to_owned())
+                .unwrap_or_else(|| locale.text("尚未扫描").into());
+            let version = installation
+                .and_then(|installation| installation.version.clone())
+                .unwrap_or_else(|| {
+                    locale
+                        .text(if installed {
+                            "版本未知"
+                        } else {
+                            "未安装"
+                        })
+                        .into()
+                });
+            let app = cx.entity();
+            let actions = div()
+                .flex()
+                .items_center()
+                .flex_wrap()
+                .gap_2()
+                .child(
+                    Button::new(SharedString::from(format!("harness-docs-{harness_id}")))
+                        .ghost()
                         .small()
-                        .min_h(px(CONTROL_HEIGHT))
-                        .text_size(px(13.))
-                        .prefix(Icon::new(IconName::SquareTerminal).small()),
-                ),
-                settings_row(
-                    colors,
-                    locale.text("环境检测"),
-                    locale.text("检查可执行文件、版本和登录状态。"),
-                    Button::new("probe")
-                        .outline()
-                        .small()
-                        .h(px(CONTROL_HEIGHT))
-                        .icon(IconName::RotateCw)
-                        .label(locale.text("重新探测环境"))
-                        .disabled(model.active_run.is_some())
-                        .on_click(cx.listener(Self::probe)),
-                ),
+                        .label(locale.text("安装文档"))
+                        .on_click(move |_, _, cx| cx.open_url(documentation(harness))),
+                )
+                .when_some(update, |element, command| {
+                    let display = command.display();
+                    element
+                        .child(
+                            Button::new(SharedString::from(format!(
+                                "harness-command-{harness_id}"
+                            )))
+                            .ghost()
+                            .small()
+                            .icon(IconName::Copy)
+                            .label(locale.text("复制命令"))
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(display.clone()))
+                            }),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("harness-update-{harness_id}")))
+                                .debug_selector(move || format!("harness-update-{harness_id}"))
+                                .outline()
+                                .small()
+                                .icon(IconName::RotateCw)
+                                .label(locale.text("更新"))
+                                .disabled(disabled)
+                                .on_click(cx.listener(move |app, _, window, cx| {
+                                    app.confirm_harness_maintenance(harness, None, window, cx)
+                                })),
+                        )
+                })
+                .when(!options.is_empty(), |element| {
+                    element.child(AnimatedDropdown::new(
+                        SharedString::from(format!("harness-install-menu-{harness_id}")),
+                        Button::new(SharedString::from(format!("harness-install-{harness_id}")))
+                            .debug_selector(move || format!("harness-install-{harness_id}"))
+                            .primary()
+                            .small()
+                            .icon(IconName::Plus)
+                            .label(locale.text("安装"))
+                            .disabled(disabled),
+                        self.reduced_motion,
+                        move |menu, _, _| {
+                            options.iter().fold(menu.min_w(px(200.)), |menu, option| {
+                                let app = app.clone();
+                                let method = option.method;
+                                menu.item(PopupMenuItem::new(locale.text(method.label())).on_click(
+                                    move |_, window, cx| {
+                                        app.update(cx, |app, cx| {
+                                            app.confirm_harness_maintenance(
+                                                harness,
+                                                Some(method),
+                                                window,
+                                                cx,
+                                            )
+                                        });
+                                    },
+                                ))
+                            })
+                        },
+                    ))
+                });
+            div()
+                .debug_selector(move || format!("harness-card-{harness_id}"))
+                .border_1()
+                .border_color(rgb(colors.border))
+                .rounded_lg()
+                .p_4()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .min_w_0()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(harness_icon(harness, colors, 20.))
+                        .child(div().flex_1().child(harness.to_string()))
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(rgb(colors.text_secondary))
+                                .child(version),
+                        ),
+                )
+                .child(label_value(colors, locale.text("安装来源"), source))
+                .when_some(
+                    installation.and_then(|installation| installation.executable.as_ref()),
+                    |element, path| {
+                        element.child(label_value(
+                            colors,
+                            locale.text("实际路径"),
+                            path.display().to_string(),
+                        ))
+                    },
+                )
+                .when_some(
+                    installation.and_then(|installation| installation.diagnostic.as_ref()),
+                    |element, diagnostic| {
+                        element.child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(rgb(colors.muted))
+                                .whitespace_normal()
+                                .child(diagnostic.render(locale).to_owned()),
+                        )
+                    },
+                )
+                .child(actions)
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
                 div()
-                    .p_5()
                     .flex()
-                    .flex_col()
+                    .items_center()
                     .gap_3()
                     .child(
                         div()
-                            .flex()
-                            .items_start()
-                            .gap_2()
-                            .text_size(px(12.))
-                            .text_color(rgb(colors.text_secondary))
-                            .child(status_dot(harness_color))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .whitespace_normal()
-                                    .child(harness_status),
-                            ),
+                            .flex_1()
+                            .child(section_label(colors, locale.text("Harness 管理"))),
                     )
-                    .when_some(
-                        probe.and_then(|probe| probe.version.clone()),
-                        |element, version| {
-                            element.child(label_value(colors, locale.text("版本"), version))
-                        },
+                    .child(
+                        Button::new("scan-harness-installations")
+                            .debug_selector(|| "scan-harness-installations".into())
+                            .outline()
+                            .small()
+                            .icon(IconName::RotateCw)
+                            .label(locale.text("重新扫描"))
+                            .disabled(manager.busy || model.active_run.is_some())
+                            .on_click(cx.listener(Self::probe)),
                     )
-                    .when_some(
-                        probe.filter(|probe| {
-                            locale == Language::English
-                                && (!probe.available || !probe.authenticated)
-                        }),
-                        |element, probe| {
-                            element.child(label_value(
-                                colors,
-                                locale.text("原始诊断"),
-                                probe.message.clone(),
-                            ))
-                        },
+                    .when(manager.busy, |element| {
+                        element.child(
+                            Button::new("cancel-harness-maintenance")
+                                .ghost()
+                                .small()
+                                .label(locale.text("取消"))
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    app.presenter.cancel_harness_maintenance();
+                                    cx.notify();
+                                })),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(rgb(colors.muted))
+                    .child(
+                        locale.text(
+                            "扫描本机安装，更新时沿用原安装来源。任务运行期间暂停安装和更新。",
+                        ),
                     ),
+            )
+            .when_some(manager.message.as_ref(), |element, message| {
+                element.child(
+                    div()
+                        .debug_selector(|| "harness-management-status".into())
+                        .text_size(px(12.))
+                        .whitespace_normal()
+                        .child(message.render(locale).to_owned()),
+                )
+            })
+            .children(cards)
+    }
+
+    fn confirm_harness_maintenance(
+        &mut self,
+        harness: HarnessKind,
+        method: Option<InstallMethod>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(request) = self.presenter.harness_maintenance_request(harness, method) else {
+            return;
+        };
+        let locale = self.presenter.model().language;
+        let title = locale.format(
+            "安装或更新 {harness}？",
+            &[("harness", harness.to_string())],
+        );
+        let detail = request.command.display();
+        let answer = window.prompt(
+            PromptLevel::Info,
+            &title,
+            Some(&detail),
+            &[
+                PromptButton::ok(locale.text("执行命令")),
+                PromptButton::cancel(locale.text("取消")),
             ],
-        )
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await.ok() == Some(0) {
+                let _ = this.update_in(cx, |app, _, cx| {
+                    app.start_harness_maintenance(request, cx);
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn start_harness_maintenance(&mut self, request: MaintenanceRequest, cx: &mut Context<Self>) {
+        self.presenter.maintain_harness(request);
+        self.presenter.notify_remote_changed();
+        cx.notify();
     }
 
     fn render_provider_profiles(&self, cx: &mut Context<Self>) -> impl IntoElement {
