@@ -103,17 +103,25 @@ fn replacements(
         .collect())
 }
 
+#[cfg(not(target_os = "windows"))]
 fn tar() -> Command {
-    #[cfg(target_os = "windows")]
-    let executable =
-        PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()))
-            .join("System32/tar.exe");
     #[cfg(target_os = "macos")]
     let executable = PathBuf::from("/usr/bin/tar");
     #[cfg(target_os = "linux")]
     let executable = PathBuf::from("tar");
     let mut command = Command::new(executable);
     hide_console(&mut command);
+    command
+}
+
+#[cfg(target_os = "windows")]
+fn powershell() -> Command {
+    let executable =
+        PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()))
+            .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+    let mut command = Command::new(executable);
+    hide_console(&mut command);
+    command.args(["-NoProfile", "-NonInteractive", "-Command"]);
     command
 }
 
@@ -139,6 +147,7 @@ fn checked_output(command: &mut Command) -> Result<String> {
     String::from_utf8(output.stdout).context("Invalid archive listing")
 }
 
+#[cfg(any(not(target_os = "windows"), test))]
 fn validate_archive_listing(listing: &str, details: &str, root: &str) -> Result<()> {
     ensure!(!listing.trim().is_empty(), "The update archive is empty");
     for name in listing.lines() {
@@ -170,9 +179,12 @@ fn validate_archive_listing(listing: &str, details: &str, root: &str) -> Result<
 }
 
 fn unpack(archive: &Path, staging: &Path, root: &str) -> Result<()> {
-    let listing = checked_output(tar().arg("-tf").arg(archive))?;
-    let details = checked_output(tar().arg("-tvf").arg(archive))?;
-    validate_archive_listing(&listing, &details, root)?;
+    #[cfg(not(target_os = "windows"))]
+    {
+        let listing = checked_output(tar().arg("-tf").arg(archive))?;
+        let details = checked_output(tar().arg("-tvf").arg(archive))?;
+        validate_archive_listing(&listing, &details, root)?;
+    }
     let destination = staging.join("unpacked");
     fs::create_dir(&destination)?;
     #[cfg(target_os = "macos")]
@@ -182,8 +194,16 @@ fn unpack(archive: &Path, staging: &Path, root: &str) -> Result<()> {
             .arg(archive)
             .arg(&destination),
     )?;
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     checked_output(tar().arg("-xf").arg(archive).arg("-C").arg(&destination))?;
+    #[cfg(target_os = "windows")]
+    checked_output(
+        powershell()
+            .arg(include_str!("update_windows.ps1"))
+            .env("NEXUS_UPDATE_ARCHIVE", archive)
+            .env("NEXUS_UPDATE_DESTINATION", &destination)
+            .env("NEXUS_UPDATE_ROOT", root),
+    )?;
     Ok(())
 }
 
@@ -289,9 +309,7 @@ fn wait_for_parent(parent: u32) -> Result<()> {
     );
     #[cfg(target_os = "windows")]
     {
-        let mut command = Command::new("powershell.exe");
-        hide_console(&mut command);
-        checked_output(command.args(["-NoProfile", "-NonInteractive", "-Command"])
+        checked_output(powershell()
             .arg(format!("$p = Get-Process -Id {parent} -ErrorAction SilentlyContinue; if ($p) {{ $p | Wait-Process -Timeout 60 -ErrorAction Stop }}; exit 0")))?;
     }
     #[cfg(not(target_os = "windows"))]
@@ -651,18 +669,34 @@ mod tests {
                 .arg(&archive),
         )
         .unwrap();
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
         checked_output(
             tar()
-                .arg(if os == "linux" { "-czf" } else { "-acf" })
+                .arg("-czf")
                 .arg(&archive)
                 .arg("-C")
                 .arg(published.parent().unwrap())
                 .arg(root),
         )
         .unwrap();
+        #[cfg(target_os = "windows")]
+        checked_output(powershell()
+            .arg("$ErrorActionPreference = 'Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::CreateFromDirectory($env:NEXUS_UPDATE_SOURCE, $env:NEXUS_UPDATE_ARCHIVE, [System.IO.Compression.CompressionLevel]::Optimal, $true)")
+            .env("NEXUS_UPDATE_SOURCE", &published)
+            .env("NEXUS_UPDATE_ARCHIVE", &archive)).unwrap();
         fs::create_dir(&staging).unwrap();
         unpack(&archive, &staging, root).unwrap();
         validate_sources(os, &executable, &staging, root).unwrap();
+        #[cfg(target_os = "windows")]
+        {
+            let invalid_archive = base.join("invalid.zip");
+            checked_output(powershell()
+                .arg("$ErrorActionPreference = 'Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; $zip = [System.IO.Compression.ZipFile]::Open($env:NEXUS_UPDATE_ARCHIVE, [System.IO.Compression.ZipArchiveMode]::Create); try { [void]$zip.CreateEntry('../outside') } finally { $zip.Dispose() }")
+                .env("NEXUS_UPDATE_ARCHIVE", &invalid_archive)).unwrap();
+            let invalid_staging = base.join("invalid-staging");
+            fs::create_dir(&invalid_staging).unwrap();
+            assert!(unpack(&invalid_archive, &invalid_staging, root).is_err());
+            assert!(!base.join("outside").exists());
+        }
     }
 }
