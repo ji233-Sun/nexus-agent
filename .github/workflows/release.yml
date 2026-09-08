@@ -183,6 +183,7 @@ jobs:
           plutil -lint "$bundle/Contents/Info.plist"
           codesign --force --sign - "$bundle"
           cp "README.md" "target/package/$package/README.md"
+          cp -R "docs" "target/package/$package/docs"
           ditto -c -k --sequesterRsrc --keepParent "target/package/$package" "target/release-assets/$package.zip"
 
       - name: Package Linux binaries
@@ -191,6 +192,7 @@ jobs:
           package="nexus-agent-$RELEASE_TAG-$RELEASE_TARGET"
           mkdir -p "target/package/$package" "target/release-assets"
           cp "target/$RELEASE_TARGET/release/nexus-desktop" "target/$RELEASE_TARGET/release/nexus-runner" "README.md" "target/package/$package/"
+          cp -R "docs" "target/package/$package/docs"
           tar -czf "target/release-assets/$package.tar.gz" -C "target/package" "$package"
 
       - name: Package Windows binaries
@@ -200,6 +202,7 @@ jobs:
           $package = "nexus-agent-$env:RELEASE_TAG-$env:RELEASE_TARGET"
           New-Item -ItemType Directory -Force "target/package/$package", "target/release-assets" | Out-Null
           Copy-Item "target/$env:RELEASE_TARGET/release/nexus-desktop.exe", "target/$env:RELEASE_TARGET/release/nexus-runner.exe", "README.md" "target/package/$package/"
+          Copy-Item -Recurse "docs" "target/package/$package/docs"
           Compress-Archive -Path "target/package/$package" -DestinationPath "target/release-assets/$package.zip"
 
       - uses: actions/upload-artifact@v7
