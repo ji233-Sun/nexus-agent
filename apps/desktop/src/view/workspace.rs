@@ -7,50 +7,80 @@ impl NexusView {
         let locale = model.language;
         let draft = &model.workspace_draft;
         let creating = model.selected_task.is_none() && model.selected_workspace.is_none();
-        let history = model.selected_codex_thread.is_some();
-        let mut controls = div()
-            .w_full()
-            .max_w(px(CONTENT_WIDTH))
-            .mx_auto()
-            .mb_2()
+        let mut row = div()
             .flex()
-            .flex_col()
+            .flex_none()
+            .items_center()
             .gap_2()
             .text_size(px(12.));
-        if model.selected_project.is_none() || history {
-            return controls;
+        if model.selected_project.is_none() || model.selected_codex_thread.is_some() {
+            return row;
         }
-        let mut row = div().flex().items_center().flex_wrap().gap_2();
         if creating {
-            for (kind, label) in [
-                (WorkspaceKind::Local, "本地"),
-                (WorkspaceKind::Worktree, "Worktree"),
-            ] {
-                row = row.child(
-                    Button::new(label)
-                        .small()
-                        .ghost()
-                        .label(locale.text(label))
-                        .selected(draft.kind == kind)
-                        .disabled(
-                            model.workspace_busy
-                                || (kind == WorkspaceKind::Worktree && !model.project_is_git),
+            let app = cx.entity();
+            let button = Button::new("workspace-mode")
+                .debug_selector(|| "workspace-mode".into())
+                .small()
+                .ghost()
+                .h(px(COMPACT_CONTROL_HEIGHT))
+                .label(locale.text(match draft.kind {
+                    WorkspaceKind::Local => "本地",
+                    WorkspaceKind::Worktree => "Worktree",
+                }))
+                .accessibility_label(locale.text("工作区模式"))
+                .disabled(model.workspace_busy);
+            row = row.child(AnimatedDropdown::new(
+                "workspace-mode",
+                button,
+                self.reduced_motion,
+                move |menu, _, cx| {
+                    let model = app.read(cx).presenter.model();
+                    let selected = model.workspace_draft.kind;
+                    let busy = model.workspace_busy;
+                    let is_git = model.project_is_git;
+                    [
+                        (WorkspaceKind::Local, "本地"),
+                        (WorkspaceKind::Worktree, "Worktree"),
+                    ]
+                    .into_iter()
+                    .fold(menu.min_w(px(140.)), |menu, (kind, label)| {
+                        let app = app.clone();
+                        menu.item(
+                            PopupMenuItem::new(locale.text(label))
+                                .checked(selected == kind)
+                                .disabled(busy || (kind == WorkspaceKind::Worktree && !is_git))
+                                .on_click(move |_, _, cx| {
+                                    app.update(cx, |app, cx| {
+                                        app.presenter.select_workspace_kind(kind);
+                                        cx.notify();
+                                    });
+                                }),
                         )
-                        .on_click(cx.listener(move |app, _, _, cx| {
-                            app.presenter.select_workspace_kind(kind);
-                            cx.notify();
-                        })),
-                );
-            }
+                    })
+                },
+            ));
         } else {
             let workspace = model.selected_workspace.as_ref();
-            row = row.child(match workspace.map(|workspace| workspace.kind) {
-                Some(WorkspaceKind::Worktree) => "Worktree",
-                _ => locale.text("本地"),
-            });
-            row = row.child(model.workspace_branch.clone().unwrap_or_else(|| "—".into()));
-            if workspace.is_some_and(|workspace| workspace.status != WorkspaceStatus::Ready) {
-                row = row.child(locale.text("目录不可用；历史仍可阅读，请新建任务"));
+            row = row.child(
+                locale.text(match workspace.map(|workspace| workspace.kind) {
+                    Some(WorkspaceKind::Worktree) => "Worktree",
+                    _ => "本地",
+                }),
+            );
+            if model.selected_task.is_some() {
+                let branch = model.workspace_branch.clone().unwrap_or_else(|| "—".into());
+                row = row.child(
+                    div()
+                        .id("workspace-current-branch")
+                        .debug_selector(|| "workspace-current-branch".into())
+                        .max_w(px(180.))
+                        .truncate()
+                        .tooltip({
+                            let branch = branch.clone();
+                            move |window, cx| Tooltip::new(branch.clone()).build(window, cx)
+                        })
+                        .child(branch),
+                );
             }
             if let Some(workspace) = workspace
                 .filter(|workspace| workspace.managed && workspace.status == WorkspaceStatus::Ready)
@@ -58,6 +88,7 @@ impl NexusView {
                 let id = workspace.id;
                 row = row.child(
                     Button::new("workspace-review")
+                        .debug_selector(|| "workspace-review".into())
                         .small()
                         .label(locale.text("查看变更"))
                         .disabled(model.workspace_busy)
@@ -70,23 +101,67 @@ impl NexusView {
         if draft.kind == WorkspaceKind::Worktree
             && (creating || (model.workspace_retry && model.selected_task.is_none()))
         {
-            row = row.child(
-                Button::new("worktree-configure")
-                    .small()
-                    .ghost()
-                    .label(format!("{} → {}", draft.base, draft.branch))
-                    .disabled(
-                        model.workspace_busy
-                            || model.selected_workspace.as_ref().is_some_and(|workspace| {
-                                workspace.status != WorkspaceStatus::Missing
-                            }),
-                    )
-                    .on_click(cx.listener(Self::configure_workspace_dialog)),
-            );
+            let app = cx.entity();
+            let button = Button::new("workspace-base")
+                .debug_selector(|| "workspace-base".into())
+                .small()
+                .ghost()
+                .h(px(COMPACT_CONTROL_HEIGHT))
+                .max_w(px(200.))
+                .child(div().min_w_0().truncate().child(if draft.base.is_empty() {
+                    locale.text("选择来源分支").to_owned()
+                } else {
+                    draft.base.clone()
+                }))
+                .accessibility_label(locale.text("来源分支"))
+                .tooltip(locale.format(
+                    "从 {branch} 创建 Worktree",
+                    &[("branch", draft.base.clone())],
+                ))
+                .disabled(
+                    model.workspace_busy
+                        || model
+                            .selected_workspace
+                            .as_ref()
+                            .is_some_and(|workspace| workspace.status != WorkspaceStatus::Missing),
+                );
+            row = row.child(AnimatedDropdown::new(
+                "workspace-base",
+                button,
+                self.reduced_motion,
+                move |menu, _, cx| {
+                    let presenter = &app.read(cx).presenter;
+                    let selected = presenter.model().workspace_draft.base.clone();
+                    let menu = menu.min_w(px(180.)).max_w(px(320.)).scrollable(true);
+                    match presenter.workspace_base_branches() {
+                        Ok(branches) if !branches.is_empty() => {
+                            branches.into_iter().fold(menu, |menu, branch| {
+                                let app = app.clone();
+                                menu.item(
+                                    PopupMenuItem::new(branch.clone())
+                                        .checked(branch == selected)
+                                        .on_click(move |_, _, cx| {
+                                            app.update(cx, |app, cx| {
+                                                app.presenter.select_workspace_base(branch.clone());
+                                                cx.notify();
+                                            });
+                                        }),
+                                )
+                            })
+                        }
+                        Ok(_) => menu
+                            .item(PopupMenuItem::new(locale.text("没有可用的分支")).disabled(true)),
+                        Err(_) => menu.item(
+                            PopupMenuItem::new(locale.text("无法读取来源分支")).disabled(true),
+                        ),
+                    }
+                },
+            ));
         }
         if model.workspace_retry {
             row = row.child(
                 Button::new("workspace-retry")
+                    .debug_selector(|| "workspace-retry".into())
                     .small()
                     .label(locale.text("重试任务"))
                     .on_click(cx.listener(|app, _, _, cx| {
@@ -95,57 +170,48 @@ impl NexusView {
                     })),
             );
         }
-        controls = controls.child(row);
-        if creating && draft.kind == WorkspaceKind::Worktree {
-            controls =
-                controls.child(locale.text("首次发送时创建目录；依赖和 .env 不会自动复制。"));
+        row
+    }
+
+    pub(super) fn render_workspace_hints(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let model = self.presenter.model();
+        let locale = model.language;
+        let creating =
+            model.selected_task.is_none() && model.workspace_draft.kind == WorkspaceKind::Worktree;
+        let unavailable = model
+            .selected_workspace
+            .as_ref()
+            .is_some_and(|workspace| workspace.status != WorkspaceStatus::Ready);
+        let mut hints = div();
+        if model.selected_project.is_none()
+            || model.selected_codex_thread.is_some()
+            || (!creating && !unavailable)
+        {
+            return hints;
+        }
+        hints = hints
+            .w_full()
+            .max_w(px(CONTENT_WIDTH))
+            .mx_auto()
+            .mb_2()
+            .px_3()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .text_size(px(12.));
+        if creating {
+            hints = hints.child(locale.text("首次发送时创建目录；依赖和 .env 不会自动复制。"));
             if model.project_dirty {
-                controls = controls.child(
+                hints = hints.child(
                     div()
                         .text_color(rgb(palette(cx).warning))
                         .child(locale.text("当前目录有未提交修改，这些修改不会带入新任务。")),
                 );
             }
+        } else if unavailable {
+            hints = hints.child(locale.text("目录不可用；历史仍可阅读，请新建任务"));
         }
-        controls
-    }
-
-    fn configure_workspace_dialog(
-        &mut self,
-        _: &gpui::ClickEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let draft = &self.presenter.model().workspace_draft;
-        let base = cx.new(|cx| InputState::new(window, cx).default_value(draft.base.clone()));
-        let branch = cx.new(|cx| InputState::new(window, cx).default_value(draft.branch.clone()));
-        let app = cx.entity();
-        window.open_dialog(cx, move |dialog, _, cx| {
-            let locale = app.read(cx).presenter.model().language;
-            let save_app = app.clone();
-            let base_input = base.clone();
-            let branch_input = branch.clone();
-            dialog
-                .title(locale.text("创建 Worktree"))
-                .child(locale.text("创建基准（分支、标签或提交，默认 HEAD）"))
-                .child(Input::new(&base))
-                .child(locale.text("任务分支（必须是尚不存在的新分支）"))
-                .child(Input::new(&branch))
-                .footer(
-                    Button::new("workspace-config-save")
-                        .primary()
-                        .label(locale.text("保存"))
-                        .on_click(move |_, window, cx| {
-                            let base = base_input.read(cx).value().to_string();
-                            let branch = branch_input.read(cx).value().to_string();
-                            save_app.update(cx, |app, cx| {
-                                app.presenter.configure_workspace(base, branch);
-                                cx.notify();
-                            });
-                            window.close_dialog(cx);
-                        }),
-                )
-        });
+        hints
     }
 
     pub(super) fn open_workspace_review(

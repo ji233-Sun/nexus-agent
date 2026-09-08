@@ -27,6 +27,14 @@ impl Presenter {
         if let Some(project) = self.model.selected_project.clone() {
             self.model.project_dirty = git::is_git_dirty(Path::new(&project.canonical_path));
             self.model.project_is_git = git::repository(Path::new(&project.canonical_path)).is_ok();
+            if self.model.project_is_git {
+                let path = Path::new(&project.canonical_path);
+                let branches = git::local_branches(path).unwrap_or_default();
+                self.model.workspace_draft.base = git::current_branch(path)
+                    .filter(|branch| branches.contains(branch))
+                    .or_else(|| branches.into_iter().next())
+                    .unwrap_or_default();
+            }
             if self.model.project_is_git
                 && self
                     .storage
@@ -66,8 +74,18 @@ impl Presenter {
         }
     }
 
-    pub(crate) fn configure_workspace(&mut self, base: String, branch: String) {
+    pub(crate) fn workspace_base_branches(&self) -> Result<Vec<String>> {
+        let project = self
+            .model
+            .selected_project
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("请先选择项目目录。"))?;
+        git::local_branches(Path::new(&project.canonical_path))
+    }
+
+    pub(crate) fn select_workspace_base(&mut self, base: String) {
         if self.model.selected_task.is_none()
+            && self.model.workspace_draft.kind == WorkspaceKind::Worktree
             && self
                 .model
                 .selected_workspace
@@ -76,9 +94,11 @@ impl Presenter {
                     self.model.workspace_retry && workspace.status == WorkspaceStatus::Missing
                 })
             && !self.model.workspace_busy
+            && self
+                .workspace_base_branches()
+                .is_ok_and(|branches| branches.contains(&base))
         {
-            self.model.workspace_draft.base = base.trim().to_owned();
-            self.model.workspace_draft.branch = branch.trim().to_owned();
+            self.model.workspace_draft.base = base;
         }
     }
 
@@ -133,6 +153,10 @@ impl Presenter {
         let Some(project) = self.model.selected_project.clone() else {
             return false;
         };
+        if self.model.workspace_draft.base.is_empty() {
+            self.model.status = "请选择来源分支。".into();
+            return false;
+        }
         let root = match &self.worktree_root {
             Ok(root) => root,
             Err(error) => {
@@ -141,7 +165,7 @@ impl Presenter {
             }
         };
         let workspace = git::planned_workspace(root, &project, &self.model.workspace_draft);
-        let base = self.model.workspace_draft.base.clone();
+        let base = format!("refs/heads/{}", self.model.workspace_draft.base);
         self.model.pending_workspace_start = Some(PendingWorkspaceStart {
             context_id: self.model.conversation.id,
             prompt: prompt.trim().to_owned(),
@@ -291,6 +315,7 @@ impl Presenter {
         if self.model.workspace_busy {
             return false;
         }
+        self.reload_workspaces();
         let Ok(Some(workspace)) = self.storage.workspace(id) else {
             return false;
         };
@@ -442,16 +467,11 @@ impl Presenter {
         } else {
             // Failed creation keeps its record visible. A retry uses a new stable ID.
             let previous = self.model.workspace_draft.clone();
-            let mut draft = WorkspaceDraft {
+            self.model.workspace_draft = WorkspaceDraft {
                 kind: previous.kind,
                 base: previous.base,
                 ..WorkspaceDraft::default()
             };
-            if previous.branch != format!("feat/nx-{}", &previous.task_id.simple().to_string()[..8])
-            {
-                draft.branch = previous.branch;
-            }
-            self.model.workspace_draft = draft;
             self.model.selected_workspace = None;
             self.begin_worktree(&pending.prompt, &pending.executable, pending.permission)
         };

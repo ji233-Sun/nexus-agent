@@ -78,9 +78,28 @@ pub(crate) fn checkout_path(path: &Path) -> Result<PathBuf> {
 }
 
 pub(crate) fn current_branch(path: &Path) -> Option<String> {
-    git(path, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+    git(path, &["symbolic-ref", "--quiet", "HEAD"])
         .ok()
-        .map(|value| value.trim_end().to_owned())
+        .and_then(|value| {
+            value
+                .trim_end()
+                .strip_prefix("refs/heads/")
+                .map(str::to_owned)
+        })
+}
+
+pub(crate) fn local_branches(path: &Path) -> Result<Vec<String>> {
+    Ok(git(
+        path,
+        &[
+            "for-each-ref",
+            "--format=%(refname:lstrip=2)",
+            "refs/heads/",
+        ],
+    )?
+    .lines()
+    .map(str::to_owned)
+    .collect())
 }
 
 fn with_repository<T>(path: &Path, operation: impl FnOnce() -> Result<T>) -> Result<T> {
@@ -145,7 +164,10 @@ pub(crate) fn planned_workspace(
         managed: true,
         external: false,
         base_sha: None,
-        branch: Some(draft.branch.clone()),
+        branch: Some(format!(
+            "feat/nx-{}",
+            &draft.task_id.simple().to_string()[..8]
+        )),
         merge_target: None,
         status: WorkspaceStatus::Creating,
         merge: None,
@@ -266,6 +288,17 @@ pub(crate) fn recover_workspace(project: &Path, mut workspace: Workspace) -> Wor
         workspace.status = WorkspaceStatus::Ready;
         if validate_workspace(&workspace).is_err() {
             workspace.status = WorkspaceStatus::Missing;
+        } else if entry.branch != workspace.branch
+            && entry.branch.is_some()
+            && local_branches(project).is_ok_and(|branches| {
+                !workspace
+                    .branch
+                    .as_ref()
+                    .is_some_and(|branch| branches.contains(branch))
+            })
+        {
+            // A rename removes the old ref. Keep the write guard for branch switches.
+            workspace.branch = entry.branch;
         }
     } else {
         workspace.status = WorkspaceStatus::Missing;
@@ -521,9 +554,16 @@ pub(crate) mod tests {
             "uncommitted\n"
         );
         validate_workspace(&first).unwrap();
-        assert_eq!(
-            recover_workspace(path, first).status,
-            WorkspaceStatus::Ready
-        );
+        let first = recover_workspace(path, first);
+        assert_eq!(first.status, WorkspaceStatus::Ready);
+        let cwd = Path::new(&first.path);
+        git(cwd, &["checkout", "-b", "other-branch"]).unwrap();
+        let switched = recover_workspace(path, first.clone());
+        assert_eq!(switched.branch, first.branch);
+        assert!(changes::plan_merge(path, &switched, "main").is_err());
+        git(cwd, &["checkout", first.branch.as_deref().unwrap()]).unwrap();
+        git(cwd, &["branch", "-m", "fix/renamed-task"]).unwrap();
+        let renamed = recover_workspace(path, first);
+        assert_eq!(renamed.branch.as_deref(), Some("fix/renamed-task"));
     }
 }
