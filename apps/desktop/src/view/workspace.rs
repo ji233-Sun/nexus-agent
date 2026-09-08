@@ -4,6 +4,7 @@ use crate::model::workspace::{WorkspaceKind, WorkspaceStatus};
 impl NexusView {
     pub(super) fn render_workspace_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let model = self.presenter.model();
+        let colors = palette(cx);
         let locale = model.language;
         let draft = &model.workspace_draft;
         let creating = model.selected_task.is_none() && model.selected_workspace.is_none();
@@ -34,6 +35,7 @@ impl NexusView {
                             }
                         })
                         .size(px(14.))
+                        .text_color(rgb(colors.text))
                         .flex_none(),
                 )
                 .child(locale.text(match draft.kind {
@@ -125,6 +127,7 @@ impl NexusView {
                     gpui::svg()
                         .data(include_bytes!("../../assets/icons/git-branch.svg").as_slice())
                         .size(px(14.))
+                        .text_color(rgb(colors.text))
                         .flex_none(),
                 )
                 .child(div().min_w_0().truncate().child(if draft.base.is_empty() {
