@@ -686,13 +686,17 @@ impl NexusView {
                                             .flex()
                                             .flex_col()
                                             .gap_2()
-                                            .child(theme_preview(theme).border_2().border_color(
-                                                rgb(if selected {
-                                                    colors.accent
-                                                } else {
-                                                    colors.border
-                                                }),
-                                            ))
+                                            .child(
+                                                theme_preview(theme)
+                                                    .debug_selector(move || {
+                                                        format!("appearance-theme-preview-{id}")
+                                                    })
+                                                    .border_color(rgb(if selected {
+                                                        colors.accent
+                                                    } else {
+                                                        colors.border
+                                                    })),
+                                            )
                                             .child(
                                                 div()
                                                     .flex()
@@ -1581,10 +1585,15 @@ pub(super) fn control_label(label: impl Into<SharedString>) -> gpui::Div {
 fn theme_preview(theme: ThemePreference) -> gpui::Div {
     let sidebar = Palette::for_dark(theme == ThemePreference::Dark);
     let content = Palette::for_dark(theme != ThemePreference::Light);
+    let radius = px(10.);
+    let border_width = px(2.);
+    // GPUI clips children to rectangles, so the backgrounds need their own inner radii.
+    let inner_radius = radius - border_width;
     div()
         .w_full()
         .h(px(124.))
-        .rounded(px(10.))
+        .rounded(radius)
+        .border(border_width)
         .overflow_hidden()
         .flex()
         .child(
@@ -1592,6 +1601,7 @@ fn theme_preview(theme: ThemePreference) -> gpui::Div {
                 .w(px(46.))
                 .h_full()
                 .flex_none()
+                .rounded_l(inner_radius)
                 .bg(rgb(sidebar.surface))
                 .p_2()
                 .flex()
@@ -1612,6 +1622,7 @@ fn theme_preview(theme: ThemePreference) -> gpui::Div {
             div()
                 .flex_1()
                 .h_full()
+                .rounded_r(inner_radius)
                 .bg(rgb(content.canvas))
                 .p_3()
                 .flex()
