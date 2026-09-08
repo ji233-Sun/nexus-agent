@@ -2076,7 +2076,8 @@ mod catalog_model_tests {
         }));
         let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
         // Read branch choices when opening the menu, including branches added after render.
-        let source = format!("release/{}", "long-branch-".repeat(18));
+        // Overflow the dropdown without exceeding Windows' Git ref lock-path limit.
+        let source = format!("release/{}", "long-branch-".repeat(6));
         git::git(Path::new(&project.canonical_path), &["branch", &source]).unwrap();
         for (language, width, height) in [
             (Language::Chinese, 1040., 680.),
@@ -2124,7 +2125,7 @@ mod catalog_model_tests {
             assert!(directory.right() <= mode.left());
             assert!(mode.right() <= base.left());
             assert!(base.right() <= context.right());
-            assert!(base.size.width <= px(200.));
+            assert_eq!(base.size.width, px(200.));
             assert!(context.bottom() <= composer.top());
             click_debug(cx, "workspace-mode");
             cx.run_until_parked();
