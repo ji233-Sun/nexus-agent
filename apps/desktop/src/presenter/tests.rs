@@ -164,8 +164,6 @@ fn failed_worktree_creation_can_correct_and_keep_a_custom_branch_on_retry() {
     assert!(presenter.retry_workspace_start());
     finish_workspace_operation(&mut presenter);
     assert_eq!(presenter.model.occupied_run_slots(), 1);
-    let pending_workspace = presenter.model.selected_workspace.as_ref().unwrap().id;
-    assert!(!presenter.cleanup_workspace(pending_workspace, "main".into()));
     emit_current_catalog(&presenter, &runner, claude_aliases());
     presenter.drain_events();
     let started = last_start(&runner);
@@ -182,17 +180,6 @@ fn failed_worktree_creation_can_correct_and_keep_a_custom_branch_on_retry() {
             .unwrap()
             .status,
         WorkspaceStatus::Missing
-    );
-    assert!(presenter.cleanup_workspace(failed.id, "main".into()));
-    finish_workspace_operation(&mut presenter);
-    assert_eq!(
-        presenter
-            .storage
-            .workspace(failed.id)
-            .unwrap()
-            .unwrap()
-            .status,
-        WorkspaceStatus::Removed
     );
     assert_eq!(presenter.model.active_run, Some(started.run_id));
 }
@@ -281,63 +268,8 @@ fn a_second_local_task_cannot_write_to_an_active_checkout() {
 }
 
 #[test]
-fn initialization_records_logs_locks_its_directory_and_allows_another_checkout_to_run() {
+fn deleting_external_worktree_tasks_preserves_the_directory_and_association() {
     use crate::infrastructure::git;
-    let (directory, project) = git::tests::repository_fixture();
-    let (mut presenter, runner, _fixture) = fixture();
-    presenter.worktree_root = Ok(directory.path().canonicalize().unwrap().join("worktrees"));
-    presenter.open_project(Path::new(&project.canonical_path));
-    let task = start_test_worktree(&mut presenter, &runner, "setup task");
-    runner.emit(Event::RunSessionStarted {
-        run_id: task.run_id,
-        session_id: "setup-session".into(),
-    });
-    runner.emit(Event::RunExited {
-        run_id: task.run_id,
-        status: RunStatus::Completed,
-        exit_code: Some(0),
-    });
-    presenter.drain_events();
-    let workspace = presenter.model.selected_workspace.clone().unwrap();
-    let script = if cfg!(windows) {
-        "echo initialized> init.txt & echo diagnostic 1>&2"
-    } else {
-        "printf initialized > init.txt; printf diagnostic >&2"
-    };
-    assert!(presenter.initialize_workspace(workspace.id, script.into()));
-    assert!(!presenter.submit("locked", "claude"));
-    assert!(!presenter.cleanup_workspace(workspace.id, "main".into()));
-    presenter.open_project(Path::new(&project.canonical_path));
-    // The initialization lock only covers its worktree, even while logs are streaming.
-    presenter.model.workspace_draft.kind = crate::model::workspace::WorkspaceKind::Local;
-    assert!(presenter.submit("independent checkout", "claude"));
-    let other = last_start(&runner);
-    finish_workspace_operation(&mut presenter);
-    assert_eq!(presenter.model.selected_task, Some(other.task_id));
-    let saved = presenter.storage.workspace(workspace.id).unwrap().unwrap();
-    let log = saved.initialization.unwrap();
-    assert!(log.success);
-    assert!(!log.running);
-    assert!(log.output.contains("diagnostic"));
-    assert!(Path::new(&task.cwd).join("init.txt").exists());
-    assert!(!Path::new(&project.canonical_path).join("init.txt").exists());
-    assert!(presenter.initialize_workspace(workspace.id, "exit 7".into()));
-    finish_workspace_operation(&mut presenter);
-    assert!(
-        !presenter
-            .storage
-            .workspace(workspace.id)
-            .unwrap()
-            .unwrap()
-            .initialization
-            .unwrap()
-            .success
-    );
-}
-
-#[test]
-fn external_worktree_local_tasks_can_only_detach_their_own_association() {
-    use crate::{infrastructure::git, model::workspace::WorkspaceStatus};
     let (directory, project) = git::tests::repository_fixture();
     let external = directory.path().join("external");
     git::git(
@@ -369,29 +301,14 @@ fn external_worktree_local_tasks_can_only_detach_their_own_association() {
         .unwrap();
     assert!(workspace.external);
     assert!(!workspace.managed);
-    assert!(presenter.cleanup_workspace(workspace.id, String::new()));
-    finish_workspace_operation(&mut presenter);
-    assert_eq!(
-        presenter
-            .storage
-            .workspace(workspace.id)
-            .unwrap()
-            .unwrap()
-            .status,
-        WorkspaceStatus::Removed
-    );
+    assert!(presenter.delete_task(start.task_id));
+    assert!(presenter.storage.workspace(workspace.id).unwrap().is_some());
     assert!(external.join("tracked.txt").exists());
     assert!(external.join(".git").exists());
-    presenter.new_task();
-    assert!(presenter.submit("new association", "claude"));
-    assert_ne!(
-        presenter.model.selected_workspace.as_ref().unwrap().id,
-        workspace.id
-    );
 }
 
 #[test]
-fn worktree_task_binds_cwd_session_and_preserves_history_after_cleanup() {
+fn worktree_task_binds_cwd_session_and_preserves_history_after_external_removal() {
     use crate::{
         infrastructure::git,
         model::workspace::{WorkspaceKind, WorkspaceStatus},
@@ -450,19 +367,12 @@ fn worktree_task_binds_cwd_session_and_preserves_history_after_cleanup() {
         presenter.model.selected_workspace.as_ref().unwrap().status,
         WorkspaceStatus::Missing
     );
-    assert!(!presenter.cleanup_workspace(workspace.id, "main".into()));
     runner.emit(Event::RunExited {
         run_id: resumed.run_id,
         status: RunStatus::Completed,
         exit_code: Some(0),
     });
     presenter.drain_events();
-    assert!(presenter.cleanup_workspace(workspace.id, "main".into()));
-    finish_workspace_operation(&mut presenter);
-    assert_eq!(
-        presenter.model.selected_workspace.as_ref().unwrap().status,
-        WorkspaceStatus::Removed
-    );
     assert!(!presenter.submit("must not run in project", "claude"));
     assert_eq!(presenter.storage.messages(start.task_id).unwrap().len(), 2);
     assert!(presenter.delete_task(start.task_id));
@@ -860,7 +770,7 @@ fn update_installation_waits_for_all_tasks_and_workspace_work_and_blocks_new_ope
     });
     presenter.drain_events();
     assert_eq!(presenter.model.active_run_count(), 0);
-    assert!(presenter.initialize_workspace(run.task_id, "echo initialized".into()));
+    assert!(presenter.review_workspace(run.task_id));
     assert!(!presenter.install_update_when_idle());
     finish_workspace_operation(&mut presenter);
     presenter.model.harness_manager.busy = true;
@@ -873,9 +783,7 @@ fn update_installation_waits_for_all_tasks_and_workspace_work_and_blocks_new_ope
     ));
     assert!(!presenter.model().can_submit());
     assert!(!presenter.submit("Do not interrupt installation", "claude"));
-    assert!(!presenter.initialize_workspace(run.task_id, "echo too late".into()));
-    assert!(!presenter.cleanup_workspace(run.task_id, "main".into()));
-    assert!(!presenter.restore_workspace_directory(run.task_id));
+    assert!(!presenter.preview_workspace_merge(run.task_id, "main".into()));
     assert!(
         presenter
             .harness_maintenance_request(HarnessKind::Claude, None)

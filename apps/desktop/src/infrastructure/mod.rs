@@ -7,4 +7,3 @@ pub(crate) mod runner_client;
 pub(crate) mod storage;
 pub(crate) mod update_installation;
 pub(crate) mod updates;
-pub(crate) mod workspace_init;

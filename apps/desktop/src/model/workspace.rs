@@ -36,6 +36,7 @@ pub(crate) struct Workspace {
     pub(crate) status: WorkspaceStatus,
     #[serde(default)]
     pub(crate) merge: Option<MergeState>,
+    // Preserve historical initialization logs when saving existing workspace records.
     #[serde(default)]
     pub(crate) initialization: Option<InitializationLog>,
 }
