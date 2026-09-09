@@ -1,3 +1,4 @@
+use crate::i18n::LocalizedText;
 use crate::infrastructure::voice::Provider;
 use uuid::Uuid;
 
@@ -21,7 +22,7 @@ pub(crate) struct VoiceModel {
     pub(crate) mimo_configured: bool,
     pub(crate) operation: Option<Operation>,
     pub(crate) transcribing: bool,
-    pub(crate) status: String,
+    pub(crate) status: LocalizedText,
 }
 
 impl VoiceModel {

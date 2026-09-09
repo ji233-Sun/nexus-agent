@@ -4878,6 +4878,14 @@ fn voice_selection_persists_without_key_and_credentials_are_isolated() {
     presenter.save_voice_key("voice-only").unwrap();
     assert!(presenter.model.voice.ready());
     assert!(presenter.voice_worker.is_none());
+    assert_eq!(
+        presenter.model.voice.status.render(Language::Chinese),
+        "已配置；尚未验证服务请求。"
+    );
+    assert_eq!(
+        presenter.model.voice.status.render(Language::English),
+        "Configured; service requests have not been verified."
+    );
     assert_eq!(runner.0.borrow().commands.len(), commands_before);
     assert_eq!(
         credentials.api_key(chat_profile).unwrap().as_deref(),
@@ -4987,12 +4995,30 @@ fn voice_completion_rejects_cancelled_wrong_session_and_provider_results() {
         presenter.model.voice.settings.provider,
         Some(Provider::Mimo)
     );
-    assert_eq!(presenter.model.voice.status, "MiMo rejected the API key");
+    for language in [Language::Chinese, Language::English] {
+        assert_eq!(
+            presenter.model.voice.status.render(language),
+            "MiMo rejected the API key"
+        );
+    }
     presenter.model.voice.operation = Some(operation);
     assert!(
         presenter
             .complete_voice(operation, Ok("  ".into()))
             .is_none()
     );
-    assert!(presenter.model.voice.status.contains("未识别到文本"));
+    assert_eq!(
+        presenter.model.voice.status.render(Language::Chinese),
+        "未识别到文本，请重试。"
+    );
+    assert_eq!(
+        presenter.model.voice.status.render(Language::English),
+        "No text was recognized. Please try again."
+    );
+
+    assert!(presenter.set_language(Language::English));
+    assert_eq!(
+        presenter.save_voice_key(" ").unwrap_err().to_string(),
+        "Enter a MiMo API key"
+    );
 }

@@ -1,5 +1,6 @@
 use super::Presenter;
 use crate::{
+    i18n::LocalizedText,
     infrastructure::{
         credentials::MIMO_VOICE_CREDENTIAL,
         voice::{self, Provider, Worker},
@@ -28,7 +29,7 @@ impl Presenter {
 
     pub(crate) fn select_voice_provider(&mut self, provider: Provider) -> Result<()> {
         if !voice::supported_providers().contains(&provider) {
-            bail!("当前平台不支持此语音 Provider");
+            bail!(self.model.language.text("当前平台不支持此语音 Provider"));
         }
         let settings = VoiceSettings {
             provider: Some(provider),
@@ -38,7 +39,7 @@ impl Presenter {
             .set_setting("voice_input", &serde_json::to_string(&settings)?)?;
         self.cancel_voice();
         self.model.voice.settings = settings;
-        self.model.voice.status.clear();
+        self.model.voice.status = LocalizedText::default();
         Ok(())
     }
 
@@ -47,7 +48,7 @@ impl Presenter {
             .as_ref()
             .is_some_and(|locale| !voice::native_locales().contains(locale))
         {
-            bail!("系统不支持此识别语言");
+            bail!(self.model.language.text("系统不支持此识别语言"));
         }
         let settings = VoiceSettings {
             locale,
@@ -63,35 +64,45 @@ impl Presenter {
     pub(crate) fn save_voice_key(&mut self, key: &str) -> Result<()> {
         let key = key.trim();
         if key.is_empty() {
-            bail!("请输入 MiMo API Key");
+            bail!(self.model.language.text("请输入 MiMo API Key"));
         }
         self.credentials
             .set_api_key(MIMO_VOICE_CREDENTIAL, key)
-            .map_err(|_| anyhow::anyhow!("无法保存到系统凭据库，请解锁凭据库后重试。"))?;
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    self.model
+                        .language
+                        .text("无法保存到系统凭据库，请解锁凭据库后重试。")
+                )
+            })?;
         self.model.voice.mimo_configured = true;
         self.model.voice.status = "已配置；尚未验证服务请求。".into();
         Ok(())
     }
 
     pub(crate) fn voice_error(&mut self, error: impl std::fmt::Display) {
-        self.model.voice.status = error.to_string();
+        self.model.voice.status = LocalizedText::from(error.to_string());
     }
 
     pub(crate) fn start_voice(&mut self) -> Result<()> {
         if !self.model.voice.ready() {
-            bail!("请先在设置 → 语音输入中选择并配置 Provider。");
+            bail!(
+                self.model
+                    .language
+                    .text("请先在设置 → 语音输入中选择并配置 Provider。")
+            );
         }
         if self.model.voice.operation.is_some() {
-            bail!("语音操作正在进行");
+            bail!(self.model.language.text("语音操作正在进行"));
         }
         if self.model.selected_codex_thread.is_some() {
-            bail!("历史记录不可输入");
+            bail!(self.model.language.text("历史记录不可输入"));
         }
         let provider = self.model.voice.settings.provider.unwrap();
         let key = if provider == Provider::Mimo {
             self.credentials
                 .api_key(MIMO_VOICE_CREDENTIAL)
-                .map_err(|_| anyhow::anyhow!("无法读取语音凭据库"))?
+                .map_err(|_| anyhow::anyhow!(self.model.language.text("无法读取语音凭据库")))?
         } else {
             None
         };
@@ -159,7 +170,7 @@ impl Presenter {
                 None
             }
             Err(error) => {
-                self.model.voice.status = error;
+                self.model.voice.status = LocalizedText::from(error);
                 None
             }
         }
