@@ -65,6 +65,7 @@ impl Presenter {
     }
 
     pub(crate) fn select_codex_thread(&mut self, thread_id: String) {
+        self.cancel_voice();
         self.model.fresh_conversation();
         self.model.selected_task = None;
         self.model.selected_codex_thread = Some(thread_id.clone());

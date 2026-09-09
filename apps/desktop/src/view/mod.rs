@@ -7,6 +7,7 @@ pub(crate) mod theme;
 mod timeline;
 mod tools;
 mod user_ask;
+mod voice;
 mod workspace;
 
 use crate::{
@@ -75,6 +76,7 @@ impl Render for DialogLayer {
 pub(crate) struct NexusView {
     presenter: Presenter,
     prompt_input: Entity<TextareaState>,
+    voice_key_input: Entity<InputState>,
     user_ask_inputs: BTreeMap<(Uuid, String), Entity<TextareaState>>,
     catalog_model_select: Entity<ListState<ModelPickerList>>,
     catalog_model_select_content: CatalogModelSelectContent,
@@ -294,6 +296,11 @@ impl NexusView {
             crate::model::updates::UpdateState::Failed(_)
         );
         let mut view = Self {
+            voice_key_input: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .masked(true)
+                    .placeholder("MiMo API Key")
+            }),
             presenter,
             prompt_input,
             user_ask_inputs: BTreeMap::new(),
@@ -479,6 +486,7 @@ impl NexusView {
                         let executable = app.presenter.model().executable.clone();
                         let untouched = app.executable_input.read(cx).value() == executable;
                         app.poll_events(Instant::now(), cx);
+                        app.poll_voice_input(window, cx);
                         if untouched && app.presenter.model().executable != executable {
                             app.sync_executable(window, cx);
                         }
@@ -812,6 +820,7 @@ impl NexusView {
         }
         let executable = self.executable_input.read(cx).value().to_string();
         if self.presenter.submit(&prompt, &executable) {
+            self.presenter.cancel_voice();
             self.prompt_input
                 .update(cx, |input, cx| input.set_value("", window, cx));
             self.expanded_messages.clear();
@@ -1874,6 +1883,7 @@ impl NexusView {
                                     .flex()
                                     .flex_col()
                                     .child(self.render_message_queue(cx))
+                                    .child(self.render_voice_controls(cx))
                                     .child(
                                         Textarea::new(&self.prompt_input)
                                             .disabled(history)
@@ -2108,6 +2118,59 @@ mod catalog_model_tests {
     use crate::presenter::tests::fixture;
     use nexus_domain::{ModelReasoningEffort, UserAskOption, UserAskQuestion};
     use nexus_protocol::Event;
+
+    #[gpui::test]
+    fn voice_settings_select_before_configure_and_draft_insertion_is_undoable(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::infrastructure::voice::Provider;
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (presenter, _, _directory) = fixture();
+        let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
+        cx.simulate_resize(gpui::size(px(1040.), px(680.)));
+        view.update_in(cx, |view, window, cx| {
+            view.settings_open = true;
+            view.select_settings_section(SettingsSection::Voice, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("voice-settings").is_some());
+        assert!(cx.debug_bounds("voice-mimo-config").is_none());
+        view.update(cx, |view, cx| {
+            view.presenter
+                .select_voice_provider(Provider::Mimo)
+                .unwrap();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let bounds = cx.debug_bounds("voice-mimo-config").unwrap();
+        assert!(bounds.left() >= px(0.) && bounds.right() <= px(1040.));
+        view.update_in(cx, |view, window, cx| {
+            assert!(!view.presenter.model().voice.ready());
+            view.settings_open = false;
+            view.prompt_input.update(cx, |input, cx| {
+                input.set_value("已有草稿：用户刚编辑", window, cx)
+            });
+            view.append_voice_text("检查 src/main.rs 与 parseHTTP", window, cx);
+            assert_eq!(
+                view.prompt_input.read(cx).value(),
+                "已有草稿：用户刚编辑\n检查 src/main.rs 与 parseHTTP"
+            );
+            assert!(view.presenter.model().queued_messages.is_empty());
+            assert!(view.presenter.model().active_run.is_none());
+            view.focus_prompt(window, cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-z"
+        } else {
+            "ctrl-z"
+        });
+        view.read_with(cx, |view, cx| {
+            assert_eq!(view.prompt_input.read(cx).value(), "已有草稿：用户刚编辑")
+        });
+    }
 
     fn omp_model(provider: &str, id: &str) -> ModelDescriptor {
         ModelDescriptor {

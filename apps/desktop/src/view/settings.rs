@@ -11,16 +11,18 @@ pub(super) enum SettingsSection {
     Appearance,
     Agent,
     Providers,
+    Voice,
     Remote,
     Archived,
 }
 
 impl SettingsSection {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::General,
         Self::Appearance,
         Self::Agent,
         Self::Providers,
+        Self::Voice,
         Self::Remote,
         Self::Archived,
     ];
@@ -31,6 +33,7 @@ impl SettingsSection {
             Self::Appearance => "appearance",
             Self::Agent => "agent",
             Self::Providers => "providers",
+            Self::Voice => "voice",
             Self::Remote => "remote",
             Self::Archived => "archived",
         }
@@ -42,6 +45,7 @@ impl SettingsSection {
             Self::Appearance => locale.text("外观"),
             Self::Agent => locale.text("执行引擎"),
             Self::Providers => locale.text("凭据配置"),
+            Self::Voice => "语音输入",
             Self::Remote => locale.text("远程访问"),
             Self::Archived => locale.text("归档对话"),
         }
@@ -53,6 +57,7 @@ impl SettingsSection {
             Self::Appearance => IconName::Palette,
             Self::Agent => IconName::Bot,
             Self::Providers => IconName::Cpu,
+            Self::Voice => IconName::Play,
             Self::Remote => IconName::Globe,
             Self::Archived => IconName::Inbox,
         }
@@ -60,7 +65,7 @@ impl SettingsSection {
 }
 
 impl NexusView {
-    fn select_settings_section(
+    pub(super) fn select_settings_section(
         &mut self,
         section: SettingsSection,
         window: &mut Window,
@@ -85,6 +90,7 @@ impl NexusView {
             SettingsSection::Appearance => self.render_appearance_settings(cx).into_any_element(),
             SettingsSection::Agent => self.render_agent_settings(cx).into_any_element(),
             SettingsSection::Providers => self.render_provider_profiles(cx).into_any_element(),
+            SettingsSection::Voice => self.render_voice_settings(cx).into_any_element(),
             SettingsSection::Remote => self.render_remote_settings(cx).into_any_element(),
             SettingsSection::Archived => self.render_archived_settings(cx).into_any_element(),
         };

@@ -2,6 +2,7 @@ pub(crate) mod harness_installation;
 pub(crate) mod history;
 pub(crate) mod tools;
 pub(crate) mod updates;
+pub(crate) mod voice;
 pub(crate) mod workspace;
 
 use crate::i18n::{Language, LocalizedText};
@@ -200,6 +201,7 @@ pub(crate) struct ResolvedModelSelection {
 #[derive(Default)]
 pub(crate) struct AppModel {
     pub(crate) language: Language,
+    pub(crate) voice: voice::VoiceModel,
     pub(crate) appearance: AppearanceSettings,
     pub(crate) title_generation: TitleGenerationSettings,
     pub(crate) updates: updates::UpdateModel,

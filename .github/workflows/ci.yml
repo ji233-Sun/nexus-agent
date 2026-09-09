@@ -52,7 +52,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends clang cmake pkg-config \
             libfontconfig1-dev libfreetype6-dev libwayland-dev libx11-xcb-dev \
-            libxkbcommon-x11-dev libssl-dev libvulkan1 libglib2.0-dev
+            libxkbcommon-x11-dev libssl-dev libvulkan1 libglib2.0-dev libasound2-dev
 
       - name: Install Rust toolchain
         run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt --component clippy
