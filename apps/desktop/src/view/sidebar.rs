@@ -1335,6 +1335,7 @@ mod tests {
         });
         let scroll = view.read_with(cx, |view, _| view.sidebar_scroll.clone());
         let viewport = scroll.bounds();
+        let device_pixel = cx.update(|window, _| px(1. / window.scale_factor()));
         let content_height = scroll.bounds_for_item(0).unwrap().size.height;
         let max_offset = (content_height - viewport.size.height).max(px(0.));
         assert_eq!(
@@ -1383,7 +1384,12 @@ mod tests {
                 after.top() > before.top(),
                 "thumb must follow downward scrolling"
             );
-            assert_eq!(after.size.height, initial_thumb.size.height);
+            // Painting snaps each edge separately, so translation can change the
+            // painted height by one device pixel without changing the layout.
+            assert!(
+                (after.size.height - initial_thumb.size.height).abs() <= device_pixel,
+                "thumb height must stay constant within one device pixel: initial={initial_thumb:?}, after={after:?}"
+            );
             assert_eq!(scroll.bounds(), viewport);
         }
 
