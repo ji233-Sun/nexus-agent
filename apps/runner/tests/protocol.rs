@@ -364,7 +364,7 @@ async fn approval_round_trip_for_each_harness_rejects_invalid_and_duplicate_resp
                     }
                 }
                 HarnessKind::Codex => assert_eq!(response["id"], 99),
-                HarnessKind::Omp => assert_eq!(response["id"], "approval-1"),
+                HarnessKind::Omp | HarnessKind::Pi => assert_eq!(response["id"], "approval-1"),
             }
             runner.shutdown().await;
         }
@@ -549,7 +549,7 @@ async fn runner_resumes_each_harness_session_across_processes() {
         let args_file = match harness {
             HarnessKind::Claude => "args.txt",
             HarnessKind::Codex => "codex-args.txt",
-            HarnessKind::Omp => "omp-args.txt",
+            HarnessKind::Omp | HarnessKind::Pi => "omp-args.txt",
         };
         let args = fs::read_to_string(directory.path().join(args_file)).unwrap();
         if harness == HarnessKind::Codex {
@@ -1149,7 +1149,7 @@ async fn runner_generates_titles_with_each_harness_in_a_safe_background_process(
             assert!(args.contains(match harness {
                 HarnessKind::Claude => "--effort\nlow",
                 HarnessKind::Codex => "--config\nmodel_reasoning_effort=\"low\"",
-                HarnessKind::Omp => "--thinking\nlow",
+                HarnessKind::Omp | HarnessKind::Pi => "--thinking\nlow",
             }));
         }
         assert_eq!(
@@ -1173,6 +1173,11 @@ async fn runner_generates_titles_with_each_harness_in_a_safe_background_process(
                 assert!(args.contains("--sandbox\nread-only"));
                 assert!(args.contains("--ignore-rules"));
                 assert!(!args.contains("workspace-write"));
+            }
+            HarnessKind::Pi => {
+                assert!(args.contains("--no-tools"));
+                assert!(args.contains("--no-session"));
+                assert!(args.contains("--no-extensions"));
             }
             HarnessKind::Omp => {
                 assert!(args.contains("--no-tools"));
@@ -1311,7 +1316,7 @@ async fn steer_waits_for_all_tools_and_uses_native_receipts_in_the_same_run() {
                     assert_eq!(frame["params"]["input"][0]["text"], prompt);
                 }
                 HarnessKind::Claude => assert_eq!(frame["message"]["content"], prompt),
-                HarnessKind::Omp => {
+                HarnessKind::Omp | HarnessKind::Pi => {
                     assert_eq!(frame["type"], "steer");
                     assert_eq!(frame["message"], prompt);
                 }

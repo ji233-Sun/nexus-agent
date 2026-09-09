@@ -2121,6 +2121,7 @@ fn provider_environment_defaults(harness: HarnessKind) -> (&'static str, &'stati
         HarnessKind::Claude => ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"),
         HarnessKind::Codex => ("CODEX_API_KEY", "OPENAI_BASE_URL"),
         HarnessKind::Omp => ("DEEPSEEK_API_KEY", ""),
+        HarnessKind::Pi => ("ANTHROPIC_API_KEY", ""),
     }
 }
 
