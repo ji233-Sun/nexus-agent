@@ -64,7 +64,19 @@ pub(crate) async fn run_harness(
     user_asks: PendingUserAsks,
     emitter: Emitter,
 ) -> (RunStatus, Option<i32>) {
-    let (spec, decoder) = super::harness::prepare(&request, &cwd);
+    let (spec, decoder) = match super::harness::prepare(&request, &cwd) {
+        Ok(prepared) => prepared,
+        Err(message) => {
+            emitter
+                .send(Event::RunFailed {
+                    run_id: request.run_id,
+                    code: ErrorCode::LaunchFailed,
+                    message,
+                })
+                .await;
+            return (RunStatus::Failed, None);
+        }
+    };
     run_prepared_harness(request, spec, decoder, cancel, input, user_asks, emitter).await
 }
 
@@ -910,7 +922,7 @@ mod tests {
             effort: ThinkingEffort::Medium,
             environment: Vec::new(),
         };
-        let (spec, decoder) = super::super::harness::prepare(&request, directory);
+        let (spec, decoder) = super::super::harness::prepare(&request, directory).unwrap();
         (request, spec, decoder)
     }
 
@@ -1187,7 +1199,7 @@ mod tests {
                         }}
                     })
                 ),
-                HarnessKind::Omp => unreachable!(),
+                HarnessKind::Omp | HarnessKind::Pi => unreachable!(),
             }
         }
     }
@@ -1201,7 +1213,8 @@ mod tests {
             let (mut request, _, _) =
                 prepared_native_user_ask_run(directory.path(), &executable, HarnessKind::Codex);
             request.prompt = format!("codex-async-{scenario}");
-            let (spec, decoder) = super::super::harness::prepare(&request, directory.path());
+            let (spec, decoder) =
+                super::super::harness::prepare(&request, directory.path()).unwrap();
             let (cancel_tx, cancel) = watch::channel(false);
             let (input, input_rx) = mpsc::unbounded_channel();
             let user_asks = PendingUserAsks::default();

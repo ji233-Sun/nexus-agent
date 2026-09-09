@@ -112,7 +112,7 @@ Codex 通过[官方 App Server 协议](https://learn.chatgpt.com/docs/app-server
 
 OMP 通过 `omp --mode rpc-ui --approval-mode <模式>` 运行，为内置 `ask` 工具提供交互 UI；Prompt 与 Steer 同样由 stdin 传入。RPC 的选择、确认、输入和编辑器请求进入 User Ask 面板，原生工具授权使用审批弹窗。Claude Code 与 OMP 的后续轮次均通过 `--resume <SESSION_ID>` 继续原会话。
 
-三个 Harness 的 Prompt 都通过 stdin 传递，不出现在进程参数中。取消和关闭时会清理 Harness 进程树：Unix 先中断再超时终止，Windows 使用 `taskkill /T /F`。
+所有已接入 Harness 的 Prompt 都通过 stdin 传递，不出现在进程参数中。取消和关闭时会清理 Harness 进程树：Unix 先中断再超时终止，Windows 使用 `taskkill /T /F`。
 
 ## 验证
 
@@ -188,3 +188,5 @@ Nightly 始终标记为 Pre-release，不占用 Latest。Cargo 包版本和 macO
 ```bash
 node --test ".github/scripts/resolve-conflicts.test.mjs"
 ```
+
+Pi 的适配位于 `crates/harness-pi`，与 OMP 共享 `harness-core::rpc` 事件解码。Pi 通过 `--mode rpc` 启动，审批扩展就绪后获取原生 Session 文件路径并发送 Prompt；后续进程通过 `--session <FILE>` 恢复。

@@ -39,7 +39,7 @@ fn main() {
         Some("app-server" | "exec")
     ) {
         Harness::Codex
-    } else if args.windows(2).any(|pair| pair[0] == "--mode" && matches!(pair[1].as_str(), "rpc" | "rpc-ui")) {
+    } else if args.windows(2).any(|pair| pair[0] == "--mode" && matches!(pair[1].as_str(), "rpc" | "rpc-ui" | "json")) {
         Harness::Omp
     } else {
         Harness::Claude
@@ -125,10 +125,15 @@ fn main() {
     });
     let resume = args
         .windows(2)
-        .find(|pair| pair[0] == "--resume")
+        .find(|pair| matches!(pair[0].as_str(), "--resume" | "--session"))
         .map(|pair| pair[1].clone());
     let mut resumed = resume.is_some();
     let mut session = resume.unwrap_or_else(|| format!("session-{}", std::process::id()));
+    let pi = args.iter().any(|arg| arg == "--extension");
+    if pi {
+        println!(r#"{{"type":"extension_ui_request","method":"notify","message":"nexus-permissions-ready"}}"#);
+        io::stdout().flush().unwrap();
+    }
     while let Ok(line) = input.recv() {
         let id = request_id(&line);
         if harness == Harness::Codex {
@@ -158,9 +163,11 @@ fn main() {
                 "model/list" => run_codex_catalog(&line, &id),
                 _ => {}
             }
+        } else if harness == Harness::Omp && string_field(&line, "type") == "get_available_models" {
+            println!(r#"{{"type":"response","id":{id},"success":true,"data":{{"models":[{{"id":"test","provider":"local","name":"Test"}}]}}}}"#);
         } else if harness == Harness::Omp && string_field(&line, "type") == "get_state" {
             println!(
-                r#"{{"type":"response","command":"get_state","id":{id},"success":true,"data":{{"sessionId":{session:?}}}}}"#
+                r#"{{"type":"response","command":"get_state","id":{id},"success":true,"data":{{"sessionId":{session:?},"sessionFile":{session:?}}}}}"#
             );
         } else {
             let prompt = string_field(

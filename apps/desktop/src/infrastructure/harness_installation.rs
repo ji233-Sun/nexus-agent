@@ -73,6 +73,7 @@ pub(crate) fn documentation(harness: HarnessKind) -> &'static str {
         HarnessKind::Claude => "https://code.claude.com/docs/en/setup",
         HarnessKind::Codex => "https://developers.openai.com/codex/cli/",
         HarnessKind::Omp => "https://github.com/can1357/oh-my-pi#install",
+        HarnessKind::Pi => "https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent",
     }
 }
 
@@ -81,6 +82,7 @@ fn package(harness: HarnessKind) -> &'static str {
         HarnessKind::Claude => "@anthropic-ai/claude-code",
         HarnessKind::Codex => "@openai/codex",
         HarnessKind::Omp => "@oh-my-pi/pi-coding-agent",
+        HarnessKind::Pi => "@earendil-works/pi-coding-agent",
     }
 }
 
@@ -558,6 +560,7 @@ fn manager_command(
 
 fn native_install(harness: HarnessKind, environment: &Environment) -> Option<MaintenanceCommand> {
     let (unix, windows) = match harness {
+        HarnessKind::Pi => return None,
         HarnessKind::Claude => (
             "curl -fsSL https://claude.ai/install.sh | bash",
             "& ([scriptblock]::Create((Invoke-RestMethod https://claude.ai/install.ps1)))",
@@ -613,8 +616,10 @@ fn install_options(
             HarnessKind::Claude => vec!["install", "--cask", "claude-code"],
             HarnessKind::Codex => vec!["install", "--cask", "codex"],
             HarnessKind::Omp => vec!["install", "can1357/tap/omp"],
+            HarnessKind::Pi => vec![],
         },
-    ) && (environment.os == "macos" || harness == HarnessKind::Omp)
+    ) && harness != HarnessKind::Pi
+        && (environment.os == "macos" || harness == HarnessKind::Omp)
     {
         options.push(InstallOption {
             method: InstallMethod::Homebrew,
@@ -649,7 +654,7 @@ fn winget_id(harness: HarnessKind) -> Option<&'static str> {
     match harness {
         HarnessKind::Claude => Some("Anthropic.ClaudeCode"),
         HarnessKind::Codex => Some("OpenAI.Codex"),
-        HarnessKind::Omp => None,
+        HarnessKind::Omp | HarnessKind::Pi => None,
     }
 }
 
@@ -664,6 +669,7 @@ fn homebrew_owner(real: &Path, harness: HarnessKind) -> Option<(PathBuf, String,
     parts.next()?;
     parts.next()?;
     let expected = match harness {
+        HarnessKind::Pi => return None,
         HarnessKind::Claude => "claude-code",
         HarnessKind::Codex => "codex",
         HarnessKind::Omp => "omp",
@@ -846,8 +852,9 @@ async fn ownership(
         HarnessKind::Claude => "claude-code",
         HarnessKind::Codex => "codex",
         HarnessKind::Omp => "omp",
+        HarnessKind::Pi => "pi",
     };
-    if inside(real, &scoop.join("apps").join(scoop_name)) {
+    if harness != HarnessKind::Pi && inside(real, &scoop.join("apps").join(scoop_name)) {
         return (
             "Scoop".into(),
             environment.command("scoop", ["update", scoop_name]),
@@ -861,6 +868,7 @@ async fn ownership(
         );
     }
     let native = match harness {
+        HarnessKind::Pi => false,
         HarnessKind::Claude => {
             inside(real, &environment.home.join(".local/share/claude/versions"))
                 || (environment.os == "windows"
@@ -1379,6 +1387,11 @@ mod tests {
                 "2.1.263",
             ),
             (HarnessKind::Codex, "/@openai%2Fcodex/latest", "0.153.4"),
+            (
+                HarnessKind::Pi,
+                "/@earendil-works%2Fpi-coding-agent/latest",
+                "0.85.1",
+            ),
             (
                 HarnessKind::Omp,
                 "/@oh-my-pi%2Fpi-coding-agent/latest",
