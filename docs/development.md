@@ -71,6 +71,7 @@ flowchart TB
     Infrastructure --> Claude[Claude Code · stream-json]
     Infrastructure --> Codex[Codex CLI · app-server]
     Infrastructure --> OMP[Oh My Pi · RPC]
+    Infrastructure --> ZCode[ZCode · app-server]
 ```
 
 - `crates/domain`：领域状态、模型和思考层级。
@@ -79,6 +80,7 @@ flowchart TB
 - `crates/harness-claude`：Claude Code 探测、启动参数和事件解码。
 - `crates/harness-codex`：Codex CLI 探测、App Server 启动配置和事件适配。
 - `crates/harness-omp`：Oh My Pi 探测、受控写入模式和 JSON 事件解码。
+- `crates/harness-zcode`：ZCode Protocol v1 会话、模型目录、工具审批、交互问题和标题生成。
 - `apps/runner/src/transport.rs`：JSONL 命令读取、协议版本校验和事件写出。
 - `apps/runner/src/application`：命令调度、双任务并发、任务与 checkout 互斥、取消和统一事件转换。
 - `apps/runner/src/infrastructure`：Harness 适配器选择、子进程执行和平台相关的进程树清理。
@@ -100,7 +102,13 @@ Codex 通过[官方 App Server 协议](https://learn.chatgpt.com/docs/app-server
 
 OMP 通过 `omp --mode rpc --approval-mode <模式>` 运行，Prompt 与 Steer 同样由 stdin 传入，授权使用 RPC 的选择/确认弹窗。Claude Code 与 OMP 的后续轮次均通过 `--resume <SESSION_ID>` 继续原会话。
 
-三个 Harness 的 Prompt 都通过 stdin 传递，不出现在进程参数中。取消和关闭时会清理 Harness 进程树：Unix 先中断再超时终止，Windows 使用 `taskkill /T /F`。
+ZCode 通过 `zcode app-server` 的 JSONL 协议运行：`session/create` / `session/resume` 后依次设置权限、模型及思考层级，再 `session/subscribe` 和 `session/send`。消费 `model.streaming`、`session.updated`、`tool.updated` 与轮次终态；`interaction/requestPermission` 的原始选项由 Runner 保管。运行偏好关闭交互问题自动作答，未知宿主请求返回 `-32601`，不假定兼容 Codex。模型目录使用 `workspace/readState`，标题先以 `persistence: deferred` 创建临时会话来加载 CLI Provider，再调用无工具的 `workspace/generateText`，不发送 `session/send`，因此不持久化标题会话。
+
+冷恢复响应中的 `ZCODE_RUNTIME_MODEL_UNAVAILABLE` 表示 runtime 尚未恢复 Provider。`resume.rs` 从 CLI 的显式 Provider 配置构建 `runtimeModel`，通过 `session/setModel` 恢复连接，模型能力仍使用 runtime 返回的元数据。无法正确恢复配置时明确失败，不静默改用其他连接。致命响应及 `turn.failed` 同时结束本轮，避免常驻 app-server 导致 Runner 挂起。
+
+该适配器依据社区 zcode-app-cli `3.11.2-22` 中的 runtime `0.16.5` 验证；其 `vendor/zcode.cjs` 包含协议方法、请求与事件 schema。兼容性测试覆盖握手、跨进程续聊、审批、取消、标题、失败退出与下一轮排队。额外用隔离目录、无凭据的本地模拟模型服务验证过 Nexus → 真实 runtime 的模型目录、流式输出、工具执行、标题请求和跨进程续聊；未验证真实账号额度或生产模型调用。
+
+四个 Harness 的 Prompt 都通过 stdin 传递，不出现在进程参数中。取消和关闭时会清理 Harness 进程树：Unix 先中断再超时终止，Windows 使用 `taskkill /T /F`。
 
 ## 验证
 

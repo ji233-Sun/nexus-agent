@@ -11,16 +11,18 @@ pub enum HarnessKind {
     Claude,
     Codex,
     Omp,
+    Zcode,
 }
 
 impl HarnessKind {
-    pub const ALL: [Self; 3] = [Self::Claude, Self::Codex, Self::Omp];
+    pub const ALL: [Self; 4] = [Self::Claude, Self::Codex, Self::Omp, Self::Zcode];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Omp => "omp",
+            Self::Zcode => "zcode",
         }
     }
 
@@ -28,7 +30,8 @@ impl HarnessKind {
         match self {
             Self::Claude => Self::Codex,
             Self::Codex => Self::Omp,
-            Self::Omp => Self::Claude,
+            Self::Omp => Self::Zcode,
+            Self::Zcode => Self::Claude,
         }
     }
 
@@ -37,6 +40,7 @@ impl HarnessKind {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Omp => "omp",
+            Self::Zcode => "zcode",
         }
     }
 }
@@ -47,6 +51,7 @@ impl fmt::Display for HarnessKind {
             Self::Claude => "Claude Code",
             Self::Codex => "Codex CLI",
             Self::Omp => "Oh My Pi",
+            Self::Zcode => "ZCode",
         })
     }
 }
@@ -59,6 +64,7 @@ impl FromStr for HarnessKind {
             "claude" => Ok(Self::Claude),
             "codex" => Ok(Self::Codex),
             "omp" => Ok(Self::Omp),
+            "zcode" => Ok(Self::Zcode),
             _ => Err(format!("unknown harness: {value}")),
         }
     }
@@ -345,6 +351,7 @@ pub enum ModelSource {
     ClaudeAliases,
     CodexAppServer,
     OmpCli,
+    ZcodeAppServer,
 }
 
 impl ModelSource {
@@ -353,6 +360,7 @@ impl ModelSource {
             Self::ClaudeAliases => HarnessKind::Claude,
             Self::CodexAppServer => HarnessKind::Codex,
             Self::OmpCli => HarnessKind::Omp,
+            Self::ZcodeAppServer => HarnessKind::Zcode,
         }
     }
 }
@@ -535,7 +543,8 @@ mod tests {
     fn model_and_effort_cycle_through_supported_values() {
         assert_eq!(HarnessKind::Claude.next(), HarnessKind::Codex);
         assert_eq!(HarnessKind::Codex.next(), HarnessKind::Omp);
-        assert_eq!(HarnessKind::Omp.next(), HarnessKind::Claude);
+        assert_eq!(HarnessKind::Omp.next(), HarnessKind::Zcode);
+        assert_eq!(HarnessKind::Zcode.next(), HarnessKind::Claude);
         assert_eq!(HarnessKind::Codex.default_executable(), "codex");
         assert_eq!(ClaudeModel::Haiku.next(), ClaudeModel::Default);
         assert_eq!(ThinkingEffort::Max.next(), ThinkingEffort::Low);

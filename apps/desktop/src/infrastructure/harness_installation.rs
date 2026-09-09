@@ -73,6 +73,7 @@ pub(crate) fn documentation(harness: HarnessKind) -> &'static str {
         HarnessKind::Claude => "https://code.claude.com/docs/en/setup",
         HarnessKind::Codex => "https://developers.openai.com/codex/cli/",
         HarnessKind::Omp => "https://github.com/can1357/oh-my-pi#install",
+        HarnessKind::Zcode => "https://github.com/kingsword09/zcode-cli",
     }
 }
 
@@ -81,6 +82,7 @@ fn package(harness: HarnessKind) -> &'static str {
         HarnessKind::Claude => "@anthropic-ai/claude-code",
         HarnessKind::Codex => "@openai/codex",
         HarnessKind::Omp => "@oh-my-pi/pi-coding-agent",
+        HarnessKind::Zcode => "zcode-app-cli",
     }
 }
 
@@ -558,6 +560,7 @@ fn manager_command(
 
 fn native_install(harness: HarnessKind, environment: &Environment) -> Option<MaintenanceCommand> {
     let (unix, windows) = match harness {
+        HarnessKind::Zcode => return None,
         HarnessKind::Claude => (
             "curl -fsSL https://claude.ai/install.sh | bash",
             "& ([scriptblock]::Create((Invoke-RestMethod https://claude.ai/install.ps1)))",
@@ -613,8 +616,10 @@ fn install_options(
             HarnessKind::Claude => vec!["install", "--cask", "claude-code"],
             HarnessKind::Codex => vec!["install", "--cask", "codex"],
             HarnessKind::Omp => vec!["install", "can1357/tap/omp"],
+            HarnessKind::Zcode => vec![],
         },
-    ) && (environment.os == "macos" || harness == HarnessKind::Omp)
+    ) && harness != HarnessKind::Zcode
+        && (environment.os == "macos" || harness == HarnessKind::Omp)
     {
         options.push(InstallOption {
             method: InstallMethod::Homebrew,
@@ -649,7 +654,7 @@ fn winget_id(harness: HarnessKind) -> Option<&'static str> {
     match harness {
         HarnessKind::Claude => Some("Anthropic.ClaudeCode"),
         HarnessKind::Codex => Some("OpenAI.Codex"),
-        HarnessKind::Omp => None,
+        HarnessKind::Omp | HarnessKind::Zcode => None,
     }
 }
 
@@ -667,6 +672,7 @@ fn homebrew_owner(real: &Path, harness: HarnessKind) -> Option<(PathBuf, String,
         HarnessKind::Claude => "claude-code",
         HarnessKind::Codex => "codex",
         HarnessKind::Omp => "omp",
+        HarnessKind::Zcode => return None,
     };
     (name == expected
         || name == format!("{expected}@latest")
@@ -846,8 +852,9 @@ async fn ownership(
         HarnessKind::Claude => "claude-code",
         HarnessKind::Codex => "codex",
         HarnessKind::Omp => "omp",
+        HarnessKind::Zcode => "zcode-app-cli",
     };
-    if inside(real, &scoop.join("apps").join(scoop_name)) {
+    if harness != HarnessKind::Zcode && inside(real, &scoop.join("apps").join(scoop_name)) {
         return (
             "Scoop".into(),
             environment.command("scoop", ["update", scoop_name]),
@@ -861,6 +868,7 @@ async fn ownership(
         );
     }
     let native = match harness {
+        HarnessKind::Zcode => false,
         HarnessKind::Claude => {
             inside(real, &environment.home.join(".local/share/claude/versions"))
                 || (environment.os == "windows"
@@ -954,6 +962,29 @@ fn installed_version(output: &str) -> Option<String> {
         let word = word.trim_matches(|ch| matches!(ch, '(' | ')' | '[' | ']' | ','));
         let word = word.strip_prefix("omp/").unwrap_or(word);
         semver::Version::parse(word.trim_start_matches('v'))
+            .ok()
+            .map(|version| version.to_string())
+    })
+}
+
+fn zcode_package_version(executable: &Path) -> Option<String> {
+    // --version reports the bundled runtime (0.16.x), not the npm package
+    // version (3.x). Comparing these would offer an update after every scan.
+    let real = real_command(executable);
+    let mut candidates = real
+        .ancestors()
+        .map(|path| path.join("package.json"))
+        .chain(
+            executable
+                .parent()
+                .map(|path| path.join("node_modules/zcode-app-cli/package.json")),
+        );
+    candidates.find_map(|path| {
+        let metadata: serde_json::Value = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+        if metadata["name"] != "zcode-app-cli" {
+            return None;
+        }
+        semver::Version::parse(metadata["version"].as_str()?)
             .ok()
             .map(|version| version.to_string())
     })
@@ -1061,10 +1092,15 @@ async fn scan_one(
         installation.source = source;
         installation.update = update;
         let command = MaintenanceCommand::new(executable, ["--version"]);
-        match run_command(&command, environment, PROBE_TIMEOUT)
-            .await
-            .and_then(|output| installed_version(&output).context("命令未返回有效版本号"))
-        {
+        let version = if harness == HarnessKind::Zcode {
+            zcode_package_version(executable)
+                .context("无法确定 zcode-app-cli 包版本；runtime 版本不能与 npm 包版本比较")
+        } else {
+            run_command(&command, environment, PROBE_TIMEOUT)
+                .await
+                .and_then(|output| installed_version(&output).context("命令未返回有效版本号"))
+        };
+        match version {
             Ok(version) => installation.version = Some(version),
             Err(error) => {
                 installation.diagnostic = Some(LocalizedText::new(
@@ -1346,6 +1382,45 @@ mod tests {
     }
 
     #[test]
+    fn zcode_installation_offers_only_the_community_cli_package() {
+        let (_directory, _cancel, mut environment) = fixture();
+        environment.tools.insert("brew".into(), "brew".into());
+        environment.tools.insert("bash".into(), "bash".into());
+        let npm = manager(&environment, InstallMethod::Npm, "npm", "bin", "global");
+        let options = install_options(HarnessKind::Zcode, &environment, &[npm]);
+        assert_eq!(options.len(), 1);
+        assert_eq!(options[0].method, InstallMethod::Npm);
+        assert!(
+            options[0]
+                .command
+                .args
+                .contains(&"zcode-app-cli@latest".into())
+        );
+        assert!(native_install(HarnessKind::Zcode, &environment).is_none());
+        assert!(winget_id(HarnessKind::Zcode).is_none());
+        let directory = tempfile::tempdir().unwrap();
+        let bin = directory.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let executable = bin.join("zcode.js");
+        fs::write(&executable, "").unwrap();
+        fs::write(
+            directory.path().join("package.json"),
+            r#"{"name":"zcode-app-cli","version":"3.11.2-22"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            zcode_package_version(&executable).as_deref(),
+            Some("3.11.2-22")
+        );
+        fs::write(
+            directory.path().join("package.json"),
+            r#"{"name":"other-package","version":"0.16.5"}"#,
+        )
+        .unwrap();
+        assert_eq!(zcode_package_version(&executable), None);
+    }
+
+    #[test]
     fn version_detection_rejects_success_messages_without_a_version() {
         for (output, version) in [
             ("2.1.263 (Claude Code)\n", "2.1.263"),
@@ -1369,6 +1444,7 @@ mod tests {
                 "2.1.263",
             ),
             (HarnessKind::Codex, "/@openai%2Fcodex/latest", "0.153.4"),
+            (HarnessKind::Zcode, "/zcode-app-cli/latest", "3.11.2-22"),
             (
                 HarnessKind::Omp,
                 "/@oh-my-pi%2Fpi-coding-agent/latest",

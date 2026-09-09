@@ -207,40 +207,64 @@ pub(crate) async fn generate_title(
     let mut child = process_command(&spec, &request.environment).spawn().ok()?;
     let pid = child.id().unwrap_or_default();
 
-    if let Some(mut stdin) = child.stdin.take()
+    let mut stdin = child.stdin.take();
+    if let Some(stdin) = stdin.as_mut()
         && stdin.write_all(spec.stdin.as_bytes()).await.is_err()
     {
         let _ = process_tree::terminate(&mut child, pid).await;
         return None;
     }
 
-    let stdout_task = tokio::spawn(read_title_stdout(child.stdout.take(), decoder));
-    let stderr_task = tokio::spawn(drain_stderr(child.stderr.take()));
+    // ZCode initializes its CLI provider context before generating a tool-free title.
+    // Other CLIs continue to receive EOF immediately after the initial prompt.
+    if request.harness != nexus_domain::HarnessKind::Zcode {
+        drop(stdin.take());
+    }
+    let mut stdout_task = tokio::spawn(read_title_stdout(child.stdout.take(), stdin, decoder));
+    let mut stderr_task = tokio::spawn(drain_stderr(child.stderr.take()));
     let deadline = sleep(Duration::from_secs(60));
     tokio::pin!(deadline);
     enum Completion {
         Exited(std::io::Result<std::process::ExitStatus>),
+        Decoded(Option<String>),
         Cancelled,
         TimedOut,
     }
     let completion = tokio::select! {
         status = child.wait() => Completion::Exited(status),
+        title = &mut stdout_task, if request.harness == nexus_domain::HarnessKind::Zcode => Completion::Decoded(title.ok().flatten()),
         _ = cancel.changed() => Completion::Cancelled,
         _ = &mut deadline => Completion::TimedOut,
     };
-    let succeeded = match completion {
-        Completion::Exited(status) => status.is_ok_and(|status| status.success()),
+    let (succeeded, decoded_title) = match completion {
+        Completion::Exited(status) => (status.is_ok_and(|status| status.success()), None),
+        Completion::Decoded(title) => {
+            // A protocol terminal response is authoritative even if the app server
+            // keeps background resources alive after stdin closes.
+            if timeout(Duration::from_secs(3), child.wait()).await.is_err() {
+                let _ = process_tree::terminate(&mut child, pid).await;
+            }
+            (true, Some(title))
+        }
         Completion::Cancelled => {
             let _ = process_tree::terminate(&mut child, pid).await;
-            false
+            (false, None)
         }
         Completion::TimedOut => {
             let _ = process_tree::terminate(&mut child, pid).await;
-            false
+            (false, None)
         }
     };
-    let title = stdout_task.await.ok().flatten();
-    let _ = stderr_task.await;
+    let title = match decoded_title {
+        Some(title) => title,
+        None => stdout_task.await.ok().flatten(),
+    };
+    if timeout(Duration::from_secs(3), &mut stderr_task)
+        .await
+        .is_err()
+    {
+        stderr_task.abort();
+    }
     succeeded
         .then_some(title)
         .flatten()
@@ -267,6 +291,7 @@ fn process_command(spec: &LaunchSpec, environment: &[EnvironmentVariable]) -> Pr
 
 async fn read_title_stdout(
     stdout: Option<tokio::process::ChildStdout>,
+    mut stdin: Option<ChildStdin>,
     mut decoder: Box<dyn LineDecoder>,
 ) -> Option<String> {
     let mut lines = BufReader::new(stdout?).lines();
@@ -279,7 +304,22 @@ async fn read_title_stdout(
         for event in events {
             match event {
                 DecodedEvent::MessageCompleted(text) => title = Some(text),
-                DecodedEvent::Error(_) => failed = true,
+                DecodedEvent::Error(_) => {
+                    if stdin.is_some() {
+                        return None;
+                    }
+                    failed = true;
+                }
+                DecodedEvent::WriteStdin(frame) => {
+                    stdin
+                        .as_mut()?
+                        .write_all(format!("{}\n", frame.0).as_bytes())
+                        .await
+                        .ok()?;
+                }
+                DecodedEvent::TurnCompleted if stdin.is_some() => {
+                    return (!failed).then_some(title).flatten();
+                }
                 _ => {}
             }
         }

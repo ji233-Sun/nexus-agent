@@ -10,11 +10,13 @@
 
 选择本地项目后发送第一条消息，即可创建任务。时间线显示回答、工具调用、状态和错误，任务标题会异步生成；标题生成失败时，保留首条消息的本地回退标题。
 
-三个 Harness 均保存原生 Session，Nexus 在自己的数据库中记录 Session ID、各轮运行状态和消息。旧版本关闭了原生 Session 保存，因此旧任务可能只能浏览历史；缺少 Session ID 时会提示无法续聊。继续对话需使用原任务的 Harness，切换 Harness 请新建任务。
+四个 Harness 均保存原生 Session，Nexus 在自己的数据库中记录 Session ID、各轮运行状态和消息。旧版本关闭了原生 Session 保存，因此旧任务可能只能浏览历史；缺少 Session ID 时会提示无法续聊。继续对话需使用原任务的 Harness，切换 Harness 请新建任务。
 
 运行中继续发送消息会进入该任务的队列，每轮成功结束后按顺序发送一条。切换聊天后，后台任务仍会继续发送自己的队列；停止或运行失败后暂停自动发送，返回原任务后可手动继续。
 
 **Steer** 用于让排队消息在下一次工具调用结束后介入当前轮次。同批并行工具全部结束后才会发送；收到 Harness 回执后，消息才移入时间线。如果本轮不再调用工具，消息会优先作为下一轮发送。停止、失败或送达未确认时保留消息并暂停自动发送。
+
+ZCode 当前通过下一轮队列接收追加消息，暂不支持本轮 Steer。
 
 队列只保留在当前应用内，退出后不恢复；归档时保留，永久删除对话时清理。任务运行时使用固定绑定的本地目录或独立 Worktree，界面会提示未提交修改。
 
@@ -48,15 +50,15 @@ Provider Profile 的名称、Base URL、环境变量名和默认模型保存在 
 
 输入区的权限选择按 Harness 分别记忆，默认“自动编辑”。每轮发送时保存所选权限；重新打开会话会恢复该会话最后一轮的选择，新建任务使用该 Harness 最近选择的模式。运行中调整权限只影响下一条消息。排队消息各自保留发送时的权限；权限与当前轮次不同的消息需等到下一轮发送，不能通过 Steer 改变当前轮次权限。
 
-| 权限模式 | Claude Code | Codex | OMP |
-| --- | --- | --- | --- |
-| 请求授权 | `default` | `read-only` + `on-request` | `always-ask` |
-| 自动编辑 | `acceptEdits` | `workspace-write` + `on-request` | `write` |
-| YOLO | `bypassPermissions` | `danger-full-access` + `never` | `yolo` |
+| 权限模式 | Claude Code | Codex | OMP | ZCode |
+| --- | --- | --- | --- | --- |
+| 请求授权 | `default` | `read-only` + `on-request` | `always-ask` | `build` |
+| 自动编辑 | `acceptEdits` | `workspace-write` + `on-request` | `write` | `edit` |
+| YOLO | `bypassPermissions` | `danger-full-access` + `never` | `yolo` | `yolo` |
 
 “请求授权”让编辑或受限操作按 CLI 策略请求批准；“自动编辑”允许文件编辑，其余受限操作按需授权。Codex 在工作区沙箱内的命令可以直接执行。YOLO 自动允许操作，Codex 同时关闭自身沙箱；CLI 的强制策略仍然有效。
 
-审批弹窗显示所属任务和操作详情，可允许、拒绝或停止任务。回复只发送给对应运行中的请求；停止、CLI 撤销请求、超时或轮次结束后，旧请求失效。后台标题生成不继承 YOLO：Claude Code / OMP 继续禁用工具，Codex 保留只读沙箱。
+审批弹窗显示所属任务和操作详情，可允许、拒绝或停止任务。回复只发送给对应运行中的请求；停止、CLI 撤销请求、超时或轮次结束后，旧请求失效。后台标题生成不继承 YOLO：Claude Code / OMP 继续禁用工具，Codex 保留只读沙箱；ZCode 初始化临时会话后使用不提供工具的 `workspace/generateText`，不保存标题会话。
 
 Harness 发起交互问题时，输入区会显示问题和可用的回答方式；提交后等待 Agent 继续。已结束或失效的请求不能重复回复。
 
@@ -66,7 +68,7 @@ Harness 发起交互问题时，输入区会显示问题和可用的回答方式
 
 Windows 的程序探测支持 `PATHEXT` 中的 `.exe`、`.com`、`.bat` 和 `.cmd`，包括 npm 安装生成的命令入口。
 
-在 **设置 → 执行引擎 → Harness 管理** 中，可以同时查看三个 Harness 的当前版本、最新版本、实际路径和安装来源，点击「重新扫描」刷新。未安装时从「安装」菜单选择本机可用的安装器；已安装且检测到更新版本时，显示「更新」入口，并沿用拥有该可执行文件的安装器。执行前显示具体命令，也可复制更新命令。
+在 **设置 → 执行引擎 → Harness 管理** 中，可以同时查看四个 Harness 的当前版本、最新版本、实际路径和安装来源，点击「重新扫描」刷新。未安装时从「安装」菜单选择本机可用的安装器；已安装且检测到更新版本时，显示「更新」入口，并沿用拥有该可执行文件的安装器。执行前显示具体命令，也可复制更新命令。
 
 | 安装来源 | 安装与更新方式 |
 | --- | --- |
@@ -99,6 +101,18 @@ omp models --json
 ```
 
 </details>
+
+### 使用 ZCode
+
+[ZCode](https://zcode.z.ai/cn) 是智谱的自研 Agent。Nexus 通过 `zcode app-server` 接入；当前验证版本为社区 [zcode-app-cli](https://github.com/kingsword09/zcode-cli) `3.11.2-22`（内置 runtime `0.16.5`，对应桌面版 `3.11.2`）。该 CLI 是非官方项目，单独安装 ZCode 桌面版不会提供 Nexus 默认查找的 `zcode` 命令。
+
+在 Harness 管理中用 npm / pnpm / Yarn / Bun / Vite+ 安装，或自行执行 `npm install -g zcode-app-cli@latest`；随后在终端运行 `zcode` 配置 API Key Provider（Coding Plan 或自定义 Provider），回到 Nexus 重新扫描并选择 ZCode。也可填写提供相同协议的可执行文件路径。
+
+模型目录读取 CLI 当前工作区配置，保留服务商、模型及变体标识。Provider Profile 默认注入 `ZCODE_API_KEY` / `ZCODE_BASE_URL`，具体端点以 CLI 的 Provider 配置为准。模型选择和登录配置由 CLI 管理。仅展示 Nexus 能识别的思考层级，其他层级可由 CLI 默认配置控制。目录可用不代表账号额度或实际模型调用一定成功。
+
+支持原生会话续聊、流式回答、工具结果、权限审批和交互问题。冷恢复从 `~/.zcode/cli/config.json` 与项目的 `zcode.json` / `.zcode/config.json` 读取显式 `provider` 配置，经 stdin 恢复模型连接；凭据不进入模型目录。`model.main` / `model.lite` 应使用 `provider/model` 字符串，暂不支持对象形式的模型连接覆盖或 `ZCODE_MODEL` 覆盖。Windows 用户配置位于 `%USERPROFILE%\.zcode\cli\config.json`。
+
+桌面 OAuth 动态认证、浏览器控制等宿主专属请求暂不支持，会向 runtime 返回明确错误；请使用 CLI 的 API Key 配置。验证使用本地模拟模型服务，未验证真实账号调用。
 
 ### 更新 Nexus
 

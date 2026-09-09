@@ -34,6 +34,10 @@ fn main() {
         run_omp_catalog();
         return;
     }
+    if env::var_os("TEST_ZCODE").is_some() {
+        run_zcode();
+        return;
+    }
     let harness = if matches!(
         args.first().map(String::as_str),
         Some("app-server" | "exec")
@@ -491,5 +495,104 @@ fn request_id(line: &str) -> String {
         format!("{:?}", string_field(line, "id"))
     } else {
         value.chars().take_while(char::is_ascii_digit).collect()
+    }
+}
+
+
+fn zcode_event(session: &str, kind: &str, payload: &str) {
+    println!(r#"{{"method":"session/event","params":{{"sessionId":{session:?},"type":{kind:?},"payload":{payload}}}}}"#);
+    io::stdout().flush().unwrap();
+}
+
+fn run_zcode() {
+    let (send, input) = mpsc::channel();
+    thread::spawn(move || {
+        for line in io::stdin().lock().lines() {
+            if send.send(line.unwrap()).is_err() { break; }
+        }
+    });
+    let mut session = format!("session-{}", std::process::id());
+    let mut resumed = false;
+    let mut runtime_restored = false;
+    while let Ok(line) = input.recv() {
+        let id = request_id(&line);
+        match string_field(&line, "method").as_str() {
+            "workspace/readState" => {
+                println!(r#"{{"id":{id},"result":{{"settings":{{"model":{{"current":{{"providerId":"test","modelId":"title-model"}},"available":[{{"ref":{{"providerId":"test","modelId":"title-model"}},"label":"Title Model"}}]}}}}}}}}"#);
+            }
+            "workspace/generateText" => {
+                fs::write("title-args.txt", "app-server").unwrap();
+                fs::write("title-prompt.txt", string_field(&line, "prompt")).unwrap();
+                fs::write("title-params.json", &line).unwrap();
+                fs::write("title-executable.txt", env::current_exe().unwrap().to_string_lossy().as_bytes()).unwrap();
+                if let Ok(value) = env::var("TEST_PROVIDER_API_KEY") { fs::write("title-provider-env.txt", value).unwrap(); }
+                println!(r#"{{"id":{id},"result":{{"text":"**Fix authentication flow.**"}}}}"#);
+                if env::var_os("TEST_ZCODE_TITLE_LINGER").is_some() {
+                    io::stdout().flush().unwrap();
+                    loop { thread::sleep(Duration::from_secs(1)); }
+                }
+            }
+            "session/create" | "session/resume" => {
+                if env::var("TEST_ZCODE_FAILURE").as_deref() == Ok("setup") {
+                    println!(r#"{{"id":{id},"error":{{"code":-32000,"message":"setup failed"}}}}"#);
+                    io::stdout().flush().unwrap();
+                    loop { thread::sleep(Duration::from_secs(1)); }
+                }
+                resumed = string_field(&line, "method") == "session/resume";
+                if resumed { session = string_field(&line, "sessionId"); }
+                if string_field(&line, "persistence") != "deferred" {
+                    fs::write("zcode-session.json", &line).unwrap();
+                    fs::write("zcode-args.txt", "app-server").unwrap();
+                    if let Ok(value) = env::var("TEST_PROVIDER_API_KEY") { fs::write("provider-env.txt", value).unwrap(); }
+                }
+                println!(r#"{{"id":"preferences","method":"session/requestRuntimePreferences","params":{{"sessionId":{session:?},"scope":"runtime-materialization"}}}}"#);
+                io::stdout().flush().unwrap();
+                let preferences = input.recv_timeout(Duration::from_secs(5)).unwrap();
+                assert!(preferences.contains("\"askUserQuestionAutoResolutionEnabled\":false"));
+                let projection = if resumed { r#"{"lastError":{"type":"ZCODE_RUNTIME_MODEL_UNAVAILABLE"}}"# } else { "{}" };
+                println!(r#"{{"id":{id},"result":{{"projection":{projection},"settings":{{"model":{{"current":{{"providerId":"test","modelId":"title-model"}}}}}},"protocol":{{"name":"ZCode Protocol","version":1}},"session":{{"sessionId":{session:?}}}}}}}"#);
+            }
+            "session/setMode" | "session/setModel" | "session/setThoughtLevel" | "session/subscribe" => {
+                if line.contains("\"runtimeModel\"") { runtime_restored = true; }
+                println!(r#"{{"id":{id},"result":{{}}}}"#);
+            }
+            "session/send" => {
+                let prompt = string_field(&line, "content");
+                assert!(!resumed || runtime_restored, "cold resume requires a runtime model");
+                if env::var("TEST_ZCODE_FAILURE").as_deref() == Ok("turn") {
+                    zcode_event(&session, "turn.failed", r#"{"error":{"message":"execution failed"}}"#);
+                    io::stdout().flush().unwrap();
+                    loop { thread::sleep(Duration::from_secs(1)); }
+                }
+                fs::write("stdin.txt", &prompt).unwrap();
+                println!(r#"{{"id":{id},"result":{{"accepted":true}}}}"#);
+                let mut text = "done".to_owned();
+                if resumed { text = fs::read_to_string(format!("{session}.txt")).unwrap(); }
+                else { fs::write(format!("{session}.txt"), &prompt).unwrap(); }
+                if prompt.starts_with("approval-") {
+                    println!(r#"{{"id":"permission-transport","method":"interaction/requestPermission","params":{{"sessionId":{session:?},"requestId":"approval-1","toolName":"Bash","reason":"test approval","input":{{"command":"echo approved"}},"options":[{{"name":"Approve","response":{{"decision":"allow"}}}},{{"name":"Deny","response":{{"decision":"deny"}}}}]}}}}"#);
+                    io::stdout().flush().unwrap();
+                    if prompt == "approval-native-cancel" {
+                        wait_for_marker("resolve-approval", &input);
+                        zcode_event(&session, "permission.resolved", r#"{"requestId":"approval-1"}"#);
+                        wait_for_marker("finish-turn", &input);
+                    } else {
+                        let Ok(response) = input.recv_timeout(Duration::from_secs(10)) else { return; };
+                        fs::write("approval-response.json", &response).unwrap();
+                        text = if string_field(&response, "decision") == "allow" { "approved" } else { "denied" }.into();
+                    }
+                } else if prompt == "steer-no-tools" {
+                    zcode_event(&session, "session.updated", r#"{"querySource":"main_turn","content":"ready"}"#);
+                    wait_for_marker("finish-turn", &input);
+                } else if !resumed {
+                    zcode_event(&session, "model.streaming", r#"{"kind":"text_delta","delta":"hello"}"#);
+                    zcode_event(&session, "tool.updated", r#"{"kind":"scheduled","toolCallId":"tool-1","toolName":"Read","input":{"path":"README.md"}}"#);
+                    zcode_event(&session, "tool.updated", r#"{"kind":"result","toolCallId":"tool-1","result":{"content":"project","success":true}}"#);
+                }
+                zcode_event(&session, "turn.completed", &format!(r#"{{"resultType":"success","response":{text:?}}}"#));
+            }
+            _ => panic!("unexpected ZCode request: {line}"),
+        }
+        io::stdout().flush().unwrap();
     }
 }

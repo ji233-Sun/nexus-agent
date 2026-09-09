@@ -3,6 +3,7 @@ use nexus_harness_claude as claude;
 use nexus_harness_codex as codex;
 use nexus_harness_core::{LaunchSpec, LineDecoder, ModelCatalogError};
 use nexus_harness_omp as omp;
+use nexus_harness_zcode as zcode;
 use nexus_protocol::{EnvironmentVariable, HarnessProbe, StartRun};
 use std::path::Path;
 use tokio::sync::watch;
@@ -12,6 +13,7 @@ pub(crate) async fn probe(harness: HarnessKind, executable: &str) -> HarnessProb
         HarnessKind::Claude => claude::probe(executable).await,
         HarnessKind::Codex => codex::probe(executable).await,
         HarnessKind::Omp => omp::probe(executable).await,
+        HarnessKind::Zcode => zcode::probe(executable).await,
     }
 }
 
@@ -25,12 +27,17 @@ pub(crate) async fn discover_models(
     match harness {
         HarnessKind::Codex => codex::discover_models(executable, cwd, environment, cancel).await,
         HarnessKind::Omp => omp::discover_models(executable, cwd, environment, cancel).await,
+        HarnessKind::Zcode => zcode::discover_models(executable, cwd, environment, cancel).await,
         HarnessKind::Claude => claude::discover_models(executable, cwd, environment, cancel).await,
     }
 }
 
 pub(crate) fn prepare(request: &StartRun, cwd: &Path) -> (LaunchSpec, Box<dyn LineDecoder>) {
     match request.harness {
+        HarnessKind::Zcode => {
+            let (spec, decoder) = zcode::prepare_run(request, cwd);
+            (spec, Box::new(decoder))
+        }
         HarnessKind::Claude => (
             claude::build_launch_spec(
                 &request.executable,
@@ -68,6 +75,10 @@ pub(crate) fn prepare_title(
     prompt: &str,
 ) -> (LaunchSpec, Box<dyn LineDecoder>) {
     match request.harness {
+        HarnessKind::Zcode => {
+            let (spec, decoder) = zcode::prepare_title(request, cwd, prompt);
+            (spec, Box::new(decoder))
+        }
         HarnessKind::Claude => (
             claude::build_title_launch_spec(
                 &request.executable,

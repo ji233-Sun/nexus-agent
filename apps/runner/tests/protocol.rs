@@ -153,13 +153,23 @@ impl TestRunner {
 }
 
 fn request(directory: &Path, executable: PathBuf, harness: HarnessKind, prompt: &str) -> StartRun {
+    if harness == HarnessKind::Zcode {
+        fs::write(directory.join("zcode.json"), r#"{"provider":{"test":{"kind":"openai","models":{"title-model":{}}}},"model":{"main":"test/title-model"}}"#).unwrap();
+    }
     StartRun {
         title_generation: Some(nexus_protocol::TitleGenerationConfig {
             harness,
             executable: executable.to_string_lossy().into_owned(),
             model: None,
             effort: ThinkingEffort::Default,
-            environment: Vec::new(),
+            environment: if harness == HarnessKind::Zcode {
+                vec![EnvironmentVariable {
+                    name: "TEST_ZCODE".into(),
+                    value: "1".into(),
+                }]
+            } else {
+                Vec::new()
+            },
         }),
         permission_mode: nexus_domain::PermissionMode::AutoEdit,
         run_id: Uuid::new_v4(),
@@ -171,7 +181,20 @@ fn request(directory: &Path, executable: PathBuf, harness: HarnessKind, prompt: 
         executable: executable.to_string_lossy().into_owned(),
         model: None,
         effort: ThinkingEffort::High,
-        environment: Vec::new(),
+        environment: if harness == HarnessKind::Zcode {
+            vec![
+                EnvironmentVariable {
+                    name: "TEST_ZCODE".into(),
+                    value: "1".into(),
+                },
+                EnvironmentVariable {
+                    name: "ZCODE_MODEL".into(),
+                    value: String::new(),
+                },
+            ]
+        } else {
+            Vec::new()
+        },
     }
 }
 
@@ -365,6 +388,7 @@ async fn approval_round_trip_for_each_harness_rejects_invalid_and_duplicate_resp
                 }
                 HarnessKind::Codex => assert_eq!(response["id"], 99),
                 HarnessKind::Omp => assert_eq!(response["id"], "approval-1"),
+                HarnessKind::Zcode => assert_eq!(response["id"], "permission-transport"),
             }
             runner.shutdown().await;
         }
@@ -550,6 +574,7 @@ async fn runner_resumes_each_harness_session_across_processes() {
             HarnessKind::Claude => "args.txt",
             HarnessKind::Codex => "codex-args.txt",
             HarnessKind::Omp => "omp-args.txt",
+            HarnessKind::Zcode => "zcode-args.txt",
         };
         let args = fs::read_to_string(directory.path().join(args_file)).unwrap();
         if harness == HarnessKind::Codex {
@@ -559,6 +584,13 @@ async fn runner_resumes_each_harness_session_across_processes() {
             .unwrap();
             assert_eq!(frame["method"], "thread/resume");
             assert_eq!(frame["params"]["threadId"], session_id);
+        } else if harness == HarnessKind::Zcode {
+            let frame: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(directory.path().join("zcode-session.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(frame["method"], "session/resume");
+            assert_eq!(frame["params"]["sessionId"], session_id);
         } else {
             assert!(args.lines().any(|arg| arg == session_id));
         }
@@ -1091,9 +1123,12 @@ async fn runner_streams_fake_omp_and_uses_guarded_rpc_mode() {
 
 #[tokio::test]
 async fn runner_generates_titles_with_each_harness_in_a_safe_background_process() {
-    for (harness, effort) in HarnessKind::ALL.into_iter().flat_map(|harness| {
-        [ThinkingEffort::Default, ThinkingEffort::Low].map(|effort| (harness, effort))
-    }) {
+    for (harness, effort) in [HarnessKind::Claude, HarnessKind::Codex, HarnessKind::Omp]
+        .into_iter()
+        .flat_map(|harness| {
+            [ThinkingEffort::Default, ThinkingEffort::Low].map(|effort| (harness, effort))
+        })
+    {
         let directory = tempfile::tempdir().unwrap();
         let executable = fake_harness(directory.path());
         let title_executable = directory
@@ -1150,6 +1185,7 @@ async fn runner_generates_titles_with_each_harness_in_a_safe_background_process(
                 HarnessKind::Claude => "--effort\nlow",
                 HarnessKind::Codex => "--config\nmodel_reasoning_effort=\"low\"",
                 HarnessKind::Omp => "--thinking\nlow",
+                HarnessKind::Zcode => unreachable!("ZCode uses workspace/generateText"),
             }));
         }
         assert_eq!(
@@ -1165,6 +1201,7 @@ async fn runner_generates_titles_with_each_harness_in_a_safe_background_process(
             "conversation-secret"
         );
         match harness {
+            HarnessKind::Zcode => unreachable!("covered by ZCode title protocol test"),
             HarnessKind::Claude => {
                 assert!(args.contains("--permission-mode\ndontAsk"));
                 assert!(args.ends_with("--tools\n"));
@@ -1221,10 +1258,42 @@ async fn title_generation_failure_does_not_fail_the_conversation() {
 }
 
 #[tokio::test]
+async fn zcode_fatal_errors_finish_without_waiting_for_app_server_exit() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = fake_harness(directory.path());
+    for failure in ["setup", "turn"] {
+        let mut request = request(
+            directory.path(),
+            executable.clone(),
+            HarnessKind::Zcode,
+            "fail",
+        );
+        request.title_generation = None;
+        request.environment.push(EnvironmentVariable {
+            name: "TEST_ZCODE_FAILURE".into(),
+            value: failure.into(),
+        });
+        let run_id = request.run_id;
+        let mut runner = TestRunner::spawn();
+        runner.send(Command::RunStart(request)).await;
+        let events = timeout(
+            Duration::from_secs(12),
+            runner.collect_run(run_id, RunStatus::Failed),
+        )
+        .await
+        .unwrap();
+        assert!(events.iter().any(
+            |event| matches!(event, Event::RunFailed { message, .. } if message.contains("failed"))
+        ));
+        runner.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn steer_waits_for_all_tools_and_uses_native_receipts_in_the_same_run() {
     let binaries = tempfile::tempdir().unwrap();
     let executable = fake_harness(binaries.path());
-    for harness in HarnessKind::ALL {
+    for harness in [HarnessKind::Claude, HarnessKind::Codex, HarnessKind::Omp] {
         for scenario in ["steer-tools", "steer-rejected", "steer-unconfirmed"] {
             if harness == HarnessKind::Claude && scenario == "steer-rejected" {
                 continue;
@@ -1305,6 +1374,7 @@ async fn steer_waits_for_all_tools_and_uses_native_receipts_in_the_same_run() {
             )
             .unwrap();
             match harness {
+                HarnessKind::Zcode => unreachable!("ZCode queues input for the next turn"),
                 HarnessKind::Codex => {
                     assert_eq!(frame["method"], "turn/steer");
                     assert_eq!(frame["params"]["expectedTurnId"], "turn-1");
@@ -1441,4 +1511,92 @@ async fn cancellation_and_shutdown_reap_the_harness_process_tree() {
             runner.shutdown().await;
         }
     }
+}
+
+#[tokio::test]
+async fn zcode_loads_catalog_and_generates_a_title_over_stdio_without_tools() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = fake_harness(directory.path());
+    let mut request = request(
+        directory.path(),
+        executable,
+        HarnessKind::Zcode,
+        "Fix the authentication flow",
+    );
+    request
+        .title_generation
+        .as_mut()
+        .unwrap()
+        .environment
+        .push(EnvironmentVariable {
+            name: "TEST_PROVIDER_API_KEY".into(),
+            value: "title-secret".into(),
+        });
+    request
+        .title_generation
+        .as_mut()
+        .unwrap()
+        .environment
+        .push(EnvironmentVariable {
+            name: "TEST_ZCODE_TITLE_LINGER".into(),
+            value: "1".into(),
+        });
+    let run_id = request.run_id;
+    let task_id = request.task_id;
+    let mut runner = TestRunner::spawn();
+    let catalog_id = Uuid::new_v4();
+    runner
+        .send(Command::ModelCatalogRefresh {
+            context_id: None,
+            purpose: Default::default(),
+            request_id: catalog_id,
+            harness: HarnessKind::Zcode,
+            executable: request.executable.clone(),
+            cwd: request.cwd.clone(),
+            environment: request.environment.clone(),
+        })
+        .await;
+    loop {
+        match runner.next().await {
+            Event::ModelCatalogLoaded {
+                request_id, models, ..
+            } if request_id == catalog_id => {
+                assert_eq!(models.len(), 1);
+                assert_eq!(models[0].source.harness(), HarnessKind::Zcode);
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&models[0].id).unwrap()["modelId"],
+                    "title-model"
+                );
+                break;
+            }
+            Event::ModelCatalogFailed { message, .. } => panic!("{message}"),
+            _ => {}
+        }
+    }
+    runner.send(Command::RunStart(request)).await;
+    let (events, title) = runner
+        .collect_run_and_title(run_id, task_id, RunStatus::Completed)
+        .await;
+    assert_eq!(title, "Fix authentication flow");
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::RunOutputDelta {text,..} if text == "hello"))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::RunToolCompleted { .. }))
+    );
+    let frame: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(directory.path().join("title-params.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(frame["method"], "workspace/generateText");
+    assert!(frame["params"].get("tools").is_none());
+    assert_eq!(
+        fs::read_to_string(directory.path().join("title-provider-env.txt")).unwrap(),
+        "title-secret"
+    );
+    runner.shutdown().await;
 }

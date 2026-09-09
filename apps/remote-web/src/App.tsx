@@ -359,9 +359,11 @@ function RemoteWorkspace({
             <span className={state?.harness_ready ? "ready" : "not-ready"}>
               {state?.harness === "codex"
                 ? "Codex CLI"
-                : state?.harness === "omp"
-                  ? "Oh My Pi"
-                  : "Claude Code"}
+                : state?.harness === "zcode"
+                  ? "ZCode"
+                  : state?.harness === "omp"
+                    ? "Oh My Pi"
+                    : "Claude Code"}
             </span>
             <span>{state?.effort ?? "—"}</span>
           </div>

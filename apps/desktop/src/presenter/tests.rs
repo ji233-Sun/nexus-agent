@@ -1527,6 +1527,7 @@ fn emit_current_catalog(
             HarnessKind::Claude => nexus_domain::ModelSource::ClaudeAliases,
             HarnessKind::Codex => nexus_domain::ModelSource::CodexAppServer,
             HarnessKind::Omp => nexus_domain::ModelSource::OmpCli,
+            HarnessKind::Zcode => nexus_domain::ModelSource::ZcodeAppServer,
         };
     }
     runner.emit(Event::ModelCatalogLoaded {
@@ -1715,8 +1716,11 @@ fn startup_restores_preferences_and_probes_all_harnesses() {
     assert_eq!(presenter.model().permission_mode, PermissionMode::Yolo);
     assert_eq!(presenter.model().executable, "/custom/codex");
     let state = runner.0.borrow();
-    assert_eq!(state.commands.len(), 4);
+    assert_eq!(state.commands.len(), HarnessKind::ALL.len() + 1);
     assert!(matches!(state.commands[0].command, Command::RunnerHello));
+    for harness in HarnessKind::ALL {
+        assert!(state.commands.iter().any(|command| matches!(&command.command, Command::HarnessProbe { harness: probed, .. } if *probed == harness)));
+    }
     assert!(state.commands.iter().any(|command| matches!(&command.command,
         Command::HarnessProbe { harness: HarnessKind::Codex, executable } if executable == "/custom/codex")));
     assert!(!presenter.model().can_submit());
