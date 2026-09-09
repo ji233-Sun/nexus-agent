@@ -147,13 +147,14 @@ void nexus_speech_cancel(void *opaque) {
     }
 }
 
-char *nexus_speech_take_result(void *opaque, bool *done) {
+char *nexus_speech_take_result(void *opaque, bool *done, bool *failed) {
     @autoreleasepool {
     NexusSpeechSession *session = (__bridge NexusSpeechSession *)opaque;
     @synchronized (session) {
         *done = session.done;
+        *failed = session.error != nil;
         if (!session.done) return NULL;
-        return NexusCopyString(session.error ? [@"ERROR: " stringByAppendingString:session.error] : (session.result ?: @""));
+        return NexusCopyString(session.error ?: (session.result ?: @""));
     }
     }
 }

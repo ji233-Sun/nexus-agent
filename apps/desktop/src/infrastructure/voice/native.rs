@@ -16,7 +16,11 @@ unsafe extern "C" {
     fn nexus_speech_start(locale: *const c_char, error: *mut *mut c_char) -> *mut c_void;
     fn nexus_speech_stop(session: *mut c_void);
     fn nexus_speech_cancel(session: *mut c_void);
-    fn nexus_speech_take_result(session: *mut c_void, done: *mut bool) -> *mut c_char;
+    fn nexus_speech_take_result(
+        session: *mut c_void,
+        done: *mut bool,
+        failed: *mut bool,
+    ) -> *mut c_char;
     fn nexus_speech_free_session(session: *mut c_void);
     fn nexus_speech_status(locale: *const c_char) -> *mut c_char;
     fn nexus_speech_locales() -> *mut c_char;
@@ -106,20 +110,24 @@ fn run_inner(commands: mpsc::Receiver<Command>, locale: Option<String>) -> anyho
             bail!("macOS Speech timed out waiting for a final result");
         }
         let mut done = false;
-        if let Some(text) = take_string(unsafe { nexus_speech_take_result(session.0, &mut done) }) {
-            if let Some(error) = text.strip_prefix("ERROR: ") {
-                bail!("macOS Speech failed: {error}");
-            }
-            if done && text.is_empty() {
-                bail!("macOS Speech returned an empty transcription");
-            }
-            if done {
-                return Ok(text);
-            }
-        } else if done {
-            bail!("macOS Speech failed without an error message");
+        let mut failed = false;
+        let text =
+            take_string(unsafe { nexus_speech_take_result(session.0, &mut done, &mut failed) });
+        if done {
+            return final_result(text, failed);
         }
     }
+}
+
+fn final_result(text: Option<String>, failed: bool) -> anyhow::Result<String> {
+    let text = text.context("macOS Speech failed without an error message")?;
+    if failed {
+        bail!("macOS Speech failed: {text}");
+    }
+    if text.is_empty() {
+        bail!("macOS Speech returned an empty transcription");
+    }
+    Ok(text)
 }
 
 fn authorize(
@@ -201,6 +209,20 @@ pub(super) fn locales() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn voice_final_result_uses_error_flag_not_transcription_prefix() {
+        let text = "ERROR: file not found";
+        assert_eq!(final_result(Some(text.into()), false).unwrap(), text);
+        assert_eq!(
+            final_result(Some(text.into()), true)
+                .unwrap_err()
+                .to_string(),
+            "macOS Speech failed: ERROR: file not found"
+        );
+        assert!(final_result(Some(String::new()), false).is_err());
+        assert!(final_result(None, false).is_err());
+    }
 
     #[test]
     fn voice_permission_requests_reject_bare_test_binary_without_usage_descriptions() {
