@@ -1,3 +1,4 @@
+pub(crate) mod cli_installation;
 pub(crate) mod codex_history;
 pub(crate) mod credentials;
 pub(crate) mod git;

@@ -56,7 +56,7 @@
 
 小提示：`⌘ / Ctrl K` 搜索会话，`⌘ / Ctrl N` 新建任务，`⌘ / Ctrl Enter` 发送消息。
 
-也可通过安装包内的原生 CLI 打开项目，无需 Node.js 或 npx。将可执行文件所在目录加入 `PATH` 后运行：
+也可通过安装包内的原生 CLI 打开项目，无需 Node.js 或 npx。在「设置 → 通用 → 命令行」点击「安装 CLI」，重新打开终端后运行：
 
 ```sh
 nexus-desktop .                # 打开当前目录
@@ -64,6 +64,8 @@ nexus-desktop "/path/to/project" # 打开指定目录（支持相对路径）
 ```
 
 macOS 可直接运行 `"/Applications/Nexus Agent.app/Contents/MacOS/nexus-desktop" .`；Windows 使用 `nexus-desktop.exe`。无参数启动仍进入桌面应用，`--help` 显示用法。每次调用启动一个应用进程。
+
+按钮将原生可执行文件所在目录加入当前用户的 `PATH`，无需管理员权限：macOS / Linux 配置 zsh、bash 或 sh 的启动文件；Windows 更新用户环境变量。现有 Shell 配置与 PATH 条目会保留。移动应用后可再次点击安装以更新路径。
 
 在「设置 → 语音输入」先选择 Provider，再配置：MiMo ASR 支持三端，需要保存自己的 API Key，停止录音后音频会发送至 MiMo；macOS 系统 Speech 无需 Key，首次录音时申请麦克风及 Speech 权限（MiMo 只需要麦克风权限）。两者最多录制 60 秒，只将最终文本回填草稿，可编辑和撤销，不会自动发送。系统识别可能联网并将音频发送给 Apple，不承诺离线。
 
