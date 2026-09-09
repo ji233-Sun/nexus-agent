@@ -299,6 +299,57 @@ impl NexusView {
             ))
             .child(self.render_title_generation_settings(cx))
             .child(self.render_update_settings(cx))
+            .child(settings_group(
+                colors,
+                locale.text("命令行"),
+                [settings_row(
+                    colors,
+                    "nexus-desktop",
+                    locale.text(
+                        "将命令加入当前用户的 PATH，在任意目录运行 nexus-desktop . 打开项目。",
+                    ),
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .items_start()
+                        .gap_2()
+                        .child(
+                            Button::new("install-cli")
+                                .debug_selector(|| "install-cli".into())
+                                .outline()
+                                .small()
+                                .disabled(
+                                    model.cli_installation_busy
+                                        || model.updates.state.is_installing(),
+                                )
+                                .label(locale.text(if model.cli_installation_busy {
+                                    "正在安装 CLI…"
+                                } else {
+                                    "安装 CLI"
+                                }))
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    app.presenter.install_cli();
+                                    cx.notify();
+                                })),
+                        )
+                        .when_some(
+                            model.cli_installation_message.as_ref(),
+                            |element, message| {
+                                element.child(
+                                    div()
+                                        .debug_selector(|| "cli-installation-message".into())
+                                        .w_full()
+                                        .min_w_0()
+                                        .text_sm()
+                                        .text_color(rgb(colors.muted))
+                                        .child(message.render(locale).to_owned()),
+                                )
+                            },
+                        ),
+                )],
+            ))
             .when_some(model.selected_project.as_ref(), |element, project| {
                 element
                     .child(settings_group(

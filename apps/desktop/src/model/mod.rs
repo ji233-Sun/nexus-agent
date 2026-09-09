@@ -208,6 +208,8 @@ pub(crate) struct AppModel {
     pub(crate) title_generation: TitleGenerationSettings,
     pub(crate) updates: updates::UpdateModel,
     pub(crate) harness_manager: harness_installation::HarnessManager,
+    pub(crate) cli_installation_busy: bool,
+    pub(crate) cli_installation_message: Option<LocalizedText>,
     pub(crate) projects: Vec<Project>,
     pub(crate) archived_tasks: Vec<TaskSummary>,
     pub(crate) workspace_busy: bool,

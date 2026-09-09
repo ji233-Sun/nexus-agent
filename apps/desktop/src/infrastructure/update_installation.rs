@@ -115,7 +115,7 @@ fn tar() -> Command {
 }
 
 #[cfg(target_os = "windows")]
-fn powershell() -> Command {
+pub(super) fn powershell() -> Command {
     let executable =
         PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()))
             .join("System32/WindowsPowerShell/v1.0/powershell.exe");

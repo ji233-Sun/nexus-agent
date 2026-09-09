@@ -544,5 +544,11 @@
   "图片无法加载，请打开原始文件查看。": "Unable to load the image. Try opening the original file.",
   "无法播放此素材，请尝试打开原始文件。": "Unable to play this media. Try opening the original file.",
   "此平台暂不支持内嵌播放，请打开原始文件播放。": "Inline playback is not available on this platform. Open the original file to play it.",
-  "打开原始文件": "Open original file"
+  "打开原始文件": "Open original file",
+  "命令行": "Command line",
+  "将命令加入当前用户的 PATH，在任意目录运行 nexus-desktop . 打开项目。": "Add the command to your user PATH, then run nexus-desktop . in any directory to open a project.",
+  "安装 CLI": "Install CLI",
+  "正在安装 CLI…": "Installing CLI…",
+  "CLI 已安装。重新打开终端后可运行 nexus-desktop .": "CLI installed. Reopen your terminal to run nexus-desktop .",
+  "CLI 安装失败：{error}": "CLI installation failed: {error}"
 }

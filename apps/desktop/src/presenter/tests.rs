@@ -989,6 +989,65 @@ fn update_preferences_restore_and_invalid_values_follow_the_installed_channel() 
     assert!(!presenter.model().updates.check_on_startup);
 }
 
+pub(crate) fn pending_cli_installation(
+    presenter: &mut Presenter,
+) -> std::sync::mpsc::Sender<Result<()>> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    presenter.cli_installation_result = Some(receiver);
+    presenter.model.cli_installation_busy = true;
+    presenter.model.cli_installation_message = None;
+    sender
+}
+
+#[test]
+fn cli_installation_reports_completion_and_failure_without_changing_the_conversation() {
+    let (mut presenter, _, _directory) = fixture();
+    let original_status = presenter.model().status.clone();
+    let original_project = presenter
+        .model()
+        .selected_project
+        .as_ref()
+        .map(|project| project.id);
+    for result in [Ok(()), Err(anyhow::anyhow!("permission denied"))] {
+        let success = result.is_ok();
+        let sender = pending_cli_installation(&mut presenter);
+        presenter.install_cli();
+        assert!(presenter.model().cli_installation_busy);
+        assert!(!presenter.drain_cli_installation_result());
+        sender.send(result).unwrap();
+        assert!(presenter.drain_events());
+        assert!(!presenter.model().cli_installation_busy);
+        assert!(presenter.cli_installation_result.is_none());
+        let message = presenter.model().cli_installation_message.as_ref().unwrap();
+        assert!(message.render(Language::English).contains(if success {
+            "CLI installed"
+        } else {
+            "permission denied"
+        }));
+        assert_eq!(presenter.model().status, original_status);
+        assert_eq!(
+            presenter
+                .model()
+                .selected_project
+                .as_ref()
+                .map(|project| project.id),
+            original_project
+        );
+    }
+    drop(pending_cli_installation(&mut presenter));
+    assert!(presenter.drain_cli_installation_result());
+    assert!(!presenter.model().cli_installation_busy);
+    assert!(
+        presenter
+            .model()
+            .cli_installation_message
+            .as_ref()
+            .unwrap()
+            .render(Language::Chinese)
+            .contains("中断")
+    );
+}
+
 #[test]
 fn update_events_guard_concurrency_and_preserve_conversations_through_completion_and_failure() {
     let (mut presenter, _, directory) = fixture();

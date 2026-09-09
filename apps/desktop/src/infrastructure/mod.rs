@@ -1,3 +1,4 @@
+pub(crate) mod cli_installation;
 pub(crate) mod cnb;
 pub(crate) mod cnb_media;
 pub(crate) mod codex_history;
