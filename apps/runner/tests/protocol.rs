@@ -154,7 +154,7 @@ impl TestRunner {
 
 fn request(directory: &Path, executable: PathBuf, harness: HarnessKind, prompt: &str) -> StartRun {
     StartRun {
-        title_generation: Some(nexus_protocol::TitleGenerationConfig {
+        title_generation: Some(nexus_protocol::TextGenerationConfig {
             harness,
             executable: executable.to_string_lossy().into_owned(),
             model: None,
@@ -1090,6 +1090,113 @@ async fn runner_streams_fake_omp_and_uses_guarded_rpc_mode() {
 }
 
 #[tokio::test]
+async fn commit_messages_use_each_harness_configuration_without_starting_a_run() {
+    let binaries = tempfile::tempdir().unwrap();
+    let executable = fake_harness(binaries.path());
+    for harness in HarnessKind::ALL {
+        let directory = tempfile::tempdir().unwrap();
+        let mut runner = TestRunner::spawn();
+        let request_id = Uuid::new_v4();
+        runner
+            .send(Command::GenerateCommitMessage {
+                request_id,
+                cwd: directory.path().to_string_lossy().into_owned(),
+                diff: "diff --git a/selected.txt b/selected.txt\n+selected change".into(),
+                language: "en".into(),
+                configuration: nexus_protocol::TextGenerationConfig {
+                    harness,
+                    executable: executable.to_string_lossy().into_owned(),
+                    model: Some("commit-model".into()),
+                    effort: ThinkingEffort::Low,
+                    environment: vec![EnvironmentVariable {
+                        name: "TEST_PROVIDER_API_KEY".into(),
+                        value: "commit-secret".into(),
+                    }],
+                },
+            })
+            .await;
+        loop {
+            match runner.next().await {
+                Event::RunnerReady => {}
+                Event::CommitMessageGenerated {
+                    request_id: id,
+                    message,
+                } => {
+                    assert_eq!(id, request_id);
+                    assert_eq!(
+                        message,
+                        "fix: Preserve selected changes\n\nKeep unrelated staged files intact."
+                    );
+                    break;
+                }
+                event => panic!("unexpected event: {event:?}"),
+            }
+        }
+        let args = fs::read_to_string(directory.path().join("title-args.txt")).unwrap();
+        assert!(args.contains("--model\ncommit-model"));
+        assert!(!args.contains("selected change"));
+        assert!(args.contains(match harness {
+            HarnessKind::Claude => "--permission-mode\ndontAsk",
+            HarnessKind::Codex => "--sandbox\nread-only",
+            HarnessKind::Omp => "--no-tools",
+        }));
+        let prompt = fs::read_to_string(directory.path().join("title-prompt.txt")).unwrap();
+        assert!(prompt.contains("selected change"));
+        assert!(prompt.contains("Git commit message in en"));
+        assert_eq!(
+            fs::read_to_string(directory.path().join("title-provider-env.txt")).unwrap(),
+            "commit-secret"
+        );
+        runner.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn commit_message_failure_reports_the_request_and_keeps_runner_available() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut runner = TestRunner::spawn();
+    for diff in ["", "selected changes"] {
+        let request_id = Uuid::new_v4();
+        runner
+            .send(Command::GenerateCommitMessage {
+                request_id,
+                cwd: directory.path().to_string_lossy().into_owned(),
+                diff: diff.into(),
+                language: "zh-CN".into(),
+                configuration: nexus_protocol::TextGenerationConfig {
+                    harness: HarnessKind::Claude,
+                    executable: directory
+                        .path()
+                        .join("missing-harness")
+                        .to_string_lossy()
+                        .into_owned(),
+                    model: None,
+                    effort: ThinkingEffort::Default,
+                    environment: vec![],
+                },
+            })
+            .await;
+        loop {
+            match runner.next().await {
+                Event::RunnerReady => {}
+                Event::CommitMessageFailed {
+                    request_id: id,
+                    message,
+                } => {
+                    assert_eq!(id, request_id);
+                    assert!(!message.is_empty());
+                    break;
+                }
+                event => panic!("unexpected event: {event:?}"),
+            }
+        }
+        runner.send(Command::RunnerHello).await;
+        runner.expect_runner_ready().await;
+    }
+    runner.shutdown().await;
+}
+
+#[tokio::test]
 async fn runner_generates_titles_with_each_harness_in_a_safe_background_process() {
     for (harness, effort) in HarnessKind::ALL.into_iter().flat_map(|harness| {
         [ThinkingEffort::Default, ThinkingEffort::Low].map(|effort| (harness, effort))
@@ -1115,7 +1222,7 @@ async fn runner_generates_titles_with_each_harness_in_a_safe_background_process(
             name: "TEST_PROVIDER_API_KEY".into(),
             value: "conversation-secret".into(),
         });
-        request.title_generation = Some(nexus_protocol::TitleGenerationConfig {
+        request.title_generation = Some(nexus_protocol::TextGenerationConfig {
             harness,
             executable: title_executable.to_string_lossy().into_owned(),
             model: Some("title-model".into()),

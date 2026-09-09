@@ -96,15 +96,20 @@ fn main() {
                 thread::sleep(Duration::from_secs(1));
             }
         }
+        let text = if prompt.contains("Write a Git commit message") {
+            "fix: Preserve selected changes\n\nKeep unrelated staged files intact."
+        } else {
+            "**Fix authentication flow.**"
+        };
         match harness {
             Harness::Codex => println!(
-                r#"{{"type":"item.completed","item":{{"id":"title","type":"agent_message","text":"**Fix authentication flow.**"}}}}"#
+                r#"{{"type":"item.completed","item":{{"id":"title","type":"agent_message","text":{text:?}}}}}"#
             ),
             Harness::Omp => println!(
-                r#"{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"**Fix authentication flow.**"}}],"stopReason":"stop"}}}}"#
+                r#"{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":{text:?}}}],"stopReason":"stop"}}}}"#
             ),
             Harness::Claude => println!(
-                r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"**Fix authentication flow.**"}}]}}}}"#
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":{text:?}}}]}}}}"#
             ),
         }
         io::stdout().flush().unwrap();

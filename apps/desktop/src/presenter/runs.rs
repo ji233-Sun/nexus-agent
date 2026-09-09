@@ -4,7 +4,7 @@ use crate::infrastructure::git;
 use crate::infrastructure::storage::NewTaskRun;
 use crate::model::workspace::{WorkspaceKind, WorkspaceStatus};
 use crate::model::{
-    ModelCatalogState, PendingUserAsk, QueuedMessage, ResolvedModelSelection,
+    GenerationKind, ModelCatalogState, PendingUserAsk, QueuedMessage, ResolvedModelSelection,
     UserAskSubmissionState,
 };
 use nexus_domain::{
@@ -45,6 +45,11 @@ impl Presenter {
                 | Event::ModelCatalogFailed { request_id, .. } => {
                     conversation.model_catalog.accepts(*request_id)
                         || conversation.title_model_catalog.accepts(*request_id)
+                        || conversation.commit_model_catalog.accepts(*request_id)
+                }
+                Event::CommitMessageGenerated { request_id, .. }
+                | Event::CommitMessageFailed { request_id, .. } => {
+                    conversation.commit_message_request == Some(*request_id)
                 }
                 Event::RunStarted { run_id, .. }
                 | Event::RunSessionStarted { run_id, .. }
@@ -80,6 +85,39 @@ impl Presenter {
     }
 
     fn handle_conversation_event(&mut self, event: Event) {
+        let generation_kind = GenerationKind::ALL.into_iter().find(|kind| match &event {
+            Event::ModelCatalogLoaded {
+                request_id,
+                harness,
+                ..
+            }
+            | Event::ModelCatalogFailed {
+                request_id,
+                harness,
+                ..
+            } => {
+                self.model.generation_settings(*kind).harness == *harness
+                    && self.model.generation_catalog(*kind).accepts(*request_id)
+            }
+            _ => false,
+        });
+        if let Some(kind) = generation_kind {
+            match event {
+                Event::ModelCatalogLoaded { models, .. } => {
+                    *self.model.generation_catalog_mut(kind) = if models.is_empty() {
+                        ModelCatalogState::Empty
+                    } else {
+                        ModelCatalogState::Ready(models)
+                    };
+                    self.normalize_generation_effort(kind);
+                }
+                Event::ModelCatalogFailed { message, .. } => {
+                    self.model.generation_catalog_mut(kind).fail(message.into())
+                }
+                _ => unreachable!(),
+            }
+            return;
+        }
         match event {
             Event::RunnerReady => {
                 self.model.status = LocalizedText::new(
@@ -113,34 +151,10 @@ impl Presenter {
                 request_id,
                 harness,
                 models,
-            } if harness == self.model.title_generation.harness
-                && self.model.title_model_catalog.accepts(request_id) =>
-            {
-                self.model.title_model_catalog = if models.is_empty() {
-                    ModelCatalogState::Empty
-                } else {
-                    ModelCatalogState::Ready(models)
-                };
-                self.normalize_title_effort();
-            }
-            Event::ModelCatalogFailed {
-                request_id,
-                harness,
-                message,
-            } if harness == self.model.title_generation.harness
-                && self.model.title_model_catalog.accepts(request_id) =>
-            {
-                self.model.title_model_catalog.fail(message.into());
-            }
-            Event::ModelCatalogLoaded {
-                request_id,
-                harness,
-                models,
             } if harness == self.model.selected_harness
                 && self.model.active_run.is_none()
                 && self.model.model_catalog.accepts(request_id) =>
             {
-                let count = models.len();
                 self.model.model_catalog = if models.is_empty() {
                     ModelCatalogState::Empty
                 } else {
@@ -160,8 +174,10 @@ impl Presenter {
                         .and_then(|profile| profile.model.as_deref())
                         .is_some()
                     && self.model.selected_catalog_model().is_none();
-                self.model.status = if selected_unavailable {
-                    LocalizedText::new(
+                // Catalog progress and diagnostics belong to the model picker. Only
+                // changes requiring the user's attention can replace task status.
+                if selected_unavailable {
+                    self.model.status = LocalizedText::new(
                         "当前 {harness} 模型 {0} 不可用，请重新选择或跟随默认。",
                         &[
                             ("harness", (harness).to_string()),
@@ -171,25 +187,13 @@ impl Presenter {
                                     .to_string(),
                             ),
                         ],
-                    )
+                    );
                 } else if effort_reset {
-                    "当前模型不支持原 effort，已恢复为模型默认。".into()
+                    self.model.status = "当前模型不支持原 effort，已恢复为模型默认。".into();
                 } else if profile_model_unverified {
-                    "Profile 默认模型不在当前目录中；仍可使用，但尚未验证可用。".into()
-                } else if count == 0 {
-                    LocalizedText::new(
-                        "{harness} 模型目录为空；仍可跟随 CLI 默认。",
-                        &[("harness", (harness).to_string())],
-                    )
-                } else {
-                    LocalizedText::new(
-                        "已加载 {count} 个 {harness} 模型。",
-                        &[
-                            ("count", (count).to_string()),
-                            ("harness", (harness).to_string()),
-                        ],
-                    )
-                };
+                    self.model.status =
+                        "Profile 默认模型不在当前目录中；仍可使用，但尚未验证可用。".into();
+                }
             }
             Event::ModelCatalogFailed {
                 request_id,
@@ -199,14 +203,27 @@ impl Presenter {
                 && self.model.active_run.is_none()
                 && self.model.model_catalog.accepts(request_id) =>
             {
-                self.model.model_catalog.fail(message.clone().into());
-                self.model.status = LocalizedText::new(
-                    "{harness} 模型目录加载失败：{message}",
-                    &[
-                        ("harness", (harness).to_string()),
-                        ("message", (message).to_string()),
-                    ],
-                );
+                self.model.model_catalog.fail(message.into());
+            }
+            Event::CommitMessageGenerated {
+                request_id,
+                message,
+            } if self.model.commit_message_request == Some(request_id) => {
+                self.model.commit_message_request = None;
+                if !message.trim().is_empty() && !message.contains('\0') {
+                    self.model.commit_message = message.trim().to_owned();
+                    self.model.changes_status = None;
+                } else {
+                    self.model.changes_status =
+                        Some("模型返回了空或无效的提交说明，请重试。".into());
+                }
+            }
+            Event::CommitMessageFailed {
+                request_id,
+                message,
+            } if self.model.commit_message_request == Some(request_id) => {
+                self.model.commit_message_request = None;
+                self.model.changes_status = Some(message.into());
             }
             Event::TaskTitleGenerated { task_id, title } => {
                 if let Some(title) = compact_task_title(&title)
@@ -996,7 +1013,7 @@ impl Presenter {
         let ResolvedModelSelection { model, effort } = self.model.resolved_model_selection();
         let title_generation = session_id
             .is_none()
-            .then(|| self.title_generation_configuration().ok())
+            .then(|| self.generation_configuration(GenerationKind::Title).ok())
             .flatten();
         let title = compact_task_title(&prompt).unwrap_or_else(|| "新任务".into());
         if task_id.is_none()

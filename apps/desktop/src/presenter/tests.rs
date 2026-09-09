@@ -1787,7 +1787,9 @@ fn catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
     assert!(presenter.select_harness(HarnessKind::Codex, "claude"));
     let stale_request_id = current_catalog_request_id(&presenter);
 
+    presenter.model.status = "当前任务状态".to_owned().into();
     assert!(presenter.refresh_model_catalog());
+    assert_eq!(presenter.model().status_text(), "当前任务状态");
     let failed_request_id = current_catalog_request_id(&presenter);
     assert_ne!(stale_request_id, failed_request_id);
     runner.0.borrow_mut().events.push(EventEnvelope {
@@ -1803,6 +1805,7 @@ fn catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
     presenter.drain_events();
     assert_eq!(current_catalog_request_id(&presenter), failed_request_id);
     assert!(presenter.model().status_text().contains("协议版本不匹配"));
+    let task_status = presenter.model().status_text().to_owned();
     runner.emit(Event::ModelCatalogLoaded {
         request_id: stale_request_id,
         harness: HarnessKind::Codex,
@@ -1829,21 +1832,17 @@ fn catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
         &presenter.model().model_catalog,
         ModelCatalogState::Failed { message, .. } if message.render(Language::Chinese) == "model/list unavailable"
     ));
-    assert!(
-        presenter
-            .model()
-            .status_text()
-            .contains("model/list unavailable")
-    );
+    assert_eq!(presenter.model().status_text(), task_status);
 
     assert!(presenter.refresh_model_catalog());
+    assert_eq!(presenter.model().status_text(), task_status);
     emit_current_catalog(&presenter, &runner, Vec::new());
     presenter.drain_events();
     assert!(matches!(
         presenter.model().model_catalog,
         ModelCatalogState::Empty
     ));
-    assert!(presenter.model().status_text().contains("目录为空"));
+    assert_eq!(presenter.model().status_text(), task_status);
 
     assert!(presenter.refresh_model_catalog());
     emit_current_catalog(
@@ -1861,10 +1860,7 @@ fn catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
         panic!("expected a ready model catalog")
     };
     assert_eq!(models[0].id, "codex-current");
-    assert_eq!(
-        presenter.model().status_text(),
-        "已加载 1 个 Codex CLI 模型。"
-    );
+    assert_eq!(presenter.model().status_text(), task_status);
 
     // Claude exercises the shared readiness state without starting a Codex history client.
     assert!(presenter.select_harness(HarnessKind::Claude, "codex"));
@@ -2196,20 +2192,35 @@ fn title_generation_settings_persist_independently_of_conversation_selection() {
         ThinkingEffort::Default
     );
     assert_eq!(presenter.model.effort, ThinkingEffort::High);
-    assert!(presenter.select_title_harness(HarnessKind::Omp));
-    assert!(!presenter.select_title_model(Some("missing".into())));
+    assert!(presenter.select_generation_harness(GenerationKind::Title, HarnessKind::Omp));
+    assert!(!presenter.select_generation_model(GenerationKind::Title, Some("missing".into())));
     presenter.model.title_model_catalog = ModelCatalogState::Ready(vec![catalog_model(
         "provider/title-model",
         false,
         &[ThinkingEffort::Low],
         ThinkingEffort::Default,
     )]);
-    assert!(presenter.select_title_model(Some("provider/title-model".into())));
-    assert!(presenter.select_title_effort(ThinkingEffort::Low));
-    assert!(!presenter.select_title_effort(ThinkingEffort::High));
+    assert!(
+        presenter
+            .select_generation_model(GenerationKind::Title, Some("provider/title-model".into()))
+    );
+    assert!(presenter.select_generation_effort(GenerationKind::Title, ThinkingEffort::Low));
+    assert!(!presenter.select_generation_effort(GenerationKind::Title, ThinkingEffort::High));
     assert_eq!(presenter.model.effort, ThinkingEffort::High);
     assert!(presenter.select_harness(HarnessKind::Codex, "claude"));
     let expected = presenter.model.title_generation.clone();
+    assert!(presenter.select_generation_harness(GenerationKind::Commit, HarnessKind::Codex));
+    presenter.model.commit_model_catalog = ModelCatalogState::Ready(vec![catalog_model(
+        "commit-model",
+        false,
+        &[ThinkingEffort::Medium],
+        ThinkingEffort::Default,
+    )]);
+    assert!(presenter.select_generation_model(GenerationKind::Commit, Some("commit-model".into())));
+    assert!(presenter.select_generation_effort(GenerationKind::Commit, ThinkingEffort::Medium));
+    assert!(!presenter.select_generation_effort(GenerationKind::Commit, ThinkingEffort::High));
+    let expected_commit = presenter.model.commit_message_generation.clone();
+    assert_eq!(presenter.model.title_generation, expected);
     drop(presenter);
     let mut presenter = Presenter::new(
         Storage::open(&path).unwrap(),
@@ -2217,12 +2228,16 @@ fn title_generation_settings_persist_independently_of_conversation_selection() {
         None,
     );
     assert_eq!(presenter.model.title_generation, expected);
+    assert_eq!(presenter.model.commit_message_generation, expected_commit);
     assert_eq!(
-        presenter.title_generation_configuration().unwrap().effort,
+        presenter
+            .generation_configuration(GenerationKind::Title)
+            .unwrap()
+            .effort,
         ThinkingEffort::Low
     );
     assert_eq!(presenter.model.selected_harness, HarnessKind::Codex);
-    assert!(presenter.select_title_harness(HarnessKind::Claude));
+    assert!(presenter.select_generation_harness(GenerationKind::Title, HarnessKind::Claude));
     assert!(presenter.model.title_generation.model.is_none());
     assert_eq!(
         presenter.model.title_generation.effort,
@@ -2232,27 +2247,201 @@ fn title_generation_settings_persist_independently_of_conversation_selection() {
 }
 
 #[test]
+fn commit_message_generation_uses_selected_changes_and_routes_results_to_the_owner() {
+    let (mut presenter, runner, _directory, start) = worktree_fixture("commit message task");
+    let cwd = Path::new(&start.cwd);
+    fs::write(cwd.join("tracked.txt"), "selected content\n").unwrap();
+    fs::write(cwd.join("unselected.txt"), "private unselected content\n").unwrap();
+    let conversation_status = presenter.model.status_text().to_owned();
+    presenter.toggle_changes_sidebar();
+    finish_workspace_operation(&mut presenter);
+    assert_eq!(presenter.model.status_text(), conversation_status);
+    assert!(presenter.model.changes_status.is_none());
+    presenter.select_changed_file("tracked.txt".into(), true);
+    assert!(
+        !presenter.generate_workspace_commit_message(),
+        "running checkout must be blocked"
+    );
+    runner.emit(Event::RunExited {
+        run_id: start.run_id,
+        status: RunStatus::Completed,
+        exit_code: Some(0),
+    });
+    presenter.drain_events();
+    let conversation_status = presenter.model.status_text().to_owned();
+    presenter.select_changed_file("tracked.txt".into(), false);
+    presenter.toggle_commit_editor();
+    assert_eq!(presenter.model.selected_changes.len(), 2);
+    presenter.select_changed_file("unselected.txt".into(), false);
+    assert!(presenter.review_conversation_changes());
+    finish_workspace_operation(&mut presenter);
+    assert!(presenter.model.commit_editor_open);
+    assert_eq!(
+        presenter
+            .model
+            .selected_changes
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        ["tracked.txt"]
+    );
+    presenter.model.commit_message_generation.model = Some("commit-model".into());
+    assert!(presenter.generate_workspace_commit_message());
+    finish_workspace_operation(&mut presenter);
+    let owner = presenter.model.conversation.id;
+    let request_id = presenter.model.commit_message_request.unwrap();
+    let commands = runner.0.borrow();
+    let command = commands
+        .commands
+        .iter()
+        .rev()
+        .find_map(|command| match &command.command {
+            Command::GenerateCommitMessage {
+                request_id,
+                cwd,
+                diff,
+                language,
+                configuration,
+            } => Some((*request_id, cwd, diff, language, configuration)),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(command.0, request_id);
+    assert_eq!(command.1, &start.cwd);
+    assert!(command.2.contains("+selected content"));
+    assert!(!command.2.contains("unselected"));
+    assert_eq!(command.3, "zh-CN");
+    assert_eq!(command.4.model.as_deref(), Some("commit-model"));
+    drop(commands);
+    presenter.new_task();
+    runner.emit(Event::CommitMessageGenerated {
+        request_id,
+        message: "fix: Describe selected changes\n\nBody".into(),
+    });
+    presenter.drain_events();
+    assert!(presenter.model.commit_message.is_empty());
+    presenter.model.activate_conversation(owner);
+    assert_eq!(
+        presenter.model.commit_message,
+        "fix: Describe selected changes\n\nBody"
+    );
+    assert!(presenter.model.commit_message_request.is_none());
+
+    for edit_draft in [true, false] {
+        assert!(presenter.generate_workspace_commit_message());
+        finish_workspace_operation(&mut presenter);
+        let request_id = presenter.model.commit_message_request.unwrap();
+        if edit_draft {
+            presenter.set_commit_message("manual edit".into());
+        } else {
+            presenter.select_changed_file("tracked.txt".into(), false);
+        }
+        runner.emit(Event::CommitMessageGenerated {
+            request_id,
+            message: "late result".into(),
+        });
+        presenter.drain_events();
+        assert_eq!(presenter.model.commit_message, "manual edit");
+        assert!(presenter.model.commit_message_request.is_none());
+    }
+    presenter.select_changed_file("tracked.txt".into(), true);
+    assert!(presenter.generate_workspace_commit_message());
+    finish_workspace_operation(&mut presenter);
+    let request_id = presenter.model.commit_message_request.unwrap();
+    runner.emit(Event::CommitMessageFailed {
+        request_id,
+        message: "offline".into(),
+    });
+    presenter.drain_events();
+    assert_eq!(presenter.model.commit_message, "manual edit");
+    assert!(presenter.model.commit_message_request.is_none());
+    assert_eq!(presenter.model.status_text(), conversation_status);
+    assert_eq!(
+        presenter
+            .model
+            .changes_status
+            .as_ref()
+            .unwrap()
+            .render(presenter.model.language),
+        "offline"
+    );
+    fs::write(cwd.join("tracked.txt"), "newer contents\n").unwrap();
+    let before = runner.0.borrow().commands.len();
+    assert!(presenter.generate_workspace_commit_message());
+    finish_workspace_operation(&mut presenter);
+    assert!(presenter.model.commit_message_request.is_none());
+    assert_eq!(
+        runner.0.borrow().commands.len(),
+        before,
+        "stale diffs must not be sent to the model"
+    );
+}
+
+#[test]
+fn commit_model_catalog_does_not_replace_conversation_or_title_catalogs() {
+    let (mut presenter, runner, _directory) = fixture();
+    assert!(presenter.refresh_generation_model_catalog(GenerationKind::Title));
+    let title_request = match presenter.model.title_model_catalog {
+        ModelCatalogState::Loading { request_id, .. } => request_id,
+        _ => panic!("title catalog loading"),
+    };
+    assert!(presenter.refresh_generation_model_catalog(GenerationKind::Commit));
+    let request_id = match presenter.model.commit_model_catalog {
+        ModelCatalogState::Loading { request_id, .. } => request_id,
+        _ => panic!("commit catalog loading"),
+    };
+    assert!(matches!(
+        &runner.0.borrow().commands.last().unwrap().command,
+        Command::ModelCatalogRefresh {
+            purpose: ModelCatalogPurpose::CommitMessageGeneration,
+            ..
+        }
+    ));
+    assert!(presenter.select_generation_harness(GenerationKind::Commit, HarnessKind::Omp));
+    runner.emit(Event::ModelCatalogLoaded {
+        request_id,
+        harness: HarnessKind::Claude,
+        models: claude_aliases(),
+    });
+    presenter.drain_events();
+    assert!(matches!(
+        presenter.model.commit_model_catalog,
+        ModelCatalogState::Idle
+    ));
+    assert!(presenter.model.title_model_catalog.accepts(title_request));
+    assert_eq!(
+        presenter.model.model_catalog.models().unwrap(),
+        claude_aliases()
+    );
+}
+
+#[test]
 fn title_generation_uses_separate_configuration_and_skips_resumed_runs() {
     let (mut presenter, runner, credentials, _directory) = provider_fixture();
     presenter.select_harness(HarnessKind::Omp, "claude");
     let mut draft = profile_draft(None, "Title", "title-secret");
     draft.model = "provider/title-model".into();
     let title_profile = presenter.save_provider_profile(draft).unwrap();
-    presenter.select_title_harness(HarnessKind::Omp);
+    presenter.select_generation_harness(GenerationKind::Title, HarnessKind::Omp);
     presenter.model.title_model_catalog = ModelCatalogState::Ready(vec![catalog_model(
         "provider/title-model",
         false,
         &[ThinkingEffort::Low],
         ThinkingEffort::Default,
     )]);
-    assert!(presenter.select_title_effort(ThinkingEffort::Low));
-    let profile_default = presenter.title_generation_configuration().unwrap();
+    assert!(presenter.select_generation_effort(GenerationKind::Title, ThinkingEffort::Low));
+    let profile_default = presenter
+        .generation_configuration(GenerationKind::Title)
+        .unwrap();
     assert_eq!(
         profile_default.model.as_deref(),
         Some("provider/title-model")
     );
     assert_eq!(profile_default.effort, ThinkingEffort::Low);
-    assert!(presenter.select_title_model(Some("provider/title-model".into())));
+    assert!(
+        presenter
+            .select_generation_model(GenerationKind::Title, Some("provider/title-model".into()))
+    );
     presenter.select_harness(HarnessKind::Claude, "/custom/omp");
     presenter
         .save_provider_profile(profile_draft(None, "Conversation", "conversation-secret"))
@@ -2308,8 +2497,8 @@ fn title_generation_uses_separate_configuration_and_skips_resumed_runs() {
 #[test]
 fn title_effort_tracks_model_support_and_resets_after_catalog_changes() {
     let (mut presenter, runner, _directory) = fixture();
-    assert!(presenter.select_title_harness(HarnessKind::Codex));
-    assert!(!presenter.select_title_effort(ThinkingEffort::Low));
+    assert!(presenter.select_generation_harness(GenerationKind::Title, HarnessKind::Codex));
+    assert!(!presenter.select_generation_effort(GenerationKind::Title, ThinkingEffort::Low));
     presenter.model.title_model_catalog = ModelCatalogState::Ready(vec![
         catalog_model(
             "default-model",
@@ -2325,19 +2514,19 @@ fn title_effort_tracks_model_support_and_resets_after_catalog_changes() {
         ),
         catalog_model("no-effort", false, &[], ThinkingEffort::Default),
     ]);
-    assert!(presenter.select_title_effort(ThinkingEffort::Low));
-    assert!(presenter.select_title_model(Some("other-model".into())));
+    assert!(presenter.select_generation_effort(GenerationKind::Title, ThinkingEffort::Low));
+    assert!(presenter.select_generation_model(GenerationKind::Title, Some("other-model".into())));
     assert_eq!(presenter.model.title_generation.effort, ThinkingEffort::Low);
-    assert!(presenter.select_title_model(Some("no-effort".into())));
+    assert!(presenter.select_generation_model(GenerationKind::Title, Some("no-effort".into())));
     assert_eq!(
         presenter.model.title_generation.effort,
         ThinkingEffort::Default
     );
-    assert!(!presenter.select_title_effort(ThinkingEffort::Low));
-    assert!(presenter.select_title_model(None));
-    assert!(presenter.select_title_effort(ThinkingEffort::Low));
+    assert!(!presenter.select_generation_effort(GenerationKind::Title, ThinkingEffort::Low));
+    assert!(presenter.select_generation_model(GenerationKind::Title, None));
+    assert!(presenter.select_generation_effort(GenerationKind::Title, ThinkingEffort::Low));
 
-    assert!(presenter.refresh_title_model_catalog());
+    assert!(presenter.refresh_generation_model_catalog(GenerationKind::Title));
     let ModelCatalogState::Loading { request_id, .. } = presenter.model.title_model_catalog else {
         panic!("loading")
     };
@@ -2363,7 +2552,7 @@ fn title_effort_tracks_model_support_and_resets_after_catalog_changes() {
         presenter.model.title_generation.effort,
         ThinkingEffort::Default
     );
-    let saved: TitleGenerationSettings = serde_json::from_str(
+    let saved: GenerationSettings = serde_json::from_str(
         &presenter
             .storage
             .setting("title_generation")
@@ -2381,7 +2570,7 @@ fn title_model_catalog_is_independent_and_ignores_stale_results() {
     let (mut presenter, runner, _directory) = fixture();
     presenter.refresh_model_catalog();
     let conversation_request = current_catalog_request_id(&presenter);
-    assert!(presenter.refresh_title_model_catalog());
+    assert!(presenter.refresh_generation_model_catalog(GenerationKind::Title));
     let ModelCatalogState::Loading {
         request_id: stale_request,
         ..
@@ -2389,8 +2578,8 @@ fn title_model_catalog_is_independent_and_ignores_stale_results() {
     else {
         panic!("loading")
     };
-    assert!(presenter.select_title_harness(HarnessKind::Omp));
-    assert!(presenter.refresh_title_model_catalog());
+    assert!(presenter.select_generation_harness(GenerationKind::Title, HarnessKind::Omp));
+    assert!(presenter.refresh_generation_model_catalog(GenerationKind::Title));
     let ModelCatalogState::Loading { request_id, .. } = presenter.model.title_model_catalog else {
         panic!("loading")
     };
@@ -2420,8 +2609,13 @@ fn title_model_catalog_is_independent_and_ignores_stale_results() {
     });
     presenter.drain_events();
     assert_eq!(presenter.model.status, status);
-    assert!(presenter.select_title_model(Some("provider/title-model".into())));
-    assert!(!presenter.select_title_model(Some("not-in-catalog".into())));
+    assert!(
+        presenter
+            .select_generation_model(GenerationKind::Title, Some("provider/title-model".into()))
+    );
+    assert!(
+        !presenter.select_generation_model(GenerationKind::Title, Some("not-in-catalog".into()))
+    );
     emit_current_catalog(&presenter, &runner, claude_aliases());
     presenter.drain_events();
     assert_eq!(presenter.model.selected_harness, HarnessKind::Claude);

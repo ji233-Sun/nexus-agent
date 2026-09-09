@@ -288,7 +288,10 @@ impl NexusView {
                     ),
                 )],
             ))
-            .child(self.render_title_generation_settings(cx))
+            .children(
+                GenerationKind::ALL
+                    .map(|kind| self.render_generation_settings(kind, cx).into_any_element()),
+            )
             .child(self.render_update_settings(cx))
             .child(settings_group(
                 colors,
@@ -374,23 +377,29 @@ impl NexusView {
             })
     }
 
-    fn render_title_generation_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_generation_settings(
+        &self,
+        kind: GenerationKind,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let model = self.presenter.model();
         let locale = model.language;
         let colors = palette(cx);
-        let selected = model.title_generation.harness;
+        let selected = model.generation_settings(kind).harness;
+        let state = &self.generation_pickers[&kind];
+        let prefix = kind.prefix();
         let app = cx.entity();
         let harness = AnimatedDropdown::new(
-            "title-harness",
-            Button::new("title-harness")
-                .debug_selector(|| "title-harness".into())
+            SharedString::from(format!("{prefix}-harness")),
+            Button::new(SharedString::from(format!("{prefix}-harness")))
+                .debug_selector(move || format!("{prefix}-harness"))
                 .outline()
                 .small()
                 .w_full()
                 .h(px(CONTROL_HEIGHT))
                 .child(harness_icon(selected, colors, 16.))
                 .child(control_label(selected.to_string()))
-                .accessibility_label(locale.text("标题生成引擎")),
+                .accessibility_label(locale.text("执行引擎")),
             self.reduced_motion,
             move |menu, _, _| {
                 HarnessKind::ALL
@@ -402,8 +411,8 @@ impl NexusView {
                                 .checked(harness == selected)
                                 .on_click(move |_, _, cx| {
                                     app.update(cx, |app, cx| {
-                                        if app.presenter.select_title_harness(harness) {
-                                            app.presenter.refresh_title_model_catalog();
+                                        if app.presenter.select_generation_harness(kind, harness) {
+                                            app.presenter.refresh_generation_model_catalog(kind);
                                         }
                                         cx.notify();
                                     });
@@ -412,7 +421,7 @@ impl NexusView {
                     })
             },
         );
-        let content = &self.title_model_select_content;
+        let content = &state.content;
         let label = content
             .selected_index()
             .and_then(|index| content.groups.get(index.section)?.items.get(index.row))
@@ -420,14 +429,14 @@ impl NexusView {
             .unwrap_or_else(|| locale.text("跟随默认").into());
         let app = cx.entity();
         let material = materials(cx);
-        let picker = Popover::new("title-model-picker")
+        let picker = Popover::new(SharedString::from(format!("{prefix}-model-picker")))
             .anchor(Anchor::BottomRight)
             .appearance(false)
-            .open(self.title_model_picker_open)
-            .track_focus(&self.title_model_select.focus_handle(cx))
+            .open(state.open)
+            .track_focus(&state.list.focus_handle(cx))
             .trigger(
-                Button::new("title-model")
-                    .debug_selector(|| "title-model".into())
+                Button::new(SharedString::from(format!("{prefix}-model")))
+                    .debug_selector(move || format!("{prefix}-model"))
                     .outline()
                     .small()
                     .w_full()
@@ -436,15 +445,15 @@ impl NexusView {
                     .icon(IconName::Cpu)
                     .tooltip(label.clone())
                     .child(control_label(label))
-                    .accessibility_label(locale.text("标题生成模型"))
+                    .accessibility_label(locale.text("模型"))
                     .child(Icon::new(IconName::ChevronDown).small()),
             )
             .on_open_change(move |open, window, cx| {
                 app.update(cx, |app, cx| {
-                    app.title_model_picker_open = *open;
+                    app.generation_pickers.get_mut(&kind).unwrap().open = *open;
                     if *open {
-                        app.presenter.refresh_title_model_catalog();
-                        app.title_model_select.update(cx, |list, cx| {
+                        app.presenter.refresh_generation_model_catalog(kind);
+                        app.generation_pickers[&kind].list.update(cx, |list, cx| {
                             list.set_query("", window, cx);
                             let selected = list.delegate().selected_index();
                             list.set_selected_index(selected, window, cx);
@@ -454,10 +463,10 @@ impl NexusView {
                     cx.notify();
                 });
             })
-            .when(self.title_model_picker_open, |picker| {
+            .when(state.open, |picker| {
                 picker.child(
                     div()
-                        .debug_selector(|| "title-model-picker-surface".into())
+                        .debug_selector(move || format!("{prefix}-model-picker-surface"))
                         .w(px(360.))
                         .h(px(320.))
                         .rounded(px(CARD_RADIUS))
@@ -467,7 +476,7 @@ impl NexusView {
                         .border_color(material.edge)
                         .shadow(material.shadow())
                         .child(
-                            List::new(&self.title_model_select)
+                            List::new(&state.list)
                                 .search_placeholder(locale.text("按 Provider、名称或模型 ID 搜索"))
                                 .size_full(),
                         ),
@@ -475,7 +484,10 @@ impl NexusView {
             });
         settings_group(
             colors,
-            locale.text("对话标题"),
+            locale.text(match kind {
+                GenerationKind::Title => "对话标题",
+                GenerationKind::Commit => "Git 提交说明",
+            }),
             [
                 settings_row(colors, locale.text("执行引擎"), "", harness),
                 settings_row(
@@ -493,15 +505,15 @@ impl NexusView {
                         .gap_2()
                         .child(div().w_full().min_w_0().child(picker))
                         .child(
-                            Button::new("title-model-refresh")
+                            Button::new(SharedString::from(format!("{prefix}-model-refresh")))
                                 .ghost()
                                 .small()
                                 .icon(IconName::RotateCw)
                                 .label(locale.text("刷新模型目录"))
                                 .accessibility_label(locale.text("刷新模型目录"))
                                 .disabled(model.selected_project.is_none())
-                                .on_click(cx.listener(|app, _, _, cx| {
-                                    app.presenter.refresh_title_model_catalog();
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.presenter.refresh_generation_model_catalog(kind);
                                     cx.notify();
                                 })),
                         ),
@@ -509,20 +521,28 @@ impl NexusView {
                 settings_row(
                     colors,
                     locale.text("思考档位"),
-                    locale.text("仅用于生成对话标题，支持的档位由模型提供。"),
-                    self.title_effort_selector(cx),
+                    locale.text(match kind {
+                        GenerationKind::Title => "仅用于生成对话标题，支持的档位由模型提供。",
+                        GenerationKind::Commit => "仅用于生成提交说明，支持的档位由模型提供。",
+                    }),
+                    self.generation_effort_selector(kind, cx),
                 ),
             ],
         )
     }
 
-    fn title_effort_selector(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn generation_effort_selector(
+        &self,
+        kind: GenerationKind,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let model = self.presenter.model();
         let locale = model.language;
-        let selected = model.title_generation.effort;
+        let settings = model.generation_settings(kind);
+        let selected = settings.effort;
+        let prefix = kind.prefix();
         let mut efforts = vec![ThinkingEffort::Default];
-        if let Some(descriptor) = model.title_catalog_model(model.title_generation.model.as_deref())
-        {
+        if let Some(descriptor) = model.generation_catalog_model(kind, settings.model.as_deref()) {
             efforts.extend(
                 descriptor
                     .supported_reasoning_efforts
@@ -531,17 +551,17 @@ impl NexusView {
             );
         }
         let supported = efforts.len() > 1;
-        let button = Button::new("title-effort")
-            .debug_selector(|| "title-effort".into())
+        let button = Button::new(SharedString::from(format!("{prefix}-effort")))
+            .debug_selector(move || format!("{prefix}-effort"))
             .outline()
             .small()
             .w_full()
             .h(px(CONTROL_HEIGHT))
             .icon(IconName::Cpu)
             .label(locale.effort(selected))
-            .accessibility_label(locale.text("标题生成思考档位"))
+            .accessibility_label(locale.text("思考档位"))
             .tooltip(if supported {
-                locale.text("标题生成思考档位")
+                locale.text("思考档位")
             } else {
                 locale.text("刷新模型目录后可选择支持的思考档位。")
             })
@@ -551,7 +571,7 @@ impl NexusView {
         }
         let app = cx.entity();
         AnimatedDropdown::new(
-            "title-effort",
+            SharedString::from(format!("{prefix}-effort")),
             button,
             self.reduced_motion,
             move |menu, _, _| {
@@ -565,7 +585,7 @@ impl NexusView {
                                 .checked(effort == selected)
                                 .on_click(move |_, _, cx| {
                                     app.update(cx, |app, cx| {
-                                        app.presenter.select_title_effort(effort);
+                                        app.presenter.select_generation_effort(kind, effort);
                                         cx.notify();
                                     });
                                 }),
