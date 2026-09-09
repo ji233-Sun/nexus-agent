@@ -1491,8 +1491,7 @@ impl NexusView {
                                     .debug_selector(|| "project-picker-trigger".into())
                                     .ghost()
                                     .small()
-                                    .p_0()
-                                    .h_auto()
+                                    .h(px(COMPACT_CONTROL_HEIGHT))
                                     .min_w_0()
                                     .max_w_full()
                                     .accessibility_label(model.language.text("选择项目"))
@@ -2385,11 +2384,12 @@ mod catalog_model_tests {
                 source
             );
             let context = cx.debug_bounds("composer-context").unwrap();
-            let directory = cx.debug_bounds("composer-directory").unwrap();
+            let directory = cx.debug_bounds("project-picker-trigger").unwrap();
             let mode = cx.debug_bounds("workspace-mode").unwrap();
             let base = cx.debug_bounds("workspace-base").unwrap();
             let composer = cx.debug_bounds("composer-surface").unwrap();
             assert_eq!(directory.left(), context.left() + px(12.));
+            assert_eq!(directory.size.height, mode.size.height);
             assert!(
                 directory.center().y >= mode.center().y - px(1.)
                     && directory.center().y <= mode.center().y + px(1.)
@@ -2644,10 +2644,14 @@ mod catalog_model_tests {
         });
         cx.run_until_parked();
         let trigger = cx.debug_bounds("project-picker-trigger").unwrap();
+        let content = cx.debug_bounds("composer-directory").unwrap();
         let name = cx.debug_bounds("composer-directory-name").unwrap();
+        assert_eq!(content.left() - trigger.left(), px(8.));
+        assert_eq!(trigger.right() - content.right(), px(8.));
+        assert!(trigger.top() < content.top() && content.bottom() < trigger.bottom());
         assert!(
-            trigger.size.width <= name.size.width + px(24.),
-            "directory trigger should fit its icon and name: {trigger:?}, {name:?}"
+            trigger.size.width <= name.size.width + px(40.),
+            "directory trigger should fit its icon, name and padding: {trigger:?}, {name:?}"
         );
         click_debug(cx, "composer-directory");
         cx.run_until_parked();
