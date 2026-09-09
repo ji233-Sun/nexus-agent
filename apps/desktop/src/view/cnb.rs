@@ -727,6 +727,11 @@ impl NexusView {
                                                     issue.body.clone()
                                                 },
                                             )
+                                            .markdown_extensions(super::cnb_media::extensions(
+                                                cnb.repository.as_deref().unwrap_or_default(),
+                                                cnb.cli.as_ref().map(|cli| cli.path.as_path()),
+                                                locale,
+                                            ))
                                             .text_size(px(14.))
                                             .line_height(relative(1.7))
                                             .style(

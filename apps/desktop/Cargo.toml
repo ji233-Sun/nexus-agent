@@ -28,15 +28,18 @@ serde_json.workspace = true
 sha2 = "0.10.9"
 smol.workspace = true
 syntect = { version = "5.3.0", default-features = false, features = ["default-syntaxes", "default-themes", "regex-fancy"] }
+tempfile.workspace = true
 tokio = { workspace = true, features = ["net"] }
-tower-http.workspace = true
+tower-http = { workspace = true, features = ["fs"] }
 uuid.workspace = true
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+wry = { version = "0.55.1", default-features = false, features = ["os-webview"] }
 
 [target.'cfg(target_os = "macos")'.build-dependencies]
 cc = "1.2"
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
-tempfile.workspace = true
 tokio-tungstenite.workspace = true
 tower.workspace = true

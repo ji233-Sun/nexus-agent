@@ -225,7 +225,7 @@ fn list_args(repository: &str, page: usize, filter: IssueFilter) -> Vec<String> 
     ]
 }
 
-fn parse_response<T: DeserializeOwned>(output: &str) -> Result<(T, Value)> {
+pub(super) fn parse_response<T: DeserializeOwned>(output: &str) -> Result<(T, Value)> {
     let response: Value =
         serde_json::from_str(output).context("CNB CLI 返回了无效 JSON，请检查 CLI 版本。")?;
     let status = response["status"]
@@ -258,6 +258,15 @@ fn parse_page(output: &str) -> Result<IssuePage> {
 }
 
 async fn run(path: &std::path::Path, args: &[String], timeout: Duration) -> Result<String> {
+    run_with_temp_dir(path, args, timeout, None).await
+}
+
+pub(super) async fn run_with_temp_dir(
+    path: &std::path::Path,
+    args: &[String],
+    timeout: Duration,
+    directory: Option<&std::path::Path>,
+) -> Result<String> {
     let mut command = Command::new(path);
     command
         .args(args)
@@ -268,6 +277,12 @@ async fn run(path: &std::path::Path, args: &[String], timeout: Duration) -> Resu
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    if let Some(directory) = directory {
+        // CNB CLI writes binary responses to os.tmpdir(). Isolate each download.
+        for variable in ["TMPDIR", "TMP", "TEMP"] {
+            command.env(variable, directory);
+        }
+    }
     nexus_runner::configure_child_process(&mut command);
     let mut child = command.spawn().context("无法启动 CNB CLI，请检查安装。")?;
     let pid = child.id().context("无法获取 CNB CLI 进程。")?;

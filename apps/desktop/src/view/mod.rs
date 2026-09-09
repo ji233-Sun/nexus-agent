@@ -1,4 +1,5 @@
 mod cnb;
+mod cnb_media;
 mod components;
 mod model_picker;
 mod pane;
@@ -2227,15 +2228,21 @@ mod catalog_model_tests {
         assert!(issue.left() > page.left() && issue.right() < page.right());
         click_debug(cx, "cnb-issue-1");
         view.update(cx, |view, cx| {
-            finish_cnb_request(&mut view.presenter, Response::Detail(Ok(cnb_issue("1"))));
+            let mut issue = cnb_issue("1");
+            issue.body = "截图说明\n\n![截图](https://example.test/screenshot.png)\n\n[录屏.mp4](undefined/team/repo/-/files/issues/1/clip.mp4)\n\nhttps://example.test/sound.mp3\n\n[普通链接](https://example.test/page)\n\n```text\nhttps://example.test/code.mp4\n```".into();
+            finish_cnb_request(&mut view.presenter, Response::Detail(Ok(issue)));
             cx.notify();
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("cnb-detail").is_some());
         assert!(cx.debug_bounds("cnb-issue-body").is_some());
+        assert!(cx.debug_bounds("cnb-media-image").is_some());
+        assert!(cx.debug_bounds("cnb-media-video").is_some());
+        assert!(cx.debug_bounds("cnb-media-audio").is_some());
         click_debug(cx, "cnb-back");
         cx.run_until_parked();
         assert!(cx.debug_bounds("cnb-issue-1").is_some());
+        assert!(cx.debug_bounds("cnb-media-video").is_none());
         click_debug(cx, "cnb-next");
         view.update(cx, |view, cx| {
             assert_eq!(view.presenter.model().cnb.page, 2);
