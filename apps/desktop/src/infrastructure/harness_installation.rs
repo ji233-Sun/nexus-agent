@@ -74,6 +74,9 @@ pub(crate) fn documentation(harness: HarnessKind) -> &'static str {
         HarnessKind::Codex => "https://developers.openai.com/codex/cli/",
         HarnessKind::Omp => "https://github.com/can1357/oh-my-pi#install",
         HarnessKind::Pi => "https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent",
+        HarnessKind::Kimi => "https://moonshotai.github.io/kimi-cli/en/guides/getting-started.html",
+        HarnessKind::Qoder => "https://docs.qoder.com/cli/quick-start",
+        HarnessKind::Codebuddy => "https://www.codebuddy.ai/docs/cli/overview",
     }
 }
 
@@ -83,6 +86,9 @@ fn package(harness: HarnessKind) -> &'static str {
         HarnessKind::Codex => "@openai/codex",
         HarnessKind::Omp => "@oh-my-pi/pi-coding-agent",
         HarnessKind::Pi => "@earendil-works/pi-coding-agent",
+        HarnessKind::Kimi => "kimi-cli",
+        HarnessKind::Qoder => "@qoder-ai/qodercli",
+        HarnessKind::Codebuddy => "@tencent-ai/codebuddy-code",
     }
 }
 
@@ -194,6 +200,7 @@ impl Environment {
             "pnpm",
             "yarn",
             "npm",
+            "uv",
             "brew",
             "winget",
             "scoop",
@@ -560,7 +567,9 @@ fn manager_command(
 
 fn native_install(harness: HarnessKind, environment: &Environment) -> Option<MaintenanceCommand> {
     let (unix, windows) = match harness {
-        HarnessKind::Pi => return None,
+        HarnessKind::Pi | HarnessKind::Kimi | HarnessKind::Qoder | HarnessKind::Codebuddy => {
+            return None;
+        }
         HarnessKind::Claude => (
             "curl -fsSL https://claude.ai/install.sh | bash",
             "& ([scriptblock]::Create((Invoke-RestMethod https://claude.ai/install.ps1)))",
@@ -599,6 +608,16 @@ fn install_options(
     environment: &Environment,
     managers: &[Manager],
 ) -> Vec<InstallOption> {
+    if harness == HarnessKind::Kimi {
+        return environment
+            .command("uv", ["tool", "install", "--python", "3.13", "kimi-cli"])
+            .map(|command| InstallOption {
+                method: InstallMethod::Native,
+                command,
+            })
+            .into_iter()
+            .collect();
+    }
     let mut options = native_install(harness, environment)
         .map(|command| InstallOption {
             method: InstallMethod::Native,
@@ -616,10 +635,14 @@ fn install_options(
             HarnessKind::Claude => vec!["install", "--cask", "claude-code"],
             HarnessKind::Codex => vec!["install", "--cask", "codex"],
             HarnessKind::Omp => vec!["install", "can1357/tap/omp"],
-            HarnessKind::Pi => vec![],
+            HarnessKind::Pi | HarnessKind::Kimi | HarnessKind::Qoder | HarnessKind::Codebuddy => {
+                vec![]
+            }
         },
-    ) && harness != HarnessKind::Pi
-        && (environment.os == "macos" || harness == HarnessKind::Omp)
+    ) && matches!(
+        harness,
+        HarnessKind::Claude | HarnessKind::Codex | HarnessKind::Omp
+    ) && (environment.os == "macos" || harness == HarnessKind::Omp)
     {
         options.push(InstallOption {
             method: InstallMethod::Homebrew,
@@ -654,7 +677,11 @@ fn winget_id(harness: HarnessKind) -> Option<&'static str> {
     match harness {
         HarnessKind::Claude => Some("Anthropic.ClaudeCode"),
         HarnessKind::Codex => Some("OpenAI.Codex"),
-        HarnessKind::Omp | HarnessKind::Pi => None,
+        HarnessKind::Omp
+        | HarnessKind::Pi
+        | HarnessKind::Kimi
+        | HarnessKind::Qoder
+        | HarnessKind::Codebuddy => None,
     }
 }
 
@@ -669,7 +696,9 @@ fn homebrew_owner(real: &Path, harness: HarnessKind) -> Option<(PathBuf, String,
     parts.next()?;
     parts.next()?;
     let expected = match harness {
-        HarnessKind::Pi => return None,
+        HarnessKind::Pi | HarnessKind::Kimi | HarnessKind::Qoder | HarnessKind::Codebuddy => {
+            return None;
+        }
         HarnessKind::Claude => "claude-code",
         HarnessKind::Codex => "codex",
         HarnessKind::Omp => "omp",
@@ -687,6 +716,17 @@ async fn ownership(
     environment: &Environment,
     managers: &[Manager],
 ) -> (LocalizedText, Option<MaintenanceCommand>) {
+    if harness == HarnessKind::Kimi {
+        let uv = environment.query_path("uv", &["tool", "dir"]).await;
+        return if uv.is_some_and(|root| inside(real, &root.join("kimi-cli"))) {
+            (
+                "uv".into(),
+                environment.command("uv", ["tool", "upgrade", "kimi-cli"]),
+            )
+        } else {
+            ("Kimi CLI（请使用原安装器更新）".into(), None)
+        };
+    }
     let entry = slash(executable);
     let target = slash(real);
     let name = package(harness);
@@ -853,8 +893,15 @@ async fn ownership(
         HarnessKind::Codex => "codex",
         HarnessKind::Omp => "omp",
         HarnessKind::Pi => "pi",
+        HarnessKind::Kimi => "kimi",
+        HarnessKind::Qoder => "qoder",
+        HarnessKind::Codebuddy => "codebuddy",
     };
-    if harness != HarnessKind::Pi && inside(real, &scoop.join("apps").join(scoop_name)) {
+    if matches!(
+        harness,
+        HarnessKind::Claude | HarnessKind::Codex | HarnessKind::Omp
+    ) && inside(real, &scoop.join("apps").join(scoop_name))
+    {
         return (
             "Scoop".into(),
             environment.command("scoop", ["update", scoop_name]),
@@ -868,7 +915,7 @@ async fn ownership(
         );
     }
     let native = match harness {
-        HarnessKind::Pi => false,
+        HarnessKind::Pi | HarnessKind::Kimi | HarnessKind::Qoder | HarnessKind::Codebuddy => false,
         HarnessKind::Claude => {
             inside(real, &environment.home.join(".local/share/claude/versions"))
                 || (environment.os == "windows"
@@ -975,10 +1022,14 @@ async fn latest_version(
     ensure!(!*cancellation.borrow(), "操作已取消");
     let mut cancellation = cancellation.clone();
     let lookup = async {
-        let url = format!(
-            "https://registry.npmjs.org/{}/latest",
-            package(harness).replace('/', "%2F")
-        );
+        let url = if harness == HarnessKind::Kimi {
+            "https://pypi.org/pypi/kimi-cli/json".into()
+        } else {
+            format!(
+                "https://registry.npmjs.org/{}/latest",
+                package(harness).replace('/', "%2F")
+            )
+        };
         let mut response = http
             .send(
                 Request::get(url)
@@ -989,20 +1040,30 @@ async fn latest_version(
             .await?;
         ensure!(
             response.status().is_success(),
-            "npm registry returned HTTP {}",
+            "package registry returned HTTP {}",
             response.status()
         );
+        let max_metadata = if harness == HarnessKind::Kimi {
+            1024 * 1024
+        } else {
+            MAX_OUTPUT
+        };
         let mut body = Vec::new();
         response
             .body_mut()
-            .take((MAX_OUTPUT + 1) as u64)
+            .take((max_metadata + 1) as u64)
             .read_to_end(&mut body)
             .await?;
-        ensure!(body.len() <= MAX_OUTPUT, "npm metadata is too large");
+        ensure!(body.len() <= max_metadata, "package metadata is too large");
         let metadata: serde_json::Value = serde_json::from_slice(&body)?;
-        let version = metadata["version"]
+        let version = if harness == HarnessKind::Kimi {
+            &metadata["info"]["version"]
+        } else {
+            &metadata["version"]
+        };
+        let version = version
             .as_str()
-            .context("npm metadata has no version")?;
+            .context("package metadata has no version")?;
         Ok(semver::Version::parse(version)?.to_string())
     };
     tokio::select! {
@@ -1377,6 +1438,34 @@ mod tests {
         assert!(installed_version("").is_none());
     }
 
+    #[test]
+    fn roadmap_installers_use_official_packages_and_kimi_never_uses_npm() {
+        let (_directory, _cancel, mut environment) = fixture();
+        let npm = manager(&environment, InstallMethod::Npm, "npm", "bin", "prefix");
+        for (harness, package) in [
+            (HarnessKind::Pi, "@earendil-works/pi-coding-agent@latest"),
+            (HarnessKind::Qoder, "@qoder-ai/qodercli@latest"),
+            (HarnessKind::Codebuddy, "@tencent-ai/codebuddy-code@latest"),
+        ] {
+            let options = install_options(harness, &environment, std::slice::from_ref(&npm));
+            assert_eq!(options.len(), 1);
+            assert!(options[0].command.args.contains(&package.into()));
+        }
+        assert!(
+            install_options(HarnessKind::Kimi, &environment, std::slice::from_ref(&npm)).is_empty()
+        );
+        environment.tools.insert(
+            "uv".into(),
+            file(&environment.home.join("bin/uv"), "fixture"),
+        );
+        let options = install_options(HarnessKind::Kimi, &environment, &[npm]);
+        assert_eq!(options.len(), 1);
+        assert_eq!(
+            options[0].command.args,
+            ["tool", "install", "--python", "3.13", "kimi-cli"]
+        );
+    }
+
     #[tokio::test]
     async fn latest_version_reads_the_latest_tag_for_each_harness() {
         let (_cancel, cancellation) = watch::channel(false);
@@ -1387,6 +1476,13 @@ mod tests {
                 "2.1.263",
             ),
             (HarnessKind::Codex, "/@openai%2Fcodex/latest", "0.153.4"),
+            (HarnessKind::Qoder, "/@qoder-ai%2Fqodercli/latest", "1.1.48"),
+            (
+                HarnessKind::Codebuddy,
+                "/@tencent-ai%2Fcodebuddy-code/latest",
+                "2.147.0",
+            ),
+            (HarnessKind::Kimi, "/pypi/kimi-cli/json", "1.50.0"),
             (
                 HarnessKind::Pi,
                 "/@earendil-works%2Fpi-coding-agent/latest",
@@ -1399,14 +1495,21 @@ mod tests {
             ),
         ] {
             let http = FakeHttpClient::create(move |request| async move {
-                assert_eq!(request.uri().host(), Some("registry.npmjs.org"));
+                assert_eq!(
+                    request.uri().host(),
+                    Some(if harness == HarnessKind::Kimi {
+                        "pypi.org"
+                    } else {
+                        "registry.npmjs.org"
+                    })
+                );
                 assert_eq!(request.uri().path(), path);
                 assert_eq!(
                     request.extensions().get::<RequestTimeout>().unwrap().0,
                     PROBE_TIMEOUT
                 );
                 Ok(Response::builder()
-                    .body(serde_json::json!({"version": version}).to_string().into())?)
+                    .body(if harness == HarnessKind::Kimi { serde_json::json!({"info":{"version":version},"releases": "x".repeat(100_000)}) } else { serde_json::json!({"version":version}) }.to_string().into())?)
             });
             assert_eq!(
                 latest_version(harness, http.as_ref(), &cancellation)

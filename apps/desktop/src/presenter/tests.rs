@@ -1587,6 +1587,9 @@ fn emit_current_catalog(
             HarnessKind::Codex => nexus_domain::ModelSource::CodexAppServer,
             HarnessKind::Omp => nexus_domain::ModelSource::OmpCli,
             HarnessKind::Pi => nexus_domain::ModelSource::PiRpc,
+            HarnessKind::Kimi => nexus_domain::ModelSource::KimiAcp,
+            HarnessKind::Qoder => nexus_domain::ModelSource::QoderAcp,
+            HarnessKind::Codebuddy => nexus_domain::ModelSource::CodebuddyAcp,
         };
     }
     runner.emit(Event::ModelCatalogLoaded {

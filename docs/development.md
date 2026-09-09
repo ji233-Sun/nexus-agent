@@ -83,6 +83,8 @@ flowchart TB
     Infrastructure --> Claude[Claude Code · stream-json]
     Infrastructure --> Codex[Codex CLI · app-server]
     Infrastructure --> OMP[Oh My Pi · RPC]
+    Infrastructure --> Pi[Pi · RPC]
+    Infrastructure --> ACP[Kimi / Qoder / CodeBuddy · ACP]
 ```
 
 - `crates/domain`：领域状态、模型和思考层级。
@@ -91,6 +93,8 @@ flowchart TB
 - `crates/harness-claude`：Claude Code 探测、启动参数和事件解码。
 - `crates/harness-codex`：Codex CLI 探测、App Server 启动配置和事件适配。
 - `crates/harness-omp`：Oh My Pi 探测、受控写入模式和 JSON 事件解码。
+- `crates/harness-pi`：Pi RPC、临时审批扩展、原生 Session 文件与模型目录。
+- `crates/harness-acp`：Kimi Code / Qoder / CodeBuddy 共用的 ACP v1 握手、会话、模型配置、审批和事件适配。
 - `apps/runner/src/transport.rs`：JSONL 命令读取、协议版本校验和事件写出。
 - `apps/runner/src/application`：命令调度、双任务并发、任务与 checkout 互斥、取消和统一事件转换。
 - `apps/runner/src/infrastructure`：Harness 适配器选择、子进程执行和平台相关的进程树清理。
@@ -190,3 +194,11 @@ node --test ".github/scripts/resolve-conflicts.test.mjs"
 ```
 
 Pi 的适配位于 `crates/harness-pi`，与 OMP 共享 `harness-core::rpc` 事件解码。Pi 通过 `--mode rpc` 启动，审批扩展就绪后获取原生 Session 文件路径并发送 Prompt；后续进程通过 `--session <FILE>` 恢复。
+
+Kimi 使用 `kimi acp`，Qoder / CodeBuddy 使用 `--acp`。初始化不声明文件系统与终端代理能力，工具在原 CLI 中运行。续聊优先使用服务端声明的 `session/resume`，否则使用 `session/load`；准备阶段过滤历史回放，再设置原生 `default` 权限、模型和支持的思考层级，最后发送 `session/prompt`。致命错误同时结束轮次，未知服务端请求返回 method-not-found。
+
+ACP 模型目录通过无 Prompt 的 `session/new` 获取，CLI 可能保存空会话。模型 ID 与配置项 ID 原样保留，Kimi 的 `,thinking` 是原生模型标识的一部分。ACP v1 无标准 Steer 或通用 User Ask；厂商私有交互扩展不在本适配范围内。CodeBuddy 子成员事件不会混入主回答。
+
+本次实际验证版本：Pi 0.85.1、Kimi CLI 1.50.0、Qoder CLI 1.1.48、CodeBuddy 2.147.0。Pi 与 Kimi 使用隔离配置和本地模拟模型验证了审批、工具、标题与跨进程续聊；Qoder 验证握手和未认证错误，CodeBuddy 验证握手及原生模型目录。Qoder / CodeBuddy 的真实账号模型调用、Windows / Linux 实机运行尚未验证。Kimi 新一代 `kimi-code` 包不属于已验证版本。
+
+标题与提交说明统一通过 `TextGenerationConfig` / `prepare_text_generation` 执行；Kimi 的临时 Agent 使用通用文本输出指令，避免把提交说明限制成短标题。Desktop / Runner 协议版本为 15，与主线原有版本 14 区分。

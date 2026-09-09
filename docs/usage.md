@@ -86,7 +86,7 @@ Windows 的程序探测支持 `PATHEXT` 中的 `.exe`、`.com`、`.bat` 和 `.cm
 
 扫描优先遵循 `PATH`，同时查找官方安装目录、Node 版本管理器及全局包管理器目录，包括自定义 `VP_HOME`、`BUN_INSTALL`、`PNPM_HOME`。Windows 优先选择可执行扩展名，避免误运行 npm 的 Unix 同名脚本。包管理器发现的有效入口若不在 `PATH` 中，会保存到已有可执行路径设置；手动指定但不存在的路径需先修正或恢复命令名。解析来源时同时检查入口和真实路径：Vite+ 的代理入口按 `vp` 处理，Homebrew Node 下的 npm 全局包仍按 npm 更新，共用 `bin` 目录不会被当作安装来源的证据。
 
-安装和更新在后台执行，任务运行期间禁用，完成后重新检测版本及运行环境。版本输出无效、命令失败或超时会显示诊断，可取消或重试；取消、超时和关闭应用时清理安装进程树。不会在启动或扫描时自动安装、更新，也不会为来源不明的文件猜测更新命令。重新扫描会同时读取本地版本与 npm registry 的最新版本；仅在最新版本高于当前版本时提供更新操作。远端查询失败会显示原因，保留本地安装信息。
+安装和更新在后台执行，任务运行期间禁用，完成后重新检测版本及运行环境。版本输出无效、命令失败或超时会显示诊断，可取消或重试；取消、超时和关闭应用时清理安装进程树。不会在启动或扫描时自动安装、更新，也不会为来源不明的文件猜测更新命令。重新扫描会同时读取本地版本与包源的最新版本（Kimi 使用 PyPI，其余使用 npm registry）；仅在最新版本高于当前版本时提供更新操作。远端查询失败会显示原因，保留本地安装信息。
 
 来源判定参考 [t3code 的维护逻辑](https://github.com/pingdotgg/t3code/blob/main/apps/server/src/provider/providerMaintenance.ts)，安装命令依据 [Claude Code](https://code.claude.com/docs/en/setup)、[Codex CLI](https://developers.openai.com/codex/cli/)、[OMP](https://github.com/can1357/oh-my-pi#install) 和 [Vite+ 全局包管理](https://viteplus.dev/guide/install)说明。
 
@@ -171,3 +171,21 @@ Desktop 启动后默认在 `127.0.0.1:3210` 提供 HTTP/WebSocket 服务。设�
 Pi 使用官方 `@earendil-works/pi-coding-agent`（`pi`）的 RPC 模式，模型目录保留 `provider/model` 标识。先在 CLI 配置 Provider 和认证。Nexus 记录原生 Session 文件路径，续聊依赖该文件仍然存在。
 
 Ask 模式允许内置只读工具，其余工具通过审批；Auto Edit 额外允许 write/edit；YOLO 放行工具。审批由随进程加载的扩展实现，扩展未就绪时不会发送任务。后台标题生成禁用工具、扩展并关闭会话保存。Pi 的原生选择和文本提问复用 RPC User Ask 面板。
+
+### Kimi Code、Qoder 与 CodeBuddy
+
+三个引擎通过官方 ACP 接入，支持流式回答、工具结果、审批、模型选择和原生会话续聊。先在各自 CLI 完成登录：`kimi login`、`qoder login`、`codebuddy login`。Kimi ACP 需要原生登录状态，仅填写 Provider API Key 不能替代该登录检查。
+
+| 引擎 | 本次验证的 CLI | 安装与配置 |
+| --- | --- | --- |
+| Kimi Code | `kimi-cli` 1.50.0，`kimi acp` | 安装菜单在存在 uv 时提供 `uv tool install --python 3.13 kimi-cli`；uv 来源通过原管理器更新，其他来源使用[官方安装文档](https://moonshotai.github.io/kimi-cli/en/guides/getting-started.html) |
+| Qoder | `@qoder-ai/qodercli` 1.1.48，`qoder --acp` | 使用本机 Node 包管理器；Provider Token 使用 `QODER_PERSONAL_ACCESS_TOKEN`，有效性由 CLI 验证 |
+| CodeBuddy | `@tencent-ai/codebuddy-code` 2.147.0，`codebuddy --acp` | 使用本机 Node 包管理器；支持 `CODEBUDDY_API_KEY` / `CODEBUDDY_BASE_URL`，地区与账号配置遵循 CLI |
+
+ACP 每轮恢复原生 `default` 权限模式。Ask 显示 CLI 请求的选项；Auto Edit 自动批准标记为 `edit` 的请求，其余继续询问；YOLO 对 CLI 请求选择「允许一次」，不绕过 CLI 强制策略。CLI 自己允许的只读或已配置操作不会额外弹窗。
+
+模型和思考层级来自当前 CLI 返回值。Kimi 的 thinking 变体直接显示为独立原生模型，不额外虚构思考层级。探测与刷新目录不会调用模型，但 CLI 可能保存空会话。续聊要求原生 Session 仍然存在，并且 CLI 支持 load/resume。
+
+ACP v1 没有标准 Steer；运行中补充的消息在下一轮发送。厂商私有 User Ask 扩展暂未接入。后台标题中 Qoder / CodeBuddy 禁用工具与 MCP，并关闭会话保存；Kimi 使用无工具、无 MCP 的独立临时 Agent 配置，CLI 仍可能在自己的数据目录保留标题会话，不续用任务会话。
+
+四个新增引擎也可用于侧栏的提交说明生成，复用无工具的后台文本生成配置。提交说明保留主题与正文的换行，不会作为会话消息发送。

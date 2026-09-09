@@ -4550,6 +4550,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-harness-acp"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "nexus-domain",
+ "nexus-harness-core",
+ "nexus-protocol",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "nexus-harness-claude"
 version = "0.1.0-alpha.1"
 dependencies = [
@@ -4619,6 +4631,7 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
  "nexus-domain",
+ "nexus-harness-acp",
  "nexus-harness-claude",
  "nexus-harness-codex",
  "nexus-harness-core",

@@ -1,4 +1,5 @@
 use nexus_domain::{HarnessKind, ModelDescriptor};
+use nexus_harness_acp as acp;
 use nexus_harness_claude as claude;
 use nexus_harness_codex as codex;
 use nexus_harness_core::{LaunchSpec, LineDecoder, ModelCatalogError};
@@ -14,6 +15,9 @@ pub(crate) async fn probe(harness: HarnessKind, executable: &str) -> HarnessProb
         HarnessKind::Codex => codex::probe(executable).await,
         HarnessKind::Omp => omp::probe(executable).await,
         HarnessKind::Pi => pi::probe(executable).await,
+        HarnessKind::Kimi | HarnessKind::Qoder | HarnessKind::Codebuddy => {
+            acp::probe(harness, executable).await
+        }
     }
 }
 
@@ -28,6 +32,9 @@ pub(crate) async fn discover_models(
         HarnessKind::Codex => codex::discover_models(executable, cwd, environment, cancel).await,
         HarnessKind::Omp => omp::discover_models(executable, cwd, environment, cancel).await,
         HarnessKind::Pi => pi::discover_models(executable, cwd, environment, cancel).await,
+        HarnessKind::Kimi | HarnessKind::Qoder | HarnessKind::Codebuddy => {
+            acp::discover_models(harness, executable, cwd, environment, cancel).await
+        }
         HarnessKind::Claude => claude::discover_models(executable, cwd, environment, cancel).await,
     }
 }
@@ -37,6 +44,10 @@ pub(crate) fn prepare(
     cwd: &Path,
 ) -> Result<(LaunchSpec, Box<dyn LineDecoder>), String> {
     Ok(match request.harness {
+        HarnessKind::Kimi | HarnessKind::Qoder | HarnessKind::Codebuddy => {
+            let (spec, decoder) = acp::prepare_run(request, cwd);
+            (spec, Box::new(decoder) as Box<dyn LineDecoder>)
+        }
         HarnessKind::Pi => {
             let (spec, decoder) = pi::prepare_run(request, cwd)?;
             (spec, Box::new(decoder) as Box<dyn LineDecoder>)
@@ -76,8 +87,56 @@ pub(crate) fn prepare_text_generation(
     request: &TextGenerationConfig,
     cwd: &Path,
     prompt: &str,
-) -> (LaunchSpec, Box<dyn LineDecoder>) {
-    match request.harness {
+) -> Result<(LaunchSpec, Box<dyn LineDecoder>), String> {
+    Ok(match request.harness {
+        HarnessKind::Kimi => {
+            let (spec, decoder) = acp::prepare_kimi_text_generation(request, prompt, cwd)?;
+            (spec, Box::new(decoder) as Box<dyn LineDecoder>)
+        }
+        HarnessKind::Qoder | HarnessKind::Codebuddy => {
+            let mut args: Vec<String> = [
+                "--print",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--tools",
+                "",
+                "--strict-mcp-config",
+                "--mcp-config",
+                "{\"mcpServers\":{}}",
+                "--no-session-persistence",
+            ]
+            .map(Into::into)
+            .to_vec();
+            if let Some(model) = &request.model {
+                args.extend(["--model".into(), model.into()]);
+            }
+            if !request.effort.is_default()
+                && !matches!(
+                    request.effort,
+                    nexus_domain::ThinkingEffort::Off | nexus_domain::ThinkingEffort::None
+                )
+            {
+                args.extend([
+                    if request.harness == HarnessKind::Qoder {
+                        "--reasoning-effort"
+                    } else {
+                        "--effort"
+                    }
+                    .into(),
+                    request.effort.as_str().into(),
+                ]);
+            }
+            (
+                LaunchSpec {
+                    executable: request.executable.clone().into(),
+                    cwd: cwd.into(),
+                    args,
+                    stdin: prompt.into(),
+                },
+                Box::new(claude::EventDecoder::default()),
+            )
+        }
         HarnessKind::Pi => {
             let (spec, decoder) = pi::prepare_title(request, cwd, prompt);
             (spec, Box::new(decoder))
@@ -112,5 +171,5 @@ pub(crate) fn prepare_text_generation(
             ),
             Box::new(omp::EventDecoder::default()),
         ),
-    }
+    })
 }

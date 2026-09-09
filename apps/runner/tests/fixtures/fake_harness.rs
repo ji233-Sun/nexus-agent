@@ -34,6 +34,8 @@ fn main() {
         run_omp_catalog();
         return;
     }
+    if args.iter().any(|arg| matches!(arg.as_str(), "acp" | "--acp")) { run_acp(&args); return; }
+    let kimi_title = args.iter().any(|arg| arg == "--agent-file");
     let harness = if matches!(
         args.first().map(String::as_str),
         Some("app-server" | "exec")
@@ -49,7 +51,7 @@ fn main() {
             .windows(2)
             .any(|pair| pair == ["--sandbox", "read-only"]),
         Harness::Omp => args.iter().any(|arg| arg == "--no-tools"),
-        Harness::Claude => args
+        Harness::Claude => kimi_title || args
             .windows(2)
             .any(|pair| pair[0] == "--tools" && pair[1].is_empty()),
     };
@@ -101,6 +103,7 @@ fn main() {
         } else {
             "**Fix authentication flow.**"
         };
+        if kimi_title { println!("{text}"); return; }
         match harness {
             Harness::Codex => println!(
                 r#"{{"type":"item.completed","item":{{"id":"title","type":"agent_message","text":{text:?}}}}}"#
@@ -571,4 +574,62 @@ fn request_id(line: &str) -> String {
     } else {
         value.chars().take_while(char::is_ascii_digit).collect()
     }
+}
+
+fn acp_text(session: &str, text: &str) {
+    println!(r#"{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":{session:?},"update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":{text:?}}}}}}}}}"#);
+}
+fn run_acp(args: &[String]) {
+    fs::write("acp-args.txt", args.join("\n")).unwrap();
+    if let Ok(value) = env::var("TEST_PROVIDER_API_KEY") { fs::write("provider-env.txt", value).unwrap(); }
+    let mut session = format!("session-{}", std::process::id());
+    let mut resumed = false;
+    let mut input = io::stdin().lock().lines();
+    while let Some(Ok(line)) = input.next() {
+        let id = request_id(&line);
+        match string_field(&line, "method").as_str() {
+            "initialize" => {
+                if env::var_os("TEST_ACP_AUTH_ERROR").is_some() {
+                    println!(r#"{{"jsonrpc":"2.0","id":{id},"error":{{"code":-32000,"message":"private secret"}}}}"#);
+                } else {
+                    println!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{"protocolVersion":1,"agentCapabilities":{{"loadSession":true,"sessionCapabilities":{{"resume":{{}}}}}}}}}}"#);
+                }
+            }
+            "session/new" | "session/resume" | "session/load" => {
+                let saved = string_field(&line, "sessionId");
+                resumed = !saved.is_empty();
+                if resumed { session = saved; }
+                fs::write("acp-session.json", &line).unwrap();
+                acp_text(&session, "historical replay must be ignored");
+                println!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{"sessionId":{session:?},"models":{{"currentModelId":"test-model","availableModels":[{{"modelId":"test-model","name":"Test"}}]}},"modes":{{"currentModeId":"default","availableModes":[{{"id":"default","name":"Default"}}]}},"configOptions":[{{"id":"thinking","type":"select","category":"thought_level","currentValue":"high","options":[{{"value":"high","name":"High"}},{{"value":"low","name":"Low"}}]}}]}}}}"#);
+            }
+            "session/set_mode" | "session/set_model" | "session/set_config_option" => println!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{}}}}"#),
+            "session/prompt" => {
+                let prompt = string_field(&line, "text");
+                fs::write("stdin.txt", &prompt).unwrap();
+                let file = format!("{session}.txt");
+                if resumed {
+                    acp_text(&session, &fs::read_to_string(file).unwrap());
+                } else {
+                    fs::write(file, &prompt).unwrap();
+                    if prompt == "wait-for-cancel" {
+                        let _child = Command::new(env::current_exe().unwrap()).arg("--child").stdin(Stdio::null()).spawn().unwrap();
+                        acp_text(&session, "ready"); io::stdout().flush().unwrap();
+                        loop { thread::sleep(Duration::from_secs(1)); }
+                    }
+                    if prompt.starts_with("approval-") {
+                        println!(r#"{{"jsonrpc":"2.0","id":"approval-1","method":"session/request_permission","params":{{"sessionId":{session:?},"toolCall":{{"toolCallId":"tool-1","kind":"execute","title":"echo approved"}},"options":[{{"optionId":"allow","name":"Approve","kind":"allow_once"}},{{"optionId":"deny","name":"Deny","kind":"reject_once"}}]}}}}"#);
+                        io::stdout().flush().unwrap();
+                        let response = input.next().unwrap().unwrap();
+                        fs::write("approval-response.json", &response).unwrap();
+                        acp_text(&session, if string_field(&response,"optionId") == "allow" { "approved" } else { "denied" });
+                    } else { acp_text(&session, "hello"); }
+                }
+                println!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{"stopReason":"end_turn"}}}}"#);
+            }
+            _ => {}
+        }
+        io::stdout().flush().unwrap();
+    }
+    fs::write("catalog-stopped.txt", "stopped").unwrap();
 }
