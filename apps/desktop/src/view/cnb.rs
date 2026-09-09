@@ -5,11 +5,13 @@ use crate::{
 };
 use gpui_kit::component::{scroll::ScrollableElement as _, spinner::Spinner};
 
-pub(super) fn cnb_icon(size: f32) -> impl IntoElement {
+pub(super) fn cnb_icon(size: f32, color: u32) -> impl IntoElement {
+    // GPUI only paints an SVG when the element has an explicit text color.
     gpui::svg()
         .data(include_bytes!("../../assets/icons/cnb.svg").as_slice())
         .size(px(size))
         .flex_none()
+        .text_color(rgb(color))
 }
 
 fn issue_color(issue: &Issue, colors: Palette) -> u32 {
@@ -77,7 +79,7 @@ impl NexusView {
                     .flex()
                     .items_center()
                     .gap_4()
-                    .child(cnb_icon(28.))
+                    .child(cnb_icon(28., colors.text))
                     .child(
                         div()
                             .flex_1()
@@ -182,7 +184,7 @@ impl NexusView {
                     .flex()
                     .items_center()
                     .gap_3()
-                    .child(cnb_icon(22.))
+                    .child(cnb_icon(22., colors.text))
                     .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("CNB"))
                     .child(div().text_color(rgb(colors.muted)).child("/"))
                     .child(
