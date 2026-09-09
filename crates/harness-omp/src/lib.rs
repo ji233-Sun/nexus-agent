@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use tokio::{io::AsyncReadExt as _, process::Command, sync::watch, time::sleep};
 
 const MODEL_CATALOG_TIMEOUT: Duration = Duration::from_secs(15);
+const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub fn build_launch_spec(
     executable: &str,
@@ -274,7 +275,7 @@ pub async fn probe(configured_executable: &str) -> HarnessProbe {
         };
     };
 
-    let deadline = tokio::time::Instant::now() + MODEL_CATALOG_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + PROBE_TIMEOUT;
     let version = tokio::time::timeout_at(
         deadline,
         Command::new(&executable)

@@ -747,17 +747,19 @@ async fn omp_probe_times_out_in_both_stages() {
                 .current_dir(directory.path())
                 .env(variable, "1"),
         );
+        let started = std::time::Instant::now();
         runner
             .send(Command::HarnessProbe {
                 harness: HarnessKind::Omp,
                 executable: executable.to_string_lossy().into_owned(),
             })
             .await;
-        let line = timeout(Duration::from_secs(20), runner.events.next_line())
+        let line = timeout(Duration::from_secs(65), runner.events.next_line())
             .await
             .expect("probe must time out")
             .unwrap()
             .unwrap();
+        assert!(started.elapsed() >= Duration::from_secs(60));
         let Event::HarnessDetected(probe) =
             serde_json::from_str::<EventEnvelope>(&line).unwrap().event
         else {
