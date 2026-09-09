@@ -56,6 +56,15 @@
 
 小提示：`⌘ / Ctrl K` 搜索会话，`⌘ / Ctrl N` 新建任务，`⌘ / Ctrl Enter` 发送消息。
 
+也可通过安装包内的原生 CLI 打开项目，无需 Node.js 或 npx。将可执行文件所在目录加入 `PATH` 后运行：
+
+```sh
+nexus-desktop .                # 打开当前目录
+nexus-desktop "/path/to/project" # 打开指定目录（支持相对路径）
+```
+
+macOS 可直接运行 `"/Applications/Nexus Agent.app/Contents/MacOS/nexus-desktop" .`；Windows 使用 `nexus-desktop.exe`。无参数启动仍进入桌面应用，`--help` 显示用法。每次调用启动一个应用进程。
+
 <details>
 <summary><strong>从源码运行</strong></summary>
 
