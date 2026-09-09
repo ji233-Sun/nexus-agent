@@ -68,7 +68,6 @@ pub(crate) struct Presenter {
     update_events: Option<std::sync::mpsc::Receiver<UpdateState>>,
     installation_worker: Option<crate::infrastructure::harness_installation::Worker>,
     workspace_events: Option<std::sync::mpsc::Receiver<workspace::WorkspaceEvent>>,
-    workspace_cancel: Option<tokio::sync::watch::Sender<bool>>,
     worktree_root: Result<std::path::PathBuf>,
 }
 
@@ -257,7 +256,6 @@ impl Presenter {
             update_events: None,
             installation_worker: None,
             workspace_events: None,
-            workspace_cancel: None,
             worktree_root: crate::infrastructure::paths::worktree_directory(),
         };
         if let Some(runner) = &presenter.runner {

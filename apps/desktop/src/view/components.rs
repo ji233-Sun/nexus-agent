@@ -551,7 +551,18 @@ mod tests {
                     run_id,
                     MessageRole::Tool,
                     MessageKind::ToolCall,
-                    "Command\ncargo test",
+                    &if index == 0 {
+                        format!(
+                            "Edit\n{}",
+                            serde_json::json!({
+                                "file_path": "main.rs",
+                                "old_string": "old\n".repeat(30),
+                                "new_string": "new\n".repeat(30),
+                            })
+                        )
+                    } else {
+                        "Command\ncargo test".into()
+                    },
                     Some(tool.clone()),
                 )
                 .unwrap();
@@ -630,12 +641,18 @@ mod tests {
         let trigger = cx.debug_bounds(row_selector).unwrap().center();
         cx.simulate_click(trigger, Default::default());
         dropdown_frame(cx, 0);
-        assert!(cx.debug_bounds(detail_selector).unwrap().size.height <= px(200.));
-        assert!(cx.debug_bounds(viewport_selector).unwrap().size.height <= px(240.));
+        let diff = cx.debug_bounds(detail_selector).unwrap();
+        let batch = cx.debug_bounds(viewport_selector).unwrap();
+        assert_eq!(diff.size.height, px(200.));
+        assert!(batch.size.height <= px(360.));
+        assert!(
+            diff.bottom() <= batch.bottom(),
+            "the expanded diff card must not be clipped by its batch"
+        );
         let row_before = cx.debug_bounds(row_selector).unwrap();
         let output_selector = format!("tool-detail-{}-1", ids[0]).leak();
         let output = cx.debug_bounds(output_selector).unwrap();
-        let content_selector = format!("tool-detail-content-{}-1", ids[0]).leak();
+        let content_selector = format!("tool-detail-{}-1-content", ids[0]).leak();
         let content_before = cx.debug_bounds(content_selector).unwrap();
         cx.simulate_event(ScrollWheelEvent {
             position: point(output.left() + px(24.), output.top() + px(12.)),

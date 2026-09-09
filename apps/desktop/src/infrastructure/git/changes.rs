@@ -90,13 +90,7 @@ pub(crate) fn review(workspace: &Workspace) -> Result<WorkspaceReview> {
         unstaged: diff(cwd, &["--"])?,
         untracked,
         dirty_paths,
-        target_branches: git(
-            cwd,
-            &["for-each-ref", "--format=%(refname:short)", "refs/heads/"],
-        )?
-        .lines()
-        .map(str::to_owned)
-        .collect(),
+        target_branches: local_branches(cwd)?,
         conflicts,
         resolution_diff,
         resolution_staged,

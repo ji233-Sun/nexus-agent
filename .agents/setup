@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+echo "[orb setup] Installing Linux build dependencies"
+packages=(
+  clang
+  cmake
+  pkg-config
+  libfontconfig1-dev
+  libfreetype6-dev
+  libwayland-dev
+  libx11-xcb-dev
+  libxkbcommon-x11-dev
+  libssl-dev
+  libvulkan1
+  libglib2.0-dev
+)
+missing_packages=()
+for package in "${packages[@]}"; do
+  if ! dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -Fq 'install ok installed'; then
+    missing_packages+=("$package")
+  fi
+done
+if ((${#missing_packages[@]})); then
+  time sudo apt-get update
+  time sudo apt-get install -y --no-install-recommends "${missing_packages[@]}"
+else
+  echo "[orb setup] Linux build dependencies already installed"
+fi
+
+echo "[orb setup] Installing Node.js 24"
+node_version="24.20.0"
+case "$(uname -m)" in
+  x86_64) node_arch="x64" ;;
+  aarch64) node_arch="arm64" ;;
+  *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+node_dir="$HOME/.local/share/node-v${node_version}-linux-${node_arch}"
+if [[ ! -x "$node_dir/bin/node" ]]; then
+  archive="node-v${node_version}-linux-${node_arch}.tar.xz"
+  download_dir="$(mktemp -d)"
+  trap 'rm -rf "$download_dir"' EXIT
+  time curl --fail --location --silent --show-error \
+    "https://nodejs.org/dist/v${node_version}/${archive}" \
+    --output "$download_dir/$archive"
+  curl --fail --location --silent --show-error \
+    "https://nodejs.org/dist/v${node_version}/SHASUMS256.txt" \
+    --output "$download_dir/SHASUMS256.txt"
+  (cd "$download_dir" && grep " ${archive}$" SHASUMS256.txt | sha256sum --check --status)
+  mkdir -p "$(dirname "$node_dir")"
+  tar -xJf "$download_dir/$archive" -C "$(dirname "$node_dir")"
+fi
+export PATH="$node_dir/bin:$PATH"
+
+profile_marker="# nexus-agent orb toolchains"
+if ! grep -Fqx "$profile_marker" "$HOME/.bash_profile" 2>/dev/null; then
+  cat >> "$HOME/.bash_profile" <<EOF
+
+$profile_marker
+export PATH="$HOME/.cargo/bin:$node_dir/bin:\$PATH"
+EOF
+fi
+
+echo "[orb setup] Installing Rust 1.98.1"
+if [[ -f "$HOME/.cargo/env" ]]; then
+  # shellcheck disable=SC1091
+  source "$HOME/.cargo/env"
+fi
+if ! command -v rustup >/dev/null 2>&1; then
+  time curl --proto '=https' --tlsv1.2 --silent --show-error --fail \
+    https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+fi
+# shellcheck disable=SC1091
+source "$HOME/.cargo/env"
+if ! rustup toolchain list | grep -Eq '^1\.98\.1(-| )'; then
+  time rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy
+else
+  time rustup component add --toolchain 1.98.1 rustfmt clippy
+fi
+
+echo "[orb setup] Installing Remote Web dependencies"
+time npm --prefix apps/remote-web ci
+
+echo "[orb setup] Fetching locked Rust dependencies"
+time cargo fetch --locked
+
+echo "[orb setup] Complete"

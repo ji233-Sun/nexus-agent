@@ -530,7 +530,7 @@ impl Presenter {
                     ),
                 };
                 self.reload_tasks();
-                self.refresh_workspace_branch();
+                self.reload_workspaces();
                 if self.model.selected_task != task_id
                     && let Some(selected_task) = self.model.selected_task
                 {
@@ -1050,12 +1050,28 @@ impl Presenter {
         };
         let task_id = pending_run.task_id;
         let run_id = pending_run.run_id;
+        // Keep the user's message and initial title unchanged in the local history.
+        let run_prompt = if session_id.is_none() && workspace.managed {
+            format!(
+                "{prompt}\n\n<nexus_worktree_context>\n\
+                 Nexus has already created a dedicated worktree for this task. \
+                 After understanding the user's task, if the current branch is still `{}`, \
+                 rename it once to a meaningful task-specific name with `git branch -m <name>`, \
+                 following the repository's branch naming rules. \
+                 Choose a different name if it already exists; never force-overwrite a branch. \
+                 Keep working in this directory; do not create another worktree or switch branches.\n\
+                 </nexus_worktree_context>",
+                workspace.branch.as_deref().unwrap_or_default(),
+            )
+        } else {
+            prompt.clone()
+        };
         let command = CommandEnvelope::new(Command::RunStart(StartRun {
             run_id,
             task_id,
             session_id,
             cwd: workspace.path.clone(),
-            prompt: prompt.clone(),
+            prompt: run_prompt,
             harness,
             executable: executable.clone(),
             model,
