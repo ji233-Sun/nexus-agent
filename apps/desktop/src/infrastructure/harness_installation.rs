@@ -1316,13 +1316,23 @@ mod tests {
     }
 
     fn file(path: &Path, content: &str) -> PathBuf {
+        use std::io::Write as _;
+
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, content).unwrap();
+        let mut file = fs::File::create(path).unwrap();
+        file.lock().unwrap();
+        file.write_all(content.as_bytes()).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+            file.set_permissions(fs::Permissions::from_mode(0o755))
+                .unwrap();
         }
+        drop(file);
+
+        // A concurrent fork can inherit the writable handle. Wait for every copy
+        // to close before executing the script, avoiding ETXTBSY on Linux.
+        fs::File::open(path).unwrap().lock_shared().unwrap();
         path.into()
     }
 

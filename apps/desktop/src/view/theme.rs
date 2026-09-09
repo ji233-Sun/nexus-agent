@@ -4,11 +4,12 @@ use gpui_kit::{
     App, BoxShadow, Global, Hsla, WindowAppearance, WindowBackgroundAppearance, px, rgb, rgba,
 };
 
-// Neutral reading surfaces with blue selection/focus, shared by every desktop view.
+// Quiet chrome, a distinct reading canvas and raised controls across both themes.
 #[derive(Clone, Copy)]
 pub(super) struct Palette {
     pub canvas: u32,
     pub surface: u32,
+    pub elevated: u32,
     pub recessed: u32,
     pub hover: u32,
     pub selected: u32,
@@ -29,17 +30,18 @@ impl Palette {
     pub(super) const fn for_dark(dark: bool) -> Self {
         if dark {
             Self {
-                canvas: 0x181818,
-                surface: 0x212121,
-                recessed: 0x282828,
-                hover: 0x303030,
-                selected: 0x2b3444,
-                border: 0x363636,
-                input_border: 0x808080,
-                text: 0xdfdfdf,
-                text_secondary: 0xbcbcbc,
-                muted: 0xaaaaaa,
-                accent: 0x8aafff,
+                canvas: 0x1b1e24,
+                surface: 0x15181d,
+                elevated: 0x242830,
+                recessed: 0x292f39,
+                hover: 0x303846,
+                selected: 0x2b3b55,
+                border: 0x353d49,
+                input_border: 0x8491a4,
+                text: 0xeff2f7,
+                text_secondary: 0xc5cdd9,
+                muted: 0xa9b5c6,
+                accent: 0x9abaff,
                 success: 0x67d4a0,
                 warning: 0xeac36b,
                 danger: 0xff9b96,
@@ -48,17 +50,18 @@ impl Palette {
             }
         } else {
             Self {
-                canvas: 0xffffff,
-                surface: 0xf9f9f9,
-                recessed: 0xf0f0f0,
-                hover: 0xe9e9e9,
-                selected: 0xe8effb,
-                border: 0xe0e0e0,
-                input_border: 0x858585,
-                text: 0x1a1c1f,
-                text_secondary: 0x505050,
-                muted: 0x606060,
-                accent: 0x2458c6,
+                canvas: 0xfbfcfe,
+                surface: 0xf0f2f6,
+                elevated: 0xffffff,
+                recessed: 0xe8edf4,
+                hover: 0xe3e9f2,
+                selected: 0xe2eafb,
+                border: 0xdce2eb,
+                input_border: 0x7a879a,
+                text: 0x202735,
+                text_secondary: 0x4b586d,
+                muted: 0x56657a,
+                accent: 0x315dc5,
                 success: 0x126f43,
                 warning: 0x815a00,
                 danger: 0xb42332,
@@ -73,11 +76,11 @@ pub(super) fn palette(cx: &App) -> Palette {
     Palette::for_dark(Theme::global(cx).is_dark())
 }
 
-pub(super) const CONTROL_HEIGHT: f32 = 32.;
-pub(super) const COMPACT_CONTROL_HEIGHT: f32 = 28.;
-pub(super) const HEADER_HEIGHT: f32 = 46.;
-pub(super) const SIDEBAR_WIDTH: f32 = 275.;
-pub(super) const CONTENT_WIDTH: f32 = 768.;
+pub(super) const CONTROL_HEIGHT: f32 = 36.;
+pub(super) const COMPACT_CONTROL_HEIGHT: f32 = 32.;
+pub(super) const HEADER_HEIGHT: f32 = 54.;
+pub(super) const SIDEBAR_WIDTH: f32 = 264.;
+pub(super) const CONTENT_WIDTH: f32 = 800.;
 pub(super) const CONTROL_RADIUS: f32 = 8.;
 pub(super) const CARD_RADIUS: f32 = 12.;
 
@@ -145,18 +148,16 @@ impl ResolvedAppearance {
                 colors.surface,
                 if self.glass && self.active { 0.94 } else { 1. },
             ),
-            floating: with_alpha(colors.surface, if self.glass { 0.98 } else { 1. }),
+            floating: with_alpha(colors.elevated, if self.glass { 0.98 } else { 1. }),
             edge: if self.glass && self.dark {
                 rgba(0xffffff24).into()
             } else {
                 rgb(colors.border).into()
             },
-            shadow: if !self.glass {
-                rgba(0x00000000).into()
-            } else if self.dark {
-                rgba(0x00000050).into()
+            shadow: if self.dark {
+                rgba(0x00000038).into()
             } else {
-                rgba(0x00000018).into()
+                rgba(0x22375916).into()
             },
         }
     }
@@ -251,9 +252,9 @@ pub(crate) fn apply_theme(appearance: ResolvedAppearance, cx: &mut App) -> bool 
     theme.muted_foreground = rgb(colors.muted).into();
     theme.accent = rgb(colors.hover).into();
     theme.accent_foreground = rgb(colors.text).into();
-    theme.primary = rgb(0x2f62d8).into();
-    theme.primary_hover = rgb(0x2554c2).into();
-    theme.primary_active = rgb(0x204bb0).into();
+    theme.primary = rgb(0x3765d6).into();
+    theme.primary_hover = rgb(0x2e58c2).into();
+    theme.primary_active = rgb(0x274dab).into();
     theme.primary_foreground = rgb(0xffffff).into();
     theme.secondary = rgb(colors.recessed).into();
     theme.secondary_hover = rgb(colors.hover).into();
@@ -280,7 +281,7 @@ pub(crate) fn apply_theme(appearance: ResolvedAppearance, cx: &mut App) -> bool 
     theme.sidebar_border = material.edge;
     theme.colors.list = material.chrome;
     theme.list_active = rgb(colors.selected).into();
-    theme.list_active_border = rgb(colors.accent).into();
+    theme.list_active_border = rgb(colors.selected).into();
     theme.list_hover = rgb(colors.hover).into();
     theme.scrollbar = rgba(0x00000000).into();
     theme.scrollbar_thumb = with_alpha(colors.text, 0.20);
@@ -405,6 +406,7 @@ mod tests {
                     for background in [
                         colors.canvas,
                         colors.surface,
+                        colors.elevated,
                         colors.recessed,
                         colors.hover,
                         colors.selected,

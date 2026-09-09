@@ -16,6 +16,18 @@ fn git(arguments: &[&str]) -> Option<String> {
 }
 
 fn main() {
+    #[cfg(target_os = "macos")]
+    {
+        cc::Build::new()
+            .file("src/infrastructure/voice/apple_speech.m")
+            .flag("-fobjc-arc")
+            .flag("-fblocks")
+            .compile("nexus_apple_speech");
+        println!("cargo::rustc-link-lib=framework=AVFoundation");
+        println!("cargo::rustc-link-lib=framework=Foundation");
+        println!("cargo::rustc-link-lib=framework=Speech");
+        println!("cargo::rerun-if-changed=src/infrastructure/voice/apple_speech.m");
+    }
     println!("cargo::rerun-if-changed=build.rs");
     println!("cargo::rerun-if-env-changed=NEXUS_RELEASE_TAG");
     for reference in [

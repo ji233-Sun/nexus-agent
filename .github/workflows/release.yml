@@ -113,7 +113,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends clang cmake pkg-config \
             libfontconfig1-dev libfreetype6-dev libwayland-dev libx11-xcb-dev \
-            libxkbcommon-x11-dev libssl-dev libvulkan1 libglib2.0-dev
+            libxkbcommon-x11-dev libssl-dev libvulkan1 libglib2.0-dev libasound2-dev
 
       - name: Locate Windows shader compiler
         if: runner.os == 'Windows'
@@ -178,6 +178,8 @@ jobs:
             <key>CFBundleGetInfoString</key><string>Nexus Agent $RELEASE_TAG</string>
             <key>NexusReleaseTag</key><string>$RELEASE_TAG</string>
             <key>NSHighResolutionCapable</key><true/>
+            <key>NSMicrophoneUsageDescription</key><string>录制语音并转换为输入文本。</string>
+            <key>NSSpeechRecognitionUsageDescription</key><string>使用 macOS 语音识别将录音转换为输入文本。</string>
           </dict></plist>
           EOF
           plutil -lint "$bundle/Contents/Info.plist"
