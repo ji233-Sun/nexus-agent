@@ -2,6 +2,9 @@ use anyhow::{Context as _, Result};
 use uuid::Uuid;
 
 const SERVICE: &str = "nexus-agent-provider-profile";
+// Reserved application credential, never a chat profile or Harness environment variable.
+pub(crate) const MIMO_VOICE_CREDENTIAL: Uuid =
+    Uuid::from_u128(0xf781d539_ed3a_4710_86f5_984836c69afa);
 
 pub(crate) trait CredentialStore {
     fn set_api_key(&self, profile_id: Uuid, api_key: &str) -> Result<()>;
@@ -35,5 +38,9 @@ impl CredentialStore for SystemCredentialStore {
 }
 
 fn entry(profile_id: Uuid) -> Result<keyring::Entry> {
+    if profile_id == MIMO_VOICE_CREDENTIAL {
+        return keyring::Entry::new("nexus-agent-voice-input", "mimo")
+            .context("打开语音输入系统凭据库");
+    }
     keyring::Entry::new(SERVICE, &profile_id.to_string()).context("打开系统凭据库")
 }
