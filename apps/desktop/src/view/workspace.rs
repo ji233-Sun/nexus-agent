@@ -260,9 +260,9 @@ impl NexusView {
                         .disabled(model.workspace_busy || !managed).on_click(move |checked, _, cx| { change_app.update(cx, |app, cx| { app.presenter.select_changed_file(name.clone(), *checked); cx.notify(); }); }));
                 }
                 for (label, diff) in [("相对创建基准的已提交变更", &review.committed), ("暂存变更", &review.staged), ("未暂存变更", &review.unstaged)] {
-                    content = content.child(diff_block(locale.text(label), diff));
+                    content = content.child(diff_block(locale.text(label), diff, true, locale, cx));
                 }
-                for (name, text) in &review.untracked { content = content.child(diff_block(&format!("{} · {name}", locale.text("未跟踪文件")), text)); }
+                for (name, text) in &review.untracked { content = content.child(diff_block(&format!("{} · {name}", locale.text("未跟踪文件")), text, false, locale, cx)); }
                 let commit_app = app.clone();
                 let message_input = message.clone();
                 let commit_review = review.clone();
@@ -283,8 +283,8 @@ impl NexusView {
                     content = content.child(format!("{} → {}\n{}", review.branch.as_deref().unwrap_or_default(), state.target_branch, state.target_path))
                         .child(format!("{}: {}", locale.text("冲突文件"), review.conflicts.join(", ")))
                         .child(locale.text("请在目标目录编辑冲突文件并 git add，再刷新此处继续；也可以中止合并。"))
-                        .child(diff_block(locale.text("当前冲突解决内容"), &review.resolution_diff))
-                        .child(diff_block(locale.text("已暂存的冲突解决内容"), &review.resolution_staged));
+                        .child(diff_block(locale.text("当前冲突解决内容"), &review.resolution_diff, true, locale, cx))
+                        .child(diff_block(locale.text("已暂存的冲突解决内容"), &review.resolution_staged, true, locale, cx));
                     for (abort, label) in [(false, "继续合并"), (true, "中止合并")] {
                         let finish_app = app.clone(); let review = review.clone();
                         actions = actions.child(Button::new(label).small().label(locale.text(label)).disabled(model.workspace_busy)
@@ -306,7 +306,7 @@ impl NexusView {
             }
             if let Some(plan) = model.merge_plan.as_ref().filter(|plan| plan.workspace_id == id) {
                 content = content.child(format!("{} → {}\n{}", plan.source_branch, plan.state.target_branch, plan.state.target_path))
-                    .child(diff_block(locale.text("合入预览"), &plan.diff));
+                    .child(diff_block(locale.text("合入预览"), &plan.diff, true, locale, cx));
                 let merge_app = app.clone(); let plan = plan.clone();
                 actions = actions.child(Button::new("confirm-workspace-merge").primary().small().label(locale.text("确认合入本地分支"))
                     .disabled(model.workspace_busy)
@@ -319,21 +319,29 @@ impl NexusView {
     }
 }
 
-fn diff_block(title: &str, content: &str) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .child(title.to_owned())
-        .child(
-            div()
-                .text_size(px(12.))
-                .font_family("monospace")
-                .whitespace_normal()
-                .child(if content.is_empty() {
-                    "—".to_owned()
-                } else {
-                    content.to_owned()
-                }),
-        )
+fn diff_block(
+    title: &str,
+    content: &str,
+    diff: bool,
+    locale: Language,
+    cx: &gpui::App,
+) -> AnyElement {
+    if content.is_empty() {
+        return div()
+            .text_size(px(12.))
+            .text_color(rgb(palette(cx).muted))
+            .child(format!("{title} · —"))
+            .into_any_element();
+    }
+    tools::render_detail(
+        format!("workspace-diff-{title}").into(),
+        &crate::model::tools::ToolDetail {
+            title: title.to_owned(),
+            text: content.to_owned(),
+            language: if diff { "diff" } else { "text" }.into(),
+            diff,
+        },
+        locale,
+    )
+    .into_any_element()
 }

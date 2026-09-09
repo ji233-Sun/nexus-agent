@@ -12,6 +12,8 @@ use syntect::{
 
 const BATCH_HEIGHT: f32 = 240.;
 const DETAIL_HEIGHT: f32 = 200.;
+const DIFF_LINE_HEIGHT: f32 = 20.;
+const DIFF_FONT_SIZE: f32 = 13.;
 
 impl NexusView {
     pub(super) fn render_tool_batch(
@@ -56,7 +58,14 @@ impl NexusView {
             ));
         }
         let toggle_id = id.clone();
-        let height = if batch
+        let height = if batch.iter().any(|tool| {
+            tool.category() == ToolCategory::Edit
+                && self.expanded_messages.contains(&tool.call.id.into())
+        }) {
+            // Show the complete diff card and a short result, not a clipped card
+            // inside a second scroll viewport. Other tool batches stay compact.
+            360.
+        } else if batch
             .iter()
             .any(|tool| self.expanded_messages.contains(&tool.call.id.into()))
         {
@@ -263,7 +272,11 @@ impl NexusView {
                         .flex_col()
                         .gap_2()
                         .children(details.iter().enumerate().map(|(index, detail)| {
-                            render_detail(id, index, detail, locale, window, cx)
+                            render_detail(
+                                format!("tool-detail-{id}-{index}").into(),
+                                detail,
+                                locale,
+                            )
                         }))
                         .when(tool.result.is_none(), |element| {
                             element.child(
@@ -283,9 +296,33 @@ impl NexusView {
     }
 }
 
-fn render_detail(
-    tool_id: Uuid,
-    index: usize,
+pub(super) fn render_detail(
+    key: SharedString,
+    detail: &ToolDetail,
+    locale: Language,
+) -> impl IntoElement {
+    DetailView {
+        key,
+        detail: detail.clone(),
+        locale,
+    }
+}
+
+#[derive(IntoElement)]
+struct DetailView {
+    key: SharedString,
+    detail: ToolDetail,
+    locale: Language,
+}
+
+impl gpui::RenderOnce for DetailView {
+    fn render(self, window: &mut Window, cx: &mut gpui::App) -> impl IntoElement {
+        render_detail_content(self.key, &self.detail, self.locale, window, cx)
+    }
+}
+
+fn render_detail_content(
+    key: SharedString,
     detail: &ToolDetail,
     locale: Language,
     window: &mut Window,
@@ -293,11 +330,7 @@ fn render_detail(
 ) -> AnyElement {
     let colors = palette(cx);
     let dark = cx.global::<ResolvedAppearance>().dark;
-    let id: ElementId = (
-        ElementId::from(tool_id),
-        SharedString::from(format!("detail-{index}")),
-    )
-        .into();
+    let id = ElementId::from(key.clone());
     let scroll = window
         .use_keyed_state((id.clone(), "scroll"), cx, |_, _| ScrollHandle::new())
         .read(cx)
@@ -305,12 +338,67 @@ fn render_detail(
     let copy = detail.text.clone();
     let language = detail.language.clone();
     let is_diff = detail.diff;
-    let (added, removed) = diff_lines(&detail.text).fold((0, 0), |(added, removed), (_, kind)| {
-        (
-            added + usize::from(kind == Some('+')),
-            removed + usize::from(kind == Some('-')),
+    let lines = if is_diff {
+        diff_lines(&detail.text).collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let added = lines.iter().filter(|line| line.kind == Some('+')).count();
+    let removed = lines.iter().filter(|line| line.kind == Some('-')).count();
+    let number_width = lines
+        .iter()
+        .flat_map(|line| [line.old, line.new])
+        .flatten()
+        .max()
+        .unwrap_or(1)
+        .to_string()
+        .len()
+        .max(2) as f32
+        * 8.
+        + 12.;
+    let gutter_width = number_width * 2. + 8.;
+    let viewport_key = key.clone();
+    // Keep one selectable code document; the gutter and full-row washes sit
+    // behind it. They share the same line metrics and scroll coordinate space.
+    let code = CodeView::markdown(id.clone(), fenced_code(&detail.text, &detail.language))
+        .selectable(true)
+        .style(
+            CodeStyle::default()
+                .with_foreground(rgb(colors.text).into())
+                .with_dark(dark)
+                .with_code_block({
+                    let style = gpui::StyleRefinement::default()
+                        .font_family(MONO_FONT)
+                        .text_size(px(if is_diff { DIFF_FONT_SIZE } else { 12. }))
+                        .line_height(if is_diff {
+                            px(DIFF_LINE_HEIGHT).into()
+                        } else {
+                            relative(1.65)
+                        })
+                        .p(px(if is_diff { 0. } else { 10. }))
+                        .bg(if is_diff {
+                            rgba(0)
+                        } else {
+                            rgb(colors.surface)
+                        });
+                    if is_diff {
+                        style.whitespace_nowrap()
+                    } else {
+                        style
+                    }
+                }),
         )
-    });
+        .code_block_highlighter(move |block| {
+            let mut highlights = code_highlights(&block.code(), &language, is_diff, dark);
+            if is_diff {
+                for (_, style) in &mut highlights {
+                    style.background_color = None;
+                    style.font_weight = None;
+                    style.font_style = None;
+                }
+            }
+            highlights
+        });
     div()
         .w_full()
         .min_w_0()
@@ -324,16 +412,22 @@ fn render_detail(
             div()
                 .h(px(30.))
                 .px_3()
+                .border_b_1()
+                .border_color(rgb(colors.border))
                 .flex()
                 .items_center()
                 .gap_2()
                 .text_size(px(12.))
                 .text_color(rgb(colors.muted))
+                .when(is_diff, |element| {
+                    element.child(Icon::new(IconName::FileText).size(px(13.)))
+                })
                 .child(
                     div()
-                        .flex_1()
                         .min_w_0()
                         .truncate()
+                        .text_color(rgb(colors.text_secondary))
+                        .font_weight(gpui::FontWeight::MEDIUM)
                         .child(detail.title.clone()),
                 )
                 .when(is_diff, |element| {
@@ -349,12 +443,19 @@ fn render_detail(
                                 .child(format!("−{removed}")),
                         )
                 })
+                .child(div().flex_1())
                 .child(
                     Button::new((id.clone(), "copy"))
+                        .debug_selector({
+                            let key = key.clone();
+                            move || format!("{key}-copy")
+                        })
                         .ghost()
                         .small()
                         .h(px(24.))
-                        .label(locale.text("复制"))
+                        .icon(IconName::Copy)
+                        .accessibility_label(locale.text("复制"))
+                        .tooltip(locale.text("复制"))
                         .on_click(move |_, _, cx| {
                             cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))
                         }),
@@ -363,10 +464,12 @@ fn render_detail(
         .child(
             div()
                 .id((id.clone(), "viewport"))
-                .debug_selector(move || format!("tool-detail-{tool_id}-{index}"))
-                .h(px(
+                .debug_selector(move || viewport_key.to_string())
+                .h(px(if is_diff {
+                    (lines.len() as f32 * DIFF_LINE_HEIGHT + 8.).clamp(48., DETAIL_HEIGHT)
+                } else {
                     (detail.text.lines().count() as f32 * 21. + 20.).clamp(52., DETAIL_HEIGHT)
-                ))
+                }))
                 .w_full()
                 .min_w_0()
                 .relative()
@@ -375,42 +478,94 @@ fn render_detail(
                     div()
                         .id((id.clone(), "code-scroll"))
                         .size_full()
-                        .overflow_y_scroll()
+                        .map(|element| {
+                            if is_diff {
+                                element.overflow_scroll()
+                            } else {
+                                element.overflow_y_scroll()
+                            }
+                        })
                         .lock_scroll_axis()
                         .track_scroll(&scroll)
                         .child(
                             div()
-                                .debug_selector(move || {
-                                    format!("tool-detail-content-{tool_id}-{index}")
-                                })
+                                .debug_selector(move || format!("{key}-content"))
                                 .w_full()
                                 .min_w_0()
-                                .child(
-                                    CodeView::markdown(
-                                        id.clone(),
-                                        fenced_code(&detail.text, &detail.language),
-                                    )
-                                    .selectable(true)
-                                    .style(
-                                        CodeStyle::default()
-                                            .with_foreground(rgb(colors.text).into())
-                                            .with_dark(dark)
-                                            .with_code_block(
-                                                gpui::StyleRefinement::default()
+                                .relative()
+                                .when(is_diff, |element| {
+                                    let style = gpui::TextStyle {
+                                        font_family: MONO_FONT.into(),
+                                        ..Default::default()
+                                    };
+                                    let width = lines.iter().fold(px(0.), |width, line| {
+                                        let text = line.text.trim_end_matches(['\r', '\n']);
+                                        width.max(
+                                            window
+                                                .text_system()
+                                                .shape_line(
+                                                    text.to_owned().into(),
+                                                    px(DIFF_FONT_SIZE),
+                                                    &[style.to_run(text.len())],
+                                                    None,
+                                                )
+                                                .width,
+                                        )
+                                    });
+                                    element
+                                        .min_w_full()
+                                        .w(width + px(gutter_width + 16.))
+                                        .pl(px(gutter_width))
+                                        .pr_2()
+                                        .child(div().absolute().top_0().left_0().w_full().children(
+                                            lines.iter().map(|line| {
+                                                let (background, marker) = match line.kind {
+                                                    Some('+') => {
+                                                        (colors.diff_added, colors.success)
+                                                    }
+                                                    Some('-') => {
+                                                        (colors.diff_removed, colors.danger)
+                                                    }
+                                                    Some(' ') => (colors.surface, colors.muted),
+                                                    _ => (colors.recessed, colors.muted),
+                                                };
+                                                div()
+                                                    .h(px(DIFF_LINE_HEIGHT))
+                                                    .w_full()
+                                                    .bg(rgb(background))
+                                                    .border_l_2()
+                                                    .border_color(rgb(
+                                                        if matches!(line.kind, Some('+' | '-')) {
+                                                            marker
+                                                        } else {
+                                                            background
+                                                        },
+                                                    ))
+                                                    .flex()
                                                     .font_family(MONO_FONT)
-                                                    .text_size(px(12.))
-                                                    .line_height(relative(1.65))
-                                                    .p(px(10.))
-                                                    .bg(rgb(colors.surface)),
-                                            ),
-                                    )
-                                    .code_block_highlighter(move |block| {
-                                        code_highlights(&block.code(), &language, is_diff, dark)
-                                    }),
-                                ),
+                                                    .text_size(px(11.))
+                                                    .line_height(px(DIFF_LINE_HEIGHT))
+                                                    .text_color(rgb(marker))
+                                                    .children([line.old, line.new].map(|number| {
+                                                        div()
+                                                            .w(px(number_width))
+                                                            .flex_none()
+                                                            .pr_2()
+                                                            .text_right()
+                                                            .child(
+                                                                number
+                                                                    .map(|n| n.to_string())
+                                                                    .unwrap_or_default(),
+                                                            )
+                                                    }))
+                                            }),
+                                        ))
+                                })
+                                .child(code),
                         ),
                 )
                 .child(ScrollableMask::new(Axis::Vertical, &scroll).id(id))
+                .when(is_diff, |element| element.horizontal_scrollbar(&scroll))
                 .vertical_scrollbar(&scroll),
         )
         .into_any_element()
@@ -431,14 +586,40 @@ fn fenced_code(code: &str, language: &str) -> String {
     } else {
         "text"
     };
-    format!("{fence}{language}\n{code}\n{fence}")
+    let newline = if code.ends_with('\n') { "" } else { "\n" };
+    format!("{fence}{language}\n{code}{newline}{fence}")
 }
 
-fn diff_lines(code: &str) -> impl Iterator<Item = (&str, Option<char>)> {
+struct DiffLine<'a> {
+    text: &'a str,
+    kind: Option<char>,
+    old: Option<usize>,
+    new: Option<usize>,
+}
+
+fn diff_lines(code: &str) -> impl Iterator<Item = DiffLine<'_>> {
     let mut in_hunk = false;
+    let (mut old, mut new) = (None, None);
+    let mut remaining = (0, 0);
     code.split_inclusive('\n').map(move |line| {
         if line.starts_with("@@") || line.starts_with("diff ") {
             in_hunk = line.starts_with("@@");
+            (old, new) = (None, None);
+            remaining = (0, 0);
+            if let Some((before, after)) = line
+                .strip_prefix("@@ -")
+                .and_then(|line| line.split_once(" +"))
+                && let Some((after, _)) = after.split_once(" @@")
+            {
+                let range = |text: &str| {
+                    let (start, count) = text.split_once(',').unwrap_or((text, "1"));
+                    Some((start.parse::<usize>().ok()?, count.parse::<usize>().ok()?))
+                };
+                if let (Some(before), Some(after)) = (range(before), range(after)) {
+                    (old, new) = (Some(before.0), Some(after.0));
+                    remaining = (before.1, after.1);
+                }
+            }
         }
         let kind = match line.chars().next() {
             Some('+') if in_hunk || !line.starts_with("+++") => Some('+'),
@@ -446,7 +627,25 @@ fn diff_lines(code: &str) -> impl Iterator<Item = (&str, Option<char>)> {
             Some(' ') => Some(' '),
             _ => None,
         };
-        (line, kind)
+        let result = DiffLine {
+            text: line,
+            kind,
+            old: old.filter(|_| matches!(kind, Some('-' | ' '))),
+            new: new.filter(|_| matches!(kind, Some('+' | ' '))),
+        };
+        if result.old.is_some() {
+            old = old.and_then(|line| line.checked_add(1));
+            remaining.0 = remaining.0.saturating_sub(1);
+        }
+        if result.new.is_some() {
+            new = new.and_then(|line| line.checked_add(1));
+            remaining.1 = remaining.1.saturating_sub(1);
+        }
+        if old.is_some() && new.is_some() && remaining == (0, 0) {
+            in_hunk = false;
+            (old, new) = (None, None);
+        }
+        result
     })
 }
 
@@ -459,7 +658,7 @@ pub(super) fn code_highlights(
     let colors = Palette::for_dark(dark);
     static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
     static THEMES: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
-    let syntax = SYNTAXES
+    let mut syntax = SYNTAXES
         .find_syntax_by_token(language)
         .unwrap_or_else(|| SYNTAXES.find_syntax_plain_text());
     let theme = &THEMES.themes[if dark {
@@ -471,7 +670,29 @@ pub(super) fn code_highlights(
     let mut after = HighlightLines::new(syntax, theme);
     let mut ranges = Vec::new();
     let mut offset = 0;
-    for (line, kind) in diff_lines(code) {
+    for DiffLine {
+        text: line, kind, ..
+    } in diff_lines(code)
+    {
+        if diff && kind.is_none() {
+            if let Some(path) = line
+                .strip_prefix("+++ ")
+                .or_else(|| line.strip_prefix("--- "))
+            {
+                // A workspace review can contain several files/languages.
+                if path.trim() != "/dev/null" {
+                    syntax = Path::new(path.trim().trim_matches('"'))
+                        .extension()
+                        .and_then(|extension| extension.to_str())
+                        .and_then(|extension| SYNTAXES.find_syntax_by_extension(extension))
+                        .unwrap_or_else(|| SYNTAXES.find_syntax_plain_text());
+                }
+            }
+            if line.starts_with("@@") || line.starts_with("diff ") || line.starts_with("+++ ") {
+                before = HighlightLines::new(syntax, theme);
+                after = HighlightLines::new(syntax, theme);
+            }
+        }
         let (prefix, background) = if diff && kind == Some('+') {
             (1, Some(rgb(colors.diff_added).into()))
         } else if diff && kind == Some('-') {
@@ -621,6 +842,20 @@ mod tests {
                 style.color.unwrap().into(),
                 rgb(colors.surface)
             ) >= 4.5));
+            let header = "diff --git a/main.rs b/main.rs\n--- a/main.rs\n+++ b/main.rs\n";
+            let review = code_highlights(&format!("{header}{diff}"), "diff", true, dark);
+            assert_eq!(
+                review
+                    .into_iter()
+                    .filter(|(range, _)| range.start >= header.len())
+                    .map(|(range, style)| (
+                        range.start - header.len()..range.end - header.len(),
+                        style
+                    ))
+                    .collect::<Vec<_>>(),
+                code_highlights(&diff, "rs", true, dark),
+                "workspace patches should use each file's syntax, not diff syntax"
+            );
         }
         assert_ne!(
             code_highlights(code, "rs", false, false),
@@ -630,11 +865,135 @@ mod tests {
             fenced_code("```\n# literal", "md"),
             "````md\n```\n# literal\n````"
         );
+        assert_eq!(fenced_code("line\n", "rs"), "```rs\nline\n```");
         assert!(fenced_code("literal", "bad\n# injected").starts_with("```text\n"));
         let diff = "--- a/file.md\n+++ b/file.md\n@@ -1 +1 @@\n----\n++++\n";
         assert_eq!(
-            diff_lines(diff).map(|(_, kind)| kind).collect::<Vec<_>>(),
+            diff_lines(diff).map(|line| line.kind).collect::<Vec<_>>(),
             vec![None, None, None, Some('-'), Some('+')]
         );
+    }
+
+    #[test]
+    fn diff_gutters_follow_hunks_without_inventing_snippet_line_numbers() {
+        let patch = "--- a/main.rs\n+++ b/main.rs\n@@ -9,3 +12,3 @@ fn main() {\n context\n-old\n+你好\n tail\n@@ -20,0 +24,2 @@\n+\n++++\n\\ No newline at end of file\n--- a/gone.rs\n+++ /dev/null\n@@ -1 +0,0 @@\n----\n";
+        let rows = diff_lines(patch).collect::<Vec<_>>();
+        assert_eq!(rows.iter().map(|row| row.text).collect::<String>(), patch);
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.kind.is_some())
+                .map(|row| (row.kind, row.old, row.new))
+                .collect::<Vec<_>>(),
+            vec![
+                (Some(' '), Some(9), Some(12)),
+                (Some('-'), Some(10), None),
+                (Some('+'), None, Some(13)),
+                (Some(' '), Some(11), Some(14)),
+                (Some('+'), None, Some(24)),
+                (Some('+'), None, Some(25)),
+                (Some('-'), Some(1), None),
+            ]
+        );
+        for patch in [
+            "-old\n+new",
+            "@@ invalid @@\n-old\n+new",
+            "@@@ combined diff @@@\n-old\n+new",
+        ] {
+            assert!(diff_lines(patch).all(|line| line.old.is_none() && line.new.is_none()));
+        }
+    }
+
+    struct DiffHarness {
+        detail: ToolDetail,
+    }
+
+    impl Render for DiffHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(480.))
+                .child(gpui_kit::base::TextSelectionLayer)
+                .child(render_detail(
+                    "test-diff".into(),
+                    &self.detail,
+                    Language::English,
+                ))
+        }
+    }
+
+    #[gpui::test]
+    fn diff_keeps_compact_lines_scrolls_both_axes_and_copies_the_original(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::{ScrollDelta, ScrollWheelEvent, point};
+
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let text = format!(
+            "@@ -1,30 +1,30 @@\n{}{}",
+            "-old\n".repeat(30),
+            format!("+{}\n", "你好 very long line ".repeat(12)).repeat(30)
+        );
+        let (_, cx) = cx.add_window_view(|_, _| DiffHarness {
+            detail: ToolDetail {
+                title: "main.rs".into(),
+                text: text.clone(),
+                language: "rs".into(),
+                diff: true,
+            },
+        });
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                window.refresh();
+                let _ = window.draw(cx);
+            });
+        };
+        draw(cx);
+        let viewport = cx.debug_bounds("test-diff").unwrap();
+        let content = cx.debug_bounds("test-diff-content").unwrap();
+        assert_eq!(viewport.size.height, px(DETAIL_HEIGHT));
+        assert!(content.size.width > viewport.size.width);
+        // No wrapping or extra paragraph spacing, including Unicode and blank lines.
+        assert_eq!(
+            content.size.height,
+            px(text.lines().count() as f32 * DIFF_LINE_HEIGHT)
+        );
+        let start = viewport.origin + point(px(65.), px(DIFF_LINE_HEIGHT + 5.));
+        let end = viewport.origin + point(px(115.), px(DIFF_LINE_HEIGHT * 2. + 5.));
+        cx.simulate_mouse_down(start, gpui::MouseButton::Left, Default::default());
+        cx.simulate_mouse_move(end, gpui::MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(end, gpui::MouseButton::Left, Default::default());
+        assert_eq!(
+            cx.update(gpui_kit::base::TextSelection::selected_text),
+            "-old\n-old\n\n", // TextView adds a code-block separator after the selected lines.
+            "cross-line selection must exclude gutter numbers"
+        );
+        for delta in [point(px(-80.), px(0.)), point(px(0.), px(-60.))] {
+            let before = cx.debug_bounds("test-diff-content").unwrap();
+            cx.simulate_event(ScrollWheelEvent {
+                position: viewport.center(),
+                delta: ScrollDelta::Pixels(delta),
+                ..Default::default()
+            });
+            draw(cx);
+            let after = cx.debug_bounds("test-diff-content").unwrap();
+            assert_eq!(after.origin, before.origin + delta);
+        }
+        let scrolled = cx.debug_bounds("test-diff-content").unwrap();
+        for dark in [false, true] {
+            cx.update(|_, cx| {
+                theme::apply_theme(
+                    ResolvedAppearance {
+                        dark,
+                        ..*cx.global::<ResolvedAppearance>()
+                    },
+                    cx,
+                );
+            });
+            draw(cx);
+            assert_eq!(cx.debug_bounds("test-diff-content").unwrap(), scrolled);
+        }
+        let copy = cx.debug_bounds("test-diff-copy").unwrap().center();
+        cx.simulate_click(copy, Default::default());
+        cx.update(|_, cx| assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), text));
     }
 }
