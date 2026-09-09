@@ -1,4 +1,7 @@
 {
+  "自定义模型 · 由当前 API 验证可用性": "Custom model · Availability is checked by the current API",
+  "搜索模型，或输入第三方 API 的模型 ID": "Search models or enter a third-party API model ID",
+  "使用自定义模型": "Use custom model",
   "语言": "Language",
   "界面语言": "Display language",
   "立即生效，并在下次启动时保留。": "Applies immediately and is remembered on restart.",

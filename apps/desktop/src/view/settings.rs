@@ -400,7 +400,9 @@ impl NexusView {
                         .shadow(material.shadow())
                         .child(
                             List::new(&self.title_model_select)
-                                .search_placeholder(locale.text("按 Provider、名称或模型 ID 搜索"))
+                                .search_placeholder(
+                                    self.title_model_select_content.search_placeholder(),
+                                )
                                 .size_full(),
                         ),
                 )

@@ -41,6 +41,18 @@ impl ModelCatalogState {
         }
     }
 
+    pub(crate) fn can_select(&self, harness: HarnessKind, id: &str) -> bool {
+        if id.is_empty() || id.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return false;
+        }
+        // Claude cannot discover all model IDs exposed by a third-party API.
+        self.models()
+            .and_then(|models| models.iter().find(|model| model.id == id))
+            .map_or(harness == HarnessKind::Claude, |model| {
+                model.availability.is_selectable()
+            })
+    }
+
     pub(crate) fn accepts(&self, request_id: Uuid) -> bool {
         matches!(self, Self::Loading { request_id: current, .. } if *current == request_id)
     }
@@ -466,10 +478,9 @@ impl AppModel {
     }
 
     pub(crate) fn model_override_is_unavailable(&self) -> bool {
-        self.model_override.is_some()
-            && self
-                .selected_catalog_model()
-                .is_none_or(|model| !model.availability.is_selectable())
+        self.model_override
+            .as_deref()
+            .is_some_and(|id| !self.model_catalog.can_select(self.selected_harness, id))
     }
 
     pub(crate) fn catalog_selection_is_valid(&self) -> bool {

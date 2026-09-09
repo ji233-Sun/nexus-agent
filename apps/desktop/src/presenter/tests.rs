@@ -4177,7 +4177,10 @@ fn catalog_context_changes_ignore_late_responses_and_keep_missing_model_names() 
             if *request_id == current && executable == "/new/executable" && Path::new(cwd) == other.canonicalize().unwrap())));
         emit_current_catalog(&presenter, &runner, vec![]);
         presenter.drain_events();
-        assert!(!presenter.model().catalog_selection_is_valid());
+        assert_eq!(
+            presenter.model().catalog_selection_is_valid(),
+            harness == HarnessKind::Claude
+        );
         assert_eq!(
             presenter.model().model_override_name.as_deref(),
             Some("Recognizable name")
@@ -4840,4 +4843,77 @@ fn history_responses_only_update_the_selected_thread() {
         presenter.model().working_directory(),
         Some(local_path.as_str())
     );
+}
+
+#[test]
+fn claude_custom_model_is_persisted_and_sent_without_catalog_discovery() {
+    let (mut presenter, runner, _credentials, _directory) = provider_fixture();
+    presenter
+        .model
+        .harnesses
+        .insert(HarnessKind::Claude, ready_probe(HarnessKind::Claude));
+    let profile_id = presenter
+        .save_provider_profile(profile_draft(None, "Third party", "secret"))
+        .unwrap();
+    emit_current_catalog(&presenter, &runner, claude_aliases());
+    presenter.drain_events();
+    presenter.select_catalog_model(Some("kimi-k2.5".into()));
+    assert!(presenter.model().catalog_selection_is_valid());
+    assert_eq!(
+        presenter
+            .storage
+            .setting(&catalog_model_setting_key(
+                HarnessKind::Claude,
+                Some(profile_id)
+            ))
+            .unwrap()
+            .as_deref(),
+        Some("kimi-k2.5")
+    );
+    presenter.select_provider_profile(None);
+    assert_ne!(
+        presenter.model().model_override.as_deref(),
+        Some("kimi-k2.5")
+    );
+    presenter.select_provider_profile(Some(profile_id));
+    assert_eq!(
+        presenter.model().model_override.as_deref(),
+        Some("kimi-k2.5")
+    );
+    assert!(presenter.select_title_model(Some("glm-5".into())));
+    assert_eq!(
+        presenter.model().title_generation.model.as_deref(),
+        Some("glm-5")
+    );
+    for invalid in ["", " ", "model with spaces", "bad\nmodel"] {
+        presenter.select_catalog_model(Some(invalid.into()));
+        assert_eq!(
+            presenter.model().model_override.as_deref(),
+            Some("kimi-k2.5")
+        );
+        assert!(!presenter.select_title_model(Some(invalid.into())));
+    }
+    assert!(presenter.submit("custom model request", "claude"));
+    assert_eq!(last_start(&runner).model.as_deref(), Some("kimi-k2.5"));
+}
+
+#[test]
+fn custom_model_selection_does_not_bypass_known_unavailability_or_other_harnesses() {
+    for harness in HarnessKind::ALL {
+        let (mut presenter, runner, _credentials, _directory) = provider_fixture();
+        presenter.select_harness(harness, "claude");
+        presenter.refresh_model_catalog();
+        let mut unavailable = catalog_model("blocked-model", false, &[], ThinkingEffort::Default);
+        unavailable.availability = nexus_domain::ModelAvailability::Unavailable {
+            reason: "disabled".into(),
+        };
+        emit_current_catalog(&presenter, &runner, vec![unavailable]);
+        presenter.drain_events();
+        presenter.select_catalog_model(Some("blocked-model".into()));
+        assert!(presenter.model().model_override.is_none());
+        if harness != HarnessKind::Claude {
+            presenter.select_catalog_model(Some("kimi-k2.5".into()));
+            assert!(presenter.model().model_override.is_none());
+        }
+    }
 }

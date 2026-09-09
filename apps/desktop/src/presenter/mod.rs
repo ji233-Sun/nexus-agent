@@ -697,11 +697,10 @@ impl Presenter {
             return;
         }
         if model_id.as_deref().is_some_and(|id| {
-            !self.model.model_catalog.models().is_some_and(|models| {
-                models
-                    .iter()
-                    .any(|model| model.id == id && model.availability.is_selectable())
-            })
+            !self
+                .model
+                .model_catalog
+                .can_select(self.model.selected_harness, id)
         }) {
             self.model.status = LocalizedText::new(
                 "所选模型不在当前 {0} 目录中，请刷新后重试。",
@@ -779,12 +778,7 @@ impl Presenter {
             !self
                 .model
                 .title_model_catalog
-                .models()
-                .is_some_and(|models| {
-                    models
-                        .iter()
-                        .any(|model| model.id == id && model.availability.is_selectable())
-                })
+                .can_select(self.model.title_generation.harness, id)
         }) {
             return false;
         }

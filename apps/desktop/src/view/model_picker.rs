@@ -53,6 +53,17 @@ impl CatalogModelItem {
         }
     }
 
+    fn custom(model_id: &str, locale: Language) -> Self {
+        Self {
+            choice: CatalogModelChoice::Model(model_id.to_owned()),
+            title: model_id.to_owned(),
+            trigger_title: format!("{model_id} · {}", locale.text("未验证")),
+            detail: locale.text("自定义模型 · 由当前 API 验证可用性").into(),
+            search_text: model_id.to_owned(),
+            disabled: false,
+        }
+    }
+
     fn unavailable(
         model_id: &str,
         name: Option<&str>,
@@ -126,6 +137,7 @@ pub(super) struct CatalogModelSelectContent {
     pub(super) groups: Vec<CatalogModelGroup>,
     pub(super) selected: CatalogModelChoice,
     locale: Language,
+    harness: HarnessKind,
 }
 
 impl CatalogModelSelectContent {
@@ -181,9 +193,11 @@ impl CatalogModelSelectContent {
         {
             groups.push(CatalogModelGroup {
                 title: locale.text("当前选择").into(),
-                items: vec![CatalogModelItem::unavailable(
-                    model_id, model_name, catalog, locale,
-                )],
+                items: vec![if catalog.can_select(harness, model_id) {
+                    CatalogModelItem::custom(model_id, locale)
+                } else {
+                    CatalogModelItem::unavailable(model_id, model_name, catalog, locale)
+                }],
             });
         }
 
@@ -229,7 +243,16 @@ impl CatalogModelSelectContent {
             groups,
             selected,
             locale,
+            harness,
         }
+    }
+
+    pub(super) fn search_placeholder(&self) -> &'static str {
+        self.locale.text(if self.harness == HarnessKind::Claude {
+            "搜索模型，或输入第三方 API 的模型 ID"
+        } else {
+            "按 Provider、名称或模型 ID 搜索"
+        })
     }
 
     pub(super) fn selected_index(&self) -> Option<IndexPath> {
@@ -371,6 +394,21 @@ impl ModelPickerList {
                 })
             })
             .collect();
+        let id = self.query.trim();
+        if self.content.harness == HarnessKind::Claude
+            && ModelCatalogState::Empty.can_select(self.content.harness, id)
+            && !self
+                .content
+                .groups
+                .iter()
+                .flat_map(|group| &group.items)
+                .any(|item| item.choice == CatalogModelChoice::Model(id.to_owned()))
+        {
+            self.groups.push(CatalogModelGroup {
+                title: self.content.locale.text("使用自定义模型").into(),
+                items: vec![CatalogModelItem::custom(id, self.content.locale)],
+            });
+        }
     }
 
     pub(super) fn item(&self, index: IndexPath) -> Option<&CatalogModelItem> {
@@ -677,7 +715,9 @@ impl NexusView {
                     .child(
                         div().flex_1().min_h_0().min_w_0().child(
                             List::new(&self.catalog_model_select)
-                                .search_placeholder(locale.text("按 Provider、名称或模型 ID 搜索"))
+                                .search_placeholder(
+                                    self.catalog_model_select_content.search_placeholder(),
+                                )
                                 .size_full(),
                         ),
                     )
@@ -759,5 +799,48 @@ impl NexusView {
                     .update(cx, |list, cx| list.focus(window, cx));
                 cx.notify();
             }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claude_search_offers_custom_id_and_keeps_selection_unverified() {
+        let mut model = AppModel {
+            conversation: crate::model::ConversationState {
+                selected_harness: HarnessKind::Claude,
+                model_catalog: ModelCatalogState::Empty,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut list = ModelPickerList::new(CatalogModelSelectContent::from_model(&model));
+        list.query = "  kimi-k2.5  ".into();
+        list.filter();
+        let item = list.item(list.selected_index().unwrap()).unwrap();
+        assert_eq!(item.choice, CatalogModelChoice::Model("kimi-k2.5".into()));
+        assert!(!item.disabled);
+        assert!(item.trigger_title.contains("未验证"));
+        model.model_override = Some("kimi-k2.5".into());
+        list.replace_content(CatalogModelSelectContent::from_model(&model));
+        assert_eq!(list.groups.iter().flat_map(|group| &group.items).count(), 1);
+        assert!(!list.item(list.selected_index().unwrap()).unwrap().disabled);
+        for query in ["", "  ", "bad model", "bad\nmodel"] {
+            list.query = query.into();
+            list.filter();
+            assert!(
+                !list
+                    .groups
+                    .iter()
+                    .any(|group| group.title == "使用自定义模型")
+            );
+        }
+        model.selected_harness = HarnessKind::Codex;
+        model.model_override = None;
+        list.query = "glm-5".into();
+        list.replace_content(CatalogModelSelectContent::from_model(&model));
+        assert!(list.groups.is_empty());
     }
 }
