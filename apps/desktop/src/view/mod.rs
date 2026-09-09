@@ -1443,7 +1443,7 @@ impl NexusView {
                     )))
                     .debug_selector(|| "composer-directory".into())
                     .min_w_0()
-                    .max_w_full()
+                    .w_full()
                     .flex()
                     .items_center()
                     .gap_2()
@@ -2251,6 +2251,7 @@ mod catalog_model_tests {
             let mode = cx.debug_bounds("workspace-mode").unwrap();
             let base = cx.debug_bounds("workspace-base").unwrap();
             let composer = cx.debug_bounds("composer-surface").unwrap();
+            assert_eq!(directory.left(), context.left() + px(12.));
             assert!(
                 directory.center().y >= mode.center().y - px(1.)
                     && directory.center().y <= mode.center().y + px(1.)
