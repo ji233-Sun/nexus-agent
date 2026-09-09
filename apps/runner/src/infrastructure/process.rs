@@ -1144,6 +1144,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn codex_async_user_ask_keeps_session_alive_and_requires_native_receipt() {
+        let binaries = tempfile::tempdir().unwrap();
+        let executable = compile_fake_harness(binaries.path());
+        for scenario in ["live", "completed", "rejected", "cancelled"] {
+            let directory = tempfile::tempdir().unwrap();
+            let (mut request, _, _) =
+                prepared_native_user_ask_run(directory.path(), &executable, HarnessKind::Codex);
+            request.prompt = format!("codex-async-{scenario}");
+            let (spec, decoder) = super::super::harness::prepare(&request, directory.path());
+            let (cancel_tx, cancel) = watch::channel(false);
+            let (input, input_rx) = mpsc::unbounded_channel();
+            let user_asks = PendingUserAsks::default();
+            let (emitter, mut events) = Emitter::channel();
+            let task = tokio::spawn(run_prepared_harness(
+                request,
+                spec,
+                decoder,
+                cancel,
+                input_rx,
+                user_asks.clone(),
+                emitter,
+            ));
+            let (request_id, questions, mut received) = receive_user_ask(&mut events).await;
+            if scenario != "live" {
+                loop {
+                    let event = timeout(Duration::from_secs(10), events.recv())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .event;
+                    let waiting = matches!(&event, Event::RunStatusChanged { message: Some(message), .. } if message.contains("等待 User Ask"));
+                    received.push(event);
+                    if waiting {
+                        break;
+                    }
+                }
+                assert!(
+                    !task.is_finished(),
+                    "async questions must survive model turn completion"
+                );
+            }
+            let answers = vec![
+                UserAskAnswer {
+                    question_id: questions[0].id.clone(),
+                    value: UserAskAnswerValue::Selected(vec![questions[0].options[1].id.clone()]),
+                },
+                UserAskAnswer {
+                    question_id: questions[1].id.clone(),
+                    value: UserAskAnswerValue::Text("每天半小时".into()),
+                },
+            ];
+            if scenario == "cancelled" {
+                cancel_tx.send(true).unwrap();
+            } else {
+                input
+                    .send(RunInput::UserAsk(
+                        user_asks.claim_answer(request_id, answers.clone()).unwrap(),
+                    ))
+                    .unwrap();
+            }
+            let (status, _) = timeout(Duration::from_secs(10), task)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                status,
+                match scenario {
+                    "cancelled" => RunStatus::Cancelled,
+                    "rejected" => RunStatus::Failed,
+                    _ => RunStatus::Completed,
+                }
+            );
+            received.extend(collect_remaining_events(events).await);
+            let finishes = received
+                .iter()
+                .filter_map(|event| match event {
+                    Event::RunUserAskFinished {
+                        request_id: id,
+                        status,
+                        ..
+                    } if *id == request_id => Some(*status),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                finishes,
+                vec![match scenario {
+                    "cancelled" => UserAskStatus::Cancelled,
+                    "rejected" => UserAskStatus::Failed,
+                    _ => UserAskStatus::Answered,
+                }]
+            );
+            assert!(user_asks.claim_answer(request_id, answers).is_err());
+            if scenario != "cancelled" {
+                let frame: Value = serde_json::from_str(
+                    &std::fs::read_to_string(directory.path().join("user-ask-input.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(frame["method"], "turn/start");
+                assert_eq!(
+                    frame["params"]["input"][0]["text"],
+                    "User Ask answers:\n\nChoose a skill?\n乐器\n\nAny details?\n每天半小时"
+                );
+                if scenario != "rejected" {
+                    assert!(received.iter().any(|event| matches!(event, Event::RunMessageCompleted { text, .. } if text == "answered")));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn fake_user_ask_round_trip_keeps_the_run_and_answer_mapping() {
         let binaries = tempfile::tempdir().unwrap();
         let directory = tempfile::tempdir().unwrap();

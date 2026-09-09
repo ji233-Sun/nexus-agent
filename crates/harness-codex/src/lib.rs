@@ -72,6 +72,7 @@ pub fn prepare_run(request: &StartRun, cwd: &Path) -> (LaunchSpec, EventDecoder)
             turn_id: None,
             approval_items: HashMap::new(),
             pending_user_asks: HashMap::new(),
+            seen_async_asks: HashSet::new(),
         },
     )
 }
@@ -493,11 +494,17 @@ pub struct EventDecoder {
     turn_id: Option<String>,
     approval_items: HashMap<String, Value>,
     pending_user_asks: HashMap<String, PendingUserAsk>,
+    seen_async_asks: HashSet<String>,
 }
 
 struct PendingUserAsk {
-    id: Value,
+    reply: UserAskReply,
     questions: Vec<UserAskQuestion>,
+}
+
+enum UserAskReply {
+    Rpc(Value),
+    Async { submitted: bool },
 }
 
 impl LineDecoder for EventDecoder {
@@ -541,19 +548,61 @@ impl LineDecoder for EventDecoder {
                 (UserAskAnswerMode::Choice { .. }, UserAskAnswerValue::Selected(values))
                     if values.len() == 1
                         && values.iter().all(|value| {
-                            question.options.iter().any(|option| option.label == *value)
+                            question.options.iter().any(|option| option.id == *value)
                         }) =>
                 {
-                    values.iter().cloned().map(Value::String).collect()
+                    values
+                        .iter()
+                        .map(|value| {
+                            Value::String(
+                                question
+                                    .options
+                                    .iter()
+                                    .find(|option| option.id == *value)
+                                    .unwrap()
+                                    .label
+                                    .clone(),
+                            )
+                        })
+                        .collect()
                 }
                 _ => return None,
             };
             encoded.insert(question.id.clone(), json!({"answers": values}));
         }
-        let pending = self.pending_user_asks.remove(native_request_id)?;
-        Some(InputFrame(
-            json!({"id": pending.id, "result": {"answers": encoded}}),
-        ))
+        match &pending.reply {
+            UserAskReply::Rpc(id) => {
+                let frame = InputFrame(json!({"id": id, "result": {"answers": encoded}}));
+                self.pending_user_asks.remove(native_request_id);
+                Some(frame)
+            }
+            UserAskReply::Async { submitted: true } => None,
+            UserAskReply::Async { submitted: false } => {
+                let text = pending
+                    .questions
+                    .iter()
+                    .map(|question| {
+                        format!(
+                            "{}\n{}",
+                            question.prompt,
+                            encoded[&question.id]["answers"][0].as_str().unwrap()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                // turn/start atomically steers an active turn or starts the next one.
+                // Async questions receive a new user message, not a JSON-RPC tool result.
+                let frame = InputFrame(
+                    json!({"id": native_request_id, "method": "turn/start", "params": {
+                        "threadId": self.thread_id.as_ref()?,
+                        "input": [{"type": "text", "text": format!("User Ask answers:\n\n{text}")}]
+                    }}),
+                );
+                self.pending_user_asks.get_mut(native_request_id)?.reply =
+                    UserAskReply::Async { submitted: true };
+                Some(frame)
+            }
+        }
     }
 }
 
@@ -585,6 +634,34 @@ impl EventDecoder {
             return self.decode_approval(frame);
         }
         if let Some(id) = frame.get("id").and_then(Value::as_str) {
+            if self.pending_user_asks.get(id).is_some_and(|pending| {
+                matches!(pending.reply, UserAskReply::Async { submitted: true })
+            }) {
+                self.pending_user_asks.remove(id);
+                if frame.get("error").is_none()
+                    && let Some(turn_id) = frame
+                        .pointer("/result/turn/id")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty())
+                {
+                    self.turn_id = Some(turn_id.into());
+                    return vec![DecodedEvent::UserAskFinished {
+                        native_request_id: id.into(),
+                        status: UserAskStatus::Answered,
+                        message: None,
+                    }];
+                }
+                let message = "Codex 未接受 User Ask 回答，请检查会话状态。".to_owned();
+                return vec![
+                    DecodedEvent::UserAskFinished {
+                        native_request_id: id.into(),
+                        status: UserAskStatus::Failed,
+                        message: Some(message.clone()),
+                    },
+                    DecodedEvent::Error(message),
+                    DecodedEvent::TurnCompleted,
+                ];
+            }
             return if let Some(message) = frame.pointer("/error/message").and_then(Value::as_str) {
                 vec![DecodedEvent::InputRejected {
                     id: id.into(),
@@ -698,6 +775,13 @@ impl EventDecoder {
             }
             Some("item/completed") => {
                 self.approval_items.remove(&item_id(&params["item"]));
+                let item = &params["item"];
+                if item["type"] == "agentMessage"
+                    && item["delivery"] == "async"
+                    && item["questions"].is_array()
+                {
+                    return self.decode_async_user_ask(item);
+                }
                 decode_completed_item(&params["item"])
             }
             Some("serverRequest/resolved") => {
@@ -718,9 +802,10 @@ impl EventDecoder {
                 .map(|text| vec![DecodedEvent::TextDelta(text.into())])
                 .unwrap_or_default(),
             Some("turn/completed") => {
-                self.pending_user_asks.clear();
+                self.turn_id = None;
                 let mut events = Vec::new();
                 if params.pointer("/turn/status").and_then(Value::as_str) != Some("completed") {
+                    self.pending_user_asks.clear();
                     events.push(DecodedEvent::Error(
                         params
                             .pointer("/turn/error/message")
@@ -728,8 +813,26 @@ impl EventDecoder {
                             .map(summarize_text)
                             .unwrap_or_else(|| "Codex 轮次已中断。".into()),
                     ));
+                } else {
+                    self.pending_user_asks.retain(|id, pending| {
+                        if matches!(pending.reply, UserAskReply::Rpc(_)) {
+                            events.push(DecodedEvent::UserAskFinished {
+                                native_request_id: id.clone(),
+                                status: UserAskStatus::Expired,
+                                message: None,
+                            });
+                            false
+                        } else {
+                            true
+                        }
+                    });
                 }
-                events.push(DecodedEvent::TurnCompleted);
+                if self.pending_user_asks.is_empty() {
+                    events.push(DecodedEvent::TurnCompleted);
+                } else {
+                    // The model can finish while an async question is still awaiting the user.
+                    events.push(DecodedEvent::Status("Codex 等待 User Ask 回答…".into()));
+                }
                 events
             }
             Some("turn/plan/updated") => vec![DecodedEvent::Status(format!(
@@ -745,6 +848,77 @@ impl EventDecoder {
             }
             _ => Vec::new(),
         }
+    }
+
+    fn decode_async_user_ask(&mut self, item: &Value) -> Vec<DecodedEvent> {
+        let Some(id) = item
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        else {
+            return decode_completed_item(item);
+        };
+        let native_request_id = format!("async:{id}");
+        if self.seen_async_asks.contains(&native_request_id) {
+            return Vec::new();
+        }
+        let questions = item["questions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .map(|(index, question)| {
+                let prompt = question.get("title")?.as_str()?.to_owned();
+                let options = match question.get("options").filter(|options| !options.is_null()) {
+                    Some(options) => options
+                        .as_array()?
+                        .iter()
+                        .enumerate()
+                        .map(|(index, option)| {
+                            Some(UserAskOption {
+                                id: index.to_string(),
+                                label: option.as_str()?.to_owned(),
+                                description: None,
+                            })
+                        })
+                        .collect::<Option<Vec<_>>>()?,
+                    None => Vec::new(),
+                };
+                Some(UserAskQuestion {
+                    id: index.to_string(),
+                    prompt,
+                    answer_mode: if options.is_empty() {
+                        UserAskAnswerMode::Text
+                    } else {
+                        UserAskAnswerMode::Choice {
+                            multiple: false,
+                            allow_custom: true,
+                        }
+                    },
+                    options,
+                })
+            })
+            .collect::<Option<Vec<_>>>();
+        let Some(questions) = questions.filter(|questions| !questions.is_empty()) else {
+            return vec![
+                DecodedEvent::Error("Codex 返回了无法解析的异步 User Ask 问题。".into()),
+                DecodedEvent::TurnCompleted,
+            ];
+        };
+        self.seen_async_asks.insert(native_request_id.clone());
+        self.pending_user_asks.insert(
+            native_request_id.clone(),
+            PendingUserAsk {
+                reply: UserAskReply::Async { submitted: false },
+                questions: questions.clone(),
+            },
+        );
+        vec![DecodedEvent::UserAskRequested(UserAskRequest {
+            native_request_id,
+            questions,
+            timeout_ms: None,
+            resolve_on_send: false,
+        })]
     }
 
     fn decode_user_ask(&mut self, frame: &Value) -> Vec<DecodedEvent> {
@@ -819,7 +993,7 @@ impl EventDecoder {
         self.pending_user_asks.insert(
             native_request_id.clone(),
             PendingUserAsk {
-                id: frame["id"].clone(),
+                reply: UserAskReply::Rpc(frame["id"].clone()),
                 questions: questions.clone(),
             },
         );
@@ -1337,6 +1511,135 @@ mod tests {
                         value: UserAskAnswerValue::Text("late".into()),
                     }],
                 )
+                .is_none()
+        );
+    }
+
+    fn async_question(id: &str) -> Value {
+        json!({"method": "item/completed", "params": {
+            "threadId": "thread-1", "turnId": "turn-1", "item": {
+                "id": id, "type": "agentMessage", "delivery": "async",
+                "phase": "final_answer", "text": "Choose a skill?\n- 外语\n- 乐器",
+                "questions": [
+                    {"title": "Choose a skill?", "options": ["外语", "乐器"]},
+                    {"title": "Any details?"}
+                ]
+            }
+        }})
+    }
+
+    #[test]
+    fn async_user_input_survives_turn_completion_and_waits_for_answer_receipt() {
+        for completed in [false, true] {
+            let mut decoder = decoder();
+            let frame = async_question("call-ask");
+            let events = decoder.decode_line(&frame.to_string()).unwrap();
+            let [DecodedEvent::UserAskRequested(request)] = events.as_slice() else {
+                panic!("expected structured async User Ask, got {events:?}")
+            };
+            assert!(!request.resolve_on_send);
+            assert_eq!(request.questions.len(), 2);
+            assert_eq!(request.questions[0].prompt, "Choose a skill?");
+            assert_eq!(
+                request.questions[0].answer_mode,
+                UserAskAnswerMode::Choice {
+                    multiple: false,
+                    allow_custom: true,
+                }
+            );
+            assert_eq!(request.questions[1].answer_mode, UserAskAnswerMode::Text);
+            assert!(decoder.decode_line(&frame.to_string()).unwrap().is_empty());
+            if completed {
+                let events = decoder.decode_line(r#"{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}}"#).unwrap();
+                assert!(!events.contains(&DecodedEvent::TurnCompleted));
+            }
+            let answers = [
+                UserAskAnswer {
+                    question_id: request.questions[0].id.clone(),
+                    value: if completed {
+                        UserAskAnswerValue::Text("做菜".into())
+                    } else {
+                        UserAskAnswerValue::Selected(vec![
+                            request.questions[0].options[1].id.clone(),
+                        ])
+                    },
+                },
+                UserAskAnswer {
+                    question_id: request.questions[1].id.clone(),
+                    value: UserAskAnswerValue::Text("每天\n半小时".into()),
+                },
+            ];
+            let response = decoder
+                .answer_user_ask(&request.native_request_id, &answers)
+                .unwrap()
+                .0;
+            assert_eq!(response["method"], "turn/start");
+            assert_eq!(response["params"]["threadId"], "thread-1");
+            assert_eq!(
+                response["params"]["input"][0]["text"],
+                format!(
+                    "User Ask answers:\n\nChoose a skill?\n{}\n\nAny details?\n每天\n半小时",
+                    if completed { "做菜" } else { "乐器" }
+                )
+            );
+            assert!(
+                decoder
+                    .answer_user_ask(&request.native_request_id, &answers)
+                    .is_none()
+            );
+            let receipt = json!({"id": response["id"], "result": {"turn": {"id": "turn-2"}}});
+            assert_eq!(
+                decoder.decode_line(&receipt.to_string()).unwrap(),
+                vec![DecodedEvent::UserAskFinished {
+                    native_request_id: request.native_request_id.clone(),
+                    status: UserAskStatus::Answered,
+                    message: None,
+                }]
+            );
+            assert_eq!(
+                decoder.steer("message", "continue").unwrap().0["params"]["expectedTurnId"],
+                "turn-2"
+            );
+            assert!(decoder.decode_line(&frame.to_string()).unwrap().is_empty());
+            assert_eq!(decoder.decode_line(r#"{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-2","status":"completed"}}}"#).unwrap(), vec![DecodedEvent::TurnCompleted]);
+        }
+    }
+
+    #[test]
+    fn async_user_input_rejects_foreign_turns_and_reports_failed_delivery() {
+        let mut decoder = decoder();
+        let mut frame = async_question("call-ask");
+        frame["params"]["turnId"] = "old-turn".into();
+        assert!(decoder.decode_line(&frame.to_string()).unwrap().is_empty());
+        frame["params"]["turnId"] = "turn-1".into();
+        let events = decoder.decode_line(&frame.to_string()).unwrap();
+        let [DecodedEvent::UserAskRequested(request)] = events.as_slice() else {
+            panic!("expected User Ask")
+        };
+        let answers = request
+            .questions
+            .iter()
+            .map(|question| UserAskAnswer {
+                question_id: question.id.clone(),
+                value: UserAskAnswerValue::Text("custom".into()),
+            })
+            .collect::<Vec<_>>();
+        let response = decoder
+            .answer_user_ask(&request.native_request_id, &answers)
+            .unwrap()
+            .0;
+        let events = decoder.decode_line(&json!({"id": response["id"], "error": {"code": -32600, "message": "Cannot accept input"}}).to_string()).unwrap();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            DecodedEvent::UserAskFinished {
+                status: UserAskStatus::Failed,
+                ..
+            }
+        )));
+        assert!(events.contains(&DecodedEvent::TurnCompleted));
+        assert!(
+            decoder
+                .answer_user_ask(&request.native_request_id, &answers)
                 .is_none()
         );
     }

@@ -185,6 +185,25 @@ fn run_turn(
         return;
     }
     fs::write(session_file, prompt).unwrap();
+    if prompt.starts_with("codex-async-") {
+        println!(r#"{{"method":"item/completed","params":{{"threadId":{session:?},"turnId":"turn-1","item":{{"id":"call-ask","type":"agentMessage","delivery":"async","phase":"final_answer","text":"Choose a skill?\n- 外语\n- 乐器","questions":[{{"title":"Choose a skill?","options":["外语","乐器"]}},{{"title":"Any details?"}}]}}}}}}"#);
+        if prompt != "codex-async-live" {
+            terminal(harness);
+        }
+        io::stdout().flush().unwrap();
+        let answer = input.recv_timeout(Duration::from_secs(10)).expect("missing async answer");
+        fs::write("user-ask-input.json", &answer).unwrap();
+        let id = request_id(&answer);
+        if prompt == "codex-async-rejected" {
+            println!(r#"{{"id":{id},"error":{{"code":-32600,"message":"Cannot accept input"}}}}"#);
+        } else {
+            let turn = if prompt == "codex-async-live" { "turn-1" } else { "turn-2" };
+            println!(r#"{{"id":{id},"result":{{"turn":{{"id":{turn:?}}}}}}}"#);
+            println!(r#"{{"method":"item/completed","params":{{"threadId":{session:?},"turnId":{turn:?},"item":{{"id":"reply","type":"agentMessage","text":"answered"}}}}}}"#);
+            println!(r#"{{"method":"turn/completed","params":{{"threadId":{session:?},"turn":{{"id":{turn:?},"status":"completed"}}}}}}"#);
+        }
+        return;
+    }
     if prompt == "user-ask-native" && harness != Harness::Omp {
         match harness {
             Harness::Claude => println!(
