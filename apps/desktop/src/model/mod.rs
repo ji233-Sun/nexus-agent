@@ -1,3 +1,4 @@
+pub(crate) mod cnb;
 pub(crate) mod harness_installation;
 pub(crate) mod history;
 pub(crate) mod tools;
@@ -224,6 +225,7 @@ pub(crate) struct ResolvedModelSelection {
 
 #[derive(Default)]
 pub(crate) struct AppModel {
+    pub(crate) cnb: cnb::CnbModel,
     pub(crate) language: Language,
     pub(crate) voice: voice::VoiceModel,
     pub(crate) appearance: AppearanceSettings,

@@ -1,3 +1,4 @@
+mod cnb;
 mod generation;
 mod harness_installation;
 mod history;
@@ -59,6 +60,7 @@ pub(crate) trait RunnerPort {
 }
 
 pub(crate) struct Presenter {
+    cnb_client: crate::infrastructure::cnb::Client,
     model: AppModel,
     voice_worker: Option<crate::infrastructure::voice::Worker>,
     storage: Storage,
@@ -233,6 +235,7 @@ impl Presenter {
             Err(error) => (None, Some(error.to_string())),
         };
         let mut presenter = Self {
+            cnb_client: crate::infrastructure::cnb::Client::default(),
             voice_worker: None,
             storage,
             runner,
@@ -297,6 +300,12 @@ impl Presenter {
             presenter.model.status = runner_error.unwrap_or_default().into();
         }
         presenter.load_voice_settings();
+        presenter.model.cnb.enabled = presenter
+            .storage
+            .setting("cnb_enabled")
+            .ok()
+            .flatten()
+            .is_none_or(|value| value != "false");
         presenter
     }
 
@@ -441,6 +450,7 @@ impl Presenter {
         if self.model.selected_project.is_none() {
             return;
         }
+        self.model.cnb.opened = false;
         self.cancel_voice();
         self.model.fresh_conversation();
         self.model.selected_task = None;
@@ -472,6 +482,7 @@ impl Presenter {
         self.model.streaming_text.clear();
         self.reload_tasks();
         self.refresh_model_catalog();
+        self.reset_cnb_project();
     }
 
     fn reload_projects(&mut self) {
@@ -499,6 +510,7 @@ impl Presenter {
     }
 
     pub(crate) fn select_task(&mut self, task_id: Uuid) {
+        self.model.cnb.opened = false;
         self.cancel_voice();
         if self.model.selected_task != Some(task_id) {
             let existing = self

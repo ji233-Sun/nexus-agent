@@ -109,7 +109,8 @@ impl NexusView {
                             .debug_selector(move || format!("sidebar-task-{id}"))
                             .selected(
                                 model.selected_task == Some(id)
-                                    && model.selected_codex_thread.is_none(),
+                                    && model.selected_codex_thread.is_none()
+                                    && !model.cnb.opened,
                             )
                             .suffix(move |_, _| {
                                 let archive_app = app.clone();
@@ -270,6 +271,39 @@ impl NexusView {
                             .flex()
                             .flex_col()
                             .gap_1()
+                            .when(
+                                selected && model.cnb.enabled && model.cnb.repository.is_some(),
+                                |list| {
+                                    list.child(
+                                        div().relative().ml(-px(24.)).child(
+                                            navigation_row(
+                                                colors,
+                                                (ElementId::from(project_id), "cnb"),
+                                                "CNB",
+                                                None,
+                                            )
+                                            .pl(px(34.))
+                                            .suffix(move |_, _| {
+                                                div()
+                                                    .debug_selector(|| "sidebar-cnb-icon".into())
+                                                    .absolute()
+                                                    .left(px(10.))
+                                                    .top(px(12.))
+                                                    .child(cnb::cnb_icon(16., colors.accent))
+                                            })
+                                            .debug_selector(|| "sidebar-cnb".into())
+                                            .selected(model.cnb.opened)
+                                            .on_click(
+                                                cx.listener(|app, _, window, cx| {
+                                                    app.presenter.open_cnb();
+                                                    app.focus_handle.focus(window, cx);
+                                                    cx.notify();
+                                                }),
+                                            ),
+                                        ),
+                                    )
+                                },
+                            )
                             .when(tasks.is_empty(), |list| {
                                 list.child(
                                     navigation_row(
