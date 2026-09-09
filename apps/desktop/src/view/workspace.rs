@@ -241,7 +241,9 @@ impl NexusView {
             })
             .unwrap_or_default();
         let target = cx.new(|cx| InputState::new(window, cx).default_value(target_default));
-        let message = cx.new(|cx| InputState::new(window, cx).default_value("完成任务成果"));
+        let locale = self.presenter.model().language;
+        let message =
+            cx.new(|cx| InputState::new(window, cx).default_value(locale.text("完成任务成果")));
         let app = cx.entity();
         window.open_dialog(cx, move |dialog, window, cx| {
             let model = app.read(cx).presenter.model();
