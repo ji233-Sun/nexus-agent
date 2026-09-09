@@ -10,9 +10,9 @@ use super::Command;
 
 unsafe extern "C" {
     fn nexus_microphone_authorization() -> i32;
-    fn nexus_request_microphone_authorization();
+    fn nexus_request_microphone_authorization() -> *mut c_char;
     fn nexus_speech_authorization() -> i32;
-    fn nexus_request_speech_authorization();
+    fn nexus_request_speech_authorization() -> *mut c_char;
     fn nexus_speech_start(locale: *const c_char, error: *mut *mut c_char) -> *mut c_void;
     fn nexus_speech_stop(session: *mut c_void);
     fn nexus_speech_cancel(session: *mut c_void);
@@ -126,7 +126,7 @@ fn authorize(
     commands: &mpsc::Receiver<Command>,
     initial: i32,
     query: unsafe extern "C" fn() -> i32,
-    request: unsafe extern "C" fn(),
+    request: unsafe extern "C" fn() -> *mut c_char,
     name: &str,
 ) -> anyhow::Result<()> {
     ensure_recording_not_cancelled(commands)?;
@@ -139,7 +139,9 @@ fn authorize(
     if initial != 1 {
         bail!("failed to query {name} permission");
     }
-    unsafe { request() };
+    if let Some(error) = take_string(unsafe { request() }) {
+        bail!("{error}");
+    }
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         match commands.recv_timeout(Duration::from_millis(50)) {
@@ -194,4 +196,41 @@ pub(super) fn locales() -> Vec<String> {
         .lines()
         .map(str::to_owned)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn voice_permission_requests_reject_bare_test_binary_without_usage_descriptions() {
+        // cargo test, like cargo run, has no .app Info.plist. Neither call may prompt.
+        let (_sender, commands) = mpsc::channel();
+        let microphone = authorize(
+            &commands,
+            1,
+            nexus_microphone_authorization,
+            nexus_request_microphone_authorization,
+            "microphone",
+        )
+        .unwrap_err();
+        assert!(
+            microphone
+                .to_string()
+                .contains("NSMicrophoneUsageDescription")
+        );
+        let speech = authorize(
+            &commands,
+            1,
+            nexus_speech_authorization,
+            nexus_request_speech_authorization,
+            "Speech recognition",
+        )
+        .unwrap_err();
+        assert!(
+            speech
+                .to_string()
+                .contains("NSSpeechRecognitionUsageDescription")
+        );
+    }
 }
