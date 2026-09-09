@@ -1442,6 +1442,7 @@ impl NexusView {
             .px_3()
             .flex()
             .items_center()
+            .justify_between()
             .gap_2()
             .child(
                 // Recreate tooltip state when switching to a different execution directory.
@@ -1452,7 +1453,6 @@ impl NexusView {
                     )))
                     .debug_selector(|| "composer-directory".into())
                     .min_w_0()
-                    .w_full()
                     .flex()
                     .items_center()
                     .gap_2()
@@ -1488,6 +1488,7 @@ impl NexusView {
                             .track_focus(&self.project_search_input.focus_handle(cx))
                             .trigger(
                                 Button::new("project-picker-trigger")
+                                    .debug_selector(|| "project-picker-trigger".into())
                                     .ghost()
                                     .small()
                                     .p_0()
@@ -1517,7 +1518,7 @@ impl NexusView {
                             .when(self.project_picker_open, |popover| {
                                 popover.child(self.render_project_picker(cx))
                             })
-                            .map(|popover| div().min_w_0().flex_1().child(popover))
+                            .map(|popover| div().min_w_0().child(popover))
                     }),
             )
             .child(self.render_workspace_controls(cx))
@@ -2603,6 +2604,12 @@ mod catalog_model_tests {
                 .update(cx, |input, cx| input.set_value("keep draft", window, cx));
         });
         cx.run_until_parked();
+        let trigger = cx.debug_bounds("project-picker-trigger").unwrap();
+        let name = cx.debug_bounds("composer-directory-name").unwrap();
+        assert!(
+            trigger.size.width <= name.size.width + px(24.),
+            "directory trigger should fit its icon and name: {trigger:?}, {name:?}"
+        );
         click_debug(cx, "composer-directory");
         cx.run_until_parked();
         assert!(cx.debug_bounds("project-picker-surface").is_some());
