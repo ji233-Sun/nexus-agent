@@ -2173,6 +2173,7 @@ mod catalog_model_tests {
         });
         cx.simulate_resize(gpui::size(px(1040.), px(680.)));
         view.update_in(cx, |view, window, cx| {
+            view.set_language(Language::English, window, cx);
             view.open_workspace_review(id, window, cx);
             finish_workspace_operation(&mut view.presenter);
             cx.notify();
@@ -2191,7 +2192,7 @@ mod catalog_model_tests {
             let _ = window.draw(cx);
         });
         click_debug(cx, "commit-workspace-files");
-        cx.simulate_prompt_answer("取消");
+        cx.simulate_prompt_answer("Cancel");
         cx.run_until_parked();
         cx.update(|window, cx| {
             window.simulate_next_frame(cx);
@@ -2202,7 +2203,7 @@ mod catalog_model_tests {
             before
         );
         click_debug(cx, "commit-workspace-files");
-        cx.simulate_prompt_answer("提交");
+        cx.simulate_prompt_answer("Commit");
         cx.run_until_parked();
         view.update(cx, |view, cx| {
             finish_workspace_operation(&mut view.presenter);
@@ -2211,6 +2212,12 @@ mod catalog_model_tests {
         assert_ne!(
             crate::infrastructure::git::git(cwd, &["rev-parse", "HEAD"]).unwrap(),
             before
+        );
+        assert_eq!(
+            crate::infrastructure::git::git(cwd, &["log", "-1", "--format=%s"])
+                .unwrap()
+                .trim(),
+            "Complete task work"
         );
         assert!(
             crate::infrastructure::git::git(cwd, &["status", "--porcelain"])

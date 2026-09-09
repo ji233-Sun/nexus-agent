@@ -191,6 +191,10 @@ mod tests {
         }
         assert_eq!(Language::English.text("设置"), "Settings");
         assert_eq!(Language::Chinese.text("设置"), "设置");
+        assert_eq!(Language::English.text("保存"), "Save");
+        assert_eq!(Language::Chinese.text("保存"), "保存");
+        assert_eq!(Language::English.text("完成任务成果"), "Complete task work");
+        assert_eq!(Language::Chinese.text("完成任务成果"), "完成任务成果");
         assert_eq!(
             Language::English.effort(ThinkingEffort::Default),
             "Model default"
