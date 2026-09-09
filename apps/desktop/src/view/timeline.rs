@@ -43,9 +43,9 @@ impl NexusView {
                             .py(px(if compact { 16. } else { 32. }))
                             .flex()
                             .flex_col()
-                            .gap(px(16.))
+                            .gap(px(24.))
                             .when(empty, |element| {
-                                element.child(self.render_welcome(colors, compact))
+                                element.child(self.render_welcome(colors, compact, cx))
                             })
                             .when(!history, |element| {
                                 element.children(timeline_items(&model.messages).iter().map(
@@ -170,7 +170,12 @@ impl NexusView {
             )
     }
 
-    fn render_welcome(&self, colors: Palette, compact: bool) -> impl IntoElement {
+    fn render_welcome(
+        &self,
+        colors: Palette,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let locale = self.presenter.model().language;
         let model = self.presenter.model();
         let history = model.selected_codex_thread.is_some();
@@ -186,9 +191,9 @@ impl NexusView {
                 .map(|project| project.display_name.clone())
                 .unwrap_or_else(|| "Nexus Agent".into());
             let title = if has_project {
-                model.selected_harness.to_string()
+                locale.text("今天想完成什么？")
             } else {
-                locale.text("未选择项目").into()
+                locale.text("从一个想法开始")
             };
             let description = if has_project {
                 model.status_text().to_owned()
@@ -207,23 +212,14 @@ impl NexusView {
                 .justify_center()
                 .py(px(if compact { 8. } else { 32. }))
                 .text_center()
-                .child(if has_project {
-                    harness_icon(
-                        model.selected_harness,
-                        colors,
-                        if compact { 36. } else { 42. },
-                    )
-                    .into_any_element()
-                } else {
-                    brand_mark(colors, if compact { 36. } else { 42. }).into_any_element()
-                })
+                .child(brand_mark(if compact { 48. } else { 64. }))
                 .child(
                     div()
                         .debug_selector(|| "workspace-empty-context".into())
-                        .mt_4()
+                        .mt_5()
                         .max_w_full()
                         .truncate()
-                        .text_size(px(12.))
+                        .text_size(px(13.))
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(rgb(colors.muted))
                         .child(context),
@@ -231,8 +227,8 @@ impl NexusView {
                 .child(
                     div()
                         .mt_3()
-                        .text_size(px(if compact { 20. } else { 24. }))
-                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_size(px(if compact { 26. } else { 32. }))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
                         .line_height(relative(1.25))
                         .child(title),
                 )
@@ -241,11 +237,42 @@ impl NexusView {
                         .debug_selector(|| "workspace-empty-status".into())
                         .mt_3()
                         .max_w(px(520.))
-                        .text_size(px(13.))
+                        .text_size(px(14.))
                         .text_color(rgb(colors.muted))
                         .line_height(relative(1.55))
                         .child(description),
                 )
+                .when(has_project, |element| {
+                    element.child(
+                        div()
+                            .mt_5()
+                            .px_3()
+                            .py_2()
+                            .rounded(px(CONTROL_RADIUS))
+                            .bg(rgb(colors.elevated))
+                            .border_1()
+                            .border_color(rgb(colors.border))
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_size(px(12.))
+                            .text_color(rgb(colors.text_secondary))
+                            .child(harness_icon(model.selected_harness, colors, 16.))
+                            .child(model.selected_harness.to_string()),
+                    )
+                })
+                .when(!has_project, |element| {
+                    element.child(
+                        Button::new("welcome-choose-project")
+                            .debug_selector(|| "welcome-choose-project".into())
+                            .mt_5()
+                            .primary()
+                            .h(px(CONTROL_HEIGHT))
+                            .icon(IconName::FolderOpen)
+                            .label(locale.text("选择项目"))
+                            .on_click(cx.listener(Self::choose_project)),
+                    )
+                })
                 .map(|element| entrance(element, "empty-state-enter", !self.reduced_motion));
         }
         let (eyebrow, title, description) = if model.codex_thread_loading {
@@ -270,7 +297,7 @@ impl NexusView {
             .justify_center()
             .py(px(if compact { 8. } else { 32. }))
             .text_center()
-            .child(brand_mark(colors, if compact { 40. } else { 48. }))
+            .child(brand_mark(if compact { 40. } else { 48. }))
             .when(!compact, |element| {
                 element.child(
                     div()

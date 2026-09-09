@@ -23,7 +23,7 @@ Ubuntu / Debian：
 ```sh
 sudo apt-get install -y clang cmake pkg-config \
   libfontconfig1-dev libfreetype6-dev libwayland-dev libx11-xcb-dev \
-  libxkbcommon-x11-dev libssl-dev libvulkan1 libglib2.0-dev
+  libxkbcommon-x11-dev libssl-dev libvulkan1 libglib2.0-dev libasound2-dev
 ```
 
 其他 Linux 发行版可参考 [GPUI / Zed 构建说明](https://zed.dev/docs/development/linux)。运行界面需要 Vulkan 驱动与桌面会话，目录选择需要 XDG Desktop Portal 及对应桌面后端。单元测试和内置 Runner 测试不要求显示服务或真实 Harness 登录。
@@ -39,6 +39,18 @@ cargo run -p nexus-desktop --locked
 默认开发构建已开启优化，保留调试信息和运行时检查。首次构建依赖较慢，后续可增量编译；评估发布性能时使用 `cargo run -p nexus-desktop --release --locked`。
 
 Desktop 默认以独立子进程运行内置 Runner，确保两者协议版本一致。需要调试外置 Runner 时，可通过 `NEXUS_RUNNER_PATH` 指定完整路径；版本不匹配时会拒绝连接。
+
+### 语音输入开发与发布验收
+
+MiMo 通过 CPAL 0.16 采集（macOS CoreAudio、Windows WASAPI、Linux ALSA；不启用 JACK），按设备默认支持格式采集后编码为单声道 PCM16 WAV。Linux 需要 ALSA 开发库和可用的默认输入设备。原生识别使用 AVAudioEngine 缓冲直接对接 SFSpeechRecognizer，Objective-C 桥与 Apple 框架仅在 macOS 构建；支持现有 Apple Silicon、Intel 发布目标，不提升最低 macOS 版本。
+
+自动测试覆盖配置持久化、凭据隔离、迟到结果、草稿撤销、WAV 编码及 Base64 大小边界；它们不能代替真实设备验收。发布前使用实际 `.app`/Windows/Linux 发布包检查：
+
+- macOS 分别验证麦克风、Speech 首次授权、拒绝及在系统设置恢复；MiMo 不应申请 Speech 权限。包内必须含 `NSMicrophoneUsageDescription`、`NSSpeechRecognitionUsageDescription`。
+- 验证无麦克风、拔出设备、取消、切换 Provider/会话、60 秒上限；取消后设备应释放且不得回填迟到文本。
+- 使用用户自己的 MiMo Key 验证成功、鉴权失败、额度/限流和断网；只保存 Key 不应发起识别请求。Key 不得出现在 SQLite、日志或 Harness 环境。
+- 用“检查 src/main.rs 的 parseHTTP 函数”等中文夹英文、路径、代码标识符录音；停止后只追加草稿，保留录音期间的编辑，撤销恢复回填前内容。
+- 原生配置显示系统支持语言、权限、服务和设备端能力；即使设备支持设备端识别，本实现也不强制离线，不能承诺音频不上传 Apple。
 
 ### 修改远程页面
 
@@ -98,7 +110,7 @@ Claude Code 通过 `--print --input-format stream-json --output-format stream-js
 
 Codex 通过[官方 App Server 协议](https://learn.chatgpt.com/docs/app-server)运行，使用 `thread/start` / `thread/resume` 和 `turn/start`，Steer 通过带当前轮次 ID 的 `turn/steer` 注入。支持命令执行、文件变更和额外文件系统/网络权限审批；额外权限的批准仅作用于当前轮次。支持非 Git 项目，Prompt 由 stdin 传入。
 
-OMP 通过 `omp --mode rpc --approval-mode <模式>` 运行，Prompt 与 Steer 同样由 stdin 传入，授权使用 RPC 的选择/确认弹窗。Claude Code 与 OMP 的后续轮次均通过 `--resume <SESSION_ID>` 继续原会话。
+OMP 通过 `omp --mode rpc-ui --approval-mode <模式>` 运行，为内置 `ask` 工具提供交互 UI；Prompt 与 Steer 同样由 stdin 传入。RPC 的选择、确认、输入和编辑器请求进入 User Ask 面板，原生工具授权使用审批弹窗。Claude Code 与 OMP 的后续轮次均通过 `--resume <SESSION_ID>` 继续原会话。
 
 三个 Harness 的 Prompt 都通过 stdin 传递，不出现在进程参数中。取消和关闭时会清理 Harness 进程树：Unix 先中断再超时终止，Windows 使用 `taskkill /T /F`。
 

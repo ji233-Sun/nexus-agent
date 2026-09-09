@@ -7,6 +7,7 @@ pub(crate) mod theme;
 mod timeline;
 mod tools;
 mod user_ask;
+mod voice;
 mod workspace;
 
 use crate::{
@@ -75,6 +76,7 @@ impl Render for DialogLayer {
 pub(crate) struct NexusView {
     presenter: Presenter,
     prompt_input: Entity<TextareaState>,
+    voice_key_input: Entity<InputState>,
     user_ask_inputs: BTreeMap<(Uuid, String), Entity<TextareaState>>,
     catalog_model_select: Entity<ListState<ModelPickerList>>,
     catalog_model_select_content: CatalogModelSelectContent,
@@ -294,6 +296,11 @@ impl NexusView {
             crate::model::updates::UpdateState::Failed(_)
         );
         let mut view = Self {
+            voice_key_input: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .masked(true)
+                    .placeholder("MiMo API Key")
+            }),
             presenter,
             prompt_input,
             user_ask_inputs: BTreeMap::new(),
@@ -479,6 +486,7 @@ impl NexusView {
                         let executable = app.presenter.model().executable.clone();
                         let untouched = app.executable_input.read(cx).value() == executable;
                         app.poll_events(Instant::now(), cx);
+                        app.poll_voice_input(window, cx);
                         if untouched && app.presenter.model().executable != executable {
                             app.sync_executable(window, cx);
                         }
@@ -812,6 +820,7 @@ impl NexusView {
         }
         let executable = self.executable_input.read(cx).value().to_string();
         if self.presenter.submit(&prompt, &executable) {
+            self.presenter.cancel_voice();
             self.prompt_input
                 .update(cx, |input, cx| input.set_value("", window, cx));
             self.expanded_messages.clear();
@@ -1433,6 +1442,7 @@ impl NexusView {
             .px_3()
             .flex()
             .items_center()
+            .justify_between()
             .gap_2()
             .child(
                 // Recreate tooltip state when switching to a different execution directory.
@@ -1443,7 +1453,6 @@ impl NexusView {
                     )))
                     .debug_selector(|| "composer-directory".into())
                     .min_w_0()
-                    .w_full()
                     .flex()
                     .items_center()
                     .gap_2()
@@ -1475,14 +1484,16 @@ impl NexusView {
                     .map(|trigger| {
                         Popover::new("project-picker")
                             .anchor(Anchor::BottomLeft)
+                            .bottom_2()
+                            .p_4()
                             .open(self.project_picker_open)
                             .track_focus(&self.project_search_input.focus_handle(cx))
                             .trigger(
                                 Button::new("project-picker-trigger")
+                                    .debug_selector(|| "project-picker-trigger".into())
                                     .ghost()
                                     .small()
-                                    .p_0()
-                                    .h_auto()
+                                    .h(px(COMPACT_CONTROL_HEIGHT))
                                     .min_w_0()
                                     .max_w_full()
                                     .accessibility_label(model.language.text("选择项目"))
@@ -1508,7 +1519,7 @@ impl NexusView {
                             .when(self.project_picker_open, |popover| {
                                 popover.child(self.render_project_picker(cx))
                             })
-                            .map(|popover| div().min_w_0().flex_1().child(popover))
+                            .map(|popover| div().min_w_0().child(popover))
                     }),
             )
             .child(self.render_workspace_controls(cx))
@@ -1534,13 +1545,26 @@ impl NexusView {
             .w(px(280.))
             .flex()
             .flex_col()
-            .gap_2()
-            .child(Input::new(&self.project_search_input).small())
+            .gap_3()
+            .child(
+                div()
+                    .debug_selector(|| "project-picker-search".into())
+                    .flex_none()
+                    .child(
+                        Input::new(&self.project_search_input)
+                            .small()
+                            .min_h(px(CONTROL_HEIGHT))
+                            .text_size(px(13.)),
+                    ),
+            )
             .child(
                 div()
                     .id("project-picker-list")
                     .max_h(px(240.))
                     .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
                     .when(projects.is_empty(), |list| {
                         list.child(
                             div()
@@ -1559,6 +1583,7 @@ impl NexusView {
                             None,
                         )
                         .debug_selector(move || format!("project-picker-{id}"))
+                        .flex_none()
                         .selected(selected == Some(id))
                         .when(selected == Some(id), |row| {
                             row.suffix(|_, _| Icon::new(IconName::Check).size(px(14.)))
@@ -1579,7 +1604,7 @@ impl NexusView {
                 div()
                     .border_t_1()
                     .border_color(rgb(colors.border))
-                    .pt_2()
+                    .pt_3()
                     .child(
                         navigation_row(
                             colors,
@@ -1602,6 +1627,7 @@ impl NexusView {
         let colors = palette(cx);
         let material = materials(cx);
         let model = self.presenter.model();
+        let voice_status = model.voice.status.render(locale);
         let probe = model.selected_probe();
         let history = model.selected_codex_thread.is_some();
         let can_submit = can_send_prompt(model, &self.prompt_input.read(cx).value());
@@ -1707,6 +1733,7 @@ impl NexusView {
         div()
             .debug_selector(|| "workspace-page".into())
             .size_full()
+            .bg(material.chrome)
             .flex()
             .child(
                 self.sidebar_pane.clone().cached(
@@ -1719,8 +1746,14 @@ impl NexusView {
             .child(
                 div()
                     .flex_1()
-                    .h_full()
                     .min_w_0()
+                    .my_2()
+                    .mr_2()
+                    .rounded(px(16.))
+                    .border_1()
+                    .border_color(rgb(colors.border))
+                    .bg(rgb(colors.canvas))
+                    .overflow_hidden()
                     .flex()
                     .flex_col()
                     .child(
@@ -1728,10 +1761,9 @@ impl NexusView {
                             .debug_selector(|| "workspace-header".into())
                             .h(px(HEADER_HEIGHT))
                             .flex_none()
-                            .bg(material.chrome)
                             .border_b(px(0.5))
                             .border_color(material.edge)
-                            .px_4()
+                            .px_5()
                             .flex()
                             .items_center()
                             .justify_between()
@@ -1798,6 +1830,7 @@ impl NexusView {
                                     .flex()
                                     .items_center()
                                     .gap_2()
+                                    .pl_3()
                                     .text_size(px(12.))
                                     .text_color(rgb(colors.muted))
                                     .child(live_status_dot(
@@ -1848,7 +1881,6 @@ impl NexusView {
                     .child(
                         div()
                             .flex_none()
-                            .bg(rgb(colors.canvas))
                             .px(px(24.))
                             .pt_3()
                             .pb_4()
@@ -1862,29 +1894,43 @@ impl NexusView {
                                     .w_full()
                                     .max_w(px(CONTENT_WIDTH))
                                     .mx_auto()
-                                    .rounded(px(20.))
+                                    .rounded(px(16.))
                                     .bg(material.floating)
                                     .border_1()
-                                    .border_color(material.edge)
+                                    .border_color(rgb(colors.input_border).opacity(0.45))
                                     .when(prompt_focused, |element| {
                                         element.border_color(rgb(colors.accent))
                                     })
                                     .shadow(material.shadow())
-                                    .p_3()
+                                    .p_4()
                                     .flex()
                                     .flex_col()
                                     .child(self.render_message_queue(cx))
+                                    .when(!voice_status.is_empty(), |element| {
+                                        element.child(
+                                            div()
+                                                .mb_2()
+                                                .text_size(px(12.))
+                                                .text_color(rgb(colors.text_secondary))
+                                                .child(voice_status.to_owned()),
+                                        )
+                                    })
                                     .child(
                                         Textarea::new(&self.prompt_input)
                                             .disabled(history)
                                             .appearance(false)
                                             .bordered(false)
+                                            .text_size(px(15.))
+                                            .line_height(relative(1.65))
                                             .aria_label(locale.text("任务描述")),
                                     )
                                     .child(
                                         div()
                                             .min_h(px(COMPACT_CONTROL_HEIGHT))
-                                            .mt_2()
+                                            .mt_3()
+                                            .pt_3()
+                                            .border_t(px(0.5))
+                                            .border_color(rgb(colors.border))
                                             .flex()
                                             .flex_wrap()
                                             .gap_2()
@@ -1895,7 +1941,7 @@ impl NexusView {
                                                     .flex()
                                                     .flex_wrap()
                                                     .items_center()
-                                                    .gap_1()
+                                                    .gap_2()
                                                     .child(self.model_selector(window, cx))
                                                     .child(self.effort_selector(cx))
                                                     .child(self.permission_selector(cx)),
@@ -1905,6 +1951,7 @@ impl NexusView {
                                                     .flex()
                                                     .items_center()
                                                     .gap_2()
+                                                    .child(self.render_voice_controls(cx))
                                                     .when(model.active_run.is_some(), |element| {
                                                         element.child(
                                                             Button::new("composer-cancel")
@@ -1933,7 +1980,8 @@ impl NexusView {
                                                             })
                                                             .primary()
                                                             .small()
-                                                            .size(px(COMPACT_CONTROL_HEIGHT))
+                                                            .size(px(CONTROL_HEIGHT))
+                                                            .rounded(px(10.))
                                                             .p_0()
                                                             .icon(IconName::ArrowUp)
                                                             .accessibility_label(
@@ -1960,13 +2008,13 @@ impl NexusView {
                                 div()
                                     .max_w(px(CONTENT_WIDTH))
                                     .mx_auto()
-                                    .mt_3()
+                                    .mt_2()
                                     .flex()
                                     .items_center()
                                     .justify_between()
                                     .child(
                                         div()
-                                            .text_size(px(12.))
+                                            .text_size(px(11.))
                                             .text_color(rgb(colors.muted))
                                             .child(composer_hint),
                                     )
@@ -2109,6 +2157,111 @@ mod catalog_model_tests {
     use nexus_domain::{ModelReasoningEffort, UserAskOption, UserAskQuestion};
     use nexus_protocol::Event;
 
+    #[gpui::test]
+    fn voice_settings_select_before_configure_and_draft_insertion_is_undoable(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::infrastructure::voice::Provider;
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (presenter, _, _directory) = fixture();
+        let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
+        cx.simulate_resize(gpui::size(px(1040.), px(680.)));
+        view.update_in(cx, |view, window, cx| {
+            view.set_language(Language::English, window, cx);
+        });
+        cx.run_until_parked();
+        let voice = cx.debug_bounds("voice-record").unwrap();
+        let submit = cx.debug_bounds("composer-submit").unwrap();
+        let composer = cx.debug_bounds("composer-surface").unwrap();
+        assert_eq!(voice.center().y, submit.center().y);
+        assert!(voice.left() >= composer.left() && voice.right() <= submit.left());
+        assert!(voice.top() >= composer.top() && voice.bottom() <= composer.bottom());
+        click_debug(cx, "voice-record");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("voice-settings").is_some());
+        assert!(cx.debug_bounds("settings-nav-voice").is_some());
+        assert_eq!(
+            Language::English.text("配置语音输入"),
+            "Configure voice input"
+        );
+        assert!(cx.debug_bounds("voice-mimo-config").is_none());
+        #[cfg(target_os = "macos")]
+        {
+            view.update(cx, |view, cx| {
+                view.presenter
+                    .select_voice_provider(Provider::MacOs)
+                    .unwrap();
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let trigger = cx.debug_bounds("voice-locale").unwrap();
+            let position = gpui::point(trigger.left() + px(16.), trigger.center().y);
+            cx.simulate_click(position, Default::default());
+            cx.run_until_parked();
+            let settings_offset = view.read_with(cx, |view, _| view.settings_scroll.offset());
+            cx.simulate_event(gpui::ScrollWheelEvent {
+                position,
+                delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-10000.))),
+                ..Default::default()
+            });
+            cx.run_until_parked();
+            cx.simulate_click(position, Default::default());
+            cx.run_until_parked();
+            view.read_with(cx, |view, _| {
+                let locales = crate::infrastructure::voice::native_locales();
+                let selected = view
+                    .presenter
+                    .model()
+                    .voice
+                    .settings
+                    .locale
+                    .as_ref()
+                    .unwrap();
+                assert!(
+                    locales[locales.len() / 2..].contains(selected),
+                    "scrolling the language menu should reach its lower entries: {selected}"
+                );
+                assert_eq!(view.settings_scroll.offset(), settings_offset);
+            });
+        }
+        view.update(cx, |view, cx| {
+            view.presenter
+                .select_voice_provider(Provider::Mimo)
+                .unwrap();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let bounds = cx.debug_bounds("voice-mimo-config").unwrap();
+        assert!(bounds.left() >= px(0.) && bounds.right() <= px(1040.));
+        view.update_in(cx, |view, window, cx| {
+            assert!(!view.presenter.model().voice.ready());
+            view.settings_open = false;
+            view.prompt_input.update(cx, |input, cx| {
+                input.set_value("已有草稿：用户刚编辑", window, cx)
+            });
+            view.append_voice_text("检查 src/main.rs 与 parseHTTP", window, cx);
+            assert_eq!(
+                view.prompt_input.read(cx).value(),
+                "已有草稿：用户刚编辑\n检查 src/main.rs 与 parseHTTP"
+            );
+            assert!(view.presenter.model().queued_messages.is_empty());
+            assert!(view.presenter.model().active_run.is_none());
+            view.focus_prompt(window, cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("voice-record").is_some());
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-z"
+        } else {
+            "ctrl-z"
+        });
+        view.read_with(cx, |view, cx| {
+            assert_eq!(view.prompt_input.read(cx).value(), "已有草稿：用户刚编辑")
+        });
+    }
+
     fn omp_model(provider: &str, id: &str) -> ModelDescriptor {
         ModelDescriptor {
             source: nexus_domain::ModelSource::OmpCli,
@@ -2247,11 +2400,12 @@ mod catalog_model_tests {
                 source
             );
             let context = cx.debug_bounds("composer-context").unwrap();
-            let directory = cx.debug_bounds("composer-directory").unwrap();
+            let directory = cx.debug_bounds("project-picker-trigger").unwrap();
             let mode = cx.debug_bounds("workspace-mode").unwrap();
             let base = cx.debug_bounds("workspace-base").unwrap();
             let composer = cx.debug_bounds("composer-surface").unwrap();
             assert_eq!(directory.left(), context.left() + px(12.));
+            assert_eq!(directory.size.height, mode.size.height);
             assert!(
                 directory.center().y >= mode.center().y - px(1.)
                     && directory.center().y <= mode.center().y + px(1.)
@@ -2505,6 +2659,16 @@ mod catalog_model_tests {
                 .update(cx, |input, cx| input.set_value("keep draft", window, cx));
         });
         cx.run_until_parked();
+        let trigger = cx.debug_bounds("project-picker-trigger").unwrap();
+        let content = cx.debug_bounds("composer-directory").unwrap();
+        let name = cx.debug_bounds("composer-directory-name").unwrap();
+        assert_eq!(content.left() - trigger.left(), px(8.));
+        assert_eq!(trigger.right() - content.right(), px(8.));
+        assert!(trigger.top() < content.top() && content.bottom() < trigger.bottom());
+        assert!(
+            trigger.size.width <= name.size.width + px(40.),
+            "directory trigger should fit its icon, name and padding: {trigger:?}, {name:?}"
+        );
         click_debug(cx, "composer-directory");
         cx.run_until_parked();
         assert!(cx.debug_bounds("project-picker-surface").is_some());
@@ -2512,6 +2676,18 @@ mod catalog_model_tests {
         let second_row: &'static str = format!("project-picker-{}", second.id).leak();
         let first_row: &'static str = format!("project-picker-{}", first.id).leak();
         assert!(cx.debug_bounds(first_row).is_some());
+        let search = cx.debug_bounds("project-picker-search").unwrap();
+        let first_bounds = cx.debug_bounds(first_row).unwrap();
+        let second_bounds = cx.debug_bounds(second_row).unwrap();
+        assert!(search.size.height >= px(CONTROL_HEIGHT));
+        assert_eq!(first_bounds.size.height, px(40.));
+        assert_eq!(second_bounds.size.height, px(40.));
+        assert!(first_bounds.top() >= search.bottom() + px(12.));
+        assert!(second_bounds.top() >= search.bottom() + px(12.));
+        assert!(
+            first_bounds.bottom() + px(4.) <= second_bounds.top()
+                || second_bounds.bottom() + px(4.) <= first_bounds.top()
+        );
         view.update_in(cx, |view, window, cx| {
             view.project_search_input.update(cx, |input, cx| {
                 input.set_value(" 第二个 PROJECT ", window, cx)
@@ -3307,6 +3483,114 @@ mod catalog_model_tests {
     }
 
     #[gpui::test]
+    fn user_ask_panel_preserves_native_question_ids_and_option_labels(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (mut presenter, runner, _directory) = fixture();
+        assert!(presenter.submit("native questions", "claude"));
+        let run_id = presenter.model().active_run.unwrap();
+        let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
+        cx.simulate_resize(gpui::size(px(1040.), px(680.)));
+        // Claude keys answers by full question text, Codex by explicit ID, OMP by dialog ID.
+        for (question_id, choice) in [("Which checks?", true), ("checks", true), ("ui_1", false)] {
+            let request_id = Uuid::new_v4();
+            runner.emit(Event::RunUserAskRequested {
+                run_id,
+                request_id,
+                questions: vec![UserAskQuestion {
+                    id: question_id.into(),
+                    prompt: "Which checks?".into(),
+                    answer_mode: if choice {
+                        UserAskAnswerMode::Choice {
+                            multiple: false,
+                            allow_custom: true,
+                        }
+                    } else {
+                        UserAskAnswerMode::Text
+                    },
+                    options: if choice {
+                        vec![UserAskOption {
+                            id: "Run tests".into(),
+                            label: "Run tests".into(),
+                            description: Some("Verify the change".into()),
+                        }]
+                    } else {
+                        vec![]
+                    },
+                }],
+            });
+            view.update_in(cx, |view, _, cx| view.poll_events(Instant::now(), cx));
+            cx.run_until_parked();
+            let question_selector = format!("user-ask-question-{request_id}-{question_id}").leak();
+            assert!(cx.debug_bounds(question_selector).is_some());
+            let stack = cx.debug_bounds("user-ask-stack").unwrap();
+            assert!(stack.bottom() <= cx.debug_bounds("composer-surface").unwrap().top());
+            if choice {
+                click_debug(
+                    cx,
+                    format!("user-ask-option-{request_id}-{question_id}-Run tests").leak(),
+                );
+            } else {
+                view.update_in(cx, |view, window, cx| {
+                    view.user_ask_inputs
+                        .get(&(request_id, question_id.into()))
+                        .unwrap()
+                        .update(cx, |input, cx| input.focus(window, cx));
+                });
+                cx.simulate_input("Custom answer");
+            }
+            cx.run_until_parked();
+            let count = runner.submitted_user_ask_answers().len();
+            assert!(view.read_with(cx, |view, _| view.presenter.can_submit_user_ask(request_id)));
+            // Choice + custom text exceeds the panel cap at the minimum window height.
+            // Scroll the panel, rather than clicking the clipped button's layout bounds.
+            cx.simulate_event(gpui::ScrollWheelEvent {
+                position: gpui::point(stack.left() + px(4.), stack.center().y),
+                delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-400.))),
+                ..Default::default()
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                let _ = window.draw(cx);
+            });
+            let submit_selector = format!("user-ask-submit-{request_id}").leak();
+            let submit_bounds = cx.debug_bounds(submit_selector).unwrap();
+            assert!(
+                submit_bounds.bottom() <= stack.bottom(),
+                "submit={submit_bounds:?}, stack={stack:?}"
+            );
+            click_debug(cx, submit_selector);
+            cx.run_until_parked();
+            let submissions = runner.submitted_user_ask_answers();
+            assert_eq!(submissions.len(), count + 1);
+            assert_eq!(
+                submissions.last().unwrap(),
+                &vec![nexus_domain::UserAskAnswer {
+                    question_id: question_id.into(),
+                    value: if choice {
+                        UserAskAnswerValue::Selected(vec!["Run tests".into()])
+                    } else {
+                        UserAskAnswerValue::Text("Custom answer".into())
+                    },
+                }]
+            );
+            runner.emit(Event::RunUserAskAnswerSent { run_id, request_id });
+            runner.emit(Event::RunUserAskFinished {
+                run_id,
+                request_id,
+                status: nexus_domain::UserAskStatus::Answered,
+                message: None,
+            });
+            view.update_in(cx, |view, _, cx| view.poll_events(Instant::now(), cx));
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("user-ask-stack").is_none());
+        }
+    }
+
+    #[gpui::test]
     fn user_ask_panel_clamps_long_content_above_the_composer(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_kit::init);
         cx.update(theme::configure_theme);
@@ -3375,6 +3659,11 @@ mod catalog_model_tests {
         cx.update(gpui_kit::init);
         cx.update(theme::configure_theme);
         let (mut presenter, runner, _directory) = fixture();
+        // Keep the dialog's slide-in animation from moving click targets between frames.
+        assert!(presenter.set_appearance(AppearanceSettings {
+            reduced_motion: true,
+            ..Default::default()
+        }));
         assert!(presenter.submit("approval task", "claude"));
         let run_id = presenter.model().active_run.unwrap();
         let (root, cx) = cx.add_window_view(|window, cx| {
@@ -3417,7 +3706,7 @@ mod catalog_model_tests {
         assert!(view.read_with(cx, |view, _| {
             view.presenter.model().responding_approval.is_none()
         }));
-        cx.simulate_click(approve.center(), Default::default());
+        click_debug(cx, "approval-option-0");
         cx.run_until_parked();
         assert_eq!(
             view.read_with(cx, |view, _| view.presenter.model().responding_approval),

@@ -65,6 +65,8 @@ nexus-desktop "/path/to/project" # 打开指定目录（支持相对路径）
 
 macOS 可直接运行 `"/Applications/Nexus Agent.app/Contents/MacOS/nexus-desktop" .`；Windows 使用 `nexus-desktop.exe`。无参数启动仍进入桌面应用，`--help` 显示用法。每次调用启动一个应用进程。
 
+在「设置 → 语音输入」先选择 Provider，再配置：MiMo ASR 支持三端，需要保存自己的 API Key，停止录音后音频会发送至 MiMo；macOS 系统 Speech 无需 Key，首次录音时申请麦克风及 Speech 权限（MiMo 只需要麦克风权限）。两者最多录制 60 秒，只将最终文本回填草稿，可编辑和撤销，不会自动发送。系统识别可能联网并将音频发送给 Apple，不承诺离线。
+
 <details>
 <summary><strong>从源码运行</strong></summary>
 

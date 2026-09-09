@@ -58,7 +58,11 @@ Provider Profile 的名称、Base URL、环境变量名和默认模型保存在 
 
 审批弹窗显示所属任务和操作详情，可允许、拒绝或停止任务。回复只发送给对应运行中的请求；停止、CLI 撤销请求、超时或轮次结束后，旧请求失效。后台标题生成不继承 YOLO：Claude Code / OMP 继续禁用工具，Codex 保留只读沙箱。
 
-Harness 发起交互问题时，输入区会显示问题和可用的回答方式；提交后等待 Agent 继续。已结束或失效的请求不能重复回复。
+Claude Code 的 `AskUserQuestion`、Codex 的同步 `request_user_input` / 异步 `request_user_input_async` 和 OMP 的 `select` / `confirm` / `input` / `editor` 会在输入区显示 User Ask 面板。选择项和回答方式遵循原生请求：Claude 支持单选、多选及自定义文本，Codex 支持单选、请求允许的自定义文本及纯文本问题，OMP 支持原生选择、是/否确认和文本回答。提交只回复对应运行中的问题；原生撤销、停止或同步提问所在轮次结束后，旧请求失效，不能重复回复。
+
+Codex 异步问题来自 `agentMessage` 中的结构化 `questions`，始终允许自定义文本。Agent 可以继续工作，输出结束后面板仍保留，任务等待回答。提交通过 `turn/start` 向原会话发送问题与答案：有活动轮次时注入该轮次，否则在原会话继续下一轮，不新建任务。收到原生接受回执后才标记已回答；停止任务会取消尚未回答的问题。
+
+OMP 使用 `rpc-ui` 模式向内置 `ask` 工具提供交互能力，需要安装支持该模式的 OMP。选择题保留选项说明，选择「Other / 自定义回答」后继续显示原生编辑器问题；多选题按 OMP RPC 的逐项选择与完成流程回答。提示文字和原始预填内容显示在问题中，不自动填入回答；请求按原生 timeout 过期。OMP 的原生工具授权（`Allow tool: …`，`Approve` / `Deny`）仍显示审批弹窗。
 
 ## 安装与更新
 
