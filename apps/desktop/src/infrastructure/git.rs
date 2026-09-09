@@ -352,6 +352,42 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn local_commit_generation_matches_selected_working_tree_contents() {
+        let (_directory, project) = repository_fixture();
+        let cwd = Path::new(&project.canonical_path);
+        let workspace = Workspace::local(&project);
+        std::fs::write(cwd.join("tracked.txt"), "intermediate staged\n").unwrap();
+        git(cwd, &["add", "tracked.txt"]).unwrap();
+        std::fs::write(cwd.join("tracked.txt"), "final selected\n").unwrap();
+        std::fs::write(cwd.join("unrelated.txt"), "unrelated secret\n").unwrap();
+        git(cwd, &["add", "unrelated.txt"]).unwrap();
+        std::fs::write(cwd.join("new space.txt"), "new selected\n").unwrap();
+        let review = changes::review(&workspace).unwrap();
+        let files = vec!["tracked.txt".into(), "new space.txt".into()];
+        assert_eq!((review.additions, review.deletions), (3, 1));
+        let diff = changes::selected_diff(&workspace, &review, &files).unwrap();
+        assert!(diff.contains("+final selected"));
+        assert!(diff.contains("new space.txt\nnew selected"));
+        assert!(!diff.contains("intermediate staged"));
+        assert!(!diff.contains("unrelated"));
+        assert!(changes::selected_diff(&workspace, &review, &[]).is_err());
+        assert!(changes::selected_diff(&workspace, &review, &["missing".into()]).is_err());
+        let message = "fix: Keep selected contents\n\nPreserve unrelated staging.";
+        changes::commit_files(&workspace, &review, &files, message).unwrap();
+        assert_eq!(
+            git(cwd, &["log", "-1", "--format=%B"]).unwrap().trim(),
+            message
+        );
+        assert_eq!(
+            git(cwd, &["diff", "--cached", "--name-only"])
+                .unwrap()
+                .trim(),
+            "unrelated.txt"
+        );
+        assert!(changes::selected_diff(&workspace, &review, &files).is_err());
+    }
+
+    #[test]
     fn review_and_selected_commits_include_all_task_changes_without_committing_other_staged_files()
     {
         let (directory, project) = repository_fixture();
@@ -400,6 +436,7 @@ pub(crate) mod tests {
         changes::commit_files(&workspace, &next, &["staged.txt".into()], "remaining file").unwrap();
         std::fs::write(cwd.join("asset.bin"), [255, 0, 1]).unwrap();
         let binary_review = changes::review(&workspace).unwrap();
+        assert_eq!((binary_review.additions, binary_review.deletions), (0, 0));
         std::fs::write(cwd.join("asset.bin"), [255, 0, 2]).unwrap();
         assert!(
             changes::commit_files(

@@ -305,7 +305,27 @@ pub(super) fn render_detail(
         key,
         detail: detail.clone(),
         locale,
+        layout: DetailLayout::Card,
     }
+}
+
+pub(super) fn render_review_detail(
+    key: SharedString,
+    detail: ToolDetail,
+    original: String,
+    locale: Language,
+) -> impl IntoElement {
+    DetailView {
+        key,
+        detail,
+        locale,
+        layout: DetailLayout::Review { original },
+    }
+}
+
+enum DetailLayout {
+    Card,
+    Review { original: String },
 }
 
 #[derive(IntoElement)]
@@ -313,17 +333,19 @@ struct DetailView {
     key: SharedString,
     detail: ToolDetail,
     locale: Language,
+    layout: DetailLayout,
 }
 
 impl gpui::RenderOnce for DetailView {
     fn render(self, window: &mut Window, cx: &mut gpui::App) -> impl IntoElement {
-        render_detail_content(self.key, &self.detail, self.locale, window, cx)
+        render_detail_content(self.key, &self.detail, self.layout, self.locale, window, cx)
     }
 }
 
 fn render_detail_content(
     key: SharedString,
     detail: &ToolDetail,
+    layout: DetailLayout,
     locale: Language,
     window: &mut Window,
     cx: &mut gpui::App,
@@ -335,7 +357,11 @@ fn render_detail_content(
         .use_keyed_state((id.clone(), "scroll"), cx, |_, _| ScrollHandle::new())
         .read(cx)
         .clone();
-    let copy = detail.text.clone();
+    let full_height = matches!(layout, DetailLayout::Review { .. });
+    let copy = match layout {
+        DetailLayout::Card => detail.text.clone(),
+        DetailLayout::Review { original } => original,
+    };
     let language = detail.language.clone();
     let is_diff = detail.diff;
     let lines = if is_diff {
@@ -402,15 +428,25 @@ fn render_detail_content(
     div()
         .w_full()
         .min_w_0()
-        .flex_none()
-        .rounded(px(CONTROL_RADIUS))
+        .flex()
+        .flex_col()
+        .map(|element| {
+            if full_height {
+                element.flex_1().min_h_0().h_full()
+            } else {
+                element
+                    .flex_none()
+                    .rounded(px(CONTROL_RADIUS))
+                    .border_1()
+                    .border_color(rgb(colors.border))
+            }
+        })
         .overflow_hidden()
         .bg(rgb(colors.surface))
-        .border_1()
-        .border_color(rgb(colors.border))
         .child(
             div()
-                .h(px(30.))
+                .h(px(if full_height { 40. } else { 30. }))
+                .flex_none()
                 .px_3()
                 .border_b_1()
                 .border_color(rgb(colors.border))
@@ -454,8 +490,16 @@ fn render_detail_content(
                         .small()
                         .h(px(24.))
                         .icon(IconName::Copy)
-                        .accessibility_label(locale.text("复制"))
-                        .tooltip(locale.text("复制"))
+                        .accessibility_label(locale.text(if full_height {
+                            "复制差异"
+                        } else {
+                            "复制"
+                        }))
+                        .tooltip(locale.text(if full_height {
+                            "复制差异"
+                        } else {
+                            "复制"
+                        }))
                         .on_click(move |_, _, cx| {
                             cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))
                         }),
@@ -465,11 +509,18 @@ fn render_detail_content(
             div()
                 .id((id.clone(), "viewport"))
                 .debug_selector(move || viewport_key.to_string())
-                .h(px(if is_diff {
-                    (lines.len() as f32 * DIFF_LINE_HEIGHT + 8.).clamp(48., DETAIL_HEIGHT)
-                } else {
-                    (detail.text.lines().count() as f32 * 21. + 20.).clamp(52., DETAIL_HEIGHT)
-                }))
+                .map(|element| {
+                    if full_height {
+                        element.flex_1().min_h_0()
+                    } else {
+                        element.h(px(if is_diff {
+                            (lines.len() as f32 * DIFF_LINE_HEIGHT + 8.).clamp(48., DETAIL_HEIGHT)
+                        } else {
+                            (detail.text.lines().count() as f32 * 21. + 20.)
+                                .clamp(52., DETAIL_HEIGHT)
+                        }))
+                    }
+                })
                 .w_full()
                 .min_w_0()
                 .relative()
@@ -876,6 +927,7 @@ mod tests {
 
     #[test]
     fn diff_gutters_follow_hunks_without_inventing_snippet_line_numbers() {
+        use super::super::review::{ReviewSection, patch_files};
         let patch = "--- a/main.rs\n+++ b/main.rs\n@@ -9,3 +12,3 @@ fn main() {\n context\n-old\n+你好\n tail\n@@ -20,0 +24,2 @@\n+\n++++\n\\ No newline at end of file\n--- a/gone.rs\n+++ /dev/null\n@@ -1 +0,0 @@\n----\n";
         let rows = diff_lines(patch).collect::<Vec<_>>();
         assert_eq!(rows.iter().map(|row| row.text).collect::<String>(), patch);
@@ -900,6 +952,64 @@ mod tests {
             "@@@ combined diff @@@\n-old\n+new",
         ] {
             assert!(diff_lines(patch).all(|line| line.old.is_none() && line.new.is_none()));
+        }
+        let full =
+            format!("diff --git a/main.rs b/main.rs\nindex 0000000..1111111 100644\n{patch}");
+        let files = patch_files(&full, ReviewSection::Unstaged);
+        assert_eq!(files.len(), 1);
+        let detail = files[0].detail(Language::English);
+        assert!(detail.text.starts_with("@@ -9,3 +12,3 @@"));
+        assert_eq!(files[0].patch, full, "copy preserves the complete patch");
+        assert_eq!(detail.language, "rs");
+        assert_eq!(
+            diff_lines(&detail.text).filter_map(|line| line.new).next(),
+            Some(12)
+        );
+    }
+
+    #[test]
+    fn review_navigation_decodes_real_git_paths_and_preserves_binary_changes() {
+        use super::super::review::{ReviewSection, patch_files};
+        use crate::{infrastructure::git, model::workspace::Workspace};
+        let (_directory, project) = git::tests::repository_fixture();
+        let cwd = Path::new(&project.canonical_path);
+        let mut names = vec!["a b/空 格.rs", "spaces b/path.rs", "plain.rs"];
+        if cfg!(unix) {
+            names.extend(["quote\"name.rs", "tab\tname.rs", "line\nname.rs"]);
+        }
+        for name in &names {
+            let path = cwd.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "fn before() {}\n").unwrap();
+        }
+        std::fs::write(cwd.join("image.bin"), [0, 1, 2]).unwrap();
+        git::git(cwd, &["add", "."]).unwrap();
+        git::git(cwd, &["commit", "-m", "review fixtures"]).unwrap();
+        for name in &names {
+            std::fs::write(cwd.join(name), "fn after() {}\n").unwrap();
+        }
+        std::fs::write(cwd.join("image.bin"), [0, 2, 3]).unwrap();
+        // Presentation must not depend on a user's Git header or color preferences.
+        git::git(cwd, &["config", "diff.mnemonicPrefix", "true"]).unwrap();
+        git::git(cwd, &["config", "color.ui", "always"]).unwrap();
+        for quote in ["true", "false"] {
+            git::git(cwd, &["config", "core.quotePath", quote]).unwrap();
+            let review = git::changes::review(&Workspace::local(&project)).unwrap();
+            let files = patch_files(&review.unstaged, ReviewSection::Unstaged);
+            assert_eq!(files.len(), names.len() + 1);
+            for name in &names {
+                let file = files.iter().find(|file| file.path == *name).unwrap();
+                assert_eq!((file.additions, file.deletions), (1, 1));
+                assert!(
+                    file.detail(Language::English)
+                        .text
+                        .contains("+fn after() {}")
+                );
+            }
+            let binary = files.iter().find(|file| file.path == "image.bin").unwrap();
+            assert_eq!((binary.additions, binary.deletions), (0, 0));
+            assert!(!binary.detail(Language::English).diff);
+            assert!(binary.patch.contains("GIT binary patch"));
         }
     }
 

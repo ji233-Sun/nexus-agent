@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::infrastructure::{
     harness,
-    process::{RunInput, SteerInput, generate_title, run_harness},
+    process::{RunInput, SteerInput, generate_commit_message, generate_title, run_harness},
 };
 use events::Emitter;
 use user_ask::PendingUserAsks;
@@ -42,7 +42,7 @@ pub(crate) struct Runner {
     active: Arc<Mutex<BTreeMap<Uuid, ActiveRun>>>,
     probe_tasks: JoinSet<()>,
     catalog_tasks: BTreeMap<(ModelCatalogPurpose, Option<Uuid>), BackgroundTask>,
-    title_tasks: Vec<BackgroundTask>,
+    generation_tasks: Vec<BackgroundTask>,
     emitter: Emitter,
 }
 
@@ -52,13 +52,13 @@ impl Runner {
             active: Arc::new(Mutex::new(BTreeMap::new())),
             probe_tasks: JoinSet::new(),
             catalog_tasks: BTreeMap::new(),
-            title_tasks: Vec::new(),
+            generation_tasks: Vec::new(),
             emitter,
         }
     }
 
     pub(crate) async fn handle(&mut self, command: Command) -> bool {
-        self.reap_title_tasks().await;
+        self.reap_generation_tasks().await;
         while self.probe_tasks.try_join_next().is_some() {}
         match command {
             Command::RunnerHello => self.emitter.send(Event::RunnerReady).await,
@@ -151,19 +151,65 @@ impl Runner {
             Command::RunStart(mut request) => {
                 let should_generate_title = request.session_id.is_none();
                 let title_config = request.title_generation.take();
-                let mut title_request = request.clone();
+                let task_id = request.task_id;
+                let prompt = request.prompt.clone();
                 if let Some(cwd) =
                     start_run(request, self.active.clone(), self.emitter.clone()).await
                     && should_generate_title
                     && let Some(config) = title_config
                     && environment_is_valid(&config.environment)
                 {
-                    title_request.harness = config.harness;
-                    title_request.executable = config.executable;
-                    title_request.model = config.model;
-                    title_request.environment = config.environment;
-                    title_request.effort = config.effort;
-                    self.spawn_title_generation(title_request, cwd);
+                    self.spawn_title_generation(task_id, config, cwd, prompt);
+                }
+            }
+            Command::GenerateCommitMessage {
+                request_id,
+                cwd,
+                diff,
+                language,
+                configuration,
+            } => {
+                let cwd = Path::new(&cwd).canonicalize();
+                if !environment_is_valid(&configuration.environment)
+                    || diff.trim().is_empty()
+                    || diff.len() > nexus_protocol::MAX_COMMIT_DIFF_BYTES
+                    || !matches!(language.as_str(), "zh-CN" | "en")
+                    || !cwd.as_ref().is_ok_and(|cwd| cwd.is_dir())
+                {
+                    self.emitter
+                        .send(Event::CommitMessageFailed {
+                            request_id,
+                            message: "无法生成提交说明：请检查项目目录、所选变更和模型配置。"
+                                .into(),
+                        })
+                        .await;
+                } else {
+                    let (cancel, cancel_rx) = watch::channel(false);
+                    let emitter = self.emitter.clone();
+                    let task = tokio::spawn(async move {
+                        let event = match generate_commit_message(
+                            configuration,
+                            cwd.unwrap(),
+                            diff,
+                            language,
+                            cancel_rx,
+                        )
+                        .await
+                        {
+                            Some(message) => Event::CommitMessageGenerated {
+                                request_id,
+                                message,
+                            },
+                            None => Event::CommitMessageFailed {
+                                request_id,
+                                message:
+                                    "提交说明生成失败或超时，请检查引擎、登录状态和模型后重试。"
+                                        .into(),
+                            },
+                        };
+                        emitter.send(event).await;
+                    });
+                    self.generation_tasks.push(BackgroundTask { cancel, task });
                 }
             }
             Command::RunSteer {
@@ -237,25 +283,30 @@ impl Runner {
         }
     }
 
-    fn spawn_title_generation(&mut self, request: StartRun, cwd: PathBuf) {
-        let task_id = request.task_id;
+    fn spawn_title_generation(
+        &mut self,
+        task_id: Uuid,
+        config: nexus_protocol::TextGenerationConfig,
+        cwd: PathBuf,
+        prompt: String,
+    ) {
         let (cancel, cancel_rx) = watch::channel(false);
         let emitter = self.emitter.clone();
         let task = tokio::spawn(async move {
-            if let Some(title) = generate_title(request, cwd, cancel_rx).await {
+            if let Some(title) = generate_title(config, cwd, prompt, cancel_rx).await {
                 emitter
                     .send(Event::TaskTitleGenerated { task_id, title })
                     .await;
             }
         });
-        self.title_tasks.push(BackgroundTask { cancel, task });
+        self.generation_tasks.push(BackgroundTask { cancel, task });
     }
 
-    async fn reap_title_tasks(&mut self) {
+    async fn reap_generation_tasks(&mut self) {
         let mut index = 0;
-        while index < self.title_tasks.len() {
-            if self.title_tasks[index].task.is_finished() {
-                let task = self.title_tasks.swap_remove(index);
+        while index < self.generation_tasks.len() {
+            if self.generation_tasks[index].task.is_finished() {
+                let task = self.generation_tasks.swap_remove(index);
                 let _ = task.task.await;
             } else {
                 index += 1;
@@ -278,10 +329,10 @@ impl Runner {
             )
             .await;
         }
-        for task in &self.title_tasks {
+        for task in &self.generation_tasks {
             let _ = task.cancel.send(true);
         }
-        while let Some(task) = self.title_tasks.pop() {
+        while let Some(task) = self.generation_tasks.pop() {
             let _ = task.task.await;
         }
     }
@@ -542,7 +593,7 @@ mod tests {
 
     fn request(cwd: String) -> StartRun {
         StartRun {
-            title_generation: Some(nexus_protocol::TitleGenerationConfig {
+            title_generation: Some(nexus_protocol::TextGenerationConfig {
                 harness: HarnessKind::Claude,
                 executable: "unused".into(),
                 model: None,
@@ -675,7 +726,7 @@ mod tests {
 
         runner.handle(Command::RunStart(request)).await;
 
-        assert!(runner.title_tasks.is_empty());
+        assert!(runner.generation_tasks.is_empty());
         runner.shutdown().await;
     }
 
@@ -700,7 +751,7 @@ mod tests {
             let (emitter, _events) = Emitter::channel();
             let mut runner = Runner::new(emitter);
             runner.handle(Command::RunStart(request)).await;
-            assert!(runner.title_tasks.is_empty());
+            assert!(runner.generation_tasks.is_empty());
             assert!(!runner.active.lock().await.is_empty());
             runner.shutdown().await;
         }

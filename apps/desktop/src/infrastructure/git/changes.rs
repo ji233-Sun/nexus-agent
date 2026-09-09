@@ -17,35 +17,73 @@ fn diff(path: &Path, args: &[&str]) -> Result<String> {
         "--no-textconv",
         "--no-renames",
         "--binary",
+        "--no-color",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
     ];
     command.extend(args);
     git(path, &command)
 }
 
-fn untracked_content(root: &Path, name: &str) -> Result<String> {
+fn untracked_content(root: &Path, name: &str) -> Result<(String, usize)> {
     let path = root.join(name);
     let metadata = std::fs::symlink_metadata(&path)?;
     if metadata.file_type().is_symlink() {
-        return Ok(format!("symlink → {}", std::fs::read_link(path)?.display()));
+        return Ok((
+            format!("symlink → {}", std::fs::read_link(path)?.display()),
+            1,
+        ));
     }
     if !metadata.is_file() {
-        return Ok("目录 / 子模块".into());
+        return Ok(("目录 / 子模块".into(), 0));
     }
     let content = std::fs::read(path)?;
-    Ok(String::from_utf8(content).unwrap_or_else(|error| {
+    let additions = if content.iter().take(8000).any(|byte| *byte == 0) {
+        0
+    } else {
+        content.iter().filter(|byte| **byte == b'\n').count()
+            + usize::from(!content.is_empty() && !content.ends_with(b"\n"))
+    };
+    let text = String::from_utf8(content).unwrap_or_else(|error| {
         format!(
             "二进制文件（{} 字节，SHA-256: {:x}）",
             error.as_bytes().len(),
             Sha256::digest(error.as_bytes())
         )
-    }))
+    });
+    Ok((text, additions))
 }
 
 pub(crate) fn review(workspace: &Workspace) -> Result<WorkspaceReview> {
     validate_workspace(workspace)?;
-    let cwd = Path::new(&workspace.path);
+    let root = checkout_path(Path::new(&workspace.path))?;
+    let cwd = root.as_path();
     let head = git(cwd, &["rev-parse", "HEAD"])?.trim().to_owned();
     let base = workspace.base_sha.as_deref().unwrap_or(&head);
+    // Count final working-tree contents against HEAD, so a file edited both
+    // before and after staging is counted only once.
+    let (mut additions, deletions) = git(
+        cwd,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--numstat",
+            "-z",
+            "HEAD",
+            "--",
+        ],
+    )?
+    .split('\0')
+    .filter_map(|entry| {
+        let mut fields = entry.splitn(3, '\t');
+        Some((
+            fields.next()?.parse::<usize>().ok()?,
+            fields.next()?.parse::<usize>().ok()?,
+        ))
+    })
+    .fold((0, 0), |(added, removed), (a, d)| (added + a, removed + d));
     let mut dirty_paths = paths(git(
         cwd,
         &[
@@ -63,7 +101,11 @@ pub(crate) fn review(workspace: &Workspace) -> Result<WorkspaceReview> {
         &["ls-files", "--others", "--exclude-standard", "-z"],
     )?)
     .into_iter()
-    .map(|name| Ok((name.clone(), untracked_content(cwd, &name)?)))
+    .map(|name| {
+        let (text, lines) = untracked_content(cwd, &name)?;
+        additions += lines;
+        Ok((name, text))
+    })
     .collect::<Result<Vec<_>>>()?;
     dirty_paths.extend(untracked.iter().map(|(name, _)| name.clone()));
     dirty_paths.sort();
@@ -90,6 +132,8 @@ pub(crate) fn review(workspace: &Workspace) -> Result<WorkspaceReview> {
         unstaged: diff(cwd, &["--"])?,
         untracked,
         dirty_paths,
+        additions,
+        deletions,
         target_branches: local_branches(cwd)?,
         conflicts,
         resolution_diff,
@@ -130,9 +174,17 @@ pub(crate) fn commit_files(
     files: &[String],
     message: &str,
 ) -> Result<WorkspaceReview> {
-    let cwd = Path::new(&workspace.path);
+    let root = checkout_path(Path::new(&workspace.path))?;
+    let cwd = root.as_path();
     with_repository(cwd, || {
-        require_task_branch(workspace)?;
+        validate_workspace(workspace)?;
+        if workspace.managed {
+            require_task_branch(workspace)?;
+        }
+        ensure!(
+            git(cwd, &["rev-parse", "--verify", "MERGE_HEAD"]).is_err(),
+            "请先完成或中止已有合并"
+        );
         ensure!(
             !message.trim().is_empty() && !files.is_empty(),
             "请选择文件并填写提交说明"
@@ -151,6 +203,44 @@ pub(crate) fn commit_files(
         commit.extend(files.iter().map(String::as_str));
         git(cwd, &commit)?;
         review(workspace)
+    })
+}
+
+pub(crate) fn selected_diff(
+    workspace: &Workspace,
+    expected: &WorkspaceReview,
+    files: &[String],
+) -> Result<String> {
+    let root = checkout_path(Path::new(&workspace.path))?;
+    with_repository(&root, || {
+        ensure!(
+            &review(workspace)? == expected,
+            "变更已更新，请刷新后重新生成提交说明"
+        );
+        ensure!(
+            !files.is_empty() && files.iter().all(|file| expected.dirty_paths.contains(file)),
+            "请选择需要提交的文件"
+        );
+        // git commit --only takes the selected working-tree contents, including
+        // unstaged edits. Generate from that same result relative to HEAD.
+        let mut args = vec!["HEAD", "--"];
+        args.extend(files.iter().map(String::as_str));
+        let mut content = diff(&root, &args)?;
+        for (name, text) in &expected.untracked {
+            if files.contains(name) {
+                content.push_str(&format!("\nNew file: {name}\n{text}\n"));
+            }
+        }
+        ensure!(!content.trim().is_empty(), "所选文件没有可提交的变更");
+        ensure!(
+            content.len() <= nexus_protocol::MAX_COMMIT_DIFF_BYTES,
+            "所选变更过大，请减少所选文件或手动填写提交说明"
+        );
+        ensure!(
+            &review(workspace)? == expected,
+            "变更已更新，请刷新后重新生成提交说明"
+        );
+        Ok(content)
     })
 }
 

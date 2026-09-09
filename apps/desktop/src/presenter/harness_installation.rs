@@ -210,8 +210,6 @@ impl Presenter {
             self.model.model_catalog = ModelCatalogState::Idle;
             self.refresh_model_catalog();
         }
-        if harness == self.model.title_generation.harness {
-            self.model.title_model_catalog = ModelCatalogState::Idle;
-        }
+        self.invalidate_generation_catalogs(harness);
     }
 }

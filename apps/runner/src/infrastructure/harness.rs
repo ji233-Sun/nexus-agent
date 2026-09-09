@@ -3,7 +3,7 @@ use nexus_harness_claude as claude;
 use nexus_harness_codex as codex;
 use nexus_harness_core::{LaunchSpec, LineDecoder, ModelCatalogError};
 use nexus_harness_omp as omp;
-use nexus_protocol::{EnvironmentVariable, HarnessProbe, StartRun};
+use nexus_protocol::{EnvironmentVariable, HarnessProbe, StartRun, TextGenerationConfig};
 use std::path::Path;
 use tokio::sync::watch;
 
@@ -62,8 +62,8 @@ pub(crate) fn prepare(request: &StartRun, cwd: &Path) -> (LaunchSpec, Box<dyn Li
     }
 }
 
-pub(crate) fn prepare_title(
-    request: &StartRun,
+pub(crate) fn prepare_text_generation(
+    request: &TextGenerationConfig,
     cwd: &Path,
     prompt: &str,
 ) -> (LaunchSpec, Box<dyn LineDecoder>) {

@@ -3,6 +3,7 @@ mod cnb_media;
 mod components;
 mod model_picker;
 mod pane;
+mod review;
 mod settings;
 mod sidebar;
 pub(crate) mod theme;
@@ -15,8 +16,8 @@ mod workspace;
 use crate::{
     i18n::Language,
     model::{
-        AppModel, AppearanceSettings, ModelCatalogState, PendingUserAsk, ThemePreference,
-        UserAskSubmissionState, history::HistoryMessage,
+        AppModel, AppearanceSettings, GenerationKind, ModelCatalogState, PendingUserAsk,
+        ThemePreference, UserAskSubmissionState, history::HistoryMessage,
     },
     presenter::{Presenter, ProviderProfileDraft},
 };
@@ -61,7 +62,10 @@ use std::{
 use theme::*;
 use uuid::Uuid;
 
-gpui::actions!(nexus_view, [SearchSessions, NewTask, ToggleSettings]);
+gpui::actions!(
+    nexus_view,
+    [SearchSessions, NewTask, ToggleSettings, CloseReview]
+);
 
 // Render outside NexusView's update so dialog builders can read its current model.
 struct DialogLayer;
@@ -75,6 +79,12 @@ impl Render for DialogLayer {
     }
 }
 
+struct GenerationPicker {
+    list: Entity<ListState<ModelPickerList>>,
+    content: CatalogModelSelectContent,
+    open: bool,
+}
+
 pub(crate) struct NexusView {
     presenter: Presenter,
     prompt_input: Entity<TextareaState>,
@@ -83,9 +93,9 @@ pub(crate) struct NexusView {
     catalog_model_select: Entity<ListState<ModelPickerList>>,
     catalog_model_select_content: CatalogModelSelectContent,
     model_picker_open: bool,
-    title_model_select: Entity<ListState<ModelPickerList>>,
-    title_model_select_content: CatalogModelSelectContent,
-    title_model_picker_open: bool,
+    generation_pickers: BTreeMap<GenerationKind, GenerationPicker>,
+    commit_inputs: BTreeMap<Uuid, Entity<TextareaState>>,
+    review_pages: BTreeMap<Uuid, review::ReviewPage>,
     executable_input: Entity<InputState>,
     provider_name_input: Entity<InputState>,
     provider_api_key_env_input: Entity<InputState>,
@@ -200,40 +210,51 @@ impl NexusView {
             state.set_selected_index(catalog_model_select_content.selected_index(), window, cx);
             state
         });
-        let title_model_select_content =
-            CatalogModelSelectContent::from_title_settings(presenter.model());
-        let title_model_select = cx.new(|cx| {
-            ListState::new(
-                ModelPickerList::new(title_model_select_content.clone()),
-                window,
-                cx,
-            )
-            .searchable(true)
-        });
-        cx.subscribe(&title_model_select, |app, list, event: &ListEvent, cx| {
-            match event {
-                ListEvent::Confirm(index) => {
-                    let choice = list
-                        .read(cx)
-                        .delegate()
-                        .item(*index)
-                        .filter(|item| !item.disabled)
-                        .map(|item| item.choice.clone());
-                    let selected = match choice {
-                        Some(CatalogModelChoice::FollowDefault) => None,
-                        Some(CatalogModelChoice::Model(id)) => Some(id),
+        let generation_pickers = GenerationKind::ALL
+            .into_iter()
+            .map(|kind| {
+                let content =
+                    CatalogModelSelectContent::from_generation_settings(presenter.model(), kind);
+                let list = cx.new(|cx| {
+                    ListState::new(ModelPickerList::new(content.clone()), window, cx)
+                        .searchable(true)
+                });
+                cx.subscribe(&list, move |app, list, event: &ListEvent, cx| {
+                    match event {
+                        ListEvent::Confirm(index) => {
+                            let choice = list
+                                .read(cx)
+                                .delegate()
+                                .item(*index)
+                                .filter(|item| !item.disabled)
+                                .map(|item| item.choice.clone());
+                            let selected = match choice {
+                                Some(CatalogModelChoice::FollowDefault) => None,
+                                Some(CatalogModelChoice::Model(id)) => Some(id),
+                                _ => return,
+                            };
+                            if app.presenter.select_generation_model(kind, selected) {
+                                app.generation_pickers.get_mut(&kind).unwrap().open = false;
+                            }
+                        }
+                        ListEvent::Cancel => {
+                            app.generation_pickers.get_mut(&kind).unwrap().open = false
+                        }
                         _ => return,
-                    };
-                    if app.presenter.select_title_model(selected) {
-                        app.title_model_picker_open = false;
                     }
-                }
-                ListEvent::Cancel => app.title_model_picker_open = false,
-                _ => return,
-            }
-            cx.notify();
-        })
-        .detach();
+                    cx.notify();
+                })
+                .detach();
+                (
+                    kind,
+                    GenerationPicker {
+                        list,
+                        content,
+                        open: false,
+                    },
+                )
+            })
+            .collect();
         cx.subscribe(&prompt_input, |_, _, event: &InputEvent, cx| {
             if matches!(
                 event,
@@ -284,6 +305,7 @@ impl NexusView {
             KeyBinding::new("secondary-k", SearchSessions, Some("Nexus")),
             KeyBinding::new("secondary-n", NewTask, Some("Nexus")),
             KeyBinding::new("secondary-,", ToggleSettings, Some("Nexus")),
+            KeyBinding::new("escape", CloseReview, Some("Nexus")),
         ]);
         let owner = cx.weak_entity();
         let sidebar_pane = cx.new(|cx| WorkspacePane::new(owner.clone(), PaneKind::Sidebar, cx));
@@ -311,9 +333,9 @@ impl NexusView {
             catalog_model_select,
             catalog_model_select_content,
             model_picker_open: false,
-            title_model_select,
-            title_model_select_content,
-            title_model_picker_open: false,
+            generation_pickers,
+            commit_inputs: BTreeMap::new(),
+            review_pages: BTreeMap::new(),
             executable_input,
             provider_name_input,
             provider_api_key_env_input,
@@ -855,7 +877,8 @@ impl NexusView {
                 self.presenter.model().title_model_catalog,
                 ModelCatalogState::Idle
             ) {
-                self.presenter.refresh_title_model_catalog();
+                self.presenter
+                    .refresh_generation_model_catalog(GenerationKind::Title);
             }
             self.focus_handle.focus(window, cx);
         } else {
@@ -1086,15 +1109,19 @@ impl NexusView {
     }
 
     fn sync_catalog_model_select(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let content = CatalogModelSelectContent::from_title_settings(self.presenter.model());
-        if content != self.title_model_select_content {
-            self.title_model_select_content = content.clone();
-            self.title_model_select.update(cx, |state, cx| {
-                state.delegate_mut().replace_content(content);
-                let selected = state.delegate().selected_index();
-                state.set_selected_index(selected, window, cx);
-                cx.notify();
-            });
+        for kind in GenerationKind::ALL {
+            let content =
+                CatalogModelSelectContent::from_generation_settings(self.presenter.model(), kind);
+            let picker = self.generation_pickers.get_mut(&kind).unwrap();
+            if content != picker.content {
+                picker.content = content.clone();
+                picker.list.update(cx, |state, cx| {
+                    state.delegate_mut().replace_content(content);
+                    let selected = state.delegate().selected_index();
+                    state.set_selected_index(selected, window, cx);
+                    cx.notify();
+                });
+            }
         }
         let content = CatalogModelSelectContent::from_model(self.presenter.model());
         if content == self.catalog_model_select_content {
@@ -1631,8 +1658,15 @@ impl NexusView {
             )
     }
 
-    fn render_workspace(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.presenter.model().cnb.opened {
+    fn render_workspace(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let page = if self.presenter.model().cnb.opened {
+            Some(self.render_cnb(cx).into_any_element())
+        } else {
+            self.review_pages
+                .get(&self.presenter.model().conversation.id)
+                .map(|page| self.render_workspace_review(page, cx))
+        };
+        if let Some(page) = page {
             return div()
                 .size_full()
                 .bg(materials(cx).chrome)
@@ -1645,7 +1679,8 @@ impl NexusView {
                             .flex_none(),
                     ),
                 )
-                .child(self.render_cnb(cx));
+                .child(page)
+                .into_any_element();
         }
         let locale = self.presenter.model().language;
         let colors = palette(cx);
@@ -1686,17 +1721,10 @@ impl NexusView {
             .selected_provider_profile()
             .is_some_and(|profile| profile.credential_configured);
         let background_run = model.active_run.is_none() && model.active_run_count() > 0;
-        let header_status_pending = model.active_run.is_some()
-            || model.codex_thread_loading
-            || (!history && matches!(model.model_catalog, ModelCatalogState::Loading { .. }));
+        let header_status_pending = model.active_run.is_some() || model.codex_thread_loading;
         let header_status_color = if header_status_pending {
             rgb(colors.accent).into()
-        } else if !history
-            && (matches!(
-                model.model_catalog,
-                ModelCatalogState::Failed { .. } | ModelCatalogState::NotReady(_)
-            ) || selected_task.is_some_and(|task| task.status == RunStatus::Failed))
-        {
+        } else if !history && selected_task.is_some_and(|task| task.status == RunStatus::Failed) {
             rgb(colors.danger).into()
         } else if selected_task.is_some_and(|task| {
             matches!(task.status, RunStatus::Cancelled | RunStatus::Interrupted)
@@ -1877,6 +1905,22 @@ impl NexusView {
                                             })
                                             .child(header_status),
                                     )
+                                    .when(!history && model.selected_project.is_some(), |element| {
+                                        element.child(
+                                            Button::new("toggle-changes-sidebar")
+                                                .debug_selector(|| "toggle-changes-sidebar".into())
+                                                .ghost()
+                                                .small()
+                                                .icon(IconName::PanelRight)
+                                                .tooltip(locale.text("环境"))
+                                                .accessibility_label(locale.text("环境"))
+                                                .selected(model.changes_sidebar_open)
+                                                .on_click(cx.listener(|app, _, _, cx| {
+                                                    app.presenter.toggle_changes_sidebar();
+                                                    cx.notify();
+                                                })),
+                                        )
+                                    })
                                     .child(
                                         Button::new("open-settings")
                                             .debug_selector(|| "open-settings".into())
@@ -2063,12 +2107,17 @@ impl NexusView {
                             ),
                     ),
             )
+            .when(model.changes_sidebar_open && !history, |element| {
+                element.child(self.render_changes_sidebar(cx))
+            })
+            .into_any_element()
     }
 }
 
 impl Render for NexusView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_user_ask_inputs(window, cx);
+        self.sync_commit_input(window, cx);
         if self.model_picker_open && self.presenter.model().active_run.is_some() {
             self.model_picker_open = false;
             self.prompt_input
@@ -2090,6 +2139,17 @@ impl Render for NexusView {
             }))
             .on_action(cx.listener(|app, _: &ToggleSettings, window, cx| {
                 app.toggle_settings(window, cx);
+            }))
+            .on_action(cx.listener(|app, _: &CloseReview, window, cx| {
+                if !app.settings_open
+                    && !app.presenter.model().cnb.opened
+                    && app
+                        .review_pages
+                        .contains_key(&app.presenter.model().conversation.id)
+                {
+                    app.close_workspace_review(window, cx);
+                    cx.stop_propagation();
+                }
             }))
             .capture_action(cx.listener(|app, action: &Enter, window, cx| {
                 if !app.settings_open
@@ -2568,7 +2628,273 @@ mod catalog_model_tests {
     }
 
     #[gpui::test]
-    fn worktree_review_requires_confirmation_and_commits_the_selected_file(
+    fn workspace_review_uses_full_page_preserves_drafts_and_navigates_files(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::{
+            infrastructure::git,
+            presenter::tests::{finish_workspace_operation, seed_cnb_issues, worktree_fixture},
+        };
+        use gpui::{ScrollDelta, ScrollWheelEvent, point};
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (mut presenter, runner, _directory, start) = worktree_fixture("review task");
+        presenter.set_appearance(AppearanceSettings {
+            reduced_motion: true,
+            ..Default::default()
+        });
+        runner.emit(Event::RunExited {
+            run_id: start.run_id,
+            status: RunStatus::Completed,
+            exit_code: Some(0),
+        });
+        presenter.drain_events();
+        let cwd = Path::new(&start.cwd);
+        std::fs::write(
+            cwd.join("tracked.txt"),
+            format!("{}\n", "long diff content ".repeat(30)).repeat(80),
+        )
+        .unwrap();
+        std::fs::write(cwd.join("staged.rs"), "fn staged() {}\n").unwrap();
+        git::git(cwd, &["add", "staged.rs"]).unwrap();
+        std::fs::create_dir(cwd.join("docs")).unwrap();
+        std::fs::write(cwd.join("docs/新文件.md"), "# New document\n").unwrap();
+        presenter.toggle_changes_sidebar();
+        finish_workspace_operation(&mut presenter);
+        presenter.select_changed_file("tracked.txt".into(), true);
+        presenter.set_commit_message("Reviewed draft".into());
+        seed_cnb_issues(&mut presenter);
+        let original = presenter
+            .model()
+            .workspace_review
+            .as_ref()
+            .unwrap()
+            .unstaged
+            .clone();
+        let id = presenter
+            .model()
+            .workspace_review
+            .as_ref()
+            .unwrap()
+            .workspace_id;
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| NexusView::new(presenter, window, cx));
+            gpui_kit::component::Root::new(view, window, cx)
+        });
+        let view = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<NexusView>().unwrap()
+        });
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                let _ = window.draw(cx);
+            });
+        };
+        cx.simulate_resize(gpui::size(px(1040.), px(680.)));
+        draw(cx);
+        click_debug(cx, "environment-changes");
+        draw(cx);
+        click_debug(cx, "show-workspace-diff");
+        draw(cx);
+        for (width, height, language) in [
+            (1040., 680., Language::Chinese),
+            (1440., 900., Language::English),
+        ] {
+            cx.simulate_resize(gpui::size(px(width), px(height)));
+            view.update_in(cx, |view, window, cx| {
+                view.set_language(language, window, cx)
+            });
+            draw(cx);
+            let page = cx.debug_bounds("workspace-review-page").unwrap();
+            let navigation = cx.debug_bounds("review-file-list").unwrap();
+            let code = cx
+                .debug_bounds(format!("review-diff-{id}-Unstaged-tracked.txt").leak())
+                .unwrap();
+            assert!(page.right() <= px(width) && page.bottom() <= px(height));
+            assert!(
+                code.size.height > px(height * 0.8),
+                "review must use available height: {code:?}"
+            );
+            assert!(code.size.width > px(480.) && code.left() >= navigation.right());
+            assert!(cx.debug_bounds("composer-surface").is_none());
+            assert!(cx.debug_bounds("workspace-header-status").is_none());
+            assert!(cx.debug_bounds("review-status").is_none());
+            assert!(cx.debug_bounds("review-merge-panel").is_none());
+        }
+        let code_key: &'static str = format!("review-diff-{id}-Unstaged-tracked.txt").leak();
+        let viewport = cx.debug_bounds(code_key).unwrap();
+        for delta in [point(px(-80.), px(0.)), point(px(0.), px(-60.))] {
+            let before = cx
+                .debug_bounds(format!("{code_key}-content").leak())
+                .unwrap();
+            cx.simulate_event(ScrollWheelEvent {
+                position: viewport.center(),
+                delta: ScrollDelta::Pixels(delta),
+                ..Default::default()
+            });
+            draw(cx);
+            let after = cx
+                .debug_bounds(format!("{code_key}-content").leak())
+                .unwrap();
+            assert_eq!(after.origin, before.origin + delta);
+        }
+        click_debug(cx, format!("{code_key}-copy").leak());
+        cx.update(|_, cx| assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), original));
+        click_debug(cx, "review-nav-Untracked-docs/新文件.md");
+        draw(cx);
+        assert!(
+            cx.debug_bounds(format!("review-diff-{id}-Untracked-docs/新文件.md").leak())
+                .is_some()
+        );
+        click_debug(cx, "sidebar-cnb");
+        draw(cx);
+        assert!(cx.debug_bounds("cnb-page").is_some());
+        assert!(cx.debug_bounds("workspace-review-page").is_none());
+        assert!(cx.debug_bounds("composer-surface").is_none());
+        cx.simulate_keystrokes("escape");
+        draw(cx);
+        assert!(cx.debug_bounds("cnb-page").is_some());
+        view.update_in(cx, |view, window, cx| {
+            view.select_task(start.task_id, window, cx);
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("cnb-page").is_none());
+        assert!(cx.debug_bounds("workspace-review-page").is_some());
+        assert!(
+            cx.debug_bounds(format!("review-diff-{id}-Untracked-docs/新文件.md").leak())
+                .is_some()
+        );
+        std::fs::write(cwd.join("docs/新文件.md"), "# Updated document\n").unwrap();
+        click_debug(cx, "refresh-workspace-review");
+        view.update(cx, |view, cx| {
+            finish_workspace_operation(&mut view.presenter);
+            cx.notify();
+        });
+        draw(cx);
+        click_debug(
+            cx,
+            format!("review-diff-{id}-Untracked-docs/新文件.md-copy").leak(),
+        );
+        cx.update(|_, cx| {
+            assert_eq!(
+                cx.read_from_clipboard().unwrap().text().unwrap(),
+                "# Updated document\n"
+            )
+        });
+        click_debug(cx, "close-workspace-review");
+        draw(cx);
+        assert!(cx.debug_bounds("composer-surface").is_some());
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.presenter.model().commit_message, "Reviewed draft");
+            assert_eq!(
+                view.presenter
+                    .model()
+                    .selected_changes
+                    .iter()
+                    .collect::<Vec<_>>(),
+                vec!["tracked.txt"]
+            );
+        });
+        click_debug(cx, "open-commit-editor");
+        draw(cx);
+        assert_eq!(
+            cx.debug_bounds("generate-commit-message")
+                .unwrap()
+                .size
+                .width,
+            px(28.)
+        );
+    }
+
+    #[gpui::test]
+    fn workspace_review_keeps_merge_preview_and_confirmation_on_the_page(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::{
+            infrastructure::git,
+            presenter::tests::{finish_workspace_operation, worktree_fixture},
+        };
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (mut presenter, runner, _directory, start) = worktree_fixture("merge task");
+        presenter.set_appearance(AppearanceSettings {
+            reduced_motion: true,
+            ..Default::default()
+        });
+        runner.emit(Event::RunExited {
+            run_id: start.run_id,
+            status: RunStatus::Completed,
+            exit_code: Some(0),
+        });
+        presenter.drain_events();
+        let cwd = Path::new(&start.cwd);
+        std::fs::write(cwd.join("tracked.txt"), "reviewed merge\n").unwrap();
+        git::git(cwd, &["commit", "-am", "reviewed change"]).unwrap();
+        let task_status = presenter.model().status_text().to_owned();
+        let project = presenter.model().selected_project.clone().unwrap();
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| NexusView::new(presenter, window, cx));
+            gpui_kit::component::Root::new(view, window, cx)
+        });
+        let view = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<NexusView>().unwrap()
+        });
+        cx.simulate_resize(gpui::size(px(1040.), px(680.)));
+        view.update_in(cx, |view, window, cx| {
+            view.open_workspace_review(start.task_id, window, cx);
+            finish_workspace_operation(&mut view.presenter);
+            cx.notify();
+        });
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                let _ = window.draw(cx);
+            });
+        };
+        draw(cx);
+        click_debug(cx, "review-merge-options");
+        draw(cx);
+        click_debug(cx, "preview-workspace-merge");
+        view.update(cx, |view, cx| {
+            finish_workspace_operation(&mut view.presenter);
+            cx.notify();
+        });
+        draw(cx);
+        assert!(
+            cx.debug_bounds(format!("review-diff-{}-Merge-tracked.txt", start.task_id).leak())
+                .is_some()
+        );
+        assert_eq!(
+            std::fs::read_to_string(Path::new(&project.canonical_path).join("tracked.txt"))
+                .unwrap(),
+            "base\n"
+        );
+        click_debug(cx, "confirm-workspace-merge");
+        view.update(cx, |view, cx| {
+            finish_workspace_operation(&mut view.presenter);
+            cx.notify();
+        });
+        draw(cx);
+        assert_eq!(
+            std::fs::read_to_string(Path::new(&project.canonical_path).join("tracked.txt"))
+                .unwrap(),
+            "reviewed merge\n"
+        );
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.presenter.model().status_text(), task_status)
+        });
+        assert!(cx.debug_bounds("review-status").is_some());
+        assert!(cx.debug_bounds("workspace-review-page").is_some());
+        cx.simulate_keystrokes("escape");
+        draw(cx);
+        assert!(cx.debug_bounds("workspace-review-page").is_none());
+        assert!(cx.debug_bounds("composer-surface").is_some());
+    }
+
+    #[gpui::test]
+    fn changes_sidebar_generates_editable_messages_and_requires_commit_confirmation(
         cx: &mut gpui::TestAppContext,
     ) {
         use crate::presenter::tests::{finish_workspace_operation, worktree_fixture};
@@ -2586,7 +2912,6 @@ mod catalog_model_tests {
             exit_code: Some(0),
         });
         presenter.drain_events();
-        let id = presenter.model().selected_workspace.as_ref().unwrap().id;
         let cwd = std::path::Path::new(&start.cwd);
         // Opening a review must also notice a branch renamed after the run ended.
         crate::infrastructure::git::git(cwd, &["branch", "-m", "fix/review-task"]).unwrap();
@@ -2602,7 +2927,7 @@ mod catalog_model_tests {
         cx.simulate_resize(gpui::size(px(1040.), px(680.)));
         view.update_in(cx, |view, window, cx| {
             view.set_language(Language::English, window, cx);
-            view.open_workspace_review(id, window, cx);
+            view.presenter.toggle_changes_sidebar();
             finish_workspace_operation(&mut view.presenter);
             cx.notify();
         });
@@ -2611,14 +2936,55 @@ mod catalog_model_tests {
             window.simulate_next_frame(cx);
             let _ = window.draw(cx);
         });
-        let content = cx.debug_bounds("workspace-review-content").unwrap();
+        let content = cx.debug_bounds("conversation-right-sidebar").unwrap();
         assert!(content.size.height > px(0.));
-        click_debug(cx, "review-file-tracked.txt");
+        assert!(content.right() <= px(1040.));
+        assert!(content.bottom() <= px(680.));
+        assert!(cx.debug_bounds("composer-surface").unwrap().right() <= content.left());
+        let card = cx.debug_bounds("environment-card").unwrap();
+        assert!(card.size.height < px(240.));
+        assert!(cx.debug_bounds("commit-editor").is_none());
+        assert!(cx.debug_bounds("conversation-changed-files").is_none());
+        click_debug(cx, "environment-changes");
         cx.run_until_parked();
         cx.update(|window, cx| {
             window.simulate_next_frame(cx);
             let _ = window.draw(cx);
         });
+        click_debug(cx, "review-file-tracked.txt");
+        click_debug(cx, "open-commit-editor");
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            let _ = window.draw(cx);
+        });
+        click_debug(cx, "generate-commit-message");
+        view.update(cx, |view, cx| {
+            finish_workspace_operation(&mut view.presenter);
+            let request_id = view.presenter.model().commit_message_request.unwrap();
+            runner.emit(Event::CommitMessageGenerated {
+                request_id,
+                message: "fix: Generated description\n\nGenerated body".into(),
+            });
+            view.presenter.drain_events();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |view, window, cx| {
+            let input = &view.commit_inputs[&view.presenter.model().conversation.id];
+            assert_eq!(
+                input.read(cx).value(),
+                "fix: Generated description\n\nGenerated body"
+            );
+            input.update(cx, |input, cx| input.focus(window, cx));
+        });
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-a"
+        } else {
+            "ctrl-a"
+        });
+        cx.simulate_input("fix: Edited description\n\nReviewed body");
+        cx.run_until_parked();
         click_debug(cx, "commit-workspace-files");
         cx.simulate_prompt_answer("Cancel");
         cx.run_until_parked();
@@ -2635,6 +3001,7 @@ mod catalog_model_tests {
         cx.run_until_parked();
         view.update(cx, |view, cx| {
             finish_workspace_operation(&mut view.presenter);
+            assert!(!view.presenter.model().commit_editor_open);
             cx.notify();
         });
         assert_ne!(
@@ -2645,13 +3012,23 @@ mod catalog_model_tests {
             crate::infrastructure::git::git(cwd, &["log", "-1", "--format=%s"])
                 .unwrap()
                 .trim(),
-            "Complete task work"
+            "fix: Edited description"
         );
         assert!(
             crate::infrastructure::git::git(cwd, &["status", "--porcelain"])
                 .unwrap()
                 .is_empty()
         );
+        click_debug(cx, "environment-changes");
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            let _ = window.draw(cx);
+        });
+        click_debug(cx, "open-commit-editor");
+        assert!(cx.debug_bounds("commit-editor").is_none());
+        assert!(cx.debug_bounds("generate-commit-message").is_none());
+        assert!(cx.debug_bounds("environment-card").unwrap().size.height < px(260.));
     }
 
     #[gpui::test]
@@ -3338,7 +3715,7 @@ mod catalog_model_tests {
     }
 
     #[gpui::test]
-    fn title_model_settings_support_search_and_preserve_conversation_selection(
+    fn generation_model_settings_support_search_and_preserve_conversation_selection(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(gpui_kit::init);
@@ -3352,15 +3729,36 @@ mod catalog_model_tests {
                 ModelCatalogState::Loading { .. }
             ));
         });
-        for (width, height, language) in [
+        for ((width, height, language), kind) in [
             (1040., 680., Language::Chinese),
             (1280., 800., Language::English),
-        ] {
+        ]
+        .into_iter()
+        .flat_map(|layout| GenerationKind::ALL.map(|kind| (layout, kind)))
+        {
+            let harness_selector = match kind {
+                GenerationKind::Title => "title-harness",
+                GenerationKind::Commit => "commit-harness",
+            };
+            let model_selector = match kind {
+                GenerationKind::Title => "title-model",
+                GenerationKind::Commit => "commit-model",
+            };
+            let effort_selector = match kind {
+                GenerationKind::Title => "title-effort",
+                GenerationKind::Commit => "commit-effort",
+            };
+            let picker_selector = match kind {
+                GenerationKind::Title => "title-model-picker-surface",
+                GenerationKind::Commit => "commit-model-picker-surface",
+            };
             cx.simulate_resize(gpui::size(px(width), px(height)));
             view.update_in(cx, |view, window, cx| {
                 view.settings_open = true;
+                view.settings_scroll.set_offset(gpui::point(px(0.), px(0.)));
                 view.set_language(language, window, cx);
-                view.presenter.select_title_harness(HarnessKind::Claude);
+                view.presenter
+                    .select_generation_harness(kind, HarnessKind::Claude);
                 view.reduced_motion = true;
                 cx.notify();
             });
@@ -3368,8 +3766,8 @@ mod catalog_model_tests {
             let content = cx.debug_bounds("settings-content-general").unwrap();
             let breadcrumb = cx.debug_bounds("settings-breadcrumb-label").unwrap();
             assert_eq!(content.left(), breadcrumb.left());
-            let harness = cx.debug_bounds("title-harness").unwrap();
-            let model = cx.debug_bounds("title-model").unwrap();
+            let harness = cx.debug_bounds(harness_selector).unwrap();
+            let model = cx.debug_bounds(model_selector).unwrap();
             assert_eq!(model.left(), harness.left());
             assert_eq!(model.size, harness.size);
             for (first, second) in [
@@ -3386,7 +3784,16 @@ mod catalog_model_tests {
                 cx.debug_bounds("update-check-on-startup").unwrap().left(),
                 harness.left()
             );
-            click_debug(cx, "title-harness");
+            if kind == GenerationKind::Commit {
+                view.update(cx, |view, cx| {
+                    view.settings_scroll
+                        .set_offset(gpui::point(px(0.), px(160.) - harness.top()));
+                    cx.notify();
+                });
+                cx.run_until_parked();
+            }
+            click_debug(cx, harness_selector);
+
             cx.run_until_parked();
             cx.simulate_keystrokes("down down down enter");
             cx.run_until_parked();
@@ -3394,15 +3801,15 @@ mod catalog_model_tests {
                 view.read_with(cx, |view, _| view
                     .presenter
                     .model()
-                    .title_generation
+                    .generation_settings(kind)
                     .harness),
                 HarnessKind::Omp
             );
-            click_debug(cx, "title-model");
+            click_debug(cx, model_selector);
             cx.run_until_parked();
             let request_id = view.read_with(cx, |view, _| {
                 let ModelCatalogState::Loading { request_id, .. } =
-                    view.presenter.model().title_model_catalog
+                    view.presenter.model().generation_catalog(kind).clone()
                 else {
                     panic!("loading")
                 };
@@ -3420,7 +3827,7 @@ mod catalog_model_tests {
                 cx.notify();
             });
             cx.run_until_parked();
-            let bounds = cx.debug_bounds("title-model-picker-surface").unwrap();
+            let bounds = cx.debug_bounds(picker_selector).unwrap();
             assert!(
                 bounds.left() >= px(0.) && bounds.right() <= px(width),
                 "{bounds:?}"
@@ -3433,43 +3840,51 @@ mod catalog_model_tests {
             cx.run_until_parked();
             cx.simulate_keystrokes("enter");
             cx.run_until_parked();
-            assert!(cx.debug_bounds("title-model-picker-surface").is_none());
-            let effort_bounds = cx.debug_bounds("title-effort").unwrap();
+            assert!(cx.debug_bounds(picker_selector).is_none());
+            let effort_bounds = cx.debug_bounds(effort_selector).unwrap();
             assert!(effort_bounds.right() <= px(width));
             assert!(effort_bounds.bottom() <= px(height));
-            click_debug(cx, "title-effort");
+            click_debug(cx, effort_selector);
             cx.run_until_parked();
             cx.simulate_keystrokes("down down enter");
             cx.run_until_parked();
             view.read_with(cx, |view, _| {
                 assert_eq!(
-                    view.presenter.model().title_generation.model.as_deref(),
+                    view.presenter
+                        .model()
+                        .generation_settings(kind)
+                        .model
+                        .as_deref(),
                     Some("provider/title-target")
                 );
                 assert_eq!(view.presenter.model().selected_harness, HarnessKind::Claude);
                 assert!(view.presenter.model().model_override.is_none());
                 assert_eq!(
-                    view.presenter.model().title_generation.effort,
+                    view.presenter.model().generation_settings(kind).effort,
                     ThinkingEffort::XHigh
                 );
                 assert_eq!(view.presenter.model().effort, ThinkingEffort::Default);
             });
-            click_debug(cx, "title-effort");
+            click_debug(cx, effort_selector);
             cx.run_until_parked();
             cx.simulate_keystrokes("down enter");
             cx.run_until_parked();
             assert_eq!(
-                view.read_with(cx, |view, _| view.presenter.model().title_generation.effort),
+                view.read_with(cx, |view, _| view
+                    .presenter
+                    .model()
+                    .generation_settings(kind)
+                    .effort),
                 ThinkingEffort::Default
             );
-            let trigger = cx.debug_bounds("title-model").unwrap();
+            let trigger = cx.debug_bounds(model_selector).unwrap();
             assert!(trigger.right() <= px(width));
             assert_eq!(trigger.size, harness.size);
-            click_debug(cx, "title-model");
+            click_debug(cx, model_selector);
             cx.run_until_parked();
             cx.simulate_keystrokes("escape");
             cx.run_until_parked();
-            assert!(cx.debug_bounds("title-model-picker-surface").is_none());
+            assert!(cx.debug_bounds(picker_selector).is_none());
         }
     }
 
