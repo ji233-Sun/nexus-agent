@@ -18,7 +18,7 @@ fn visible_history<'a>(
     (visible, has_more)
 }
 
-fn navigation_row(
+pub(super) fn navigation_row(
     colors: Palette,
     id: impl Into<ElementId>,
     title: impl Into<SharedString>,

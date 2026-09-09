@@ -49,6 +49,7 @@ use nexus_domain::{
 };
 use pane::{PaneKind, WorkspacePane};
 use settings::SettingsSection;
+use sidebar::navigation_row;
 use std::{
     collections::{BTreeMap, HashSet},
     path::Path,
@@ -89,6 +90,8 @@ pub(crate) struct NexusView {
     provider_base_url_input: Entity<InputState>,
     provider_model_input: Entity<InputState>,
     search_input: Entity<InputState>,
+    project_search_input: Entity<InputState>,
+    project_picker_open: bool,
     focus_handle: FocusHandle,
     timeline_scroll: ScrollHandle,
     sidebar_scroll: ScrollHandle,
@@ -175,6 +178,11 @@ impl NexusView {
         });
         let search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder(locale.text("搜索任务与历史…")));
+        let project_search_input = cx.new(|cx| InputState::new(window, cx));
+        cx.subscribe(&project_search_input, |_, _, _: &InputEvent, cx| {
+            cx.notify()
+        })
+        .detach();
         let catalog_model_select_content = CatalogModelSelectContent::from_model(presenter.model());
         let catalog_model_select = cx.new(|cx| {
             let mut state = ListState::new(
@@ -303,6 +311,8 @@ impl NexusView {
             provider_base_url_input,
             provider_model_input,
             search_input,
+            project_search_input,
+            project_picker_open: false,
             focus_handle: cx.focus_handle(),
             timeline_scroll: ScrollHandle::new(),
             sidebar_scroll: ScrollHandle::new(),
@@ -1413,6 +1423,7 @@ impl NexusView {
         let model = self.presenter.model();
         let colors = palette(cx);
         let path = model.working_directory().map(str::to_owned);
+        let app = cx.entity();
         div()
             .debug_selector(|| "composer-context".into())
             .w_full()
@@ -1438,7 +1449,6 @@ impl NexusView {
                     .text_color(rgb(colors.muted))
                     .cursor_pointer()
                     .hover(|style| style.text_color(rgb(colors.text)))
-                    .on_click(cx.listener(Self::choose_project))
                     .when_some(path, |element, path| {
                         element.tooltip(move |window, cx| {
                             let path = path.clone();
@@ -1459,6 +1469,127 @@ impl NexusView {
                             .min_w_0()
                             .truncate()
                             .child(working_directory_label(model).to_owned()),
+                    )
+                    .map(|trigger| {
+                        Popover::new("project-picker")
+                            .anchor(Anchor::BottomLeft)
+                            .open(self.project_picker_open)
+                            .track_focus(&self.project_search_input.focus_handle(cx))
+                            .trigger(
+                                Button::new("project-picker-trigger")
+                                    .ghost()
+                                    .small()
+                                    .p_0()
+                                    .h_auto()
+                                    .min_w_0()
+                                    .max_w_full()
+                                    .accessibility_label(model.language.text("选择项目"))
+                                    .child(trigger),
+                            )
+                            .on_open_change(move |open, window, cx| {
+                                app.update(cx, |app, cx| {
+                                    app.project_picker_open = *open;
+                                    if *open {
+                                        let locale = app.presenter.model().language;
+                                        app.project_search_input.update(cx, |input, cx| {
+                                            input.set_placeholder(
+                                                locale.text("搜索项目"),
+                                                window,
+                                                cx,
+                                            );
+                                            input.set_value("", window, cx);
+                                        });
+                                    }
+                                    cx.notify();
+                                });
+                            })
+                            .when(self.project_picker_open, |popover| {
+                                popover.child(self.render_project_picker(cx))
+                            })
+                            .map(|popover| div().min_w_0().max_w_full().child(popover))
+                    }),
+            )
+    }
+
+    fn render_project_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let model = self.presenter.model();
+        let locale = model.language;
+        let colors = palette(cx);
+        let query = self.project_search_input.read(cx).value();
+        let selected = model
+            .selected_project
+            .as_ref()
+            .filter(|_| model.selected_codex_thread.is_none())
+            .map(|project| project.id);
+        let projects: Vec<_> = model
+            .projects
+            .iter()
+            .filter(|project| matches_search(&project.display_name, &query))
+            .collect();
+        div()
+            .debug_selector(|| "project-picker-surface".into())
+            .w(px(280.))
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(Input::new(&self.project_search_input).small())
+            .child(
+                div()
+                    .id("project-picker-list")
+                    .max_h(px(240.))
+                    .overflow_y_scroll()
+                    .when(projects.is_empty(), |list| {
+                        list.child(
+                            div()
+                                .p_2()
+                                .text_color(rgb(colors.muted))
+                                .child(locale.text("没有匹配的项目")),
+                        )
+                    })
+                    .children(projects.into_iter().map(|project| {
+                        let project = project.clone();
+                        let id = project.id;
+                        navigation_row(
+                            colors,
+                            ElementId::from(id),
+                            project.display_name.clone(),
+                            None,
+                        )
+                        .debug_selector(move || format!("project-picker-{id}"))
+                        .selected(selected == Some(id))
+                        .when(selected == Some(id), |row| {
+                            row.suffix(|_, _| Icon::new(IconName::Check).size(px(14.)))
+                        })
+                        .on_click(cx.listener(
+                            move |app, _, window, cx| {
+                                app.project_picker_open = false;
+                                if selected != Some(id) {
+                                    app.select_project(project.clone());
+                                }
+                                app.focus_prompt(window, cx);
+                                cx.notify();
+                            },
+                        ))
+                    })),
+            )
+            .child(
+                div()
+                    .border_t_1()
+                    .border_color(rgb(colors.border))
+                    .pt_2()
+                    .child(
+                        navigation_row(
+                            colors,
+                            "project-picker-new",
+                            locale.text("新建项目"),
+                            Some(IconName::Plus),
+                        )
+                        .debug_selector(|| "project-picker-new".into())
+                        .on_click(cx.listener(|app, event, window, cx| {
+                            app.project_picker_open = false;
+                            app.choose_project(event, window, cx);
+                            cx.notify();
+                        })),
                     ),
             )
     }
@@ -2262,6 +2393,125 @@ mod catalog_model_tests {
             assert_eq!(model.working_directory(), None);
             model.codex_threads.clear();
         }
+    }
+
+    #[gpui::test]
+    fn working_directory_picker_searches_switches_and_dismisses_without_resetting_current_project(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (mut presenter, _, directory) = fixture();
+        let first = presenter.model().selected_project.clone().unwrap();
+        let path = directory.path().join("第二个 Project");
+        std::fs::create_dir_all(&path).unwrap();
+        presenter.open_project(&path);
+        let second = presenter.model().selected_project.clone().unwrap();
+        let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
+        view.update_in(cx, |view, window, cx| {
+            view.prompt_input
+                .update(cx, |input, cx| input.set_value("keep draft", window, cx));
+        });
+        cx.run_until_parked();
+        click_debug(cx, "composer-directory");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("project-picker-surface").is_some());
+        assert!(cx.debug_bounds("project-picker-new").is_some());
+        let second_row: &'static str = format!("project-picker-{}", second.id).leak();
+        let first_row: &'static str = format!("project-picker-{}", first.id).leak();
+        assert!(cx.debug_bounds(first_row).is_some());
+        view.update_in(cx, |view, window, cx| {
+            view.project_search_input.update(cx, |input, cx| {
+                input.set_value(" 第二个 PROJECT ", window, cx)
+            });
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(first_row).is_none());
+        click_debug(cx, second_row);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("project-picker-surface").is_none());
+        view.read_with(cx, |view, cx| {
+            assert_eq!(view.prompt_input.read(cx).value(), "keep draft");
+            assert_eq!(
+                view.presenter.model().selected_project.as_ref().unwrap().id,
+                second.id
+            );
+        });
+        click_debug(cx, "composer-directory");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds(first_row).is_some(),
+            "reopening clears search"
+        );
+        click_debug(cx, first_row);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("project-picker-surface").is_none());
+        view.read_with(cx, |view, _| {
+            assert_eq!(
+                view.presenter.model().selected_project.as_ref().unwrap().id,
+                first.id
+            );
+        });
+        click_debug(cx, "composer-directory");
+        cx.run_until_parked();
+        view.update_in(cx, |view, window, cx| {
+            view.project_search_input.update(cx, |input, cx| {
+                input.set_value("no such project", window, cx)
+            });
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(first_row).is_none());
+        assert!(cx.debug_bounds(second_row).is_none());
+        assert!(cx.debug_bounds("project-picker-new").is_some());
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("project-picker-surface").is_none());
+        view.read_with(cx, |view, _| {
+            assert_eq!(
+                view.presenter.model().selected_project.as_ref().unwrap().id,
+                first.id
+            );
+        });
+        view.update(cx, |view, cx| {
+            view.presenter
+                .select_codex_thread("read-only-history".into());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        click_debug(cx, "composer-directory");
+        cx.run_until_parked();
+        click_debug(cx, first_row);
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert!(view.presenter.model().selected_codex_thread.is_none());
+            assert_eq!(
+                view.presenter.model().selected_project.as_ref().unwrap().id,
+                first.id
+            );
+        });
+        let empty_directory = tempfile::tempdir().unwrap();
+        view.update(cx, |view, cx| {
+            view.presenter = Presenter::new(
+                crate::infrastructure::storage::Storage::open(
+                    &empty_directory.path().join("empty.sqlite"),
+                )
+                .unwrap(),
+                Err(anyhow::anyhow!("no runner")),
+                None,
+            );
+            cx.notify();
+        });
+        cx.run_until_parked();
+        click_debug(cx, "composer-directory");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("project-picker-surface").is_some());
+        assert!(cx.debug_bounds("project-picker-new").is_some());
+        cx.simulate_click(gpui::point(px(10.), px(10.)), Default::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("project-picker-surface").is_none());
+        assert!(view.read_with(cx, |view, _| {
+            view.presenter.model().selected_project.is_none()
+        }));
     }
 
     #[gpui::test]
