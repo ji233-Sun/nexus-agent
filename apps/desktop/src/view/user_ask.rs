@@ -69,6 +69,7 @@ impl NexusView {
                 move || selector.clone()
             })
             .w_full()
+            .flex_none()
             .rounded(px(CONTROL_RADIUS))
             .border_1()
             .border_color(material.edge)

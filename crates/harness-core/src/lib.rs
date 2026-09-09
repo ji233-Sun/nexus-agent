@@ -43,6 +43,9 @@ impl std::fmt::Debug for InputFrame {
 pub struct UserAskRequest {
     pub native_request_id: String,
     pub questions: Vec<UserAskQuestion>,
+    pub timeout_ms: Option<u64>,
+    // Some RPCs consume the answer without emitting an acknowledgement.
+    pub resolve_on_send: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

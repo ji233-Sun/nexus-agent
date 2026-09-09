@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -7,10 +7,12 @@ use std::{
 
 use nexus_domain::{
     HarnessKind, ModelDescriptor, ModelReasoningEffort, PermissionMode, ThinkingEffort,
+    UserAskAnswer, UserAskAnswerMode, UserAskAnswerValue, UserAskOption, UserAskQuestion,
+    UserAskStatus,
 };
 use nexus_harness_core::{
-    ApprovalOption, ApprovalPrompt, InputFrame, LineDecoder, resolve_executable, summarize_text,
-    tool_content,
+    ApprovalOption, ApprovalPrompt, InputFrame, LineDecoder, UserAskRequest, resolve_executable,
+    summarize_text, tool_content,
 };
 pub use nexus_harness_core::{DecodedEvent, LaunchSpec, ModelCatalogError};
 use nexus_protocol::{EnvironmentVariable, HarnessProbe};
@@ -31,7 +33,7 @@ pub fn build_launch_spec(
 ) -> LaunchSpec {
     let mut args = vec![
         "--mode".into(),
-        "rpc".into(),
+        "rpc-ui".into(),
         "--no-title".into(),
         "--approval-mode".into(),
         match permission_mode {
@@ -343,18 +345,52 @@ pub async fn probe(configured_executable: &str) -> HarnessProbe {
 }
 
 #[derive(Default)]
-pub struct EventDecoder;
+pub struct EventDecoder {
+    pending_user_asks: HashMap<String, Vec<ApprovalOption>>,
+}
 
 impl LineDecoder for EventDecoder {
     fn decode_line(&mut self, line: &str) -> Result<Vec<DecodedEvent>, serde_json::Error> {
         let frame: Value = serde_json::from_str(line)?;
-        Ok(decode_frame(&frame))
+        let events = if frame["type"] == "extension_ui_request" {
+            self.decode_ui_request(&frame)
+        } else {
+            decode_frame(&frame)
+        };
+        if events.contains(&DecodedEvent::TurnCompleted) {
+            self.pending_user_asks.clear();
+        }
+        Ok(events)
     }
 
     fn steer(&mut self, message_id: &str, prompt: &str) -> Option<InputFrame> {
         Some(InputFrame(
             json!({"type": "steer", "id": message_id, "message": prompt}),
         ))
+    }
+
+    fn answer_user_ask(
+        &mut self,
+        native_request_id: &str,
+        answers: &[UserAskAnswer],
+    ) -> Option<InputFrame> {
+        let [answer] = answers else { return None };
+        if answer.question_id != native_request_id {
+            return None;
+        }
+        let options = self.pending_user_asks.get(native_request_id)?;
+        let response = match &answer.value {
+            UserAskAnswerValue::Text(value) if options.is_empty() => InputFrame(json!({
+                "type": "extension_ui_response", "id": native_request_id, "value": value
+            })),
+            UserAskAnswerValue::Selected(values) if values.len() == 1 => options
+                .get(values[0].parse::<usize>().ok()?)?
+                .response
+                .clone(),
+            _ => return None,
+        };
+        self.pending_user_asks.remove(native_request_id);
+        Some(response)
     }
 }
 
@@ -411,7 +447,6 @@ fn decode_frame(frame: &Value) -> Vec<DecodedEvent> {
         Some("agent_end") if frame.get("isTerminal").and_then(Value::as_bool) != Some(false) => {
             vec![DecodedEvent::TurnCompleted]
         }
-        Some("extension_ui_request") => decode_ui_request(frame),
         Some("agent_start") => vec![DecodedEvent::Status("Oh My Pi 会话已启动".into())],
         Some("turn_start") => vec![DecodedEvent::Status("Oh My Pi 正在处理任务…".into())],
         Some("message_update") => frame
@@ -462,63 +497,129 @@ fn decode_frame(frame: &Value) -> Vec<DecodedEvent> {
     }
 }
 
-fn decode_ui_request(frame: &Value) -> Vec<DecodedEvent> {
-    let method = frame
-        .get("method")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if method == "cancel" {
-        return vec![DecodedEvent::ApprovalResolved(
-            frame["targetId"].to_string(),
-        )];
-    }
-    let cancel =
-        InputFrame(json!({"type": "extension_ui_response", "id": frame["id"], "cancelled": true}));
-    let options = match method {
-        "select" => frame
-            .get("options")
-            .and_then(Value::as_array)
+impl EventDecoder {
+    fn decode_ui_request(&mut self, frame: &Value) -> Vec<DecodedEvent> {
+        let method = frame
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if method == "cancel" {
+            if let Some(id) = frame["targetId"].as_str()
+                && self.pending_user_asks.remove(id).is_some()
+            {
+                return vec![DecodedEvent::UserAskFinished {
+                    native_request_id: id.into(),
+                    status: UserAskStatus::Cancelled,
+                    message: None,
+                }];
+            }
+            return vec![DecodedEvent::ApprovalResolved(
+                frame["targetId"].to_string(),
+            )];
+        }
+        let cancel = InputFrame(
+            json!({"type": "extension_ui_response", "id": frame["id"], "cancelled": true}),
+        );
+        let options = match method {
+            "select" => frame
+                .get("options")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(|label| ApprovalOption {
+                    label: label.into(),
+                    response: InputFrame(json!({
+                        "type": "extension_ui_response", "id": frame["id"], "value": label
+                    })),
+                })
+                .collect::<Vec<_>>(),
+            "confirm" => [("Yes", true), ("No", false)]
+                .into_iter()
+                .map(|(label, confirmed)| ApprovalOption {
+                    label: label.into(),
+                    response: InputFrame(json!({
+                        "type": "extension_ui_response", "id": frame["id"], "confirmed": confirmed
+                    })),
+                })
+                .collect(),
+            "input" | "editor" => Vec::new(),
+            // Non-dialog notifications do not expect a response.
+            "notify" | "setStatus" | "setWidget" | "setTitle" | "set_editor_text" | "open_url" => {
+                return Vec::new();
+            }
+            _ => return vec![DecodedEvent::WriteStdin(cancel)],
+        };
+        let Some(id) = frame["id"].as_str().filter(|id| !id.trim().is_empty()) else {
+            return vec![DecodedEvent::WriteStdin(cancel)];
+        };
+        if matches!(method, "select" | "confirm") && options.is_empty() {
+            return vec![DecodedEvent::WriteStdin(cancel)];
+        }
+        let prompt = ["title", "message", "placeholder", "prefill"]
             .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .map(|label| ApprovalOption {
-                label: label.into(),
-                response: InputFrame(json!({
-                    "type": "extension_ui_response", "id": frame["id"], "value": label
-                })),
-            })
-            .collect::<Vec<_>>(),
-        "confirm" => [("Approve", true), ("Deny", false)]
-            .into_iter()
-            .map(|(label, confirmed)| ApprovalOption {
-                label: label.into(),
-                response: InputFrame(json!({
-                    "type": "extension_ui_response", "id": frame["id"], "confirmed": confirmed
-                })),
-            })
-            .collect(),
-        // Non-dialog notifications do not expect a response.
-        "notify" | "setStatus" | "setWidget" | "setTitle" | "set_editor_text" | "open_url" => {
+            .filter_map(|key| frame[key].as_str())
+            .filter(|text| !text.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        // OMP's tool approval wrapper uses this exact select prompt and option pair.
+        if method == "select"
+            && frame["title"]
+                .as_str()
+                .is_some_and(|title| title.starts_with("Allow tool: "))
+            && options
+                .iter()
+                .map(|option| option.label.as_str())
+                .eq(["Approve", "Deny"])
+        {
+            return vec![DecodedEvent::ApprovalRequested(ApprovalPrompt {
+                id: frame["id"].to_string(),
+                title: "Oh My Pi".into(),
+                details: prompt,
+                options,
+                cancel,
+                timeout_ms: frame.get("timeout").and_then(Value::as_u64),
+            })];
+        }
+        if self.pending_user_asks.contains_key(id) {
             return Vec::new();
         }
-        _ => return vec![DecodedEvent::WriteStdin(cancel)],
-    };
-    if options.is_empty() || !frame["id"].is_string() {
-        return vec![DecodedEvent::WriteStdin(cancel)];
+        let question = UserAskQuestion {
+            id: id.into(),
+            prompt: if prompt.is_empty() {
+                "Oh My Pi".into()
+            } else {
+                prompt
+            },
+            answer_mode: if options.is_empty() {
+                UserAskAnswerMode::Text
+            } else {
+                UserAskAnswerMode::Choice {
+                    multiple: false,
+                    allow_custom: false,
+                }
+            },
+            options: options
+                .iter()
+                .enumerate()
+                .map(|(index, option)| UserAskOption {
+                    id: index.to_string(),
+                    label: option.label.clone(),
+                    description: frame["optionDetails"]
+                        .get(index)
+                        .and_then(|detail| detail["description"].as_str())
+                        .map(str::to_owned),
+                })
+                .collect(),
+        };
+        self.pending_user_asks.insert(id.into(), options);
+        vec![DecodedEvent::UserAskRequested(UserAskRequest {
+            native_request_id: id.into(),
+            questions: vec![question],
+            timeout_ms: frame.get("timeout").and_then(Value::as_u64),
+            resolve_on_send: true,
+        })]
     }
-    vec![DecodedEvent::ApprovalRequested(ApprovalPrompt {
-        id: frame["id"].to_string(),
-        title: "Oh My Pi".into(),
-        details: [frame.get("title"), frame.get("message")]
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .collect::<Vec<_>>()
-            .join("\n\n"),
-        options,
-        cancel,
-        timeout_ms: frame.get("timeout").and_then(Value::as_u64),
-    })]
 }
 
 fn decode_message(frame: &Value) -> Vec<DecodedEvent> {
@@ -584,7 +685,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn launch_spec_uses_rpc_without_prompt_in_argv() {
+    fn launch_spec_uses_rpc_ui_without_prompt_in_argv() {
         for (mode, value) in [
             (PermissionMode::Ask, "always-ask"),
             (PermissionMode::AutoEdit, "write"),
@@ -614,7 +715,11 @@ mod tests {
             None,
             PermissionMode::AutoEdit,
         );
-        assert!(spec.args.windows(2).any(|pair| pair == ["--mode", "rpc"]));
+        assert!(
+            spec.args
+                .windows(2)
+                .any(|pair| pair == ["--mode", "rpc-ui"])
+        );
         assert!(!spec.args.iter().any(|arg| arg == "--print"));
         assert!(
             spec.args
@@ -723,34 +828,126 @@ mod tests {
     }
 
     #[test]
-    fn rpc_approval_select_and_confirm_preserve_choices_timeout_and_cancel() {
-        let mut decoder = EventDecoder;
-        for (method, extra) in [
-            ("select", json!({"options": ["Approve", "Deny"]})),
-            ("confirm", json!({"message": "Run command?"})),
+    fn rpc_choice_dialogs_preserve_options_and_native_answer_types() {
+        for (method, options, answer_key, expected) in [
+            (
+                "select",
+                json!(["Tests", "Other (type your own)"]),
+                "value",
+                json!("Other (type your own)"),
+            ),
+            ("confirm", Value::Null, "confirmed", json!(false)),
         ] {
-            let mut frame = json!({"type": "extension_ui_request", "id": "approval-1", "method": method, "title": "Allow tool: bash", "timeout": 1000});
-            frame
-                .as_object_mut()
-                .unwrap()
-                .extend(extra.as_object().unwrap().clone());
+            let mut decoder = EventDecoder::default();
+            let frame = json!({"type":"extension_ui_request", "id":"choice", "method":method,
+                "title":"Which checks?", "options":options, "timeout":5000,
+                "optionDetails":[{"description":"Run tests"},{}]});
             let events = decoder.decode_line(&frame.to_string()).unwrap();
-            let [DecodedEvent::ApprovalRequested(prompt)] = events.as_slice() else {
-                panic!("expected approval")
+            let [DecodedEvent::UserAskRequested(request)] = events.as_slice() else {
+                panic!("expected User Ask, got {events:?}")
             };
-            assert_eq!(prompt.options.len(), 2);
-            assert_eq!(prompt.timeout_ms, Some(1000));
-            assert!(prompt.details.contains("Allow tool: bash"));
+            assert_eq!(request.timeout_ms, Some(5000));
+            assert_eq!(
+                request.questions[0].answer_mode,
+                UserAskAnswerMode::Choice {
+                    multiple: false,
+                    allow_custom: false
+                }
+            );
             if method == "select" {
-                assert_eq!(prompt.options[0].response.0["value"], "Approve");
-                assert_eq!(prompt.options[1].response.0["value"], "Deny");
-            } else {
-                assert_eq!(prompt.options[0].response.0["confirmed"], true);
-                assert_eq!(prompt.options[1].response.0["confirmed"], false);
+                assert_eq!(
+                    request.questions[0].options[0].description.as_deref(),
+                    Some("Run tests")
+                );
             }
-            assert_eq!(prompt.cancel.0["cancelled"], true);
-            assert_eq!(decoder.decode_line(r#"{"type":"extension_ui_request","method":"cancel","id":"other","targetId":"approval-1"}"#).unwrap(), vec![DecodedEvent::ApprovalResolved(prompt.id.clone())]);
+            let answer = [UserAskAnswer {
+                question_id: "choice".into(),
+                value: UserAskAnswerValue::Selected(vec![
+                    request.questions[0].options[1].id.clone(),
+                ]),
+            }];
+            let response = decoder.answer_user_ask("choice", &answer).unwrap().0;
+            assert_eq!(response[answer_key], expected);
+            assert!(decoder.answer_user_ask("choice", &answer).is_none());
+            let cancel_frame = json!({"type":"extension_ui_request","id":"cancelled-choice","method":method,"title":"Question?","options":options});
+            decoder.decode_line(&cancel_frame.to_string()).unwrap();
+            assert_eq!(decoder.decode_line(r#"{"type":"extension_ui_request","id":"cancel","method":"cancel","targetId":"cancelled-choice"}"#).unwrap(), vec![DecodedEvent::UserAskFinished {
+                native_request_id:"cancelled-choice".into(), status:UserAskStatus::Cancelled, message:None,
+            }]);
+            assert!(
+                decoder
+                    .answer_user_ask(
+                        "cancelled-choice",
+                        &[UserAskAnswer {
+                            question_id: "cancelled-choice".into(),
+                            value: UserAskAnswerValue::Selected(vec!["0".into()])
+                        }]
+                    )
+                    .is_none()
+            );
         }
+    }
+
+    #[test]
+    fn rpc_tool_approval_preserves_choices_timeout_and_cancel() {
+        let mut decoder = EventDecoder::default();
+        let frame = json!({"type": "extension_ui_request", "id": "approval-1", "method": "select", "title": "Allow tool: bash", "timeout": 1000, "options": ["Approve", "Deny"]});
+        let events = decoder.decode_line(&frame.to_string()).unwrap();
+        let [DecodedEvent::ApprovalRequested(prompt)] = events.as_slice() else {
+            panic!("expected approval")
+        };
+        assert_eq!(prompt.options.len(), 2);
+        assert_eq!(prompt.timeout_ms, Some(1000));
+        assert!(prompt.details.contains("Allow tool: bash"));
+        assert_eq!(prompt.options[0].response.0["value"], "Approve");
+        assert_eq!(prompt.options[1].response.0["value"], "Deny");
+        assert_eq!(prompt.cancel.0["cancelled"], true);
+        assert_eq!(decoder.decode_line(r#"{"type":"extension_ui_request","method":"cancel","id":"other","targetId":"approval-1"}"#).unwrap(), vec![
+                DecodedEvent::ApprovalResolved(prompt.id.clone()),
+            ]);
+    }
+
+    #[test]
+    fn rpc_text_dialogs_round_trip_without_cancelling() {
+        let mut decoder = EventDecoder::default();
+        for method in ["input", "editor"] {
+            let frame = json!({"type": "extension_ui_request", "id": "ui_1",
+                "method": method, "title": "Branch name", "timeout": 1234});
+            let events = decoder.decode_line(&frame.to_string()).unwrap();
+            let [DecodedEvent::UserAskRequested(request)] = events.as_slice() else {
+                panic!("expected User Ask, got {events:?}");
+            };
+            assert_eq!(request.native_request_id, "ui_1");
+            assert_eq!(request.timeout_ms, Some(1234));
+            assert!(request.resolve_on_send);
+            assert_eq!(
+                request.questions,
+                vec![UserAskQuestion {
+                    id: "ui_1".into(),
+                    prompt: "Branch name".into(),
+                    answer_mode: UserAskAnswerMode::Text,
+                    options: vec![],
+                }]
+            );
+            let mut answers = vec![UserAskAnswer {
+                question_id: "ui_1".into(),
+                value: UserAskAnswerValue::Text("feature/修复\n\"details\"".into()),
+            }];
+            assert_eq!(
+                decoder.answer_user_ask("ui_1", &answers).unwrap().0,
+                json!({"type": "extension_ui_response", "id": "ui_1", "value": "feature/修复\n\"details\""})
+            );
+            assert!(decoder.answer_user_ask("other", &answers).is_none());
+            assert!(decoder.answer_user_ask("ui_1", &[]).is_none());
+            answers[0].value = UserAskAnswerValue::Selected(vec!["wrong".into()]);
+            assert!(decoder.answer_user_ask("ui_1", &answers).is_none());
+        }
+        let events = decoder.decode_line(r#"{"type":"extension_ui_request","id":"editor-2","method":"editor","title":"Custom answer","prefill":"existing text"}"#).unwrap();
+        assert!(
+            matches!(events.as_slice(), [DecodedEvent::UserAskRequested(request)]
+            if request.questions[0].prompt == "Custom answer\n\nexisting text"
+                && request.timeout_ms.is_none())
+        );
     }
 
     #[test]
@@ -863,7 +1060,7 @@ mod tests {
 
     #[test]
     fn decoder_maps_stream_messages_and_tool_events() {
-        let mut decoder = EventDecoder;
+        let mut decoder = EventDecoder::default();
         assert_eq!(
             decoder
                 .decode_line(r#"{"type":"response","command":"get_state","id":"nexus-session","success":true,"data":{"sessionId":"existing-session"}}"#)
@@ -927,7 +1124,7 @@ mod tests {
 
     #[test]
     fn steering_receipts_and_terminal_events_are_distinct() {
-        let mut decoder = EventDecoder;
+        let mut decoder = EventDecoder::default();
         let frame = decoder.steer("message-1", "update\n第二行").unwrap();
         assert_eq!(
             frame.0,
@@ -971,7 +1168,7 @@ mod tests {
 
     #[test]
     fn decoder_surfaces_provider_errors() {
-        let mut decoder = EventDecoder;
+        let mut decoder = EventDecoder::default();
         let message = r#"{"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"error","errorMessage":"denied"}}"#;
         assert_eq!(
             decoder.decode_line(message).unwrap(),
