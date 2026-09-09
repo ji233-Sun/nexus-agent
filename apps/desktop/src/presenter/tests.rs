@@ -4907,7 +4907,13 @@ fn custom_model_selection_does_not_bypass_known_unavailability_or_other_harnesse
         unavailable.availability = nexus_domain::ModelAvailability::Unavailable {
             reason: "disabled".into(),
         };
-        emit_current_catalog(&presenter, &runner, vec![unavailable]);
+        let known = catalog_model(
+            "provider/model with spaces",
+            false,
+            &[],
+            ThinkingEffort::Default,
+        );
+        emit_current_catalog(&presenter, &runner, vec![unavailable, known.clone()]);
         presenter.drain_events();
         presenter.select_catalog_model(Some("blocked-model".into()));
         assert!(presenter.model().model_override.is_none());
@@ -4915,5 +4921,14 @@ fn custom_model_selection_does_not_bypass_known_unavailability_or_other_harnesse
             presenter.select_catalog_model(Some("kimi-k2.5".into()));
             assert!(presenter.model().model_override.is_none());
         }
+        presenter.select_catalog_model(Some(known.id.clone()));
+        assert_eq!(
+            presenter.model().model_override.as_deref(),
+            Some(known.id.as_str())
+        );
+        assert!(presenter.model().catalog_selection_is_valid());
+        presenter.select_title_harness(harness);
+        presenter.model.title_model_catalog = ModelCatalogState::Ready(vec![known.clone()]);
+        assert!(presenter.select_title_model(Some(known.id)));
     }
 }

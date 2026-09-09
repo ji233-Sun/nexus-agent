@@ -42,15 +42,16 @@ impl ModelCatalogState {
     }
 
     pub(crate) fn can_select(&self, harness: HarnessKind, id: &str) -> bool {
-        if id.is_empty() || id.chars().any(|c| c.is_whitespace() || c.is_control()) {
-            return false;
+        if let Some(model) = self
+            .models()
+            .and_then(|models| models.iter().find(|model| model.id == id))
+        {
+            return model.availability.is_selectable();
         }
         // Claude cannot discover all model IDs exposed by a third-party API.
-        self.models()
-            .and_then(|models| models.iter().find(|model| model.id == id))
-            .map_or(harness == HarnessKind::Claude, |model| {
-                model.availability.is_selectable()
-            })
+        harness == HarnessKind::Claude
+            && !id.is_empty()
+            && !id.chars().any(|c| c.is_whitespace() || c.is_control())
     }
 
     pub(crate) fn accepts(&self, request_id: Uuid) -> bool {
