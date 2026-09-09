@@ -274,15 +274,27 @@ pub async fn probe(configured_executable: &str) -> HarnessProbe {
         };
     };
 
-    let version = Command::new(&executable).arg("--version").output().await;
-    let Ok(version) = version else {
+    let deadline = tokio::time::Instant::now() + MODEL_CATALOG_TIMEOUT;
+    let version = tokio::time::timeout_at(
+        deadline,
+        Command::new(&executable)
+            .arg("--version")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+    let Ok(Ok(version)) = version else {
         return HarnessProbe {
             harness: HarnessKind::Omp,
             available: false,
             authenticated: false,
             executable: executable.display().to_string(),
             version: None,
-            message: "Oh My Pi 存在，但无法执行。请检查文件权限。".into(),
+            message: if version.is_err() {
+                "Oh My Pi 版本探测超时，请重试。".into()
+            } else {
+                "Oh My Pi 存在，但无法执行。请检查文件权限。".into()
+            },
         };
     };
     if !version.status.success() {
@@ -296,11 +308,18 @@ pub async fn probe(configured_executable: &str) -> HarnessProbe {
         };
     }
     let version = String::from_utf8_lossy(&version.stdout).trim().to_owned();
-    let authenticated = Command::new(&executable)
-        .args(["models", "--json"])
-        .output()
-        .await
+    let models = tokio::time::timeout_at(
+        deadline,
+        Command::new(&executable)
+            .args(["models", "--json"])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+    let timed_out = models.is_err();
+    let authenticated = models
         .ok()
+        .and_then(Result::ok)
         .filter(|output| output.status.success())
         .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
         .and_then(|value| value.get("models").and_then(Value::as_array).map(Vec::len))
@@ -314,6 +333,8 @@ pub async fn probe(configured_executable: &str) -> HarnessProbe {
         version: Some(version),
         message: if authenticated {
             "Oh My Pi 已就绪".into()
+        } else if timed_out {
+            "Oh My Pi 模型探测超时，请重试。".into()
         } else {
             "Oh My Pi 尚无可用模型，请先完成登录或配置 Provider。".into()
         },

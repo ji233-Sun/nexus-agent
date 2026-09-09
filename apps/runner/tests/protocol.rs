@@ -42,7 +42,13 @@ struct TestRunner {
 
 impl TestRunner {
     fn spawn() -> Self {
-        let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_nexus-runner"))
+        Self::spawn_command(&mut tokio::process::Command::new(env!(
+            "CARGO_BIN_EXE_nexus-runner"
+        )))
+    }
+
+    fn spawn_command(command: &mut tokio::process::Command) -> Self {
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -726,6 +732,95 @@ async fn runner_loads_all_codex_model_pages_and_reaps_the_app_server() {
         "stopped"
     );
     runner.shutdown().await;
+}
+
+#[tokio::test]
+async fn omp_probe_times_out_in_both_stages() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = fake_harness(directory.path());
+    for (variable, available, message) in [
+        ("TEST_OMP_VERSION_BLOCK", false, "版本探测超时"),
+        ("TEST_OMP_CATALOG_BLOCK", true, "模型探测超时"),
+    ] {
+        let mut runner = TestRunner::spawn_command(
+            tokio::process::Command::new(env!("CARGO_BIN_EXE_nexus-runner"))
+                .current_dir(directory.path())
+                .env(variable, "1"),
+        );
+        runner
+            .send(Command::HarnessProbe {
+                harness: HarnessKind::Omp,
+                executable: executable.to_string_lossy().into_owned(),
+            })
+            .await;
+        let line = timeout(Duration::from_secs(20), runner.events.next_line())
+            .await
+            .expect("probe must time out")
+            .unwrap()
+            .unwrap();
+        let Event::HarnessDetected(probe) =
+            serde_json::from_str::<EventEnvelope>(&line).unwrap().event
+        else {
+            panic!("expected probe result")
+        };
+        assert_eq!(probe.available, available);
+        assert!(!probe.authenticated);
+        assert!(probe.message.contains(message), "{}", probe.message);
+        assert_eq!(
+            probe.version.as_deref(),
+            available.then_some("fake-omp 1.0")
+        );
+        runner.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn blocked_omp_probe_does_not_block_commands_or_shutdown() {
+    let fixtures = tempfile::tempdir().unwrap();
+    let executable = fake_harness(fixtures.path());
+    for cancel in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut runner = TestRunner::spawn_command(
+            tokio::process::Command::new(env!("CARGO_BIN_EXE_nexus-runner"))
+                .current_dir(directory.path())
+                .env("TEST_OMP_CATALOG_BLOCK", "1"),
+        );
+        let mut request = request(
+            directory.path(),
+            executable.clone(),
+            HarnessKind::Omp,
+            "approval-round-trip",
+        );
+        request.title_generation = None;
+        request.permission_mode = nexus_domain::PermissionMode::Ask;
+        let run_id = request.run_id;
+        runner.send(Command::RunStart(request)).await;
+        let approval = next_approval(&mut runner, run_id).await;
+        runner
+            .send(Command::HarnessProbe {
+                harness: HarnessKind::Omp,
+                executable: executable.to_string_lossy().into_owned(),
+            })
+            .await;
+        timeout(Duration::from_secs(5), async {
+            while !directory.path().join("omp-catalog-cwd.txt").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            runner.send(Command::RunnerHello).await;
+            runner.expect_runner_ready().await;
+            runner.send(if cancel {
+                Command::RunCancel { run_id }
+            } else {
+                Command::RunApprovalRespond { run_id, request_id: approval.request_id, option: Some(0) }
+            }).await;
+            let events = runner.collect_run(run_id, if cancel { RunStatus::Cancelled } else { RunStatus::Completed }).await;
+            assert!(!events.iter().any(|event| matches!(event, Event::HarnessDetected(_))));
+            if !cancel {
+                assert!(events.iter().any(|event| matches!(event, Event::RunMessageCompleted { text, .. } if text == "approved")));
+            }
+            runner.shutdown().await;
+        }).await.expect("probe blocked command handling or shutdown");
+    }
 }
 
 #[tokio::test]
