@@ -1384,6 +1384,10 @@ fn executable_setting_key(harness: HarnessKind) -> &'static str {
         HarnessKind::Claude => "claude_executable",
         HarnessKind::Codex => "codex_executable",
         HarnessKind::Omp => "omp_executable",
+        HarnessKind::Pi => "pi_executable",
+        HarnessKind::Kimi => "kimi_executable",
+        HarnessKind::Qoder => "qoder_executable",
+        HarnessKind::CodeBuddy => "codebuddy_executable",
     }
 }
 

@@ -135,6 +135,11 @@ pub(crate) fn probe_status(probe: &HarnessProbe) -> LocalizedText {
         }
         let source = if !probe.available {
             "{harness} 不可用，请在设置中检查可执行文件。"
+        } else if !probe.authenticated && probe.can_run(false) {
+            return format!(
+                "{} is installed; native CLI authentication will be checked when running.",
+                probe.harness
+            );
         } else if !probe.authenticated {
             "{harness} 尚未登录，请登录 CLI 或配置 Provider Profile。"
         } else {

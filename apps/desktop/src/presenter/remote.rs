@@ -97,7 +97,7 @@ impl Presenter {
                     .model
                     .selected_provider_profile()
                     .is_some_and(|profile| profile.credential_configured);
-                probe.available && (probe.authenticated || profile_ready)
+                probe.can_run(profile_ready)
             }),
         }
     }

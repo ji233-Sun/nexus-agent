@@ -937,7 +937,7 @@ impl Presenter {
         let Some(probe) = self
             .model
             .selected_probe()
-            .filter(|probe| probe.available && (probe.authenticated || profile_ready))
+            .filter(|probe| probe.can_run(profile_ready))
         else {
             self.model.status = LocalizedText::new(
                 "{0} 尚未就绪，请先完成探测和登录。",

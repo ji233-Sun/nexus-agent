@@ -411,7 +411,7 @@ impl AppModel {
             && self.harness_manager.operating.is_none()
             && self
                 .selected_probe()
-                .is_some_and(|probe| probe.available && (probe.authenticated || profile_ready))
+                .is_some_and(|probe| probe.can_run(profile_ready))
             && self.catalog_selection_is_valid()
     }
 

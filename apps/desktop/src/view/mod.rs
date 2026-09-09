@@ -1655,7 +1655,7 @@ impl NexusView {
         } else {
             probe
                 .map(|probe| {
-                    if probe.available && (probe.authenticated || selected_profile_ready) {
+                    if probe.can_run(selected_profile_ready) {
                         rgb(colors.success).into()
                     } else {
                         rgb(colors.danger).into()
@@ -2073,6 +2073,10 @@ fn provider_environment_defaults(harness: HarnessKind) -> (&'static str, &'stati
         HarnessKind::Claude => ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"),
         HarnessKind::Codex => ("CODEX_API_KEY", "OPENAI_BASE_URL"),
         HarnessKind::Omp => ("DEEPSEEK_API_KEY", ""),
+        HarnessKind::Pi => ("ANTHROPIC_API_KEY", ""),
+        HarnessKind::Kimi => ("KIMI_API_KEY", "KIMI_BASE_URL"),
+        HarnessKind::Qoder => ("QODER_PERSONAL_ACCESS_TOKEN", ""),
+        HarnessKind::CodeBuddy => ("CODEBUDDY_API_KEY", "CODEBUDDY_BASE_URL"),
     }
 }
 

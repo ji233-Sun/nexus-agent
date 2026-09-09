@@ -30,6 +30,14 @@ pub(super) fn harness_icon(harness: HarnessKind, colors: Palette, size: f32) -> 
                 .flex_none()
                 .into_any_element();
         }
+        HarnessKind::Pi | HarnessKind::Kimi | HarnessKind::Qoder | HarnessKind::CodeBuddy => {
+            return gpui::div()
+                .size(px(size))
+                .flex_none()
+                .text_size(px(size * 0.7))
+                .child(harness.to_string().chars().next().unwrap().to_string())
+                .into_any_element();
+        }
     };
     gpui::svg()
         .data(icon)

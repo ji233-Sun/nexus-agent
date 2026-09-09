@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 13;
+pub const PROTOCOL_VERSION: u32 = 14;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -288,6 +288,23 @@ pub struct HarnessProbe {
     pub executable: String,
     pub version: Option<String>,
     pub message: String,
+}
+
+impl HarnessProbe {
+    // These CLIs do not expose a stable, credential-free authentication probe.
+    // Let their native login resolve at execution time without claiming authenticated.
+    pub fn can_run(&self, profile_ready: bool) -> bool {
+        self.available
+            && (self.authenticated
+                || profile_ready
+                || matches!(
+                    self.harness,
+                    HarnessKind::Pi
+                        | HarnessKind::Kimi
+                        | HarnessKind::Qoder
+                        | HarnessKind::CodeBuddy
+                ))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

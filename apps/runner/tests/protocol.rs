@@ -16,6 +16,11 @@ use tokio::{
 };
 use uuid::Uuid;
 
+// The additional CLI wire protocols are exercised by process::tests using the
+// same fake executable's TEST_ADDITIONAL_HARNESS mode.
+const ORIGINAL_PROTOCOL_FIXTURES: [HarnessKind; 3] =
+    [HarnessKind::Claude, HarnessKind::Codex, HarnessKind::Omp];
+
 fn fake_harness(directory: &Path) -> PathBuf {
     let executable = directory.join(format!("fake-harness{}", std::env::consts::EXE_SUFFIX));
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_harness.rs");
@@ -295,7 +300,7 @@ async fn two_checkouts_run_together_and_cancel_and_approval_are_scoped() {
 async fn approval_round_trip_for_each_harness_rejects_invalid_and_duplicate_responses() {
     let fixtures = tempfile::tempdir().unwrap();
     let executable = fake_harness(fixtures.path());
-    for harness in HarnessKind::ALL {
+    for harness in ORIGINAL_PROTOCOL_FIXTURES {
         for option in [0, 1] {
             let directory = tempfile::tempdir().unwrap();
             let mut request = request(
@@ -354,6 +359,12 @@ async fn approval_round_trip_for_each_harness_rejects_invalid_and_duplicate_resp
             )
             .unwrap();
             match harness {
+                HarnessKind::Pi
+                | HarnessKind::Kimi
+                | HarnessKind::Qoder
+                | HarnessKind::CodeBuddy => {
+                    unreachable!("additional protocols have separate fixtures")
+                }
                 HarnessKind::Claude => {
                     assert_eq!(response["response"]["request_id"], "approval-1");
                     if option == 0 {
@@ -375,7 +386,7 @@ async fn approval_round_trip_for_each_harness_rejects_invalid_and_duplicate_resp
 async fn pending_approvals_are_cleared_on_cancel_and_late_replies_never_reach_harness() {
     let fixtures = tempfile::tempdir().unwrap();
     let executable = fake_harness(fixtures.path());
-    for harness in HarnessKind::ALL {
+    for harness in ORIGINAL_PROTOCOL_FIXTURES {
         let directory = tempfile::tempdir().unwrap();
         let request = request(
             directory.path(),
@@ -405,7 +416,7 @@ async fn pending_approvals_are_cleared_on_cancel_and_late_replies_never_reach_ha
 async fn native_approval_cancellation_removes_the_request_before_the_run_ends() {
     let fixtures = tempfile::tempdir().unwrap();
     let executable = fake_harness(fixtures.path());
-    for harness in HarnessKind::ALL {
+    for harness in ORIGINAL_PROTOCOL_FIXTURES {
         let directory = tempfile::tempdir().unwrap();
         let request = request(
             directory.path(),
@@ -505,7 +516,7 @@ async fn exited_run_releases_the_slot_before_the_next_message_starts() {
 async fn runner_resumes_each_harness_session_across_processes() {
     let directory = tempfile::tempdir().unwrap();
     let executable = fake_harness(directory.path());
-    for harness in HarnessKind::ALL {
+    for harness in ORIGINAL_PROTOCOL_FIXTURES {
         let mut request = request(
             directory.path(),
             executable.clone(),
@@ -547,6 +558,9 @@ async fn runner_resumes_each_harness_session_across_processes() {
             "follow-up"
         );
         let args_file = match harness {
+            HarnessKind::Pi | HarnessKind::Kimi | HarnessKind::Qoder | HarnessKind::CodeBuddy => {
+                unreachable!()
+            }
             HarnessKind::Claude => "args.txt",
             HarnessKind::Codex => "codex-args.txt",
             HarnessKind::Omp => "omp-args.txt",
@@ -1091,7 +1105,7 @@ async fn runner_streams_fake_omp_and_uses_guarded_rpc_mode() {
 
 #[tokio::test]
 async fn runner_generates_titles_with_each_harness_in_a_safe_background_process() {
-    for (harness, effort) in HarnessKind::ALL.into_iter().flat_map(|harness| {
+    for (harness, effort) in ORIGINAL_PROTOCOL_FIXTURES.into_iter().flat_map(|harness| {
         [ThinkingEffort::Default, ThinkingEffort::Low].map(|effort| (harness, effort))
     }) {
         let directory = tempfile::tempdir().unwrap();
@@ -1147,6 +1161,10 @@ async fn runner_generates_titles_with_each_harness_in_a_safe_background_process(
             assert!(!args.contains("--thinking"));
         } else {
             assert!(args.contains(match harness {
+                HarnessKind::Pi
+                | HarnessKind::Kimi
+                | HarnessKind::Qoder
+                | HarnessKind::CodeBuddy => unreachable!(),
                 HarnessKind::Claude => "--effort\nlow",
                 HarnessKind::Codex => "--config\nmodel_reasoning_effort=\"low\"",
                 HarnessKind::Omp => "--thinking\nlow",
@@ -1165,6 +1183,9 @@ async fn runner_generates_titles_with_each_harness_in_a_safe_background_process(
             "conversation-secret"
         );
         match harness {
+            HarnessKind::Pi | HarnessKind::Kimi | HarnessKind::Qoder | HarnessKind::CodeBuddy => {
+                unreachable!("additional protocols have separate fixtures")
+            }
             HarnessKind::Claude => {
                 assert!(args.contains("--permission-mode\ndontAsk"));
                 assert!(args.ends_with("--tools\n"));
@@ -1224,7 +1245,7 @@ async fn title_generation_failure_does_not_fail_the_conversation() {
 async fn steer_waits_for_all_tools_and_uses_native_receipts_in_the_same_run() {
     let binaries = tempfile::tempdir().unwrap();
     let executable = fake_harness(binaries.path());
-    for harness in HarnessKind::ALL {
+    for harness in ORIGINAL_PROTOCOL_FIXTURES {
         for scenario in ["steer-tools", "steer-rejected", "steer-unconfirmed"] {
             if harness == HarnessKind::Claude && scenario == "steer-rejected" {
                 continue;
@@ -1305,6 +1326,12 @@ async fn steer_waits_for_all_tools_and_uses_native_receipts_in_the_same_run() {
             )
             .unwrap();
             match harness {
+                HarnessKind::Pi
+                | HarnessKind::Kimi
+                | HarnessKind::Qoder
+                | HarnessKind::CodeBuddy => {
+                    unreachable!("additional protocols have separate fixtures")
+                }
                 HarnessKind::Codex => {
                     assert_eq!(frame["method"], "turn/steer");
                     assert_eq!(frame["params"]["expectedTurnId"], "turn-1");
@@ -1358,7 +1385,7 @@ async fn shutdown_reaps_a_blocked_title_process_tree() {
 async fn unsent_steer_is_rejected_on_completion_or_cancellation() {
     let binaries = tempfile::tempdir().unwrap();
     let executable = fake_harness(binaries.path());
-    for harness in HarnessKind::ALL {
+    for harness in ORIGINAL_PROTOCOL_FIXTURES {
         for cancel in [false, true] {
             let directory = tempfile::tempdir().unwrap();
             let request = request(

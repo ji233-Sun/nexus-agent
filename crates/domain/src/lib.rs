@@ -11,16 +11,32 @@ pub enum HarnessKind {
     Claude,
     Codex,
     Omp,
+    Pi,
+    Kimi,
+    Qoder,
+    CodeBuddy,
 }
 
 impl HarnessKind {
-    pub const ALL: [Self; 3] = [Self::Claude, Self::Codex, Self::Omp];
+    pub const ALL: [Self; 7] = [
+        Self::Claude,
+        Self::Codex,
+        Self::Omp,
+        Self::Pi,
+        Self::Kimi,
+        Self::Qoder,
+        Self::CodeBuddy,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Omp => "omp",
+            Self::Pi => "pi",
+            Self::Kimi => "kimi",
+            Self::Qoder => "qoder",
+            Self::CodeBuddy => "codebuddy",
         }
     }
 
@@ -28,7 +44,11 @@ impl HarnessKind {
         match self {
             Self::Claude => Self::Codex,
             Self::Codex => Self::Omp,
-            Self::Omp => Self::Claude,
+            Self::Omp => Self::Pi,
+            Self::Pi => Self::Kimi,
+            Self::Kimi => Self::Qoder,
+            Self::Qoder => Self::CodeBuddy,
+            Self::CodeBuddy => Self::Claude,
         }
     }
 
@@ -37,6 +57,10 @@ impl HarnessKind {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Omp => "omp",
+            Self::Pi => "pi",
+            Self::Kimi => "kimi",
+            Self::Qoder => "qodercli",
+            Self::CodeBuddy => "codebuddy",
         }
     }
 }
@@ -47,6 +71,10 @@ impl fmt::Display for HarnessKind {
             Self::Claude => "Claude Code",
             Self::Codex => "Codex CLI",
             Self::Omp => "Oh My Pi",
+            Self::Pi => "Pi",
+            Self::Kimi => "Kimi Code",
+            Self::Qoder => "Qoder",
+            Self::CodeBuddy => "CodeBuddy",
         })
     }
 }
@@ -59,6 +87,10 @@ impl FromStr for HarnessKind {
             "claude" => Ok(Self::Claude),
             "codex" => Ok(Self::Codex),
             "omp" => Ok(Self::Omp),
+            "pi" => Ok(Self::Pi),
+            "kimi" => Ok(Self::Kimi),
+            "qoder" => Ok(Self::Qoder),
+            "codebuddy" => Ok(Self::CodeBuddy),
             _ => Err(format!("unknown harness: {value}")),
         }
     }
@@ -535,7 +567,8 @@ mod tests {
     fn model_and_effort_cycle_through_supported_values() {
         assert_eq!(HarnessKind::Claude.next(), HarnessKind::Codex);
         assert_eq!(HarnessKind::Codex.next(), HarnessKind::Omp);
-        assert_eq!(HarnessKind::Omp.next(), HarnessKind::Claude);
+        assert_eq!(HarnessKind::Omp.next(), HarnessKind::Pi);
+        assert_eq!(HarnessKind::CodeBuddy.next(), HarnessKind::Claude);
         assert_eq!(HarnessKind::Codex.default_executable(), "codex");
         assert_eq!(ClaudeModel::Haiku.next(), ClaudeModel::Default);
         assert_eq!(ThinkingEffort::Max.next(), ThinkingEffort::Low);

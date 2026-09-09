@@ -73,6 +73,10 @@ pub(crate) fn documentation(harness: HarnessKind) -> &'static str {
         HarnessKind::Claude => "https://code.claude.com/docs/en/setup",
         HarnessKind::Codex => "https://developers.openai.com/codex/cli/",
         HarnessKind::Omp => "https://github.com/can1357/oh-my-pi#install",
+        HarnessKind::Pi => "https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent",
+        HarnessKind::Kimi => "https://moonshotai.github.io/kimi-cli/en/",
+        HarnessKind::Qoder => "https://docs.qoder.com/cli/installation",
+        HarnessKind::CodeBuddy => "https://www.codebuddy.ai/docs/cli/installation",
     }
 }
 
@@ -81,6 +85,7 @@ fn package(harness: HarnessKind) -> &'static str {
         HarnessKind::Claude => "@anthropic-ai/claude-code",
         HarnessKind::Codex => "@openai/codex",
         HarnessKind::Omp => "@oh-my-pi/pi-coding-agent",
+        _ => "",
     }
 }
 
@@ -558,6 +563,9 @@ fn manager_command(
 
 fn native_install(harness: HarnessKind, environment: &Environment) -> Option<MaintenanceCommand> {
     let (unix, windows) = match harness {
+        HarnessKind::Pi | HarnessKind::Kimi | HarnessKind::Qoder | HarnessKind::CodeBuddy => {
+            return None;
+        }
         HarnessKind::Claude => (
             "curl -fsSL https://claude.ai/install.sh | bash",
             "& ([scriptblock]::Create((Invoke-RestMethod https://claude.ai/install.ps1)))",
@@ -596,6 +604,9 @@ fn install_options(
     environment: &Environment,
     managers: &[Manager],
 ) -> Vec<InstallOption> {
+    if package(harness).is_empty() {
+        return Vec::new();
+    }
     let mut options = native_install(harness, environment)
         .map(|command| InstallOption {
             method: InstallMethod::Native,
@@ -613,6 +624,7 @@ fn install_options(
             HarnessKind::Claude => vec!["install", "--cask", "claude-code"],
             HarnessKind::Codex => vec!["install", "--cask", "codex"],
             HarnessKind::Omp => vec!["install", "can1357/tap/omp"],
+            _ => unreachable!("manual installation"),
         },
     ) && (environment.os == "macos" || harness == HarnessKind::Omp)
     {
@@ -649,7 +661,7 @@ fn winget_id(harness: HarnessKind) -> Option<&'static str> {
     match harness {
         HarnessKind::Claude => Some("Anthropic.ClaudeCode"),
         HarnessKind::Codex => Some("OpenAI.Codex"),
-        HarnessKind::Omp => None,
+        _ => None,
     }
 }
 
@@ -667,6 +679,7 @@ fn homebrew_owner(real: &Path, harness: HarnessKind) -> Option<(PathBuf, String,
         HarnessKind::Claude => "claude-code",
         HarnessKind::Codex => "codex",
         HarnessKind::Omp => "omp",
+        _ => "",
     };
     (name == expected
         || name == format!("{expected}@latest")
@@ -681,6 +694,9 @@ async fn ownership(
     environment: &Environment,
     managers: &[Manager],
 ) -> (LocalizedText, Option<MaintenanceCommand>) {
+    if package(harness).is_empty() {
+        return ("手动安装（请使用原安装方式更新）".into(), None);
+    }
     let entry = slash(executable);
     let target = slash(real);
     let name = package(harness);
@@ -846,6 +862,7 @@ async fn ownership(
         HarnessKind::Claude => "claude-code",
         HarnessKind::Codex => "codex",
         HarnessKind::Omp => "omp",
+        _ => "",
     };
     if inside(real, &scoop.join("apps").join(scoop_name)) {
         return (
@@ -861,6 +878,7 @@ async fn ownership(
         );
     }
     let native = match harness {
+        HarnessKind::Pi | HarnessKind::Kimi | HarnessKind::Qoder | HarnessKind::CodeBuddy => false,
         HarnessKind::Claude => {
             inside(real, &environment.home.join(".local/share/claude/versions"))
                 || (environment.os == "windows"
@@ -965,6 +983,7 @@ async fn latest_version(
     cancellation: &watch::Receiver<bool>,
 ) -> Result<String> {
     ensure!(!*cancellation.borrow(), "操作已取消");
+    ensure!(!package(harness).is_empty(), "请通过官方安装文档查询版本");
     let mut cancellation = cancellation.clone();
     let lookup = async {
         let url = format!(

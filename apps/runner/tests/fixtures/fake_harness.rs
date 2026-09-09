@@ -34,6 +34,10 @@ fn main() {
         run_omp_catalog();
         return;
     }
+    if let Ok(harness) = env::var("TEST_ADDITIONAL_HARNESS") {
+        run_additional(&harness, &args);
+        return;
+    }
     let harness = if matches!(
         args.first().map(String::as_str),
         Some("app-server" | "exec")
@@ -492,4 +496,77 @@ fn request_id(line: &str) -> String {
     } else {
         value.chars().take_while(char::is_ascii_digit).collect()
     }
+}
+
+fn run_additional(harness: &str, args: &[String]) {
+    let title = args.iter().any(|arg| arg == "--no-tools" || arg == "--agent-file")
+        || args.windows(2).any(|pair| pair[0] == "--tools" && pair[1].is_empty());
+    if title {
+        let mut input = String::new(); io::stdin().read_to_string(&mut input).unwrap();
+        match harness {
+            "kimi" => println!(r#"{{"role":"assistant","content":"Fixture title"}}"#),
+            "pi" => println!(r#"{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Fixture title"}}]}}}}"#),
+            _ => println!(r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"Fixture title"}}]}}}}"#),
+        }
+        return;
+    }
+    let mut lines = io::stdin().lock().lines();
+    let first = lines.next().unwrap().unwrap();
+    let prompt = if harness == "qoder" {
+        assert!(first.contains("nexus-initialize"));
+        println!(r#"{{"type":"control_response","response":{{"subtype":"success","request_id":"nexus-initialize","response":{{}}}}}}"#);
+        io::stdout().flush().unwrap();
+        lines.next().unwrap().unwrap()
+    } else if harness == "pi" {
+        assert!(first.contains("get_state"));
+        println!(r#"{{"type":"response","command":"get_state","success":true,"data":{{"sessionFile":"/tmp/pi-session.jsonl"}}}}"#);
+        lines.next().unwrap().unwrap()
+    } else { first };
+    fs::write("additional-prompt.json", &prompt).unwrap();
+    if harness == "pi" { println!(r#"{{"type":"response","id":"nexus-prompt","command":"prompt","success":true}}"#); }
+
+    match harness {
+        "pi" => println!(r#"{{"type":"message_update","assistantMessageEvent":{{"type":"text_delta","delta":"ready"}}}}"#),
+        "kimi" => println!(r#"{{"method":"event","params":{{"type":"ContentPart","payload":{{"type":"text","text":"ready"}}}}}}"#),
+        _ => {
+            println!(r#"{{"type":"system","subtype":"init","session_id":"stream-session"}}"#);
+            println!(r#"{{"type":"stream_event","event":{{"delta":{{"type":"text_delta","text":"ready"}}}}}}"#);
+        }
+    }
+    io::stdout().flush().unwrap();
+    if prompt.contains("cancel-fixture") { loop { thread::sleep(Duration::from_secs(1)); } }
+    match harness {
+        "pi" => println!(r#"{{"type":"extension_ui_request","id":"approval","method":"confirm","title":"Allow bash?"}}"#),
+        "kimi" => println!(r#"{{"jsonrpc":"2.0","method":"request","id":"rpc-approval","params":{{"type":"ApprovalRequest","payload":{{"id":"approval","sender":"Shell","description":"Run fixture"}}}}}}"#),
+        _ => println!(r#"{{"type":"control_request","request_id":"approval","request":{{"subtype":"can_use_tool","tool_name":"Bash","input":{{"command":"fixture"}}}}}}"#),
+    }
+    io::stdout().flush().unwrap();
+    let mut answer = lines.next().unwrap().unwrap();
+    if harness == "pi" && answer.contains("nexus-prompt-state") {
+        println!(r#"{{"type":"response","command":"get_state","id":"nexus-prompt-state","success":true,"data":{{"isStreaming":true,"isCompacting":false,"pendingMessageCount":0}}}}"#);
+        io::stdout().flush().unwrap();
+        answer = lines.next().unwrap().unwrap();
+    }
+    fs::write("additional-answer.json", &answer).unwrap();
+    if harness == "codebuddy" {
+        assert!(answer.contains("\"allowed\":true"), "CodeBuddy SdkPermissionClient defaults absent allowed to false");
+        assert!(!answer.contains("\"behavior\""));
+    } else {
+        assert!(answer.contains("approve") || answer.contains("allow") || answer.contains("true"));
+    }
+    match harness {
+        "pi" => {
+            println!(r#"{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"done"}}]}}}}"#);
+            println!(r#"{{"type":"agent_end","willRetry":false}}"#);
+            println!(r#"{{"type":"agent_settled"}}"#);
+        }
+        "kimi" => println!(r#"{{"jsonrpc":"2.0","id":"nexus-prompt","result":{{"status":"finished"}}}}"#),
+        _ => {
+            println!(r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"done"}}]}}}}"#);
+            println!(r#"{{"type":"result","is_error":false}}"#);
+        }
+    }
+    io::stdout().flush().unwrap();
+    // RPC processes stay alive; the runner must use the protocol terminal event.
+    loop { thread::sleep(Duration::from_secs(1)); }
 }

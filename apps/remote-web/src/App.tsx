@@ -357,11 +357,10 @@ function RemoteWorkspace({
           </div>
           <div className="runtime-status">
             <span className={state?.harness_ready ? "ready" : "not-ready"}>
-              {state?.harness === "codex"
-                ? "Codex CLI"
-                : state?.harness === "omp"
-                  ? "Oh My Pi"
-                  : "Claude Code"}
+              {state ? {
+                claude: "Claude Code", codex: "Codex CLI", omp: "Oh My Pi", pi: "Pi",
+                kimi: "Kimi Code", qoder: "Qoder", codebuddy: "CodeBuddy",
+              }[state.harness] : "—"}
             </span>
             <span>{state?.effort ?? "—"}</span>
           </div>

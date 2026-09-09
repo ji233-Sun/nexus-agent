@@ -64,7 +64,19 @@ pub(crate) async fn run_harness(
     user_asks: PendingUserAsks,
     emitter: Emitter,
 ) -> (RunStatus, Option<i32>) {
-    let (spec, decoder) = super::harness::prepare(&request, &cwd);
+    let (spec, decoder) = match super::harness::prepare(&request, &cwd) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            emitter
+                .send(Event::RunFailed {
+                    run_id: request.run_id,
+                    code: ErrorCode::LaunchFailed,
+                    message: format!("无法准备 Harness：{error}"),
+                })
+                .await;
+            return (RunStatus::Failed, None);
+        }
+    };
     run_prepared_harness(request, spec, decoder, cancel, input, user_asks, emitter).await
 }
 
@@ -202,7 +214,7 @@ pub(crate) async fn generate_title(
     mut cancel: watch::Receiver<bool>,
 ) -> Option<String> {
     let prompt = title_generation_prompt(&request.prompt);
-    let (mut spec, decoder) = super::harness::prepare_title(&request, &cwd, &prompt);
+    let (mut spec, decoder) = super::harness::prepare_title(&request, &cwd, &prompt).ok()?;
     spec.executable = nexus_harness_core::resolve_executable(&request.executable)?;
     let mut child = process_command(&spec, &request.environment).spawn().ok()?;
     let pid = child.id().unwrap_or_default();
@@ -766,6 +778,98 @@ mod tests {
                     "answers": answers,
                 }))
             })
+        }
+    }
+
+    #[tokio::test]
+    async fn additional_harnesses_complete_approval_cancel_and_generate_titles() {
+        let binaries = tempfile::tempdir().unwrap();
+        let executable = compile_fake_harness(binaries.path());
+        for harness in [
+            HarnessKind::Pi,
+            HarnessKind::Kimi,
+            HarnessKind::Qoder,
+            HarnessKind::CodeBuddy,
+        ] {
+            for cancel_run in [false, true] {
+                let directory = tempfile::tempdir().unwrap();
+                let prompt = if cancel_run {
+                    "cancel-fixture"
+                } else {
+                    "complete-fixture"
+                };
+                let (mut request, _) = prepared_user_ask_run(directory.path(), &executable, prompt);
+                request.harness = harness;
+                request.effort = ThinkingEffort::Default;
+                request.permission_mode = nexus_domain::PermissionMode::Ask;
+                request.environment.push(EnvironmentVariable {
+                    name: "TEST_ADDITIONAL_HARNESS".into(),
+                    value: harness.as_str().into(),
+                });
+                let probe = super::super::harness::probe(harness, &request.executable).await;
+                assert!(probe.can_run(false), "{harness}: {}", probe.message);
+                assert!(!probe.authenticated);
+                let (cancel_tx, cancel_rx) = watch::channel(false);
+                let (input_tx, input_rx) = mpsc::unbounded_channel();
+                let (emitter, mut events) = Emitter::channel();
+                let task = tokio::spawn(run_harness(
+                    request.clone(),
+                    directory.path().into(),
+                    cancel_rx,
+                    input_rx,
+                    PendingUserAsks::default(),
+                    emitter,
+                ));
+                let mut saw_session = false;
+                let mut saw_message = false;
+                let mut saw_approval = false;
+                while let Some(envelope) = timeout(Duration::from_secs(15), events.recv())
+                    .await
+                    .expect("additional harness timeout")
+                {
+                    match envelope.event {
+                        Event::RunSessionStarted { .. } => saw_session = true,
+                        Event::RunMessageCompleted { .. } => saw_message = true,
+                        Event::RunOutputDelta { text, .. } if cancel_run && text == "ready" => {
+                            cancel_tx.send(true).unwrap();
+                        }
+                        Event::RunApprovalRequested { request, .. } => {
+                            saw_approval = true;
+                            input_tx
+                                .send(RunInput::Approval {
+                                    request_id: request.request_id,
+                                    option: Some(0),
+                                })
+                                .unwrap();
+                        }
+                        Event::RunFailed { message, .. } => panic!("{harness}: {message}"),
+                        _ => {}
+                    }
+                }
+                let result = timeout(Duration::from_secs(15), task)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    result.0,
+                    if cancel_run {
+                        RunStatus::Cancelled
+                    } else {
+                        RunStatus::Completed
+                    }
+                );
+                assert!(saw_session);
+                if !cancel_run {
+                    assert!(saw_approval && saw_message);
+                    let (_cancel_tx, cancel_rx) = watch::channel(false);
+                    assert_eq!(
+                        generate_title(request, directory.path().into(), cancel_rx)
+                            .await
+                            .as_deref(),
+                        Some("Fixture title")
+                    );
+                }
+            }
         }
     }
 

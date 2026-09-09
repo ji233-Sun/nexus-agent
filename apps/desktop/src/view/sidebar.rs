@@ -596,7 +596,7 @@ impl NexusView {
                                             model
                                                 .selected_probe()
                                                 .map(|probe| {
-                                                    if probe.available && probe.authenticated {
+                                                    if probe.can_run(false) {
                                                         rgb(colors.success).into()
                                                     } else {
                                                         rgb(colors.warning).into()

@@ -136,6 +136,29 @@ pub(crate) fn worktree_fixture(
 }
 
 #[test]
+fn additional_harnesses_allow_native_cli_authentication_without_claiming_login() {
+    for harness in [
+        HarnessKind::Pi,
+        HarnessKind::Kimi,
+        HarnessKind::Qoder,
+        HarnessKind::CodeBuddy,
+    ] {
+        let (mut presenter, runner, _directory) = fixture();
+        assert!(presenter.select_harness(harness, "claude"));
+        let mut probe = ready_probe(harness);
+        probe.authenticated = false;
+        runner.emit(Event::HarnessDetected(probe));
+        emit_current_catalog(&presenter, &runner, Vec::new());
+        presenter.drain_events();
+        assert!(presenter.model().can_submit(), "{harness}");
+        assert!(presenter.submit("Use native login", harness.default_executable()));
+        let start = last_start(&runner);
+        assert_eq!(start.harness, harness);
+        assert!(start.model.is_none());
+    }
+}
+
+#[test]
 fn failed_worktree_creation_retries_with_a_new_branch_and_keeps_the_selected_base() {
     use crate::{
         infrastructure::git,
@@ -1527,6 +1550,9 @@ fn emit_current_catalog(
             HarnessKind::Claude => nexus_domain::ModelSource::ClaudeAliases,
             HarnessKind::Codex => nexus_domain::ModelSource::CodexAppServer,
             HarnessKind::Omp => nexus_domain::ModelSource::OmpCli,
+            _ => panic!(
+                "this harness uses its native default/profile model, not a discovered catalog"
+            ),
         };
     }
     runner.emit(Event::ModelCatalogLoaded {
@@ -1715,7 +1741,10 @@ fn startup_restores_preferences_and_probes_all_harnesses() {
     assert_eq!(presenter.model().permission_mode, PermissionMode::Yolo);
     assert_eq!(presenter.model().executable, "/custom/codex");
     let state = runner.0.borrow();
-    assert_eq!(state.commands.len(), 4);
+    assert_eq!(state.commands.len(), HarnessKind::ALL.len() + 1);
+    for expected in HarnessKind::ALL {
+        assert_eq!(state.commands.iter().filter(|command| matches!(command.command, Command::HarnessProbe { harness, .. } if harness == expected)).count(), 1);
+    }
     assert!(matches!(state.commands[0].command, Command::RunnerHello));
     assert!(state.commands.iter().any(|command| matches!(&command.command,
         Command::HarnessProbe { harness: HarnessKind::Codex, executable } if executable == "/custom/codex")));
@@ -3573,7 +3602,7 @@ fn switching_harnesses_restores_each_executable_and_codex_uses_default_model() {
 
 #[test]
 fn all_harnesses_share_selection_priority_and_run_configuration() {
-    for harness in HarnessKind::ALL {
+    for harness in [HarnessKind::Claude, HarnessKind::Codex, HarnessKind::Omp] {
         let (mut presenter, runner, _credentials, _directory) = provider_fixture();
         presenter.select_harness(harness, "claude");
         presenter
@@ -4041,7 +4070,7 @@ fn all_harnesses_restore_each_profile_and_cli_selection_after_restart() {
     );
     presenter.open_project(directory.path());
     let mut expected = Vec::new();
-    for harness in HarnessKind::ALL {
+    for harness in [HarnessKind::Claude, HarnessKind::Codex, HarnessKind::Omp] {
         let executable = presenter.model().executable.clone();
         presenter.select_harness(harness, &executable);
         for (index, name) in ["cli", "first", "second"].into_iter().enumerate() {
@@ -4134,7 +4163,7 @@ fn claude_legacy_preferences_migrate_once_without_leaking_to_profiles() {
 
 #[test]
 fn catalog_context_changes_ignore_late_responses_and_keep_missing_model_names() {
-    for harness in HarnessKind::ALL {
+    for harness in [HarnessKind::Claude, HarnessKind::Codex, HarnessKind::Omp] {
         let (mut presenter, runner, _credentials, directory) = provider_fixture();
         presenter.select_harness(harness, "claude");
         presenter.refresh_model_catalog();

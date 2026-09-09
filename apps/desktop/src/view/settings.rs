@@ -887,7 +887,7 @@ impl NexusView {
         let profile_ready = selected_profile.is_some_and(|profile| profile.credential_configured);
         let harness_color: Hsla = probe
             .map(|probe| {
-                if probe.available && (probe.authenticated || profile_ready) {
+                if probe.can_run(profile_ready) {
                     rgb(colors.success).into()
                 } else {
                     rgb(colors.danger).into()
@@ -976,8 +976,7 @@ impl NexusView {
                         )
                         .when_some(
                             probe.filter(|probe| {
-                                locale == Language::English
-                                    && (!probe.available || !probe.authenticated)
+                                locale == Language::English && !probe.can_run(false)
                             }),
                             |element, probe| {
                                 element.child(label_value(

@@ -94,3 +94,5 @@ Nexus 的原生界面基于 [GPUI Kit](https://github.com/longbridge/gpui-kit)�
   <a href="https://github.com/ji233-Sun/nexus-agent/issues/new">报告问题或提出建议</a> ·
   <a href="https://github.com/ji233-Sun/nexus-agent/pulls">查看贡献</a>
 </p>
+
+Harness 协议、版本要求与运行限制见 [Harness 接入](docs/harnesses.md)。

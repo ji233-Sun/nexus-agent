@@ -621,7 +621,7 @@ impl NexusView {
                                 harness,
                                 None,
                                 locale.text("CLI 默认配置"),
-                                probe.is_some_and(|probe| probe.available && probe.authenticated),
+                                probe.is_some_and(|probe| probe.can_run(false)),
                                 cx,
                             ))
                             .children(profiles.map(|profile| {
