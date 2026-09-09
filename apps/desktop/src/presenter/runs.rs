@@ -4,7 +4,7 @@ use crate::infrastructure::git;
 use crate::infrastructure::storage::NewTaskRun;
 use crate::model::workspace::{WorkspaceKind, WorkspaceStatus};
 use crate::model::{
-    ModelCatalogState, PendingUserAsk, QueuedMessage, ResolvedModelSelection,
+    GenerationKind, ModelCatalogState, PendingUserAsk, QueuedMessage, ResolvedModelSelection,
     UserAskSubmissionState,
 };
 use nexus_domain::{
@@ -45,6 +45,11 @@ impl Presenter {
                 | Event::ModelCatalogFailed { request_id, .. } => {
                     conversation.model_catalog.accepts(*request_id)
                         || conversation.title_model_catalog.accepts(*request_id)
+                        || conversation.commit_model_catalog.accepts(*request_id)
+                }
+                Event::CommitMessageGenerated { request_id, .. }
+                | Event::CommitMessageFailed { request_id, .. } => {
+                    conversation.commit_message_request == Some(*request_id)
                 }
                 Event::RunStarted { run_id, .. }
                 | Event::RunSessionStarted { run_id, .. }
@@ -80,6 +85,39 @@ impl Presenter {
     }
 
     fn handle_conversation_event(&mut self, event: Event) {
+        let generation_kind = GenerationKind::ALL.into_iter().find(|kind| match &event {
+            Event::ModelCatalogLoaded {
+                request_id,
+                harness,
+                ..
+            }
+            | Event::ModelCatalogFailed {
+                request_id,
+                harness,
+                ..
+            } => {
+                self.model.generation_settings(*kind).harness == *harness
+                    && self.model.generation_catalog(*kind).accepts(*request_id)
+            }
+            _ => false,
+        });
+        if let Some(kind) = generation_kind {
+            match event {
+                Event::ModelCatalogLoaded { models, .. } => {
+                    *self.model.generation_catalog_mut(kind) = if models.is_empty() {
+                        ModelCatalogState::Empty
+                    } else {
+                        ModelCatalogState::Ready(models)
+                    };
+                    self.normalize_generation_effort(kind);
+                }
+                Event::ModelCatalogFailed { message, .. } => {
+                    self.model.generation_catalog_mut(kind).fail(message.into())
+                }
+                _ => unreachable!(),
+            }
+            return;
+        }
         match event {
             Event::RunnerReady => {
                 self.model.status = LocalizedText::new(
@@ -108,29 +146,6 @@ impl Presenter {
                 if let Some(executable) = history_executable {
                     self.connect_codex_history(executable);
                 }
-            }
-            Event::ModelCatalogLoaded {
-                request_id,
-                harness,
-                models,
-            } if harness == self.model.title_generation.harness
-                && self.model.title_model_catalog.accepts(request_id) =>
-            {
-                self.model.title_model_catalog = if models.is_empty() {
-                    ModelCatalogState::Empty
-                } else {
-                    ModelCatalogState::Ready(models)
-                };
-                self.normalize_title_effort();
-            }
-            Event::ModelCatalogFailed {
-                request_id,
-                harness,
-                message,
-            } if harness == self.model.title_generation.harness
-                && self.model.title_model_catalog.accepts(request_id) =>
-            {
-                self.model.title_model_catalog.fail(message.into());
             }
             Event::ModelCatalogLoaded {
                 request_id,
@@ -207,6 +222,25 @@ impl Presenter {
                         ("message", (message).to_string()),
                     ],
                 );
+            }
+            Event::CommitMessageGenerated {
+                request_id,
+                message,
+            } if self.model.commit_message_request == Some(request_id) => {
+                self.model.commit_message_request = None;
+                if !message.trim().is_empty() && !message.contains('\0') {
+                    self.model.commit_message = message.trim().to_owned();
+                    self.model.status = "提交说明已生成，可编辑后提交。".into();
+                } else {
+                    self.model.status = "模型返回了空或无效的提交说明，请重试。".into();
+                }
+            }
+            Event::CommitMessageFailed {
+                request_id,
+                message,
+            } if self.model.commit_message_request == Some(request_id) => {
+                self.model.commit_message_request = None;
+                self.model.status = message.into();
             }
             Event::TaskTitleGenerated { task_id, title } => {
                 if let Some(title) = compact_task_title(&title)
@@ -996,7 +1030,7 @@ impl Presenter {
         let ResolvedModelSelection { model, effort } = self.model.resolved_model_selection();
         let title_generation = session_id
             .is_none()
-            .then(|| self.title_generation_configuration().ok())
+            .then(|| self.generation_configuration(GenerationKind::Title).ok())
             .flatten();
         let title = compact_task_title(&prompt).unwrap_or_else(|| "新任务".into());
         if task_id.is_none()

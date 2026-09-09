@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 13;
+pub const PROTOCOL_VERSION: u32 = 14;
+pub const MAX_COMMIT_DIFF_BYTES: usize = 128 * 1024;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -14,6 +15,7 @@ pub enum ModelCatalogPurpose {
     #[default]
     Conversation,
     TitleGeneration,
+    CommitMessageGeneration,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +61,14 @@ pub enum Command {
     },
     #[serde(rename = "run.start")]
     RunStart(StartRun),
+    #[serde(rename = "commit.message.generate")]
+    GenerateCommitMessage {
+        request_id: Uuid,
+        cwd: String,
+        diff: String,
+        language: String,
+        configuration: TextGenerationConfig,
+    },
     #[serde(rename = "run.steer")]
     RunSteer {
         run_id: Uuid,
@@ -98,11 +108,11 @@ pub struct StartRun {
     #[serde(default)]
     pub environment: Vec<EnvironmentVariable>,
     #[serde(default)]
-    pub title_generation: Option<TitleGenerationConfig>,
+    pub title_generation: Option<TextGenerationConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TitleGenerationConfig {
+pub struct TextGenerationConfig {
     pub harness: HarnessKind,
     pub executable: String,
     pub model: Option<String>,
@@ -278,6 +288,10 @@ pub enum Event {
     },
     #[serde(rename = "task.title.generated")]
     TaskTitleGenerated { task_id: Uuid, title: String },
+    #[serde(rename = "commit.message.generated")]
+    CommitMessageGenerated { request_id: Uuid, message: String },
+    #[serde(rename = "commit.message.failed")]
+    CommitMessageFailed { request_id: Uuid, message: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -401,7 +415,7 @@ mod tests {
 
     #[test]
     fn protocol_round_trip_preserves_harness_model_and_effort() {
-        let title_generation = TitleGenerationConfig {
+        let title_generation = TextGenerationConfig {
             harness: HarnessKind::Claude,
             executable: "/opt/bin/claude".into(),
             model: Some("haiku".into()),

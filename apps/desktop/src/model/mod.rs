@@ -71,18 +71,42 @@ pub(crate) struct AppearanceSettings {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
-pub(crate) struct TitleGenerationSettings {
+pub(crate) struct GenerationSettings {
     pub(crate) harness: HarnessKind,
     pub(crate) model: Option<String>,
     pub(crate) effort: ThinkingEffort,
 }
 
-impl Default for TitleGenerationSettings {
+impl Default for GenerationSettings {
     fn default() -> Self {
         Self {
             harness: HarnessKind::default(),
             model: None,
             effort: ThinkingEffort::Default,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum GenerationKind {
+    Title,
+    Commit,
+}
+
+impl GenerationKind {
+    pub(crate) const ALL: [Self; 2] = [Self::Title, Self::Commit];
+
+    pub(crate) fn setting_key(self) -> &'static str {
+        match self {
+            Self::Title => "title_generation",
+            Self::Commit => "commit_message_generation",
+        }
+    }
+
+    pub(crate) fn prefix(self) -> &'static str {
+        match self {
+            Self::Title => "title",
+            Self::Commit => "commit",
         }
     }
 }
@@ -203,7 +227,8 @@ pub(crate) struct AppModel {
     pub(crate) language: Language,
     pub(crate) voice: voice::VoiceModel,
     pub(crate) appearance: AppearanceSettings,
-    pub(crate) title_generation: TitleGenerationSettings,
+    pub(crate) title_generation: GenerationSettings,
+    pub(crate) commit_message_generation: GenerationSettings,
     pub(crate) updates: updates::UpdateModel,
     pub(crate) harness_manager: harness_installation::HarnessManager,
     pub(crate) projects: Vec<Project>,
@@ -224,6 +249,10 @@ pub(crate) struct AppModel {
 // selected conversation lives here; switching moves it into the keyed collection.
 #[derive(Default)]
 pub(crate) struct ConversationState {
+    pub(crate) changes_sidebar_open: bool,
+    pub(crate) commit_message: String,
+    pub(crate) commit_message_request: Option<Uuid>,
+    pub(crate) commit_model_catalog: ModelCatalogState,
     pub(crate) workspace_retry: bool,
     pub(crate) pending_workspace_start: Option<workspace::PendingWorkspaceStart>,
     pub(crate) workspace_review: Option<workspace::WorkspaceReview>,
@@ -452,13 +481,38 @@ impl AppModel {
         }
     }
 
-    pub(crate) fn title_catalog_model(
+    pub(crate) fn generation_settings(&self, kind: GenerationKind) -> &GenerationSettings {
+        match kind {
+            GenerationKind::Title => &self.title_generation,
+            GenerationKind::Commit => &self.commit_message_generation,
+        }
+    }
+
+    pub(crate) fn generation_catalog(&self, kind: GenerationKind) -> &ModelCatalogState {
+        match kind {
+            GenerationKind::Title => &self.title_model_catalog,
+            GenerationKind::Commit => &self.commit_model_catalog,
+        }
+    }
+
+    pub(crate) fn generation_catalog_mut(
+        &mut self,
+        kind: GenerationKind,
+    ) -> &mut ModelCatalogState {
+        match kind {
+            GenerationKind::Title => &mut self.title_model_catalog,
+            GenerationKind::Commit => &mut self.commit_model_catalog,
+        }
+    }
+
+    pub(crate) fn generation_catalog_model(
         &self,
+        kind: GenerationKind,
         model_override: Option<&str>,
     ) -> Option<&ModelDescriptor> {
-        let models = self.title_model_catalog.models()?;
+        let models = self.generation_catalog(kind).models()?;
         let model_id = model_override.or_else(|| {
-            self.provider_profile_for(self.title_generation.harness)
+            self.provider_profile_for(self.generation_settings(kind).harness)
                 .and_then(|profile| profile.model.as_deref())
         });
         models.iter().find(|model| {

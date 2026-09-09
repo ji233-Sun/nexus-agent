@@ -2,6 +2,286 @@ use super::*;
 use crate::model::workspace::{WorkspaceKind, WorkspaceStatus};
 
 impl NexusView {
+    pub(super) fn sync_commit_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let model = self.presenter.model();
+        self.commit_inputs.retain(|id, _| {
+            model
+                .all_conversations()
+                .any(|conversation| conversation.id == *id)
+        });
+        if !model.changes_sidebar_open {
+            return;
+        }
+        let id = model.conversation.id;
+        let message = model.commit_message.clone();
+        let placeholder = model.language.text("填写提交说明，或根据所选变更生成…");
+        if let Some(input) = self.commit_inputs.get(&id) {
+            if input.read(cx).value().as_str() != message {
+                input.update(cx, |input, cx| input.set_value(message, window, cx));
+            }
+        } else {
+            let input = cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .auto_grow(3, 6)
+                    .default_value(message)
+                    .placeholder(placeholder)
+            });
+            cx.subscribe(&input, move |app, input, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change)
+                    && app.presenter.model().conversation.id == id
+                {
+                    app.presenter
+                        .set_commit_message(input.read(cx).value().to_string());
+                    cx.notify();
+                }
+            })
+            .detach();
+            self.commit_inputs.insert(id, input);
+        }
+    }
+
+    pub(super) fn render_changes_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let model = self.presenter.model();
+        let locale = model.language;
+        let colors = palette(cx);
+        let review = model.workspace_review.as_ref();
+        let generating = model.commit_message_request.is_some();
+        let running = model.working_directory().is_some_and(|cwd| {
+            model.all_conversations().any(|conversation| {
+                conversation.active_run.is_some()
+                    && conversation
+                        .active_checkout
+                        .as_ref()
+                        .is_some_and(|checkout| Path::new(cwd).starts_with(checkout))
+            })
+        });
+        let busy = model.workspace_busy || generating || running;
+        let mut files = div()
+            .id("conversation-changed-files")
+            .min_h_0()
+            .flex_1()
+            .overflow_y_scroll()
+            .p_3()
+            .flex()
+            .flex_col()
+            .gap_2();
+        if let Some(review) = review {
+            for path in &review.dirty_paths {
+                let name = path.clone();
+                files = files.child(
+                    Checkbox::new(SharedString::from(format!("sidebar-change-{path}")))
+                        .debug_selector({
+                            let path = path.clone();
+                            move || format!("review-file-{path}")
+                        })
+                        .label(path.clone())
+                        .checked(model.selected_changes.contains(path))
+                        .disabled(model.workspace_busy)
+                        .on_click(cx.listener(move |app, checked, _, cx| {
+                            app.presenter.select_changed_file(name.clone(), *checked);
+                            cx.notify();
+                        })),
+                );
+            }
+            if review.dirty_paths.is_empty() {
+                files = files.child(
+                    div()
+                        .text_color(rgb(colors.muted))
+                        .child(locale.text("没有待提交的变更")),
+                );
+            }
+        } else {
+            files = files.child(locale.text(if model.workspace_busy {
+                "正在读取变更…"
+            } else {
+                "刷新以查看项目变更"
+            }));
+        }
+        div()
+            .id("conversation-right-sidebar")
+            .debug_selector(|| "conversation-right-sidebar".into())
+            .w(px(320.))
+            .flex_none()
+            .min_h_0()
+            .my_2()
+            .mr_2()
+            .rounded(px(16.))
+            .border_1()
+            .border_color(rgb(colors.border))
+            .bg(rgb(colors.canvas))
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .text_size(px(12.))
+            .child(
+                div()
+                    .h(px(HEADER_HEIGHT))
+                    .flex_none()
+                    .px_3()
+                    .border_b_1()
+                    .border_color(rgb(colors.border))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(locale.text("变更与提交"))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_1()
+                            .child(
+                                Button::new("refresh-conversation-changes")
+                                    .debug_selector(|| "refresh-conversation-changes".into())
+                                    .ghost()
+                                    .small()
+                                    .icon(IconName::RotateCw)
+                                    .tooltip(locale.text("刷新变更"))
+                                    .disabled(model.workspace_busy)
+                                    .on_click(cx.listener(|app, _, _, cx| {
+                                        app.presenter.review_conversation_changes();
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("close-changes-sidebar")
+                                    .ghost()
+                                    .small()
+                                    .icon(IconName::Close)
+                                    .tooltip(locale.text("关闭"))
+                                    .on_click(cx.listener(|app, _, _, cx| {
+                                        app.presenter.toggle_changes_sidebar();
+                                        cx.notify();
+                                    })),
+                            ),
+                    ),
+            )
+            .when_some(review, |element, review| {
+                element.child(div().px_3().pt_3().truncate().child(format!(
+                    "{} · {}",
+                    review.branch.as_deref().unwrap_or("HEAD"),
+                    &review.head[..review.head.len().min(8)]
+                )))
+            })
+            .child(files)
+            .child(
+                div()
+                    .flex_none()
+                    .p_3()
+                    .border_t_1()
+                    .border_color(rgb(colors.border))
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .when_some(review, |element, review| {
+                        let id = review.workspace_id;
+                        element.child(
+                            Button::new("show-workspace-diff")
+                                .ghost()
+                                .small()
+                                .label(locale.text("查看完整差异"))
+                                .disabled(model.workspace_busy)
+                                .on_click(cx.listener(move |app, _, window, cx| {
+                                    app.open_workspace_review(id, window, cx)
+                                })),
+                        )
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(locale.text("提交说明"))
+                            .child(
+                                Button::new("generate-commit-message")
+                                    .debug_selector(|| "generate-commit-message".into())
+                                    .small()
+                                    .outline()
+                                    .label(locale.text(if generating {
+                                        "正在生成…"
+                                    } else {
+                                        "生成提交说明"
+                                    }))
+                                    .disabled(
+                                        busy || review.is_none()
+                                            || model.selected_changes.is_empty(),
+                                    )
+                                    .on_click(cx.listener(|app, _, _, cx| {
+                                        app.presenter.generate_workspace_commit_message();
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .when_some(
+                        self.commit_inputs.get(&model.conversation.id),
+                        |element, input| {
+                            element.child(Textarea::new(input).disabled(model.workspace_busy))
+                        },
+                    )
+                    .child(
+                        Button::new("commit-workspace-files")
+                            .debug_selector(|| "commit-workspace-files".into())
+                            .primary()
+                            .small()
+                            .w_full()
+                            .label(locale.text("提交所选文件"))
+                            .disabled(
+                                busy || review.is_none()
+                                    || model.selected_changes.is_empty()
+                                    || model.commit_message.trim().is_empty(),
+                            )
+                            .on_click(cx.listener(|app, _, window, cx| {
+                                app.confirm_workspace_commit(window, cx)
+                            })),
+                    )
+                    .when(running, |element| {
+                        element.child(locale.text("任务运行结束后可生成说明和提交。"))
+                    })
+                    .child(
+                        div()
+                            .text_color(rgb(colors.muted))
+                            .child(model.status_text().to_owned()),
+                    ),
+            )
+    }
+
+    fn confirm_workspace_commit(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let model = self.presenter.model();
+        let Some(review) = model.workspace_review.clone() else {
+            return;
+        };
+        let owner = model.conversation.id;
+        let locale = model.language;
+        let files = model.selected_changes.iter().cloned().collect::<Vec<_>>();
+        let message = model.commit_message.clone();
+        let detail = format!(
+            "{}\n\n{}\n\n{}",
+            review.branch.as_deref().unwrap_or("HEAD"),
+            message,
+            files.join("\n")
+        );
+        let answer = window.prompt(
+            PromptLevel::Info,
+            locale.text("确认将所选文件提交到当前分支？"),
+            Some(&detail),
+            &[
+                PromptButton::ok(locale.text("提交")),
+                PromptButton::cancel(locale.text("取消")),
+            ],
+            cx,
+        );
+        let app = cx.entity();
+        cx.spawn(async move |_, cx| {
+            if answer.await.ok() == Some(0) {
+                app.update(cx, |app, cx| {
+                    if app.presenter.model().conversation.id == owner {
+                        app.presenter.commit_workspace_files(review, files, message);
+                        cx.notify();
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
     pub(super) fn render_workspace_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let model = self.presenter.model();
         let colors = palette(cx);
@@ -97,18 +377,18 @@ impl NexusView {
                         .child(branch),
                 );
             }
-            if let Some(workspace) = workspace
-                .filter(|workspace| workspace.managed && workspace.status == WorkspaceStatus::Ready)
-            {
-                let id = workspace.id;
+            if workspace.is_some_and(|workspace| {
+                workspace.managed && workspace.status == WorkspaceStatus::Ready
+            }) {
                 row = row.child(
                     Button::new("workspace-review")
                         .debug_selector(|| "workspace-review".into())
                         .small()
                         .label(locale.text("查看变更"))
                         .disabled(model.workspace_busy)
-                        .on_click(cx.listener(move |app, _, window, cx| {
-                            app.open_workspace_review(id, window, cx)
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.presenter.toggle_changes_sidebar();
+                            cx.notify();
                         })),
                 );
             }
@@ -228,7 +508,14 @@ impl NexusView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.presenter.review_workspace(id) {
+        if self
+            .presenter
+            .model()
+            .workspace_review
+            .as_ref()
+            .is_none_or(|review| review.workspace_id != id)
+            && !self.presenter.review_workspace(id)
+        {
             return;
         }
         let target_default = self
@@ -241,9 +528,6 @@ impl NexusView {
             })
             .unwrap_or_default();
         let target = cx.new(|cx| InputState::new(window, cx).default_value(target_default));
-        let locale = self.presenter.model().language;
-        let message =
-            cx.new(|cx| InputState::new(window, cx).default_value(locale.text("完成任务成果")));
         let app = cx.entity();
         window.open_dialog(cx, move |dialog, window, cx| {
             let model = app.read(cx).presenter.model();
@@ -255,31 +539,10 @@ impl NexusView {
                 .disabled(model.workspace_busy).on_click(move |_, _, cx| { refresh_app.update(cx, |app, cx| { app.presenter.review_workspace(id); cx.notify(); }); }));
             if let Some(review) = model.workspace_review.as_ref().filter(|review| review.workspace_id == id) {
                 content = content.child(format!("{} · {}", review.branch.as_deref().unwrap_or("HEAD"), review.head));
-                for path in &review.dirty_paths {
-                    let change_app = app.clone();
-                    let name = path.clone();
-                    content = content.child(Checkbox::new(SharedString::from(format!("change-{path}"))).debug_selector({ let path = path.clone(); move || format!("review-file-{path}") }).label(path.clone()).checked(model.selected_changes.contains(path))
-                        .disabled(model.workspace_busy || !managed).on_click(move |checked, _, cx| { change_app.update(cx, |app, cx| { app.presenter.select_changed_file(name.clone(), *checked); cx.notify(); }); }));
-                }
                 for (label, diff) in [("相对创建基准的已提交变更", &review.committed), ("暂存变更", &review.staged), ("未暂存变更", &review.unstaged)] {
                     content = content.child(diff_block(locale.text(label), diff, true, locale, cx));
                 }
                 for (name, text) in &review.untracked { content = content.child(diff_block(&format!("{} · {name}", locale.text("未跟踪文件")), text, false, locale, cx)); }
-                let commit_app = app.clone();
-                let message_input = message.clone();
-                let commit_review = review.clone();
-                let files = model.selected_changes.iter().cloned().collect::<Vec<_>>();
-                content = content.child(locale.text("提交说明")).child(Input::new(&message));
-                actions = actions.child(Button::new("commit-workspace-files").debug_selector(|| "commit-workspace-files".into()).small().label(locale.text("提交所选文件"))
-                    .disabled(model.workspace_busy || !managed || files.is_empty())
-                    .on_click(move |_, window, cx| {
-                        let description = message_input.read(cx).value().to_string();
-                        let detail = format!("{}\n\n{}", description, files.join("\n"));
-                        let answer = window.prompt(PromptLevel::Info, locale.text("确认将所选文件提交到任务分支？"), Some(&detail),
-                            &[PromptButton::ok(locale.text("提交")), PromptButton::cancel(locale.text("取消"))], cx);
-                        let app = commit_app.clone(); let files = files.clone(); let review = commit_review.clone();
-                        cx.spawn(async move |cx| { if answer.await.ok() == Some(0) { app.update(cx, |app, cx| { app.presenter.commit_workspace_files(review, files, description); cx.notify(); }); } }).detach();
-                    }));
                 if let Some(workspace) = model.workspaces.iter().find(|workspace| workspace.id == id)
                     && let Some(state) = &workspace.merge {
                     content = content.child(format!("{} → {}\n{}", review.branch.as_deref().unwrap_or_default(), state.target_branch, state.target_path))
@@ -297,7 +560,7 @@ impl NexusView {
                                 cx.spawn(async move |cx| { if answer.await.ok() == Some(0) { app.update(cx, |app, cx| { app.presenter.finish_workspace_merge(review, abort); cx.notify(); }); } }).detach();
                             }));
                     }
-                } else {
+                } else if managed {
                     let preview_app = app.clone(); let target_input = target.clone();
                     content = content.child(locale.text("合入本地目标分支")).child(Input::new(&target))
                         .child(review.target_branches.join(" · "));

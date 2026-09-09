@@ -143,11 +143,11 @@ impl CatalogModelSelectContent {
         )
     }
 
-    pub(super) fn from_title_settings(model: &AppModel) -> Self {
-        let settings = &model.title_generation;
+    pub(super) fn from_generation_settings(model: &AppModel, kind: GenerationKind) -> Self {
+        let settings = model.generation_settings(kind);
         Self::from_catalog(
             settings.harness,
-            &model.title_model_catalog,
+            model.generation_catalog(kind),
             settings.model.as_deref(),
             None,
             model

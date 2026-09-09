@@ -1,3 +1,4 @@
+mod generation;
 mod harness_installation;
 mod history;
 mod remote;
@@ -17,8 +18,8 @@ use crate::{
         storage::Storage,
     },
     model::{
-        AppModel, AppearanceSettings, ConversationState, ModelCatalogState,
-        TitleGenerationSettings,
+        AppModel, AppearanceSettings, ConversationState, GenerationKind, GenerationSettings,
+        ModelCatalogState,
         updates::{UpdateChannel, UpdateModel, UpdateState},
     },
     remote_control::{RemoteCommand, RemoteControl, TOKEN_SETTING_KEY},
@@ -30,7 +31,7 @@ use nexus_domain::{
 };
 use nexus_protocol::{
     Command, CommandEnvelope, EnvironmentVariable, EventEnvelope, ModelCatalogPurpose,
-    TitleGenerationConfig,
+    TextGenerationConfig,
 };
 use std::{collections::BTreeMap, path::Path, str::FromStr as _};
 use uuid::Uuid;
@@ -182,14 +183,28 @@ impl Presenter {
             .ok()
             .flatten()
             .and_then(|value| serde_json::from_str(&value).ok())
-            .unwrap_or_else(|| TitleGenerationSettings {
+            .unwrap_or_else(|| GenerationSettings {
                 harness: selected_harness,
                 model: model_override.clone(),
-                ..TitleGenerationSettings::default()
+                ..GenerationSettings::default()
             });
         let _ = storage.set_setting(
             "title_generation",
             &serde_json::to_string(&title_generation).expect("serializable title settings"),
+        );
+        let commit_message_generation = storage
+            .setting("commit_message_generation")
+            .ok()
+            .flatten()
+            .and_then(|value| serde_json::from_str(&value).ok())
+            .unwrap_or_else(|| GenerationSettings {
+                harness: selected_harness,
+                ..Default::default()
+            });
+        let _ = storage.set_setting(
+            "commit_message_generation",
+            &serde_json::to_string(&commit_message_generation)
+                .expect("serializable generation settings"),
         );
         let model_override_name = storage
             .setting(&catalog_model_name_setting_key(
@@ -224,6 +239,7 @@ impl Presenter {
                 language,
                 appearance,
                 title_generation,
+                commit_message_generation,
                 updates,
                 projects,
                 archived_tasks,
@@ -601,9 +617,7 @@ impl Presenter {
         let harness = self.model.selected_harness;
         if self.model.executable != executable {
             self.model.model_catalog = ModelCatalogState::Idle;
-            if harness == self.model.title_generation.harness {
-                self.model.title_model_catalog = ModelCatalogState::Idle;
-            }
+            self.invalidate_generation_catalogs(harness);
         }
         self.model.executable = executable.clone();
         self.model.harnesses.remove(&harness);
@@ -767,156 +781,6 @@ impl Presenter {
         self.model.permission_mode = mode;
     }
 
-    pub(crate) fn select_title_harness(&mut self, harness: HarnessKind) -> bool {
-        if self.model.title_generation.harness == harness {
-            return false;
-        }
-        if !self.set_title_generation(TitleGenerationSettings {
-            harness,
-            ..TitleGenerationSettings::default()
-        }) {
-            return false;
-        }
-        self.model.title_model_catalog = ModelCatalogState::Idle;
-        true
-    }
-
-    pub(crate) fn select_title_model(&mut self, model: Option<String>) -> bool {
-        if model.as_deref().is_some_and(|id| {
-            !self
-                .model
-                .title_model_catalog
-                .models()
-                .is_some_and(|models| {
-                    models
-                        .iter()
-                        .any(|model| model.id == id && model.availability.is_selectable())
-                })
-        }) {
-            return false;
-        }
-        let effort = self.model.title_generation.effort;
-        let effort = if self
-            .model
-            .title_catalog_model(model.as_deref())
-            .is_some_and(|descriptor| descriptor.supports_effort(&effort))
-        {
-            effort
-        } else {
-            ThinkingEffort::Default
-        };
-        self.set_title_generation(TitleGenerationSettings {
-            harness: self.model.title_generation.harness,
-            model,
-            effort,
-        })
-    }
-
-    pub(crate) fn select_title_effort(&mut self, effort: ThinkingEffort) -> bool {
-        if !effort.is_default()
-            && self
-                .model
-                .title_catalog_model(self.model.title_generation.model.as_deref())
-                .is_none_or(|model| !model.supports_effort(&effort))
-        {
-            return false;
-        }
-        self.set_title_generation(TitleGenerationSettings {
-            effort,
-            ..self.model.title_generation.clone()
-        })
-    }
-
-    fn normalize_title_effort(&mut self) {
-        let settings = &self.model.title_generation;
-        if !settings.effort.is_default()
-            && self
-                .model
-                .title_catalog_model(settings.model.as_deref())
-                .is_none_or(|model| !model.supports_effort(&settings.effort))
-        {
-            self.select_title_effort(ThinkingEffort::Default);
-        }
-    }
-
-    fn set_title_generation(&mut self, settings: TitleGenerationSettings) -> bool {
-        let value = serde_json::to_string(&settings).expect("serializable title settings");
-        if self
-            .storage
-            .set_setting("title_generation", &value)
-            .is_err()
-        {
-            self.model.status = "无法保存标题生成设置。".into();
-            return false;
-        }
-        self.model.title_generation = settings;
-        true
-    }
-
-    fn title_generation_configuration(&self) -> Result<TitleGenerationConfig> {
-        let settings = &self.model.title_generation;
-        let executable = self
-            .storage
-            .setting(executable_setting_key(settings.harness))?
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| settings.harness.default_executable().into());
-        let model = settings.model.clone().or_else(|| {
-            self.model
-                .provider_profile_for(settings.harness)
-                .and_then(|profile| profile.model.clone())
-        });
-        Ok(TitleGenerationConfig {
-            harness: settings.harness,
-            executable,
-            model,
-            effort: settings.effort,
-            environment: self.provider_launch_configuration(settings.harness)?,
-        })
-    }
-
-    pub(crate) fn refresh_title_model_catalog(&mut self) -> bool {
-        let Some(cwd) = self.model.working_directory().map(str::to_owned) else {
-            self.model.title_model_catalog = ModelCatalogState::Idle;
-            return false;
-        };
-        let configuration = match self.title_generation_configuration() {
-            Ok(configuration) => configuration,
-            Err(error) => {
-                self.model.title_model_catalog =
-                    ModelCatalogState::NotReady(error.to_string().into());
-                return false;
-            }
-        };
-        let request_id = Uuid::new_v4();
-        let command = CommandEnvelope::new(Command::ModelCatalogRefresh {
-            context_id: Some(self.model.conversation.id),
-            request_id,
-            purpose: ModelCatalogPurpose::TitleGeneration,
-            harness: configuration.harness,
-            executable: configuration.executable,
-            cwd,
-            environment: configuration.environment,
-        });
-        let models = self
-            .model
-            .title_model_catalog
-            .models()
-            .unwrap_or_default()
-            .to_vec();
-        self.model.title_model_catalog = ModelCatalogState::Loading { request_id, models };
-        if self
-            .runner
-            .as_ref()
-            .is_none_or(|runner| runner.send(command).is_err())
-        {
-            self.model
-                .title_model_catalog
-                .fail("Runner 不可用。".into());
-            return false;
-        }
-        true
-    }
-
     pub(crate) fn select_effort(&mut self, effort: ThinkingEffort) {
         if self.model.active_run.is_some() || self.model.effort == effort {
             return;
@@ -949,6 +813,7 @@ impl Presenter {
         let project_changed = self.model.catalog_project != project_id;
         if project_changed {
             self.model.title_model_catalog = ModelCatalogState::Idle;
+            self.model.commit_model_catalog = ModelCatalogState::Idle;
         }
         self.model.catalog_project = project_id;
         let harness = self.model.selected_harness;
@@ -1302,9 +1167,7 @@ impl Presenter {
 
     fn restore_catalog_preferences(&mut self) {
         let harness = self.model.selected_harness;
-        if harness == self.model.title_generation.harness {
-            self.model.title_model_catalog = ModelCatalogState::Idle;
-        }
+        self.invalidate_generation_catalogs(harness);
         let profile_id = self
             .model
             .selected_provider_profile()
