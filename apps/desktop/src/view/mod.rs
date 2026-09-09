@@ -1716,6 +1716,7 @@ impl NexusView {
         div()
             .debug_selector(|| "workspace-page".into())
             .size_full()
+            .bg(material.chrome)
             .flex()
             .child(
                 self.sidebar_pane.clone().cached(
@@ -1728,8 +1729,14 @@ impl NexusView {
             .child(
                 div()
                     .flex_1()
-                    .h_full()
                     .min_w_0()
+                    .my_2()
+                    .mr_2()
+                    .rounded(px(16.))
+                    .border_1()
+                    .border_color(rgb(colors.border))
+                    .bg(rgb(colors.canvas))
+                    .overflow_hidden()
                     .flex()
                     .flex_col()
                     .child(
@@ -1737,10 +1744,9 @@ impl NexusView {
                             .debug_selector(|| "workspace-header".into())
                             .h(px(HEADER_HEIGHT))
                             .flex_none()
-                            .bg(material.chrome)
                             .border_b(px(0.5))
                             .border_color(material.edge)
-                            .px_4()
+                            .px_5()
                             .flex()
                             .items_center()
                             .justify_between()
@@ -1807,6 +1813,7 @@ impl NexusView {
                                     .flex()
                                     .items_center()
                                     .gap_2()
+                                    .pl_3()
                                     .text_size(px(12.))
                                     .text_color(rgb(colors.muted))
                                     .child(live_status_dot(
@@ -1857,7 +1864,6 @@ impl NexusView {
                     .child(
                         div()
                             .flex_none()
-                            .bg(rgb(colors.canvas))
                             .px(px(24.))
                             .pt_3()
                             .pb_4()
@@ -1871,30 +1877,43 @@ impl NexusView {
                                     .w_full()
                                     .max_w(px(CONTENT_WIDTH))
                                     .mx_auto()
-                                    .rounded(px(20.))
+                                    .rounded(px(16.))
                                     .bg(material.floating)
                                     .border_1()
-                                    .border_color(material.edge)
+                                    .border_color(rgb(colors.input_border).opacity(0.45))
                                     .when(prompt_focused, |element| {
                                         element.border_color(rgb(colors.accent))
                                     })
                                     .shadow(material.shadow())
-                                    .p_3()
+                                    .p_4()
                                     .flex()
                                     .flex_col()
                                     .child(self.render_message_queue(cx))
-                                    .child(self.render_voice_controls(cx))
+                                    .when(!model.voice.status.is_empty(), |element| {
+                                        element.child(
+                                            div()
+                                                .mb_2()
+                                                .text_size(px(12.))
+                                                .text_color(rgb(colors.text_secondary))
+                                                .child(model.voice.status.clone()),
+                                        )
+                                    })
                                     .child(
                                         Textarea::new(&self.prompt_input)
                                             .disabled(history)
                                             .appearance(false)
                                             .bordered(false)
+                                            .text_size(px(15.))
+                                            .line_height(relative(1.65))
                                             .aria_label(locale.text("任务描述")),
                                     )
                                     .child(
                                         div()
                                             .min_h(px(COMPACT_CONTROL_HEIGHT))
-                                            .mt_2()
+                                            .mt_3()
+                                            .pt_3()
+                                            .border_t(px(0.5))
+                                            .border_color(rgb(colors.border))
                                             .flex()
                                             .flex_wrap()
                                             .gap_2()
@@ -1915,6 +1934,7 @@ impl NexusView {
                                                     .flex()
                                                     .items_center()
                                                     .gap_2()
+                                                    .child(self.render_voice_controls(cx))
                                                     .when(model.active_run.is_some(), |element| {
                                                         element.child(
                                                             Button::new("composer-cancel")
@@ -1943,7 +1963,8 @@ impl NexusView {
                                                             })
                                                             .primary()
                                                             .small()
-                                                            .size(px(COMPACT_CONTROL_HEIGHT))
+                                                            .size(px(CONTROL_HEIGHT))
+                                                            .rounded(px(10.))
                                                             .p_0()
                                                             .icon(IconName::ArrowUp)
                                                             .accessibility_label(
@@ -1970,13 +1991,13 @@ impl NexusView {
                                 div()
                                     .max_w(px(CONTENT_WIDTH))
                                     .mx_auto()
-                                    .mt_3()
+                                    .mt_2()
                                     .flex()
                                     .items_center()
                                     .justify_between()
                                     .child(
                                         div()
-                                            .text_size(px(12.))
+                                            .text_size(px(11.))
                                             .text_color(rgb(colors.muted))
                                             .child(composer_hint),
                                     )
@@ -2129,10 +2150,14 @@ mod catalog_model_tests {
         let (presenter, _, _directory) = fixture();
         let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
         cx.simulate_resize(gpui::size(px(1040.), px(680.)));
-        view.update_in(cx, |view, window, cx| {
-            view.settings_open = true;
-            view.select_settings_section(SettingsSection::Voice, window, cx);
-        });
+        cx.run_until_parked();
+        let voice = cx.debug_bounds("voice-record").unwrap();
+        let submit = cx.debug_bounds("composer-submit").unwrap();
+        let composer = cx.debug_bounds("composer-surface").unwrap();
+        assert_eq!(voice.center().y, submit.center().y);
+        assert!(voice.left() >= composer.left() && voice.right() <= submit.left());
+        assert!(voice.top() >= composer.top() && voice.bottom() <= composer.bottom());
+        click_debug(cx, "voice-record");
         cx.run_until_parked();
         assert!(cx.debug_bounds("voice-settings").is_some());
         assert!(cx.debug_bounds("voice-mimo-config").is_none());

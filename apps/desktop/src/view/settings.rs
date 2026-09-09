@@ -99,17 +99,15 @@ impl NexusView {
         div()
             .debug_selector(|| "settings-page".into())
             .size_full()
+            .bg(material.chrome)
             .flex()
             .child(
                 div()
                     .debug_selector(|| "settings-navigation".into())
-                    .w(px(240.))
+                    .w(px(SIDEBAR_WIDTH))
                     .h_full()
                     .flex_none()
                     .pt(px(titlebar_inset))
-                    .bg(material.chrome)
-                    .border_r(px(0.5))
-                    .border_color(material.edge)
                     .flex()
                     .flex_col()
                     .child(
@@ -120,7 +118,7 @@ impl NexusView {
                             .flex()
                             .items_center()
                             .gap_3()
-                            .child(brand_mark(colors, 28.))
+                            .child(brand_mark(32.))
                             .child(
                                 div()
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -130,11 +128,11 @@ impl NexusView {
                     .child(
                         div()
                             .flex_1()
-                            .px_3()
+                            .px(px(14.))
                             .py_5()
                             .flex()
                             .flex_col()
-                            .gap_1()
+                            .gap_2()
                             .child(
                                 div()
                                     .px(px(10.))
@@ -188,13 +186,18 @@ impl NexusView {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .h_full()
+                    .my_2()
+                    .mr_2()
+                    .rounded(px(16.))
+                    .border_1()
+                    .border_color(rgb(colors.border))
+                    .bg(rgb(colors.canvas))
+                    .overflow_hidden()
                     .flex()
                     .flex_col()
                     .child(
                         div()
                             .debug_selector(|| "settings-breadcrumb".into())
-                            .bg(material.chrome)
                             .border_b(px(0.5))
                             .border_color(material.edge)
                             .h(px(HEADER_HEIGHT))
@@ -202,20 +205,27 @@ impl NexusView {
                             .px_8()
                             .flex()
                             .items_center()
-                            .gap_3()
                             .child(
                                 div()
-                                    .debug_selector(|| "settings-breadcrumb-label".into())
-                                    .text_color(rgb(colors.muted))
-                                    .child(locale.text("设置")),
-                            )
-                            .child(div().text_color(rgb(colors.muted)).child("/"))
-                            .child(section.label(locale)),
+                                    .w_full()
+                                    .max_w(px(CONTENT_WIDTH))
+                                    .mx_auto()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .debug_selector(|| "settings-breadcrumb-label".into())
+                                            .text_color(rgb(colors.muted))
+                                            .child(locale.text("设置")),
+                                    )
+                                    .child(div().text_color(rgb(colors.muted)).child("/"))
+                                    .child(section.label(locale)),
+                            ),
                     )
                     .child(
                         div()
                             .id("settings-scroll")
-                            .bg(rgb(colors.canvas))
                             .flex_1()
                             .min_h_0()
                             .overflow_y_scroll()
@@ -231,6 +241,7 @@ impl NexusView {
                                         })
                                         .w_full()
                                         .max_w(px(CONTENT_WIDTH))
+                                        .mx_auto()
                                         .child(content),
                                 ),
                             )
@@ -1511,7 +1522,7 @@ impl NexusView {
     }
 }
 
-fn settings_group(
+pub(super) fn settings_group(
     colors: Palette,
     title: impl Into<SharedString>,
     rows: impl IntoIterator<Item = gpui::Div>,
@@ -1524,14 +1535,23 @@ fn settings_group(
             div()
                 .min_w_0()
                 .truncate()
-                .child(section_label(colors, title)),
+                .text_size(px(16.))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(rgb(colors.text))
+                .child(title.into()),
         )
         .child(
-            div().children(rows.into_iter().enumerate().map(|(index, row)| {
-                row.when(index > 0, |row| {
-                    row.border_t(px(0.5)).border_color(rgb(colors.border))
-                })
-            })),
+            div()
+                .bg(rgb(colors.elevated))
+                .border_1()
+                .border_color(rgb(colors.border))
+                .rounded(px(CARD_RADIUS))
+                .px_5()
+                .children(rows.into_iter().enumerate().map(|(index, row)| {
+                    row.when(index > 0, |row| {
+                        row.border_t(px(0.5)).border_color(rgb(colors.border))
+                    })
+                })),
         )
 }
 
@@ -1546,7 +1566,7 @@ fn settings_row(
         .py_4()
         .flex()
         .items_center()
-        .gap_6()
+        .gap_5()
         .child(
             div()
                 .flex_1()

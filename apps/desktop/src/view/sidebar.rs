@@ -2,7 +2,7 @@ use super::*;
 use crate::model::history::ThreadSummary;
 use gpui_kit::component::{list::ListItem, scroll::Scrollbar, spinner::Spinner};
 
-const SIDEBAR_ROW_HEIGHT: f32 = 32.;
+const SIDEBAR_ROW_HEIGHT: f32 = 36.;
 pub(super) const HISTORY_PAGE_SIZE: usize = 10;
 
 fn visible_history<'a>(
@@ -57,7 +57,6 @@ impl NexusView {
     ) -> impl IntoElement {
         let locale = self.presenter.model().language;
         let colors = palette(cx);
-        let material = materials(cx);
         let model = self.presenter.model();
         let query = self.search_input.read(cx).value();
         let selected_project_id = model.selected_project.as_ref().map(|project| project.id);
@@ -203,6 +202,7 @@ impl NexusView {
                             Some(IconName::Folder),
                         )
                         .group("sidebar-project")
+                        .font_weight(gpui::FontWeight::MEDIUM)
                         .debug_selector(move || format!("sidebar-project-{project_id}"))
                         .on_click(cx.listener(move |app, _, _, cx| {
                             if !selected {
@@ -322,33 +322,37 @@ impl NexusView {
             .h_full()
             .flex_none()
             .pt(px(if cfg!(target_os = "macos") { 36. } else { 0. }))
-            .bg(material.chrome)
-            .border_r(px(0.5))
-            .border_color(material.edge)
             .flex()
             .flex_col()
             .child(
-                div().flex_none().px(px(12.)).pt(px(8.)).child(
+                div().flex_none().px(px(14.)).pt(px(8.)).child(
                     div()
                         .w_full()
                         .flex()
                         .flex_col()
-                        .gap_2()
-                        .pb_4()
+                        .gap(px(10.))
+                        .pb_6()
                         .child(
                             div()
-                                .px_2()
-                                .py_3()
-                                .text_size(px(16.))
+                                .px_1()
+                                .pt_2()
+                                .pb_4()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .text_size(px(15.))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child(brand_mark(32.))
                                 .child("Nexus Agent"),
                         )
                         .child(
                             Button::new("new-task")
-                                .ghost()
+                                .outline()
                                 .small()
                                 .w_full()
-                                .h(px(SIDEBAR_ROW_HEIGHT))
+                                .h(px(38.))
+                                .bg(rgb(colors.elevated))
+                                .border_color(rgb(colors.border))
                                 .text_size(px(13.))
                                 .accessibility_label(locale.text("新建任务"))
                                 .child(
@@ -363,13 +367,18 @@ impl NexusView {
                                                 .flex()
                                                 .items_center()
                                                 .gap_2()
-                                                .child(Icon::new(IconName::Plus))
+                                                .child(Icon::new(IconName::Plus).text_color(rgb(colors.accent)))
+                                                .font_weight(gpui::FontWeight::MEDIUM)
                                                 .child(locale.text("新建任务")),
                                         )
                                         .child(
                                             div()
-                                                .text_size(px(12.))
+                                                .text_size(px(11.))
                                                 .text_color(rgb(colors.muted))
+                                                .rounded(px(5.))
+                                                .bg(rgb(colors.surface))
+                                                .px(px(5.))
+                                                .py(px(2.))
                                                 .child(if cfg!(target_os = "macos") {
                                                     "⌘ N"
                                                 } else {
@@ -386,14 +395,20 @@ impl NexusView {
                                 ),
                         )
                         .child(
-                            Input::new(&self.search_input)
-                                .small()
-                                .appearance(false)
-                                .bordered(false)
-                                .min_h(px(SIDEBAR_ROW_HEIGHT))
-                                .text_size(px(13.))
-                                .prefix(Icon::new(IconName::Search).small())
-                                .cleanable(true),
+                            div()
+                                .rounded(px(CONTROL_RADIUS))
+                                .bg(rgb(colors.recessed))
+                                .px_2()
+                                .child(
+                                    Input::new(&self.search_input)
+                                        .small()
+                                        .appearance(false)
+                                        .bordered(false)
+                                        .min_h(px(SIDEBAR_ROW_HEIGHT))
+                                        .text_size(px(12.))
+                                        .prefix(Icon::new(IconName::Search).size(px(14.)).text_color(rgb(colors.muted)))
+                                        .cleanable(true),
+                                ),
                         ),
                 ),
             )
@@ -406,7 +421,7 @@ impl NexusView {
                     .track_scroll(&self.sidebar_scroll)
                     .child(
                         div()
-                            .px(px(12.))
+                            .px(px(14.))
                             .pb(px(16.))
                             .flex()
                             .flex_col()
@@ -414,7 +429,8 @@ impl NexusView {
                                 div()
                                     .px(px(10.))
                                     .pb(px(10.))
-                                    .text_size(px(12.))
+                                    .text_size(px(11.))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .text_color(rgb(colors.muted))
                                     .child(locale.text("项目空间")),
                             )
@@ -428,6 +444,7 @@ impl NexusView {
                                 )
                                 .debug_selector(|| "add-project".into())
                                 .mt(px(8.))
+                                .text_color(rgb(colors.muted))
                                 .on_click(cx.listener(Self::choose_project)),
                             )
                             .child(
@@ -517,7 +534,7 @@ impl NexusView {
                     }),
             )
             .child(
-                div().flex_none().px(px(12.)).pb(px(12.)).child(
+                div().flex_none().px(px(14.)).pb(px(16.)).child(
                     div()
                         .w_full()
                         .pt_3()
@@ -838,6 +855,21 @@ mod tests {
         assert!(cx.debug_bounds("workspace-header-task").is_none());
         assert!(cx.debug_bounds("workspace-header-settled-status").is_some());
         assert!(cx.debug_bounds("workspace-header-pending-status").is_none());
+
+        for size in [
+            gpui::size(px(1040.), px(680.)),
+            gpui::size(px(1280.), px(800.)),
+        ] {
+            cx.simulate_resize(size);
+            cx.run_until_parked();
+            let welcome = cx.debug_bounds("workspace-empty-no-project").unwrap();
+            let choose_project = cx.debug_bounds("welcome-choose-project").unwrap();
+            let timeline = view.read_with(cx, |view, _| view.timeline_scroll.bounds());
+            assert!(choose_project.left() >= welcome.left());
+            assert!(choose_project.right() <= welcome.right());
+            assert!(choose_project.top() >= timeline.top());
+            assert!(choose_project.bottom() <= timeline.bottom());
+        }
 
         view.update(cx, |view, cx| {
             view.presenter.open_project(directory.path());
