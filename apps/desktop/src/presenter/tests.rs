@@ -4878,14 +4878,7 @@ fn voice_selection_persists_without_key_and_credentials_are_isolated() {
     presenter.save_voice_key("voice-only").unwrap();
     assert!(presenter.model.voice.ready());
     assert!(presenter.voice_worker.is_none());
-    assert_eq!(
-        presenter.model.voice.status.render(Language::Chinese),
-        "已配置；尚未验证服务请求。"
-    );
-    assert_eq!(
-        presenter.model.voice.status.render(Language::English),
-        "Configured; service requests have not been verified."
-    );
+    assert_eq!(presenter.model.voice.status, LocalizedText::default());
     assert_eq!(runner.0.borrow().commands.len(), commands_before);
     assert_eq!(
         credentials.api_key(chat_profile).unwrap().as_deref(),
@@ -4936,6 +4929,7 @@ fn voice_completion_rejects_cancelled_wrong_session_and_provider_results() {
     };
     presenter.model.voice.operation = Some(operation);
     let text = "检查 src/main.rs 的 parseHTTP 函数";
+    presenter.voice_error("previous voice error");
     assert!(
         presenter
             .complete_voice(
@@ -4964,10 +4958,13 @@ fn voice_completion_rejects_cancelled_wrong_session_and_provider_results() {
             .as_deref(),
         Some(text)
     );
+    assert_eq!(presenter.model.voice.status, LocalizedText::default());
     assert!(runner.0.borrow().commands.is_empty());
     assert!(presenter.model.queued_messages.is_empty());
     presenter.model.voice.operation = Some(operation);
+    presenter.voice_error("previous voice error");
     presenter.cancel_voice();
+    assert_eq!(presenter.model.voice.status, LocalizedText::default());
     assert!(
         presenter
             .complete_voice(operation, Ok(text.into()))

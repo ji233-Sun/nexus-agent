@@ -76,7 +76,7 @@ impl Presenter {
                 )
             })?;
         self.model.voice.mimo_configured = true;
-        self.model.voice.status = "已配置；尚未验证服务请求。".into();
+        self.model.voice.status = LocalizedText::default();
         Ok(())
     }
 
@@ -114,7 +114,7 @@ impl Presenter {
         });
         self.voice_worker = Some(worker);
         self.model.voice.transcribing = false;
-        self.model.voice.status = "正在请求麦克风并录音（最多 60 秒）…".into();
+        self.model.voice.status = LocalizedText::default();
         Ok(())
     }
 
@@ -122,14 +122,14 @@ impl Presenter {
         if let Some(worker) = &self.voice_worker {
             worker.stop();
             self.model.voice.transcribing = true;
-            self.model.voice.status = "正在识别…".into();
+            self.model.voice.status = LocalizedText::default();
         }
     }
 
     pub(crate) fn cancel_voice(&mut self) {
         self.voice_worker.take(); // Drop cancels recording and network work.
         if self.model.voice.operation.take().is_some() {
-            self.model.voice.status = "语音输入已取消。".into();
+            self.model.voice.status = LocalizedText::default();
         }
         self.model.voice.transcribing = false;
     }
@@ -162,7 +162,7 @@ impl Presenter {
         self.model.voice.transcribing = false;
         match result {
             Ok(text) if !text.trim().is_empty() => {
-                self.model.voice.status = "已回填草稿，可编辑或撤销；尚未发送。".into();
+                self.model.voice.status = LocalizedText::default();
                 Some(text)
             }
             Ok(_) => {

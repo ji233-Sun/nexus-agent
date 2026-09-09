@@ -501,14 +501,9 @@
   "系统不支持此识别语言": "This recognition language is not supported by the system",
   "请输入 MiMo API Key": "Enter a MiMo API key",
   "无法保存到系统凭据库，请解锁凭据库后重试。": "Cannot save to the system credential store. Unlock it and try again.",
-  "已配置；尚未验证服务请求。": "Configured; service requests have not been verified.",
   "请先在设置 → 语音输入中选择并配置 Provider。": "Choose and configure a provider in Settings → Voice input first.",
   "语音操作正在进行": "A voice operation is already in progress",
   "历史记录不可输入": "Voice input is unavailable in history",
   "无法读取语音凭据库": "Cannot read the voice credential store",
-  "正在请求麦克风并录音（最多 60 秒）…": "Requesting microphone access and recording (up to 60 seconds)…",
-  "正在识别…": "Transcribing…",
-  "语音输入已取消。": "Voice input cancelled.",
-  "已回填草稿，可编辑或撤销；尚未发送。": "Draft filled. You can edit or undo it; it has not been sent.",
   "未识别到文本，请重试。": "No text was recognized. Please try again."
 }
