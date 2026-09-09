@@ -232,22 +232,14 @@ impl RenderOnce for AnimatedDropdown {
     }
 }
 
-pub(super) fn brand_mark(colors: Palette, size: f32) -> impl IntoElement {
-    div()
-        .size(px(size))
-        .flex_none()
-        .rounded(px(CARD_RADIUS))
-        .bg(rgb(colors.recessed))
-        .border_1()
-        .border_color(rgb(colors.border))
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(
-            Icon::new(IconName::Asterisk)
-                .size(px(size * 0.55))
-                .text_color(rgb(colors.text_secondary)),
-        )
+pub(super) fn brand_mark(size: f32) -> impl IntoElement {
+    static ICON: LazyLock<Arc<gpui::Image>> = LazyLock::new(|| {
+        Arc::new(gpui::Image::from_bytes(
+            gpui::ImageFormat::Svg,
+            include_bytes!("../../assets/brand/nexus-icon.svg").to_vec(),
+        ))
+    });
+    gpui::img(ICON.clone()).size(px(size)).flex_none()
 }
 
 pub(super) fn entrance(element: gpui::Div, id: impl Into<ElementId>, animated: bool) -> AnyElement {
@@ -347,11 +339,11 @@ impl NexusView {
                 div()
                     .when(is_user, |element| {
                         element
-                            .max_w(px(600.))
-                            .rounded(px(16.))
+                            .max_w(px(620.))
+                            .rounded(px(18.))
                             .bg(rgb(colors.recessed))
-                            .px_4()
-                            .py_3()
+                            .px_5()
+                            .py(px(14.))
                     })
                     .when(!is_user, |element| element.w_full())
                     .when(!is_user && is_panel, |element| {
@@ -362,7 +354,7 @@ impl NexusView {
                             .border_color(rgb(colors.border))
                             .p_3()
                     })
-                    .when(!is_user && !is_panel, |element| element.px_1().py_1())
+                    .when(!is_user && !is_panel, |element| element.px_1().py_2())
                     .when(show_label, |element| {
                         element.child(
                             div()
@@ -379,9 +371,9 @@ impl NexusView {
                     })
                     .child(if kind == MessageKind::Text {
                         TextView::markdown(id.clone(), content.to_owned())
-                            .text_size(px(14.))
+                            .text_size(px(15.))
                             .font_weight(gpui::FontWeight::NORMAL)
-                            .line_height(relative(1.65))
+                            .line_height(relative(1.7))
                             .style(
                                 TextViewStyle::default()
                                     .paragraph_gap(gpui::rems(1.))
@@ -399,11 +391,11 @@ impl NexusView {
                                             .font_family(MONO_FONT)
                                             .text_size(px(13.))
                                             .line_height(relative(1.6))
-                                            .p(px(12.))
-                                            .bg(rgb(colors.surface))
+                                            .p(px(16.))
+                                            .bg(rgb(colors.elevated))
                                             .border_1()
                                             .border_color(rgb(colors.border))
-                                            .rounded(px(CONTROL_RADIUS)),
+                                            .rounded(px(CARD_RADIUS)),
                                     )
                                     .table_head(
                                         gpui::StyleRefinement::default()

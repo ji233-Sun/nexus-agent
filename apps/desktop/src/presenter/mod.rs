@@ -3,6 +3,7 @@ mod history;
 mod remote;
 mod runs;
 mod updates;
+mod voice;
 mod workspace;
 
 #[cfg(test)]
@@ -58,6 +59,7 @@ pub(crate) trait RunnerPort {
 
 pub(crate) struct Presenter {
     model: AppModel,
+    voice_worker: Option<crate::infrastructure::voice::Worker>,
     storage: Storage,
     runner: Option<Box<dyn RunnerPort>>,
     codex_history_client: Option<CodexHistoryClient>,
@@ -215,6 +217,7 @@ impl Presenter {
             Err(error) => (None, Some(error.to_string())),
         };
         let mut presenter = Self {
+            voice_worker: None,
             storage,
             runner,
             model: AppModel {
@@ -275,6 +278,7 @@ impl Presenter {
         } else if !has_storage_error {
             presenter.model.status = runner_error.unwrap_or_default().into();
         }
+        presenter.load_voice_settings();
         presenter
     }
 
@@ -372,6 +376,7 @@ impl Presenter {
         if self.model.selected_project.is_none() {
             return;
         }
+        self.cancel_voice();
         self.model.fresh_conversation();
         self.model.selected_task = None;
         self.reset_workspace_draft();
@@ -387,6 +392,7 @@ impl Presenter {
     }
 
     pub(crate) fn select_project(&mut self, project: Project) {
+        self.cancel_voice();
         self.model.fresh_conversation();
         self.model.permission_mode =
             load_permission_mode(&self.storage, self.model.selected_harness);
@@ -428,6 +434,7 @@ impl Presenter {
     }
 
     pub(crate) fn select_task(&mut self, task_id: Uuid) {
+        self.cancel_voice();
         if self.model.selected_task != Some(task_id) {
             let existing = self
                 .model

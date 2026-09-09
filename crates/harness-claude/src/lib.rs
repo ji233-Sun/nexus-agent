@@ -1,12 +1,16 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use nexus_domain::{
     ClaudeModel, HarnessKind, ModelAvailability, ModelDescriptor, ModelSource, PermissionMode,
-    ThinkingEffort,
+    ThinkingEffort, UserAskAnswer, UserAskAnswerMode, UserAskAnswerValue, UserAskOption,
+    UserAskQuestion, UserAskStatus,
 };
 use nexus_harness_core::{
-    ApprovalOption, ApprovalPrompt, InputFrame, LineDecoder, ModelCatalogError, resolve_executable,
-    tool_content,
+    ApprovalOption, ApprovalPrompt, InputFrame, LineDecoder, ModelCatalogError, UserAskRequest,
+    resolve_executable, tool_content,
 };
 pub use nexus_harness_core::{DecodedEvent, LaunchSpec};
 use nexus_protocol::{EnvironmentVariable, HarnessProbe};
@@ -194,16 +198,146 @@ pub async fn probe(configured_executable: &str) -> HarnessProbe {
 }
 
 #[derive(Default)]
-pub struct EventDecoder;
+pub struct EventDecoder {
+    pending_user_asks: HashMap<String, Value>,
+}
 
 impl LineDecoder for EventDecoder {
     fn decode_line(&mut self, line: &str) -> Result<Vec<DecodedEvent>, serde_json::Error> {
         let frame: Value = serde_json::from_str(line)?;
+        if frame.get("type").and_then(Value::as_str) == Some("control_request")
+            && frame.pointer("/request/subtype").and_then(Value::as_str) == Some("can_use_tool")
+            && frame.pointer("/request/tool_name").and_then(Value::as_str)
+                == Some("AskUserQuestion")
+        {
+            return Ok(self.decode_user_ask(&frame));
+        }
+        if frame.get("type").and_then(Value::as_str) == Some("control_cancel_request")
+            && let Some(id) = frame.get("request_id").and_then(Value::as_str)
+            && self.pending_user_asks.remove(id).is_some()
+        {
+            return Ok(vec![DecodedEvent::UserAskFinished {
+                native_request_id: id.into(),
+                status: UserAskStatus::Cancelled,
+                message: None,
+            }]);
+        }
+        if frame.get("type").and_then(Value::as_str) == Some("result") {
+            self.pending_user_asks.clear();
+        }
         Ok(decode_frame(&frame))
     }
 
     fn steer(&mut self, message_id: &str, prompt: &str) -> Option<InputFrame> {
         Some(InputFrame(user_input(prompt, Some(message_id))))
+    }
+
+    fn answer_user_ask(
+        &mut self,
+        native_request_id: &str,
+        answers: &[UserAskAnswer],
+    ) -> Option<InputFrame> {
+        let input = self.pending_user_asks.get(native_request_id)?;
+        let questions = input.get("questions")?.as_array()?;
+        if answers.len() != questions.len() {
+            return None;
+        }
+        let mut response_answers = serde_json::Map::new();
+        for question in questions {
+            let text = question.get("question")?.as_str()?;
+            let answer = answers.iter().find(|answer| answer.question_id == text)?;
+            let value = match &answer.value {
+                UserAskAnswerValue::Text(value) => value.clone(),
+                UserAskAnswerValue::Selected(values) => values.join(", "),
+            };
+            response_answers.insert(text.into(), Value::String(value));
+        }
+        let mut input = self.pending_user_asks.remove(native_request_id)?;
+        input["answers"] = Value::Object(response_answers);
+        Some(InputFrame(json!({"type": "control_response", "response": {
+            "subtype": "success", "request_id": native_request_id, "response": {
+                "behavior": "allow", "updatedInput": input
+            }
+        }})))
+    }
+}
+
+impl EventDecoder {
+    fn decode_user_ask(&mut self, frame: &Value) -> Vec<DecodedEvent> {
+        let unsupported = || {
+            vec![DecodedEvent::WriteStdin(InputFrame(json!({
+                "type": "control_response", "response": {
+                    "subtype": "error", "request_id": frame["request_id"],
+                    "error": "Nexus 无法解析此用户问题请求。"
+                }
+            })))]
+        };
+        let Some(id) = frame
+            .get("request_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        else {
+            return unsupported();
+        };
+        let input = frame
+            .pointer("/request/input")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let Some(raw_questions) = input.get("questions").and_then(Value::as_array) else {
+            return unsupported();
+        };
+        let questions = raw_questions
+            .iter()
+            .filter_map(|question| {
+                let prompt = question.get("question")?.as_str()?.to_owned();
+                let options = question
+                    .get("options")
+                    .and_then(Value::as_array)
+                    .map(|options| {
+                        options
+                            .iter()
+                            .filter_map(|option| {
+                                let label = option.get("label")?.as_str()?.to_owned();
+                                Some(UserAskOption {
+                                    id: label.clone(),
+                                    label,
+                                    description: option
+                                        .get("description")
+                                        .and_then(Value::as_str)
+                                        .map(str::to_owned),
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                Some(UserAskQuestion {
+                    id: prompt.clone(),
+                    prompt,
+                    answer_mode: if options.is_empty() {
+                        UserAskAnswerMode::Text
+                    } else {
+                        UserAskAnswerMode::Choice {
+                            multiple: question
+                                .get("multiSelect")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false),
+                            allow_custom: true,
+                        }
+                    },
+                    options,
+                })
+            })
+            .collect::<Vec<_>>();
+        if questions.len() != raw_questions.len() || questions.is_empty() {
+            return unsupported();
+        }
+        self.pending_user_asks.insert(id.into(), input);
+        vec![DecodedEvent::UserAskRequested(UserAskRequest {
+            native_request_id: id.into(),
+            questions,
+            timeout_ms: None,
+            resolve_on_send: true,
+        })]
     }
 }
 
@@ -535,7 +669,7 @@ mod tests {
 
     #[test]
     fn tool_approval_waits_for_user_and_preserves_input_and_cancellation() {
-        let mut decoder = EventDecoder;
+        let mut decoder = EventDecoder::default();
         let frame = json!({"type": "control_request", "request_id": "approval-1", "request": {
             "subtype": "can_use_tool", "tool_name": "Bash", "input": {"command": "echo \"审批\"", "timeout": 1000}
         }});
@@ -566,6 +700,115 @@ mod tests {
     }
 
     #[test]
+    fn ask_user_question_maps_questions_and_builds_sdk_response() {
+        let mut decoder = EventDecoder::default();
+        let input = json!({
+            "questions": [
+                {"question": "Which features?", "header": "Features", "multiSelect": true,
+                 "options": [
+                    {"label": "Fast", "description": "Optimize latency"},
+                    {"label": "Safe", "description": "Prefer checks"}
+                 ]},
+                {"question": "Anything else?", "header": "Notes"}
+            ],
+            "metadata": {"preserve": true}
+        });
+        let frame = json!({"type": "control_request", "request_id": "ask-1", "request": {
+            "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": input
+        }});
+        let events = decoder.decode_line(&frame.to_string()).unwrap();
+        let [DecodedEvent::UserAskRequested(request)] = events.as_slice() else {
+            panic!("expected user ask")
+        };
+        assert_eq!(request.native_request_id, "ask-1");
+        assert_eq!(request.timeout_ms, None);
+        assert!(request.resolve_on_send);
+        assert_eq!(request.questions[0].id, "Which features?");
+        assert_eq!(request.questions[0].prompt, "Which features?");
+        assert_eq!(
+            request.questions[0].answer_mode,
+            UserAskAnswerMode::Choice {
+                multiple: true,
+                allow_custom: true
+            }
+        );
+        assert_eq!(request.questions[0].options[0].id, "Fast");
+        assert_eq!(request.questions[0].options[0].label, "Fast");
+        assert_eq!(
+            request.questions[0].options[0].description.as_deref(),
+            Some("Optimize latency")
+        );
+        assert_eq!(request.questions[1].id, "Anything else?");
+        assert_eq!(request.questions[1].answer_mode, UserAskAnswerMode::Text);
+
+        let response = decoder
+            .answer_user_ask(
+                "ask-1",
+                &[
+                    UserAskAnswer {
+                        question_id: "Which features?".into(),
+                        value: UserAskAnswerValue::Selected(vec!["Fast".into(), "Safe".into()]),
+                    },
+                    UserAskAnswer {
+                        question_id: "Anything else?".into(),
+                        value: UserAskAnswerValue::Text("custom text".into()),
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(response.0["response"]["response"]["behavior"], "allow");
+        let mut expected_input = input;
+        expected_input["answers"] = json!({
+            "Which features?": "Fast, Safe", "Anything else?": "custom text"
+        });
+        assert_eq!(
+            response.0["response"]["response"]["updatedInput"],
+            expected_input
+        );
+        assert_eq!(
+            response.0["response"]["response"]["updatedInput"]["answers"],
+            json!({
+                "Which features?": "Fast, Safe", "Anything else?": "custom text"
+            })
+        );
+        assert!(decoder.answer_user_ask("ask-1", &[]).is_none());
+    }
+
+    #[test]
+    fn ask_user_question_cancel_clears_pending_and_rejects_late_answer() {
+        let mut decoder = EventDecoder::default();
+        let frame = json!({"type": "control_request", "request_id": "ask-cancel", "request": {
+            "subtype": "can_use_tool", "tool_name": "AskUserQuestion",
+            "input": {"questions": [{"question": "Continue?", "options": [{"label": "Yes"}]}]}
+        }});
+        assert!(matches!(
+            decoder.decode_line(&frame.to_string()).unwrap().as_slice(),
+            [DecodedEvent::UserAskRequested(_)]
+        ));
+        assert_eq!(
+            decoder
+                .decode_line(r#"{"type":"control_cancel_request","request_id":"ask-cancel"}"#)
+                .unwrap(),
+            vec![DecodedEvent::UserAskFinished {
+                native_request_id: "ask-cancel".into(),
+                status: UserAskStatus::Cancelled,
+                message: None,
+            }]
+        );
+        assert!(
+            decoder
+                .answer_user_ask(
+                    "ask-cancel",
+                    &[UserAskAnswer {
+                        question_id: "Continue?".into(),
+                        value: UserAskAnswerValue::Selected(vec!["Yes".into()]),
+                    }]
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
     fn title_launch_spec_disables_tools_and_edit_approval() {
         let spec = build_title_launch_spec(
             "/usr/local/bin/claude",
@@ -587,7 +830,7 @@ mod tests {
 
     #[test]
     fn decoder_maps_text_and_tool_events() {
-        let mut decoder = EventDecoder;
+        let mut decoder = EventDecoder::default();
         assert_eq!(
             decoder
                 .decode_line(
@@ -633,7 +876,7 @@ mod tests {
 
     #[test]
     fn malformed_frames_are_recoverable() {
-        let mut decoder = EventDecoder;
+        let mut decoder = EventDecoder::default();
         assert!(decoder.decode_line("not json").is_err());
         assert_eq!(
             decoder
@@ -645,7 +888,7 @@ mod tests {
 
     #[test]
     fn steering_replays_the_message_id_and_reports_failed_turns() {
-        let mut decoder = EventDecoder;
+        let mut decoder = EventDecoder::default();
         let frame = decoder
             .steer("message-id", "new instruction\n第二行")
             .unwrap();

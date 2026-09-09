@@ -326,6 +326,8 @@ impl EventDecoder {
                     vec![DecodedEvent::UserAskRequested(UserAskRequest {
                         native_request_id: native_id,
                         questions,
+                        timeout_ms: None,
+                        resolve_on_send: false,
                     })]
                 }
             }
@@ -915,13 +917,23 @@ mod tests {
     #[test]
     fn questions_preserve_multiple_choices_and_refresh_transport_ids() {
         let (_, mut decoder) = prepare_run(&run(), Path::new("/project"));
+        opened(&mut decoder);
         let mut frame = json!({"id":"server-1","method":"interaction/requestUserInput","params":{
             "requestId":"ask-1","questions":[{"question":"Which checks?","multiSelect":true,"options":[{"label":"Tests","value":"tests"},{"label":"Build","value":"build"}]}]
         }});
         let events = decode(&mut decoder, frame.clone());
-        assert!(
-            matches!(&events[0],DecodedEvent::UserAskRequested(ask) if matches!(ask.questions[0].answer_mode,UserAskAnswerMode::Choice{multiple:true,allow_custom:true}))
-        );
+        let [DecodedEvent::UserAskRequested(ask)] = events.as_slice() else {
+            panic!("question missing");
+        };
+        assert_eq!(ask.timeout_ms, None);
+        assert!(!ask.resolve_on_send);
+        assert!(matches!(
+            ask.questions[0].answer_mode,
+            UserAskAnswerMode::Choice {
+                multiple: true,
+                allow_custom: true
+            }
+        ));
         frame["id"] = json!("server-2");
         assert!(decode(&mut decoder, frame).is_empty());
         let response = decoder
@@ -939,6 +951,18 @@ mod tests {
             json!(["tests", "build"])
         );
         assert!(decoder.answer_user_ask("ask-1", &[]).is_none());
+        assert_eq!(
+            event(
+                &mut decoder,
+                "userInput.resolved",
+                json!({"requestId":"ask-1"})
+            ),
+            [DecodedEvent::UserAskFinished {
+                native_request_id: "ask-1".into(),
+                status: UserAskStatus::Answered,
+                message: None,
+            }]
+        );
     }
 
     #[test]
