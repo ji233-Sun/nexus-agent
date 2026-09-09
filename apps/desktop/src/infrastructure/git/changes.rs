@@ -22,23 +22,33 @@ fn diff(path: &Path, args: &[&str]) -> Result<String> {
     git(path, &command)
 }
 
-fn untracked_content(root: &Path, name: &str) -> Result<String> {
+fn untracked_content(root: &Path, name: &str) -> Result<(String, usize)> {
     let path = root.join(name);
     let metadata = std::fs::symlink_metadata(&path)?;
     if metadata.file_type().is_symlink() {
-        return Ok(format!("symlink → {}", std::fs::read_link(path)?.display()));
+        return Ok((
+            format!("symlink → {}", std::fs::read_link(path)?.display()),
+            1,
+        ));
     }
     if !metadata.is_file() {
-        return Ok("目录 / 子模块".into());
+        return Ok(("目录 / 子模块".into(), 0));
     }
     let content = std::fs::read(path)?;
-    Ok(String::from_utf8(content).unwrap_or_else(|error| {
+    let additions = if content.iter().take(8000).any(|byte| *byte == 0) {
+        0
+    } else {
+        content.iter().filter(|byte| **byte == b'\n').count()
+            + usize::from(!content.is_empty() && !content.ends_with(b"\n"))
+    };
+    let text = String::from_utf8(content).unwrap_or_else(|error| {
         format!(
             "二进制文件（{} 字节，SHA-256: {:x}）",
             error.as_bytes().len(),
             Sha256::digest(error.as_bytes())
         )
-    }))
+    });
+    Ok((text, additions))
 }
 
 pub(crate) fn review(workspace: &Workspace) -> Result<WorkspaceReview> {
@@ -47,6 +57,30 @@ pub(crate) fn review(workspace: &Workspace) -> Result<WorkspaceReview> {
     let cwd = root.as_path();
     let head = git(cwd, &["rev-parse", "HEAD"])?.trim().to_owned();
     let base = workspace.base_sha.as_deref().unwrap_or(&head);
+    // Count final working-tree contents against HEAD, so a file edited both
+    // before and after staging is counted only once.
+    let (mut additions, deletions) = git(
+        cwd,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--numstat",
+            "-z",
+            "HEAD",
+            "--",
+        ],
+    )?
+    .split('\0')
+    .filter_map(|entry| {
+        let mut fields = entry.splitn(3, '\t');
+        Some((
+            fields.next()?.parse::<usize>().ok()?,
+            fields.next()?.parse::<usize>().ok()?,
+        ))
+    })
+    .fold((0, 0), |(added, removed), (a, d)| (added + a, removed + d));
     let mut dirty_paths = paths(git(
         cwd,
         &[
@@ -64,7 +98,11 @@ pub(crate) fn review(workspace: &Workspace) -> Result<WorkspaceReview> {
         &["ls-files", "--others", "--exclude-standard", "-z"],
     )?)
     .into_iter()
-    .map(|name| Ok((name.clone(), untracked_content(cwd, &name)?)))
+    .map(|name| {
+        let (text, lines) = untracked_content(cwd, &name)?;
+        additions += lines;
+        Ok((name, text))
+    })
     .collect::<Result<Vec<_>>>()?;
     dirty_paths.extend(untracked.iter().map(|(name, _)| name.clone()));
     dirty_paths.sort();
@@ -91,6 +129,8 @@ pub(crate) fn review(workspace: &Workspace) -> Result<WorkspaceReview> {
         unstaged: diff(cwd, &["--"])?,
         untracked,
         dirty_paths,
+        additions,
+        deletions,
         target_branches: local_branches(cwd)?,
         conflicts,
         resolution_diff,

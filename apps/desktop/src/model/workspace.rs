@@ -88,6 +88,8 @@ pub(crate) struct WorkspaceReview {
     pub(crate) unstaged: String,
     pub(crate) untracked: Vec<(String, String)>,
     pub(crate) dirty_paths: Vec<String>,
+    pub(crate) additions: usize,
+    pub(crate) deletions: usize,
     pub(crate) target_branches: Vec<String>,
     pub(crate) conflicts: Vec<String>,
     pub(crate) resolution_diff: String,

@@ -226,6 +226,12 @@ impl Presenter {
         self.model.workspace_operation_context = None;
         self.model.workspace_operation_paths.clear();
         let committed = matches!(&event, WorkspaceEvent::Committed(_));
+        let changes_operation = matches!(
+            &event,
+            WorkspaceEvent::Reviewed(_)
+                | WorkspaceEvent::Committed(_)
+                | WorkspaceEvent::CommitPrepared { .. }
+        );
         let result = match event {
             WorkspaceEvent::Resolved(result) => {
                 result.and_then(|workspace| {
@@ -263,17 +269,17 @@ impl Presenter {
                     if committed {
                         self.model.commit_message.clear();
                         self.model.commit_message_request = None;
+                        self.model.commit_editor_open = false;
+                    }
+                    if review.dirty_paths.is_empty() {
+                        self.model.commit_editor_open = false;
                     }
                     self.model
                         .selected_changes
                         .retain(|path| review.dirty_paths.contains(path));
                     self.model.workspace_review = Some(review);
                     self.model.merge_plan = None;
-                    self.model.status = if committed {
-                        "提交成功。".into()
-                    } else {
-                        "变更已刷新，请选择需要提交的文件。".into()
-                    };
+                    self.model.changes_status = committed.then(|| "提交成功。".into());
                 })
             }
             WorkspaceEvent::CommitPrepared {
@@ -314,7 +320,12 @@ impl Presenter {
             }),
         };
         if let Err(error) = result {
-            self.model.status = format!("Git 操作失败：{error}").into();
+            let message = format!("Git 操作失败：{error}").into();
+            if changes_operation {
+                self.model.changes_status = Some(message);
+            } else {
+                self.model.status = message;
+            }
             self.model.workspace_retry = self.model.pending_workspace_start.is_some();
             self.reload_workspaces();
         }
@@ -356,19 +367,27 @@ impl Presenter {
         let Ok(Some(workspace)) = self.storage.workspace(id) else {
             return false;
         };
+        if self
+            .model
+            .workspace_review
+            .as_ref()
+            .is_none_or(|review| review.workspace_id != id)
+        {
+            self.model.selected_changes.clear();
+        }
         self.model.workspace_review = None;
         self.model.commit_message_request = None;
-        self.model.selected_changes.clear();
         self.model.merge_plan = None;
         self.spawn_workspace_operation(move || {
             WorkspaceEvent::Reviewed(git::changes::review(&workspace))
         });
-        self.model.status = "正在读取完整任务变更…".into();
+        self.model.changes_status = None;
         true
     }
 
     pub(crate) fn select_changed_file(&mut self, path: String, selected: bool) {
         self.model.commit_message_request = None;
+        self.model.changes_status = None;
         if selected {
             self.model.selected_changes.insert(path);
         } else {
@@ -383,6 +402,24 @@ impl Presenter {
         }
     }
 
+    pub(crate) fn toggle_changes_files(&mut self) {
+        self.model.changes_files_expanded = !self.model.changes_files_expanded;
+    }
+
+    pub(crate) fn toggle_commit_editor(&mut self) {
+        if self.model.commit_editor_open {
+            self.model.commit_editor_open = false;
+        } else if let Some(review) = &self.model.workspace_review
+            && !review.dirty_paths.is_empty()
+        {
+            let files = review.dirty_paths.clone();
+            if self.model.selected_changes.is_empty() {
+                self.model.selected_changes.extend(files);
+            }
+            self.model.commit_editor_open = true;
+        }
+    }
+
     pub(crate) fn review_conversation_changes(&mut self) -> bool {
         if self.model.workspace_busy || self.model.selected_codex_thread.is_some() {
             return false;
@@ -394,11 +431,11 @@ impl Presenter {
                 .flatten()
         });
         let Some(workspace) = workspace else {
-            self.model.status = "任务目录尚未就绪，无法查看变更。".into();
+            self.model.changes_status = Some("任务目录尚未就绪，无法查看变更。".into());
             return false;
         };
         if let Err(error) = self.storage.save_workspace(&workspace) {
-            self.model.status = error.to_string().into();
+            self.model.changes_status = Some(error.to_string().into());
             return false;
         }
         self.review_workspace(workspace.id)
@@ -408,6 +445,7 @@ impl Presenter {
         if self.model.commit_message != message {
             self.model.commit_message = message;
             self.model.commit_message_request = None;
+            self.model.changes_status = None;
         }
     }
 
@@ -438,7 +476,7 @@ impl Presenter {
         let (workspace, configuration) = match configuration {
             Ok(configuration) => configuration,
             Err(error) => {
-                self.model.status = error.to_string().into();
+                self.model.changes_status = Some(error.to_string().into());
                 return false;
             }
         };
@@ -458,7 +496,7 @@ impl Presenter {
                 }
             }),
         });
-        self.model.status = "正在生成提交说明…".into();
+        self.model.changes_status = None;
         true
     }
 
@@ -471,11 +509,12 @@ impl Presenter {
         let workspace = match self.workspace_for_write(review.workspace_id) {
             Ok(workspace) => workspace,
             Err(error) => {
-                self.model.status = error.to_string().into();
+                self.model.changes_status = Some(error.to_string().into());
                 return false;
             }
         };
         self.model.workspace_operation_paths = vec![Path::new(&workspace.path).to_path_buf()];
+        self.model.changes_status = None;
         self.spawn_workspace_operation(move || {
             WorkspaceEvent::Committed(git::changes::commit_files(
                 &workspace, &review, &files, &message,

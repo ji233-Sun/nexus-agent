@@ -364,6 +364,7 @@ pub(crate) mod tests {
         std::fs::write(cwd.join("new space.txt"), "new selected\n").unwrap();
         let review = changes::review(&workspace).unwrap();
         let files = vec!["tracked.txt".into(), "new space.txt".into()];
+        assert_eq!((review.additions, review.deletions), (3, 1));
         let diff = changes::selected_diff(&workspace, &review, &files).unwrap();
         assert!(diff.contains("+final selected"));
         assert!(diff.contains("new space.txt\nnew selected"));
@@ -435,6 +436,7 @@ pub(crate) mod tests {
         changes::commit_files(&workspace, &next, &["staged.txt".into()], "remaining file").unwrap();
         std::fs::write(cwd.join("asset.bin"), [255, 0, 1]).unwrap();
         let binary_review = changes::review(&workspace).unwrap();
+        assert_eq!((binary_review.additions, binary_review.deletions), (0, 0));
         std::fs::write(cwd.join("asset.bin"), [255, 0, 2]).unwrap();
         assert!(
             changes::commit_files(

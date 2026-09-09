@@ -1879,7 +1879,9 @@ impl NexusView {
                                                 .debug_selector(|| "toggle-changes-sidebar".into())
                                                 .ghost()
                                                 .small()
-                                                .label(locale.text("变更"))
+                                                .icon(IconName::PanelRight)
+                                                .tooltip(locale.text("环境"))
+                                                .accessibility_label(locale.text("环境"))
                                                 .selected(model.changes_sidebar_open)
                                                 .on_click(cx.listener(|app, _, _, cx| {
                                                     app.presenter.toggle_changes_sidebar();
@@ -2514,7 +2516,18 @@ mod catalog_model_tests {
         assert!(content.right() <= px(1040.));
         assert!(content.bottom() <= px(680.));
         assert!(cx.debug_bounds("composer-surface").unwrap().right() <= content.left());
+        let card = cx.debug_bounds("environment-card").unwrap();
+        assert!(card.size.height < px(240.));
+        assert!(cx.debug_bounds("commit-editor").is_none());
+        assert!(cx.debug_bounds("conversation-changed-files").is_none());
+        click_debug(cx, "environment-changes");
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            let _ = window.draw(cx);
+        });
         click_debug(cx, "review-file-tracked.txt");
+        click_debug(cx, "open-commit-editor");
         cx.run_until_parked();
         cx.update(|window, cx| {
             window.simulate_next_frame(cx);
@@ -2563,6 +2576,7 @@ mod catalog_model_tests {
         cx.run_until_parked();
         view.update(cx, |view, cx| {
             finish_workspace_operation(&mut view.presenter);
+            assert!(!view.presenter.model().commit_editor_open);
             cx.notify();
         });
         assert_ne!(
@@ -2580,6 +2594,16 @@ mod catalog_model_tests {
                 .unwrap()
                 .is_empty()
         );
+        click_debug(cx, "environment-changes");
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            let _ = window.draw(cx);
+        });
+        click_debug(cx, "open-commit-editor");
+        assert!(cx.debug_bounds("commit-editor").is_none());
+        assert!(cx.debug_bounds("generate-commit-message").is_none());
+        assert!(cx.debug_bounds("environment-card").unwrap().size.height < px(260.));
     }
 
     #[gpui::test]

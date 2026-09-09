@@ -2197,8 +2197,11 @@ fn commit_message_generation_uses_selected_changes_and_routes_results_to_the_own
     let cwd = Path::new(&start.cwd);
     fs::write(cwd.join("tracked.txt"), "selected content\n").unwrap();
     fs::write(cwd.join("unselected.txt"), "private unselected content\n").unwrap();
+    let conversation_status = presenter.model.status_text().to_owned();
     presenter.toggle_changes_sidebar();
     finish_workspace_operation(&mut presenter);
+    assert_eq!(presenter.model.status_text(), conversation_status);
+    assert!(presenter.model.changes_status.is_none());
     presenter.select_changed_file("tracked.txt".into(), true);
     assert!(
         !presenter.generate_workspace_commit_message(),
@@ -2210,6 +2213,23 @@ fn commit_message_generation_uses_selected_changes_and_routes_results_to_the_own
         exit_code: Some(0),
     });
     presenter.drain_events();
+    let conversation_status = presenter.model.status_text().to_owned();
+    presenter.select_changed_file("tracked.txt".into(), false);
+    presenter.toggle_commit_editor();
+    assert_eq!(presenter.model.selected_changes.len(), 2);
+    presenter.select_changed_file("unselected.txt".into(), false);
+    assert!(presenter.review_conversation_changes());
+    finish_workspace_operation(&mut presenter);
+    assert!(presenter.model.commit_editor_open);
+    assert_eq!(
+        presenter
+            .model
+            .selected_changes
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        ["tracked.txt"]
+    );
     presenter.model.commit_message_generation.model = Some("commit-model".into());
     assert!(presenter.generate_workspace_commit_message());
     finish_workspace_operation(&mut presenter);
@@ -2280,7 +2300,16 @@ fn commit_message_generation_uses_selected_changes_and_routes_results_to_the_own
     presenter.drain_events();
     assert_eq!(presenter.model.commit_message, "manual edit");
     assert!(presenter.model.commit_message_request.is_none());
-    assert_eq!(presenter.model.status_text(), "offline");
+    assert_eq!(presenter.model.status_text(), conversation_status);
+    assert_eq!(
+        presenter
+            .model
+            .changes_status
+            .as_ref()
+            .unwrap()
+            .render(presenter.model.language),
+        "offline"
+    );
     fs::write(cwd.join("tracked.txt"), "newer contents\n").unwrap();
     let before = runner.0.borrow().commands.len();
     assert!(presenter.generate_workspace_commit_message());

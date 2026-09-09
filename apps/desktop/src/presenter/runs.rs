@@ -230,9 +230,10 @@ impl Presenter {
                 self.model.commit_message_request = None;
                 if !message.trim().is_empty() && !message.contains('\0') {
                     self.model.commit_message = message.trim().to_owned();
-                    self.model.status = "提交说明已生成，可编辑后提交。".into();
+                    self.model.changes_status = None;
                 } else {
-                    self.model.status = "模型返回了空或无效的提交说明，请重试。".into();
+                    self.model.changes_status =
+                        Some("模型返回了空或无效的提交说明，请重试。".into());
                 }
             }
             Event::CommitMessageFailed {
@@ -240,7 +241,7 @@ impl Presenter {
                 message,
             } if self.model.commit_message_request == Some(request_id) => {
                 self.model.commit_message_request = None;
-                self.model.status = message.into();
+                self.model.changes_status = Some(message.into());
             }
             Event::TaskTitleGenerated { task_id, title } => {
                 if let Some(title) = compact_task_title(&title)

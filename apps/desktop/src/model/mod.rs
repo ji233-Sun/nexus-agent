@@ -250,6 +250,9 @@ pub(crate) struct AppModel {
 #[derive(Default)]
 pub(crate) struct ConversationState {
     pub(crate) changes_sidebar_open: bool,
+    pub(crate) changes_files_expanded: bool,
+    pub(crate) commit_editor_open: bool,
+    pub(crate) changes_status: Option<LocalizedText>,
     pub(crate) commit_message: String,
     pub(crate) commit_message_request: Option<Uuid>,
     pub(crate) commit_model_catalog: ModelCatalogState,
