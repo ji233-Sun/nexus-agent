@@ -3046,6 +3046,114 @@ mod catalog_model_tests {
     }
 
     #[gpui::test]
+    fn user_ask_panel_preserves_native_question_ids_and_option_labels(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (mut presenter, runner, _directory) = fixture();
+        assert!(presenter.submit("native questions", "claude"));
+        let run_id = presenter.model().active_run.unwrap();
+        let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
+        cx.simulate_resize(gpui::size(px(1040.), px(680.)));
+        // Claude keys answers by full question text, Codex by explicit ID, OMP by dialog ID.
+        for (question_id, choice) in [("Which checks?", true), ("checks", true), ("ui_1", false)] {
+            let request_id = Uuid::new_v4();
+            runner.emit(Event::RunUserAskRequested {
+                run_id,
+                request_id,
+                questions: vec![UserAskQuestion {
+                    id: question_id.into(),
+                    prompt: "Which checks?".into(),
+                    answer_mode: if choice {
+                        UserAskAnswerMode::Choice {
+                            multiple: false,
+                            allow_custom: true,
+                        }
+                    } else {
+                        UserAskAnswerMode::Text
+                    },
+                    options: if choice {
+                        vec![UserAskOption {
+                            id: "Run tests".into(),
+                            label: "Run tests".into(),
+                            description: Some("Verify the change".into()),
+                        }]
+                    } else {
+                        vec![]
+                    },
+                }],
+            });
+            view.update_in(cx, |view, _, cx| view.poll_events(Instant::now(), cx));
+            cx.run_until_parked();
+            let question_selector = format!("user-ask-question-{request_id}-{question_id}").leak();
+            assert!(cx.debug_bounds(question_selector).is_some());
+            let stack = cx.debug_bounds("user-ask-stack").unwrap();
+            assert!(stack.bottom() <= cx.debug_bounds("composer-surface").unwrap().top());
+            if choice {
+                click_debug(
+                    cx,
+                    format!("user-ask-option-{request_id}-{question_id}-Run tests").leak(),
+                );
+            } else {
+                view.update_in(cx, |view, window, cx| {
+                    view.user_ask_inputs
+                        .get(&(request_id, question_id.into()))
+                        .unwrap()
+                        .update(cx, |input, cx| input.focus(window, cx));
+                });
+                cx.simulate_input("Custom answer");
+            }
+            cx.run_until_parked();
+            let count = runner.submitted_user_ask_answers().len();
+            assert!(view.read_with(cx, |view, _| view.presenter.can_submit_user_ask(request_id)));
+            // Choice + custom text exceeds the panel cap at the minimum window height.
+            // Scroll the panel, rather than clicking the clipped button's layout bounds.
+            cx.simulate_event(gpui::ScrollWheelEvent {
+                position: gpui::point(stack.left() + px(4.), stack.center().y),
+                delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-400.))),
+                ..Default::default()
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                let _ = window.draw(cx);
+            });
+            let submit_selector = format!("user-ask-submit-{request_id}").leak();
+            let submit_bounds = cx.debug_bounds(submit_selector).unwrap();
+            assert!(
+                submit_bounds.bottom() <= stack.bottom(),
+                "submit={submit_bounds:?}, stack={stack:?}"
+            );
+            click_debug(cx, submit_selector);
+            cx.run_until_parked();
+            let submissions = runner.submitted_user_ask_answers();
+            assert_eq!(submissions.len(), count + 1);
+            assert_eq!(
+                submissions.last().unwrap(),
+                &vec![nexus_domain::UserAskAnswer {
+                    question_id: question_id.into(),
+                    value: if choice {
+                        UserAskAnswerValue::Selected(vec!["Run tests".into()])
+                    } else {
+                        UserAskAnswerValue::Text("Custom answer".into())
+                    },
+                }]
+            );
+            runner.emit(Event::RunUserAskAnswerSent { run_id, request_id });
+            runner.emit(Event::RunUserAskFinished {
+                run_id,
+                request_id,
+                status: nexus_domain::UserAskStatus::Answered,
+                message: None,
+            });
+            view.update_in(cx, |view, _, cx| view.poll_events(Instant::now(), cx));
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("user-ask-stack").is_none());
+        }
+    }
+
+    #[gpui::test]
     fn user_ask_panel_clamps_long_content_above_the_composer(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_kit::init);
         cx.update(theme::configure_theme);
