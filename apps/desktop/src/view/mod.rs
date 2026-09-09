@@ -1484,6 +1484,8 @@ impl NexusView {
                     .map(|trigger| {
                         Popover::new("project-picker")
                             .anchor(Anchor::BottomLeft)
+                            .bottom_2()
+                            .p_4()
                             .open(self.project_picker_open)
                             .track_focus(&self.project_search_input.focus_handle(cx))
                             .trigger(
@@ -1543,13 +1545,26 @@ impl NexusView {
             .w(px(280.))
             .flex()
             .flex_col()
-            .gap_2()
-            .child(Input::new(&self.project_search_input).small())
+            .gap_3()
+            .child(
+                div()
+                    .debug_selector(|| "project-picker-search".into())
+                    .flex_none()
+                    .child(
+                        Input::new(&self.project_search_input)
+                            .small()
+                            .min_h(px(CONTROL_HEIGHT))
+                            .text_size(px(13.)),
+                    ),
+            )
             .child(
                 div()
                     .id("project-picker-list")
                     .max_h(px(240.))
                     .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
                     .when(projects.is_empty(), |list| {
                         list.child(
                             div()
@@ -1568,6 +1583,7 @@ impl NexusView {
                             None,
                         )
                         .debug_selector(move || format!("project-picker-{id}"))
+                        .flex_none()
                         .selected(selected == Some(id))
                         .when(selected == Some(id), |row| {
                             row.suffix(|_, _| Icon::new(IconName::Check).size(px(14.)))
@@ -1588,7 +1604,7 @@ impl NexusView {
                 div()
                     .border_t_1()
                     .border_color(rgb(colors.border))
-                    .pt_2()
+                    .pt_3()
                     .child(
                         navigation_row(
                             colors,
@@ -1925,7 +1941,7 @@ impl NexusView {
                                                     .flex()
                                                     .flex_wrap()
                                                     .items_center()
-                                                    .gap_1()
+                                                    .gap_2()
                                                     .child(self.model_selector(window, cx))
                                                     .child(self.effort_selector(cx))
                                                     .child(self.permission_selector(cx)),
@@ -2660,6 +2676,18 @@ mod catalog_model_tests {
         let second_row: &'static str = format!("project-picker-{}", second.id).leak();
         let first_row: &'static str = format!("project-picker-{}", first.id).leak();
         assert!(cx.debug_bounds(first_row).is_some());
+        let search = cx.debug_bounds("project-picker-search").unwrap();
+        let first_bounds = cx.debug_bounds(first_row).unwrap();
+        let second_bounds = cx.debug_bounds(second_row).unwrap();
+        assert!(search.size.height >= px(CONTROL_HEIGHT));
+        assert_eq!(first_bounds.size.height, px(40.));
+        assert_eq!(second_bounds.size.height, px(40.));
+        assert!(first_bounds.top() >= search.bottom() + px(12.));
+        assert!(second_bounds.top() >= search.bottom() + px(12.));
+        assert!(
+            first_bounds.bottom() + px(4.) <= second_bounds.top()
+                || second_bounds.bottom() + px(4.) <= first_bounds.top()
+        );
         view.update_in(cx, |view, window, cx| {
             view.project_search_input.update(cx, |input, cx| {
                 input.set_value(" 第二个 PROJECT ", window, cx)

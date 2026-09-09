@@ -444,7 +444,7 @@ impl ListDelegate for ModelPickerList {
         Some(
             ListItem::new(("model-row", index.section * 100_000 + index.row))
                 .debug_selector(move || format!("model-row-{}-{}", index.section, index.row))
-                .h(px(54.))
+                .h(px(60.))
                 .min_w_0()
                 .overflow_hidden()
                 .px_3()
@@ -458,6 +458,7 @@ impl ListDelegate for ModelPickerList {
                         .overflow_hidden()
                         .flex()
                         .flex_col()
+                        .gap_1()
                         .child(
                             div()
                                 .text_ellipsis()
@@ -483,9 +484,9 @@ impl ListDelegate for ModelPickerList {
     ) -> Option<impl IntoElement> {
         Some(
             div()
-                .h(px(26.))
+                .h(px(32.))
                 .px_3()
-                .pt_1()
+                .pt_2()
                 .text_size(px(12.))
                 .text_color(rgb(palette(cx).muted))
                 .child(self.groups.get(section)?.title.clone()),
@@ -543,6 +544,7 @@ impl NexusView {
         let app = cx.entity();
         Popover::new("model-picker")
             .anchor(Anchor::BottomLeft)
+            .bottom_2()
             .appearance(false)
             .open(self.model_picker_open)
             .track_focus(&self.catalog_model_select.focus_handle(cx))
@@ -590,11 +592,11 @@ impl NexusView {
                 div()
                     .id("model-configurations")
                     .debug_selector(|| "model-configurations".into())
-                    .w(px(190.))
+                    .w(px(208.))
                     .h_full()
                     .flex_none()
                     .overflow_y_scroll()
-                    .p_2()
+                    .p_3()
                     .border_r_1()
                     .border_color(material.edge)
                     .children(HarnessKind::ALL.map(|harness| {
@@ -604,13 +606,16 @@ impl NexusView {
                             .iter()
                             .filter(|profile| profile.harness == harness);
                         div()
-                            .mb_2()
+                            .mb_3()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
                             .child(
                                 div()
                                     .flex()
                                     .items_center()
                                     .gap_2()
-                                    .h(px(30.))
+                                    .h(px(COMPACT_CONTROL_HEIGHT))
                                     .px_2()
                                     .text_size(px(12.))
                                     .text_color(rgb(colors.text_secondary))
@@ -649,7 +654,7 @@ impl NexusView {
                             .flex()
                             .items_center()
                             .justify_between()
-                            .h(px(38.))
+                            .h(px(44.))
                             .px_3()
                             .flex_none()
                             .child(
@@ -667,6 +672,7 @@ impl NexusView {
                                 Button::new("composer-model-refresh")
                                     .ghost()
                                     .small()
+                                    .size(px(COMPACT_CONTROL_HEIGHT))
                                     .icon(IconName::RotateCw)
                                     .tooltip(locale.text("刷新模型目录"))
                                     .accessibility_label(locale.text("刷新模型目录"))
@@ -721,7 +727,7 @@ impl NexusView {
             .ghost()
             .small()
             .w_full()
-            .h(px(44.))
+            .h(px(48.))
             .selected(selected)
             .justify_start()
             .min_w_0()
@@ -732,6 +738,9 @@ impl NexusView {
                     .min_w_0()
                     .overflow_hidden()
                     .text_left()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
                     .child(div().text_ellipsis().child(name.to_owned()))
                     .when(!ready, |row| {
                         row.child(

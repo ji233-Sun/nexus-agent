@@ -77,7 +77,7 @@ pub(super) fn palette(cx: &App) -> Palette {
 }
 
 pub(super) const CONTROL_HEIGHT: f32 = 36.;
-pub(super) const COMPACT_CONTROL_HEIGHT: f32 = 28.;
+pub(super) const COMPACT_CONTROL_HEIGHT: f32 = 32.;
 pub(super) const HEADER_HEIGHT: f32 = 54.;
 pub(super) const SIDEBAR_WIDTH: f32 = 264.;
 pub(super) const CONTENT_WIDTH: f32 = 800.;

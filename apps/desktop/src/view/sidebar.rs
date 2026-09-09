@@ -2,7 +2,7 @@ use super::*;
 use crate::model::history::ThreadSummary;
 use gpui_kit::component::{list::ListItem, scroll::Scrollbar, spinner::Spinner};
 
-const SIDEBAR_ROW_HEIGHT: f32 = 36.;
+const SIDEBAR_ROW_HEIGHT: f32 = 40.;
 pub(super) const HISTORY_PAGE_SIZE: usize = 10;
 
 fn visible_history<'a>(
@@ -269,7 +269,7 @@ impl NexusView {
                             .pl(px(24.))
                             .flex()
                             .flex_col()
-                            .gap(px(2.))
+                            .gap_1()
                             .when(tasks.is_empty(), |list| {
                                 list.child(
                                     navigation_row(
@@ -486,7 +486,7 @@ impl NexusView {
                                             .pl(px(24.))
                                             .flex()
                                             .flex_col()
-                                            .gap(px(2.))
+                                            .gap_1()
                                             .when(history.is_empty(), |list| {
                                                 list.child(
                                                     navigation_row(
