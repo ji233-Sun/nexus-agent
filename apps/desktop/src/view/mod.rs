@@ -1,3 +1,4 @@
+mod cnb;
 mod components;
 mod model_picker;
 mod pane;
@@ -98,6 +99,8 @@ pub(crate) struct NexusView {
     timeline_scroll: ScrollHandle,
     sidebar_scroll: ScrollHandle,
     settings_scroll: ScrollHandle,
+    cnb_scroll: ScrollHandle,
+    cnb_detail_scroll: ScrollHandle,
     sidebar_pane: Entity<WorkspacePane>,
     timeline_pane: Entity<WorkspacePane>,
     settings_pane: Entity<WorkspacePane>,
@@ -324,6 +327,8 @@ impl NexusView {
             timeline_scroll: ScrollHandle::new(),
             sidebar_scroll: ScrollHandle::new(),
             settings_scroll: ScrollHandle::new(),
+            cnb_scroll: ScrollHandle::new(),
+            cnb_detail_scroll: ScrollHandle::new(),
             sidebar_pane,
             timeline_pane,
             settings_pane,
@@ -604,6 +609,9 @@ impl NexusView {
     }
 
     fn poll_events(&mut self, now: Instant, cx: &mut Context<Self>) {
+        if self.presenter.drain_cnb_events() {
+            cx.notify();
+        }
         if self.presenter.drain_installation_events() {
             cx.notify();
         }
@@ -1623,6 +1631,21 @@ impl NexusView {
     }
 
     fn render_workspace(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.presenter.model().cnb.opened {
+            return div()
+                .size_full()
+                .bg(materials(cx).chrome)
+                .flex()
+                .child(
+                    self.sidebar_pane.clone().cached(
+                        gpui::StyleRefinement::default()
+                            .w(px(SIDEBAR_WIDTH))
+                            .h_full()
+                            .flex_none(),
+                    ),
+                )
+                .child(self.render_cnb(cx));
+        }
         let locale = self.presenter.model().language;
         let colors = palette(cx);
         let material = materials(cx);
@@ -2156,6 +2179,115 @@ mod catalog_model_tests {
     use crate::presenter::tests::fixture;
     use nexus_domain::{ModelReasoningEffort, UserAskOption, UserAskQuestion};
     use nexus_protocol::Event;
+
+    #[gpui::test]
+    fn cnb_navigation_renders_issues_details_and_pagination_without_a_composer(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::{
+            infrastructure::cnb::Response,
+            model::cnb::{IssueFilter, IssuePage},
+            presenter::tests::{cnb_issue, finish_cnb_request, seed_cnb_issues},
+        };
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (mut presenter, _, _directory) = fixture();
+        let project = presenter.model().selected_project.as_ref().unwrap().id;
+        seed_cnb_issues(&mut presenter);
+        let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
+        cx.simulate_resize(gpui::size(px(1040.), px(720.)));
+        view.update_in(cx, |view, window, cx| {
+            view.set_appearance(
+                AppearanceSettings {
+                    theme: ThemePreference::Light,
+                    reduced_motion: true,
+                    ..Default::default()
+                },
+                window,
+                cx,
+            );
+            view.prompt_input
+                .update(cx, |input, cx| input.set_value("保留会话草稿", window, cx));
+        });
+        cx.run_until_parked();
+        let project_selector: &'static str = format!("sidebar-project-{project}").leak();
+        let project_row = cx.debug_bounds(project_selector).unwrap();
+        let cnb_row = cx.debug_bounds("sidebar-cnb").unwrap();
+        assert!(cnb_row.top() >= project_row.bottom());
+        assert_eq!(cnb_row.size.height, px(40.));
+        click_debug(cx, "sidebar-cnb");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("cnb-page").is_some());
+        assert!(cx.debug_bounds("cnb-issue-tab").is_some());
+        let icon = cx.debug_bounds("sidebar-cnb-icon").unwrap();
+        assert!(icon.left() >= cnb_row.left() && icon.right() < cnb_row.left() + px(34.));
+        assert!(cx.debug_bounds("composer-surface").is_none());
+        let issue = cx.debug_bounds("cnb-issue-1").unwrap();
+        let page = cx.debug_bounds("cnb-page").unwrap();
+        assert!(issue.left() > page.left() && issue.right() < page.right());
+        click_debug(cx, "cnb-issue-1");
+        view.update(cx, |view, cx| {
+            finish_cnb_request(&mut view.presenter, Response::Detail(Ok(cnb_issue("1"))));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("cnb-detail").is_some());
+        assert!(cx.debug_bounds("cnb-issue-body").is_some());
+        click_debug(cx, "cnb-back");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("cnb-issue-1").is_some());
+        click_debug(cx, "cnb-next");
+        view.update(cx, |view, cx| {
+            assert_eq!(view.presenter.model().cnb.page, 2);
+            finish_cnb_request(
+                &mut view.presenter,
+                Response::List(Ok(IssuePage {
+                    issues: vec![cnb_issue("31")],
+                    total: 61,
+                })),
+            );
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("cnb-issue-31").is_some());
+        click_debug(cx, "cnb-filter-closed");
+        view.update_in(cx, |view, window, cx| {
+            assert_eq!(view.presenter.model().cnb.filter, IssueFilter::Closed);
+            assert_eq!(view.presenter.model().cnb.page, 1);
+            finish_cnb_request(
+                &mut view.presenter,
+                Response::List(Ok(IssuePage {
+                    issues: vec![],
+                    total: 0,
+                })),
+            );
+            view.set_appearance(
+                AppearanceSettings {
+                    theme: ThemePreference::Dark,
+                    reduced_motion: true,
+                    ..Default::default()
+                },
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("cnb-empty").is_some());
+        view.update_in(cx, |view, window, cx| {
+            view.new_task(window, cx);
+            assert_eq!(view.prompt_input.read(cx).value(), "保留会话草稿");
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("cnb-page").is_none());
+        assert!(cx.debug_bounds("composer-surface").is_some());
+        view.update_in(cx, |view, window, cx| {
+            view.settings_open = true;
+            view.select_settings_section(SettingsSection::SourceControl, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("settings-nav-source-control").is_some());
+        assert!(cx.debug_bounds("cnb-enabled").is_some());
+    }
 
     #[gpui::test]
     fn voice_settings_select_before_configure_and_draft_insertion_is_undoable(

@@ -94,6 +94,7 @@ pub(crate) fn fixture() -> (Presenter, FakeRunner, tempfile::TempDir) {
     let storage = Storage::open(Path::new(":memory:")).unwrap();
     let runner = FakeRunner::default();
     let mut presenter = Presenter::new(storage, Ok(Box::new(runner.clone())), None);
+    presenter.cnb_client = crate::infrastructure::cnb::Client::fake();
     presenter.open_project(directory.path());
     presenter.model.model_catalog = ModelCatalogState::Ready(claude_aliases());
     presenter
@@ -102,6 +103,175 @@ pub(crate) fn fixture() -> (Presenter, FakeRunner, tempfile::TempDir) {
         .insert(HarnessKind::Claude, ready_probe(HarnessKind::Claude));
     runner.0.borrow_mut().commands.clear();
     (presenter, runner, directory)
+}
+
+pub(crate) fn cnb_issue(number: &str) -> crate::model::cnb::Issue {
+    serde_json::from_value(serde_json::json!({
+        "number":number, "title":format!("CNB 集成测试 #{number}"), "state":"open",
+        "body":"## 问题描述\n\n支持 **Markdown**、链接与代码。\n\n```rust\nfn main() {}\n```",
+        "author":{"username":"author", "nickname":"开发者"},
+        "assignees":[{"username":"owner"}], "labels":[{"name":"enhancement", "color":"#315DC5"}],
+        "created_at":"2026-09-09T00:00:00Z", "updated_at":"2026-09-09T01:00:00Z", "priority":"P1", "comment_count":2
+    })).unwrap()
+}
+
+pub(crate) fn seed_cnb_issues(presenter: &mut Presenter) {
+    presenter.model.cnb = crate::model::cnb::CnbModel {
+        repository: Some("team/project".into()),
+        cli: Some(crate::model::cnb::Cli {
+            path: "/missing-test-cnb".into(),
+            version: "1.10.10".into(),
+        }),
+        issues: (1..=30)
+            .map(|number| cnb_issue(&number.to_string()))
+            .collect(),
+        total: 61,
+        ..Default::default()
+    };
+}
+
+pub(crate) fn finish_cnb_request(
+    presenter: &mut Presenter,
+    response: crate::infrastructure::cnb::Response,
+) {
+    use crate::infrastructure::cnb::{Event, Response};
+    let id = match &response {
+        Response::Inspection { .. } => presenter.model.cnb.detection_request,
+        Response::List(_) => presenter.model.cnb.list_request,
+        Response::Detail(_) => presenter.model.cnb.detail_request,
+    }
+    .expect("pending CNB request");
+    presenter.handle_cnb_event(Event { id, response });
+}
+
+#[test]
+fn cnb_navigation_preserves_conversation_and_ignores_obsolete_project_and_detail_results() {
+    use crate::{
+        infrastructure::cnb::{Event, Response},
+        model::cnb::{IssueFilter, IssuePage},
+    };
+    let (mut presenter, runner, directory) = fixture();
+    seed_cnb_issues(&mut presenter);
+    let conversation = presenter.model.conversation.id;
+    presenter.open_cnb();
+    assert!(presenter.model.cnb.opened);
+    assert_eq!(presenter.model.conversation.id, conversation);
+    assert!(runner.0.borrow().commands.is_empty());
+    presenter.select_cnb_issue("1".into());
+    let earlier = presenter.model.cnb.detail_request.unwrap();
+    presenter.select_cnb_issue("2".into());
+    presenter.handle_cnb_event(Event {
+        id: earlier,
+        response: Response::Detail(Ok(cnb_issue("1"))),
+    });
+    assert!(presenter.model.cnb.detail.is_none());
+    finish_cnb_request(&mut presenter, Response::Detail(Ok(cnb_issue("2"))));
+    assert_eq!(presenter.model.cnb.detail.as_ref().unwrap().number, "2");
+    presenter.close_cnb_issue();
+    assert_eq!(presenter.model.cnb.issues.len(), 30);
+    assert_eq!(presenter.model.cnb.page, 1);
+    presenter.load_cnb_issues(2, IssueFilter::Closed);
+    let previous = presenter.model.cnb.list_request.unwrap();
+    assert!(presenter.model.cnb.issues.is_empty());
+    assert_eq!(presenter.model.cnb.filter, IssueFilter::Closed);
+    let project = directory.path().join("other-project");
+    fs::create_dir(&project).unwrap();
+    presenter.open_project(&project);
+    presenter.handle_cnb_event(Event {
+        id: previous,
+        response: Response::List(Ok(IssuePage {
+            issues: vec![cnb_issue("3")],
+            total: 1,
+        })),
+    });
+    assert!(!presenter.model.cnb.opened);
+    assert!(presenter.model.cnb.repository.is_none());
+    assert!(presenter.model.cnb.issues.is_empty());
+}
+
+#[test]
+fn cnb_failures_can_be_retried_and_disabling_invalidates_requests_and_persists() {
+    use crate::{
+        infrastructure::cnb::{Event, Response},
+        model::cnb::{IssueFilter, IssuePage},
+    };
+    let (mut presenter, _, _directory) = fixture();
+    seed_cnb_issues(&mut presenter);
+    presenter.load_cnb_issues(1, IssueFilter::Open);
+    finish_cnb_request(&mut presenter, Response::List(Err("需要登录".into())));
+    assert!(presenter.model.cnb.list_request.is_none());
+    assert!(presenter.model.cnb.list_error.is_some());
+    presenter.load_cnb_issues(1, IssueFilter::Open);
+    finish_cnb_request(
+        &mut presenter,
+        Response::List(Ok(IssuePage {
+            issues: vec![cnb_issue("2")],
+            total: 1,
+        })),
+    );
+    assert!(presenter.model.cnb.list_error.is_none());
+    assert_eq!(presenter.model.cnb.total, 1);
+    presenter.select_cnb_issue("2".into());
+    let id = presenter.model.cnb.detail_request.unwrap();
+    presenter.set_cnb_enabled(false);
+    assert!(!presenter.model.cnb.enabled);
+    assert_eq!(
+        presenter.storage.setting("cnb_enabled").unwrap().as_deref(),
+        Some("false")
+    );
+    presenter.handle_cnb_event(Event {
+        id,
+        response: Response::Detail(Ok(cnb_issue("2"))),
+    });
+    assert!(presenter.model.cnb.detail.is_none());
+    let presenter = Presenter::new(presenter.storage, Err(anyhow::anyhow!("test runner")), None);
+    assert!(!presenter.model.cnb.enabled);
+}
+
+#[test]
+fn cnb_inspection_keeps_repository_visible_when_cli_is_missing_and_rejects_stale_inspections() {
+    use crate::infrastructure::cnb::{Event, Response};
+    let (mut presenter, _, _directory) = fixture();
+    let old = Uuid::new_v4();
+    let current = Uuid::new_v4();
+    presenter.model.cnb.detection_request = Some(current);
+    presenter.handle_cnb_event(Event {
+        id: old,
+        response: Response::Inspection {
+            repository: Some("wrong/project".into()),
+            cli: Err("missing".into()),
+        },
+    });
+    assert!(presenter.model.cnb.repository.is_none());
+    finish_cnb_request(
+        &mut presenter,
+        Response::Inspection {
+            repository: Some("team/project".into()),
+            cli: Err("missing".into()),
+        },
+    );
+    assert_eq!(
+        presenter.model.cnb.repository.as_deref(),
+        Some("team/project")
+    );
+    assert!(presenter.model.cnb.cli.is_none());
+    presenter.open_cnb();
+    assert!(presenter.model.cnb.opened);
+    assert!(presenter.model.cnb.list_request.is_none());
+    presenter.model.cnb.detection_request = Some(Uuid::new_v4());
+    finish_cnb_request(
+        &mut presenter,
+        Response::Inspection {
+            repository: Some("team/project".into()),
+            cli: Ok(crate::model::cnb::Cli {
+                path: "/missing-test-cnb".into(),
+                version: "1.10.10".into(),
+            }),
+        },
+    );
+    assert!(presenter.model.cnb.list_request.is_some());
+    presenter.new_task();
+    assert!(!presenter.model.cnb.opened);
 }
 
 pub(crate) fn finish_workspace_operation(presenter: &mut Presenter) {
