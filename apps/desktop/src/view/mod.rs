@@ -3222,6 +3222,11 @@ mod catalog_model_tests {
         cx.update(gpui_kit::init);
         cx.update(theme::configure_theme);
         let (mut presenter, runner, _directory) = fixture();
+        // Keep the dialog's slide-in animation from moving click targets between frames.
+        assert!(presenter.set_appearance(AppearanceSettings {
+            reduced_motion: true,
+            ..Default::default()
+        }));
         assert!(presenter.submit("approval task", "claude"));
         let run_id = presenter.model().active_run.unwrap();
         let (root, cx) = cx.add_window_view(|window, cx| {
@@ -3264,7 +3269,7 @@ mod catalog_model_tests {
         assert!(view.read_with(cx, |view, _| {
             view.presenter.model().responding_approval.is_none()
         }));
-        cx.simulate_click(approve.center(), Default::default());
+        click_debug(cx, "approval-option-0");
         cx.run_until_parked();
         assert_eq!(
             view.read_with(cx, |view, _| view.presenter.model().responding_approval),
