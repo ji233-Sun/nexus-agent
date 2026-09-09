@@ -2516,6 +2516,60 @@ mod catalog_model_tests {
     }
 
     #[gpui::test]
+    fn cli_installation_settings_show_the_action_and_completion_feedback(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (mut presenter, _, _directory) = fixture();
+        let sender = crate::presenter::tests::pending_cli_installation(&mut presenter);
+        let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
+        cx.simulate_resize(gpui::size(px(1040.), px(680.)));
+        view.update_in(cx, |view, _, cx| {
+            view.settings_open = true;
+            view.settings_section = SettingsSection::General;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |view, _, cx| {
+            view.settings_scroll
+                .set_offset(gpui::point(px(0.), px(-10_000.)));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        click_debug(cx, "install-cli");
+        assert!(view.read_with(cx, |view, _| view.presenter.model().cli_installation_busy));
+        assert!(cx.debug_bounds("cli-installation-message").is_none());
+        sender.send(Ok(())).unwrap();
+        for (width, height, language) in [
+            (1040., 680., Language::Chinese),
+            (1280., 900., Language::English),
+        ] {
+            cx.simulate_resize(gpui::size(px(width), px(height)));
+            view.update_in(cx, |view, window, cx| {
+                view.presenter.drain_events();
+                view.set_language(language, window, cx);
+                view.settings_scroll
+                    .set_offset(gpui::point(px(0.), px(-10_000.)));
+                cx.notify();
+            });
+            cx.run_until_parked();
+            for selector in ["install-cli", "cli-installation-message"] {
+                let bounds = cx.debug_bounds(selector).unwrap();
+                assert!(
+                    bounds.left() >= px(0.) && bounds.right() <= px(width),
+                    "{selector}: {bounds:?}"
+                );
+                assert!(
+                    bounds.top() >= px(0.) && bounds.bottom() <= px(height),
+                    "{selector}: {bounds:?}"
+                );
+            }
+            assert!(!view.read_with(cx, |view, _| view.presenter.model().cli_installation_busy));
+        }
+    }
+
+    #[gpui::test]
     fn harness_settings_show_versions_sources_and_only_available_actions(
         cx: &mut gpui::TestAppContext,
     ) {

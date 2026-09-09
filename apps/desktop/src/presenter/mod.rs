@@ -69,6 +69,7 @@ pub(crate) struct Presenter {
     credentials: Box<dyn CredentialStore>,
     update_events: Option<std::sync::mpsc::Receiver<UpdateState>>,
     installation_worker: Option<crate::infrastructure::harness_installation::Worker>,
+    cli_installation_result: Option<std::sync::mpsc::Receiver<Result<()>>>,
     workspace_events: Option<std::sync::mpsc::Receiver<workspace::WorkspaceEvent>>,
     worktree_root: Result<std::path::PathBuf>,
 }
@@ -258,6 +259,7 @@ impl Presenter {
             credentials,
             update_events: None,
             installation_worker: None,
+            cli_installation_result: None,
             workspace_events: None,
             worktree_root: crate::infrastructure::paths::worktree_directory(),
         };
@@ -284,6 +286,52 @@ impl Presenter {
 
     pub(crate) fn model(&self) -> &AppModel {
         &self.model
+    }
+
+    pub(crate) fn install_cli(&mut self) {
+        if self.cli_installation_result.is_some() || self.model.updates.state.is_installing() {
+            return;
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        match std::thread::Builder::new()
+            .name("nexus-cli-install".into())
+            .spawn(move || {
+                let _ = sender.send(crate::infrastructure::cli_installation::install());
+            }) {
+            Ok(_) => {
+                self.cli_installation_result = Some(receiver);
+                self.model.cli_installation_busy = true;
+                self.model.cli_installation_message = None;
+            }
+            Err(error) => {
+                self.model.cli_installation_message = Some(LocalizedText::new(
+                    "CLI 安装失败：{error}",
+                    &[("error", error.to_string())],
+                ))
+            }
+        }
+    }
+
+    fn drain_cli_installation_result(&mut self) -> bool {
+        let Some(receiver) = &self.cli_installation_result else {
+            return false;
+        };
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err(anyhow::anyhow!("CLI 安装进程已中断"))
+            }
+        };
+        self.cli_installation_result = None;
+        self.model.cli_installation_busy = false;
+        self.model.cli_installation_message = Some(match result {
+            Ok(()) => "CLI 已安装。重新打开终端后可运行 nexus-desktop .".into(),
+            Err(error) => {
+                LocalizedText::new("CLI 安装失败：{error}", &[("error", format!("{error:#}"))])
+            }
+        });
+        true
     }
 
     pub(crate) fn set_language(&mut self, language: Language) -> bool {
@@ -340,6 +388,7 @@ impl Presenter {
         let mut changed = self.drain_workspace_events()
             || !runner_events.is_empty()
             || !history_events.is_empty();
+        changed |= self.drain_cli_installation_result();
         for envelope in runner_events {
             if envelope.protocol_version != nexus_protocol::PROTOCOL_VERSION {
                 self.model.status = "Desktop 与 Runner 协议版本不匹配，请重启或更新应用。".into();
