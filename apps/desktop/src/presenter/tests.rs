@@ -1728,7 +1728,9 @@ fn catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
     assert!(presenter.select_harness(HarnessKind::Codex, "claude"));
     let stale_request_id = current_catalog_request_id(&presenter);
 
+    presenter.model.status = "当前任务状态".to_owned().into();
     assert!(presenter.refresh_model_catalog());
+    assert_eq!(presenter.model().status_text(), "当前任务状态");
     let failed_request_id = current_catalog_request_id(&presenter);
     assert_ne!(stale_request_id, failed_request_id);
     runner.0.borrow_mut().events.push(EventEnvelope {
@@ -1744,6 +1746,7 @@ fn catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
     presenter.drain_events();
     assert_eq!(current_catalog_request_id(&presenter), failed_request_id);
     assert!(presenter.model().status_text().contains("协议版本不匹配"));
+    let task_status = presenter.model().status_text().to_owned();
     runner.emit(Event::ModelCatalogLoaded {
         request_id: stale_request_id,
         harness: HarnessKind::Codex,
@@ -1770,21 +1773,17 @@ fn catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
         &presenter.model().model_catalog,
         ModelCatalogState::Failed { message, .. } if message.render(Language::Chinese) == "model/list unavailable"
     ));
-    assert!(
-        presenter
-            .model()
-            .status_text()
-            .contains("model/list unavailable")
-    );
+    assert_eq!(presenter.model().status_text(), task_status);
 
     assert!(presenter.refresh_model_catalog());
+    assert_eq!(presenter.model().status_text(), task_status);
     emit_current_catalog(&presenter, &runner, Vec::new());
     presenter.drain_events();
     assert!(matches!(
         presenter.model().model_catalog,
         ModelCatalogState::Empty
     ));
-    assert!(presenter.model().status_text().contains("目录为空"));
+    assert_eq!(presenter.model().status_text(), task_status);
 
     assert!(presenter.refresh_model_catalog());
     emit_current_catalog(
@@ -1802,10 +1801,7 @@ fn catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
         panic!("expected a ready model catalog")
     };
     assert_eq!(models[0].id, "codex-current");
-    assert_eq!(
-        presenter.model().status_text(),
-        "已加载 1 个 Codex CLI 模型。"
-    );
+    assert_eq!(presenter.model().status_text(), task_status);
 
     // Claude exercises the shared readiness state without starting a Codex history client.
     assert!(presenter.select_harness(HarnessKind::Claude, "codex"));

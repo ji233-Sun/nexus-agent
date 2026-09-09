@@ -835,22 +835,11 @@ impl Presenter {
             Ok(configuration) => configuration,
             Err(error) => {
                 self.model.model_catalog = ModelCatalogState::NotReady(error.to_string().into());
-                self.model.status = LocalizedText::new(
-                    "无法加载 {harness} 模型目录：{error}",
-                    &[
-                        ("harness", (harness).to_string()),
-                        ("error", (error).to_string()),
-                    ],
-                );
                 return false;
             }
         };
         let Some(runner) = &self.runner else {
             self.model.model_catalog.fail("Runner 不可用。".into());
-            self.model.status = LocalizedText::new(
-                "Runner 不可用，无法加载 {harness} 模型目录。",
-                &[("harness", (harness).to_string())],
-            );
             return false;
         };
         let request_id = Uuid::new_v4();
@@ -879,16 +868,8 @@ impl Presenter {
         self.model.model_catalog = ModelCatalogState::Loading { request_id, models };
         if runner.send(command).is_err() {
             self.model.model_catalog.fail("Runner 不可用。".into());
-            self.model.status = LocalizedText::new(
-                "Runner 不可用，无法加载 {harness} 模型目录。",
-                &[("harness", (harness).to_string())],
-            );
             return false;
         }
-        self.model.status = LocalizedText::new(
-            "正在加载 {harness} 模型目录…",
-            &[("harness", (harness).to_string())],
-        );
         true
     }
 

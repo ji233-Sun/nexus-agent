@@ -155,7 +155,6 @@ impl Presenter {
                 && self.model.active_run.is_none()
                 && self.model.model_catalog.accepts(request_id) =>
             {
-                let count = models.len();
                 self.model.model_catalog = if models.is_empty() {
                     ModelCatalogState::Empty
                 } else {
@@ -175,8 +174,10 @@ impl Presenter {
                         .and_then(|profile| profile.model.as_deref())
                         .is_some()
                     && self.model.selected_catalog_model().is_none();
-                self.model.status = if selected_unavailable {
-                    LocalizedText::new(
+                // Catalog progress and diagnostics belong to the model picker. Only
+                // changes requiring the user's attention can replace task status.
+                if selected_unavailable {
+                    self.model.status = LocalizedText::new(
                         "当前 {harness} 模型 {0} 不可用，请重新选择或跟随默认。",
                         &[
                             ("harness", (harness).to_string()),
@@ -186,25 +187,13 @@ impl Presenter {
                                     .to_string(),
                             ),
                         ],
-                    )
+                    );
                 } else if effort_reset {
-                    "当前模型不支持原 effort，已恢复为模型默认。".into()
+                    self.model.status = "当前模型不支持原 effort，已恢复为模型默认。".into();
                 } else if profile_model_unverified {
-                    "Profile 默认模型不在当前目录中；仍可使用，但尚未验证可用。".into()
-                } else if count == 0 {
-                    LocalizedText::new(
-                        "{harness} 模型目录为空；仍可跟随 CLI 默认。",
-                        &[("harness", (harness).to_string())],
-                    )
-                } else {
-                    LocalizedText::new(
-                        "已加载 {count} 个 {harness} 模型。",
-                        &[
-                            ("count", (count).to_string()),
-                            ("harness", (harness).to_string()),
-                        ],
-                    )
-                };
+                    self.model.status =
+                        "Profile 默认模型不在当前目录中；仍可使用，但尚未验证可用。".into();
+                }
             }
             Event::ModelCatalogFailed {
                 request_id,
@@ -214,14 +203,7 @@ impl Presenter {
                 && self.model.active_run.is_none()
                 && self.model.model_catalog.accepts(request_id) =>
             {
-                self.model.model_catalog.fail(message.clone().into());
-                self.model.status = LocalizedText::new(
-                    "{harness} 模型目录加载失败：{message}",
-                    &[
-                        ("harness", (harness).to_string()),
-                        ("message", (message).to_string()),
-                    ],
-                );
+                self.model.model_catalog.fail(message.into());
             }
             Event::CommitMessageGenerated {
                 request_id,

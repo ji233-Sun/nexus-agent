@@ -1682,17 +1682,10 @@ impl NexusView {
             .selected_provider_profile()
             .is_some_and(|profile| profile.credential_configured);
         let background_run = model.active_run.is_none() && model.active_run_count() > 0;
-        let header_status_pending = model.active_run.is_some()
-            || model.codex_thread_loading
-            || (!history && matches!(model.model_catalog, ModelCatalogState::Loading { .. }));
+        let header_status_pending = model.active_run.is_some() || model.codex_thread_loading;
         let header_status_color = if header_status_pending {
             rgb(colors.accent).into()
-        } else if !history
-            && (matches!(
-                model.model_catalog,
-                ModelCatalogState::Failed { .. } | ModelCatalogState::NotReady(_)
-            ) || selected_task.is_some_and(|task| task.status == RunStatus::Failed))
-        {
+        } else if !history && selected_task.is_some_and(|task| task.status == RunStatus::Failed) {
             rgb(colors.danger).into()
         } else if selected_task.is_some_and(|task| {
             matches!(task.status, RunStatus::Cancelled | RunStatus::Interrupted)

@@ -395,13 +395,13 @@ impl NexusView {
                     .debug_selector(|| "commit-editor".into())
                     .mx_2()
                     .mt_2()
-                    .pt_3()
+                    .pt_2()
                     .pb_2()
                     .border_t_1()
                     .border_color(rgb(colors.border))
                     .flex()
                     .flex_col()
-                    .gap_3()
+                    .gap_2()
                     .child(
                         div()
                             .flex()
@@ -420,7 +420,23 @@ impl NexusView {
                                     .debug_selector(|| "generate-commit-message".into())
                                     .ghost()
                                     .small()
-                                    .label(locale.text(if generating {
+                                    .size(px(28.))
+                                    .loading(generating)
+                                    .when(!generating, |button| {
+                                        button.child(
+                                            gpui::svg()
+                                                .data(
+                                                    include_bytes!(
+                                                        "../../assets/icons/sparkles.svg"
+                                                    )
+                                                    .as_slice(),
+                                                )
+                                                .size(px(16.))
+                                                .text_color(rgb(colors.text_secondary)),
+                                        )
+                                    })
+                                    .accessibility_label(locale.text("生成提交说明"))
+                                    .tooltip(locale.text(if generating {
                                         "正在生成…"
                                     } else {
                                         "生成提交说明"
