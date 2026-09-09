@@ -365,6 +365,9 @@ async fn approval_round_trip_for_each_harness_rejects_invalid_and_duplicate_resp
                 }
                 HarnessKind::Codex => assert_eq!(response["id"], 99),
                 HarnessKind::Omp | HarnessKind::Pi => assert_eq!(response["id"], "approval-1"),
+                HarnessKind::Kimi | HarnessKind::Qoder | HarnessKind::Codebuddy => {
+                    assert_eq!(response["result"]["outcome"]["outcome"], "selected")
+                }
             }
             runner.shutdown().await;
         }
@@ -405,7 +408,12 @@ async fn pending_approvals_are_cleared_on_cancel_and_late_replies_never_reach_ha
 async fn native_approval_cancellation_removes_the_request_before_the_run_ends() {
     let fixtures = tempfile::tempdir().unwrap();
     let executable = fake_harness(fixtures.path());
-    for harness in HarnessKind::ALL {
+    for harness in [
+        HarnessKind::Claude,
+        HarnessKind::Codex,
+        HarnessKind::Omp,
+        HarnessKind::Pi,
+    ] {
         let directory = tempfile::tempdir().unwrap();
         let request = request(
             directory.path(),
@@ -550,6 +558,7 @@ async fn runner_resumes_each_harness_session_across_processes() {
             HarnessKind::Claude => "args.txt",
             HarnessKind::Codex => "codex-args.txt",
             HarnessKind::Omp | HarnessKind::Pi => "omp-args.txt",
+            HarnessKind::Kimi | HarnessKind::Qoder | HarnessKind::Codebuddy => "acp-args.txt",
         };
         let args = fs::read_to_string(directory.path().join(args_file)).unwrap();
         if harness == HarnessKind::Codex {
@@ -559,6 +568,16 @@ async fn runner_resumes_each_harness_session_across_processes() {
             .unwrap();
             assert_eq!(frame["method"], "thread/resume");
             assert_eq!(frame["params"]["threadId"], session_id);
+        } else if matches!(
+            harness,
+            HarnessKind::Kimi | HarnessKind::Qoder | HarnessKind::Codebuddy
+        ) {
+            let frame: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(directory.path().join("acp-session.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(frame["method"], "session/resume");
+            assert_eq!(frame["params"]["sessionId"], session_id);
         } else {
             assert!(args.lines().any(|arg| arg == session_id));
         }
@@ -1092,7 +1111,10 @@ async fn runner_streams_fake_omp_and_uses_guarded_rpc_mode() {
 #[tokio::test]
 async fn runner_generates_titles_with_each_harness_in_a_safe_background_process() {
     for (harness, effort) in HarnessKind::ALL.into_iter().flat_map(|harness| {
-        [ThinkingEffort::Default, ThinkingEffort::Low].map(|effort| (harness, effort))
+        [ThinkingEffort::Default, ThinkingEffort::Low]
+            .into_iter()
+            .filter(move |effort| harness != HarnessKind::Kimi || effort.is_default())
+            .map(move |effort| (harness, effort))
     }) {
         let directory = tempfile::tempdir().unwrap();
         let executable = fake_harness(directory.path());
@@ -1147,7 +1169,9 @@ async fn runner_generates_titles_with_each_harness_in_a_safe_background_process(
             assert!(!args.contains("--thinking"));
         } else {
             assert!(args.contains(match harness {
-                HarnessKind::Claude => "--effort\nlow",
+                HarnessKind::Claude | HarnessKind::Codebuddy => "--effort\nlow",
+                HarnessKind::Qoder => "--reasoning-effort\nlow",
+                HarnessKind::Kimi => unreachable!(),
                 HarnessKind::Codex => "--config\nmodel_reasoning_effort=\"low\"",
                 HarnessKind::Omp | HarnessKind::Pi => "--thinking\nlow",
             }));
@@ -1173,6 +1197,15 @@ async fn runner_generates_titles_with_each_harness_in_a_safe_background_process(
                 assert!(args.contains("--sandbox\nread-only"));
                 assert!(args.contains("--ignore-rules"));
                 assert!(!args.contains("workspace-write"));
+            }
+            HarnessKind::Kimi => {
+                assert!(args.contains("--agent-file"));
+                assert!(args.contains("--mcp-config-file"));
+            }
+            HarnessKind::Qoder | HarnessKind::Codebuddy => {
+                assert!(args.contains("--tools\n\n"));
+                assert!(args.contains("--no-session-persistence"));
+                assert!(args.contains("--strict-mcp-config"));
             }
             HarnessKind::Pi => {
                 assert!(args.contains("--no-tools"));
@@ -1229,7 +1262,12 @@ async fn title_generation_failure_does_not_fail_the_conversation() {
 async fn steer_waits_for_all_tools_and_uses_native_receipts_in_the_same_run() {
     let binaries = tempfile::tempdir().unwrap();
     let executable = fake_harness(binaries.path());
-    for harness in HarnessKind::ALL {
+    for harness in [
+        HarnessKind::Claude,
+        HarnessKind::Codex,
+        HarnessKind::Omp,
+        HarnessKind::Pi,
+    ] {
         for scenario in ["steer-tools", "steer-rejected", "steer-unconfirmed"] {
             if harness == HarnessKind::Claude && scenario == "steer-rejected" {
                 continue;
@@ -1315,6 +1353,7 @@ async fn steer_waits_for_all_tools_and_uses_native_receipts_in_the_same_run() {
                     assert_eq!(frame["params"]["expectedTurnId"], "turn-1");
                     assert_eq!(frame["params"]["input"][0]["text"], prompt);
                 }
+                HarnessKind::Kimi | HarnessKind::Qoder | HarnessKind::Codebuddy => unreachable!(),
                 HarnessKind::Claude => assert_eq!(frame["message"]["content"], prompt),
                 HarnessKind::Omp | HarnessKind::Pi => {
                     assert_eq!(frame["type"], "steer");
@@ -1363,7 +1402,12 @@ async fn shutdown_reaps_a_blocked_title_process_tree() {
 async fn unsent_steer_is_rejected_on_completion_or_cancellation() {
     let binaries = tempfile::tempdir().unwrap();
     let executable = fake_harness(binaries.path());
-    for harness in HarnessKind::ALL {
+    for harness in [
+        HarnessKind::Claude,
+        HarnessKind::Codex,
+        HarnessKind::Omp,
+        HarnessKind::Pi,
+    ] {
         for cancel in [false, true] {
             let directory = tempfile::tempdir().unwrap();
             let request = request(
@@ -1445,5 +1489,58 @@ async fn cancellation_and_shutdown_reap_the_harness_process_tree() {
         } else {
             runner.shutdown().await;
         }
+    }
+}
+
+#[tokio::test]
+async fn acp_catalog_and_authentication_failures_finish_without_starting_model_calls() {
+    let fixtures = tempfile::tempdir().unwrap();
+    let executable = fake_harness(fixtures.path());
+    for harness in [
+        HarnessKind::Kimi,
+        HarnessKind::Qoder,
+        HarnessKind::Codebuddy,
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut runner = TestRunner::spawn();
+        let request_id = Uuid::new_v4();
+        runner
+            .send(Command::ModelCatalogRefresh {
+                context_id: None,
+                purpose: Default::default(),
+                request_id,
+                harness,
+                executable: executable.to_string_lossy().into_owned(),
+                cwd: directory.path().to_string_lossy().into_owned(),
+                environment: vec![],
+            })
+            .await;
+        let event = runner.next().await;
+        assert!(
+            matches!(event, Event::ModelCatalogLoaded {request_id: id, models, ..} if id==request_id && models[0].source.harness()==harness && models[0].id=="test-model")
+        );
+        assert!(!directory.path().join("stdin.txt").exists());
+        assert!(directory.path().join("catalog-stopped.txt").exists());
+        let mut request = request(
+            directory.path(),
+            executable.clone(),
+            harness,
+            "must not send",
+        );
+        request.environment.push(EnvironmentVariable {
+            name: "TEST_ACP_AUTH_ERROR".into(),
+            value: "1".into(),
+        });
+        let run_id = request.run_id;
+        runner.send(Command::RunStart(request)).await;
+        let events = runner.collect_run(run_id, RunStatus::Failed).await;
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e,Event::RunFailed {message,..} if message.contains("认证")))
+        );
+        assert!(!format!("{events:?}").contains("private secret"));
+        assert!(!directory.path().join("stdin.txt").exists());
+        runner.shutdown().await;
     }
 }

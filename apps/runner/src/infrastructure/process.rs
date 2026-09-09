@@ -214,7 +214,7 @@ pub(crate) async fn generate_title(
     mut cancel: watch::Receiver<bool>,
 ) -> Option<String> {
     let prompt = title_generation_prompt(&request.prompt);
-    let (mut spec, decoder) = super::harness::prepare_title(&request, &cwd, &prompt);
+    let (mut spec, decoder) = super::harness::prepare_title(&request, &cwd, &prompt).ok()?;
     spec.executable = nexus_harness_core::resolve_executable(&request.executable)?;
     let mut child = process_command(&spec, &request.environment).spawn().ok()?;
     let pid = child.id().unwrap_or_default();
@@ -1164,7 +1164,11 @@ mod tests {
                         }}
                     })
                 ),
-                HarnessKind::Omp | HarnessKind::Pi => unreachable!(),
+                HarnessKind::Omp
+                | HarnessKind::Pi
+                | HarnessKind::Kimi
+                | HarnessKind::Qoder
+                | HarnessKind::Codebuddy => unreachable!(),
             }
         }
     }

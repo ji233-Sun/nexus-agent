@@ -361,6 +361,12 @@ function RemoteWorkspace({
                 ? "Codex CLI"
                 : state?.harness === "pi"
                   ? "Pi"
+                  : state?.harness === "kimi"
+                  ? "Kimi Code"
+                  : state?.harness === "qoder"
+                  ? "Qoder"
+                  : state?.harness === "codebuddy"
+                  ? "CodeBuddy"
                 : state?.harness === "omp"
                   ? "Oh My Pi"
                   : "Claude Code"}

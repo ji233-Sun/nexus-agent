@@ -9,13 +9,18 @@ use std::sync::{Arc, LazyLock};
 pub(super) fn harness_icon(harness: HarnessKind, colors: Palette, size: f32) -> AnyElement {
     // Claude/Codex: assets/harness/LICENSE; OMP: assets/harness/OMP_LICENSE.
     let (icon, color): (&[u8], _) = match harness {
-        HarnessKind::Pi => {
+        HarnessKind::Pi | HarnessKind::Kimi | HarnessKind::Qoder | HarnessKind::Codebuddy => {
             return div()
                 .size(px(size))
                 .flex_none()
                 .text_size(px(size * 0.8))
                 .text_color(rgb(colors.text))
-                .child("π")
+                .child(match harness {
+                    HarnessKind::Pi => "π",
+                    HarnessKind::Kimi => "K",
+                    HarnessKind::Qoder => "Q",
+                    _ => "B",
+                })
                 .into_any_element();
         }
         HarnessKind::Claude => (
