@@ -2131,10 +2131,16 @@ mod catalog_model_tests {
         cx.simulate_resize(gpui::size(px(1040.), px(680.)));
         view.update_in(cx, |view, window, cx| {
             view.settings_open = true;
+            view.set_language(Language::English, window, cx);
             view.select_settings_section(SettingsSection::Voice, window, cx);
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("voice-settings").is_some());
+        assert!(cx.debug_bounds("settings-nav-voice").is_some());
+        assert_eq!(
+            Language::English.text("配置语音输入"),
+            "Configure voice input"
+        );
         assert!(cx.debug_bounds("voice-mimo-config").is_none());
         view.update(cx, |view, cx| {
             view.presenter
@@ -2162,6 +2168,7 @@ mod catalog_model_tests {
             cx.notify();
         });
         cx.run_until_parked();
+        assert!(cx.debug_bounds("voice-record").is_some());
         cx.simulate_keystrokes(if cfg!(target_os = "macos") {
             "cmd-z"
         } else {
