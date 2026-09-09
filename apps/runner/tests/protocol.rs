@@ -976,7 +976,7 @@ async fn runner_streams_fake_omp_and_uses_guarded_rpc_mode() {
     );
     let args = fs::read_to_string(directory.path().join("omp-args.txt")).unwrap();
     let args = args.lines().collect::<Vec<_>>();
-    assert!(args.windows(2).any(|pair| pair == ["--mode", "rpc"]));
+    assert!(args.windows(2).any(|pair| pair == ["--mode", "rpc-ui"]));
     assert!(
         args.windows(2)
             .any(|pair| pair == ["--approval-mode", "write"])

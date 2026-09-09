@@ -741,7 +741,7 @@ mod tests {
     impl Default for FakeUserAskDecoder {
         fn default() -> Self {
             Self {
-                omp: nexus_harness_omp::EventDecoder,
+                omp: nexus_harness_omp::EventDecoder::default(),
                 requests: HashSet::new(),
                 supports_answers: true,
             }
@@ -933,6 +933,8 @@ mod tests {
         for (prompt, expected) in [
             ("omp-text-input", UserAskStatus::Answered),
             ("omp-text-editor", UserAskStatus::Answered),
+            ("omp-text-select", UserAskStatus::Answered),
+            ("omp-text-confirm", UserAskStatus::Answered),
             ("omp-text-cancel", UserAskStatus::Cancelled),
             ("omp-text-timeout", UserAskStatus::Expired),
         ] {
@@ -946,7 +948,7 @@ mod tests {
             let task = tokio::spawn(run_prepared_harness(
                 request,
                 spec,
-                Box::new(nexus_harness_omp::EventDecoder),
+                Box::new(nexus_harness_omp::EventDecoder::default()),
                 cancel,
                 input_rx,
                 user_asks.clone(),
@@ -956,7 +958,11 @@ mod tests {
             assert_eq!(questions[0].prompt, "Branch name");
             let answers = vec![UserAskAnswer {
                 question_id: "ui_1".into(),
-                value: UserAskAnswerValue::Text("feature/修复\nsecond line".into()),
+                value: if questions[0].options.is_empty() {
+                    UserAskAnswerValue::Text("feature/修复\nsecond line".into())
+                } else {
+                    UserAskAnswerValue::Selected(vec![questions[0].options[1].id.clone()])
+                },
             }];
             if expected == UserAskStatus::Answered {
                 input
@@ -1018,10 +1024,18 @@ mod tests {
                     &std::fs::read_to_string(directory.path().join("user-ask-input.json")).unwrap(),
                 )
                 .unwrap();
-                assert_eq!(
-                    frame,
-                    serde_json::json!({"type": "extension_ui_response", "id": "ui_1", "value": "feature/修复\nsecond line"})
-                );
+                let expected = match prompt {
+                    "omp-text-confirm" => {
+                        json!({"type": "extension_ui_response", "id": "ui_1", "confirmed": false})
+                    }
+                    "omp-text-select" => {
+                        json!({"type": "extension_ui_response", "id": "ui_1", "value": "Other (type your own)"})
+                    }
+                    _ => {
+                        json!({"type": "extension_ui_response", "id": "ui_1", "value": "feature/修复\nsecond line"})
+                    }
+                };
+                assert_eq!(frame, expected);
             } else {
                 assert!(!directory.path().join("user-ask-input.json").exists());
             }

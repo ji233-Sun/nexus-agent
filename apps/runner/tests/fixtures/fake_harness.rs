@@ -30,7 +30,7 @@ fn main() {
         Some("app-server" | "exec")
     ) {
         Harness::Codex
-    } else if args.windows(2).any(|pair| pair == ["--mode", "rpc"]) {
+    } else if args.windows(2).any(|pair| pair[0] == "--mode" && matches!(pair[1].as_str(), "rpc" | "rpc-ui")) {
         Harness::Omp
     } else {
         Harness::Claude
@@ -228,9 +228,14 @@ fn run_turn(
         return;
     }
     if prompt.starts_with("omp-text-") {
-        let method = if prompt == "omp-text-editor" { "editor" } else { "input" };
+        let method = match prompt {
+            "omp-text-editor" => "editor",
+            "omp-text-select" => "select",
+            "omp-text-confirm" => "confirm",
+            _ => "input",
+        };
         let timeout = if prompt == "omp-text-timeout" { ",\"timeout\":50" } else { "" };
-        println!(r#"{{"type":"extension_ui_request","id":"ui_1","method":{method:?},"title":"Branch name"{timeout}}}"#);
+        println!(r#"{{"type":"extension_ui_request","id":"ui_1","method":{method:?},"title":"Branch name","options":["Tests","Other (type your own)"]{timeout}}}"#);
         if matches!(prompt, "omp-text-cancel" | "omp-text-timeout") {
             if prompt == "omp-text-cancel" {
                 println!(r#"{{"type":"extension_ui_request","id":"cancel-2","method":"cancel","targetId":"ui_1"}}"#);
