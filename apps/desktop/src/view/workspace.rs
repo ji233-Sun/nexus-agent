@@ -422,6 +422,7 @@ impl NexusView {
                                     .small()
                                     .size(px(28.))
                                     .loading(generating)
+                                    .when(generating, |button| button.icon(IconName::LoaderCircle))
                                     .when(!generating, |button| {
                                         button.child(
                                             gpui::svg()
@@ -770,114 +771,4 @@ impl NexusView {
             .text_size(px(12.))
             .child(locale.text("目录不可用；历史仍可阅读，请新建任务"))
     }
-
-    pub(super) fn open_workspace_review(
-        &mut self,
-        id: Uuid,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self
-            .presenter
-            .model()
-            .workspace_review
-            .as_ref()
-            .is_none_or(|review| review.workspace_id != id)
-            && !self.presenter.review_workspace(id)
-        {
-            return;
-        }
-        let target_default = self
-            .presenter
-            .model()
-            .selected_project
-            .as_ref()
-            .and_then(|project| {
-                crate::infrastructure::git::current_branch(Path::new(&project.canonical_path))
-            })
-            .unwrap_or_default();
-        let target = cx.new(|cx| InputState::new(window, cx).default_value(target_default));
-        let app = cx.entity();
-        window.open_dialog(cx, move |dialog, window, cx| {
-            let model = app.read(cx).presenter.model();
-            let locale = model.language;
-            let managed = model.workspaces.iter().any(|workspace| workspace.id == id && workspace.managed);
-            let mut content = div().id("workspace-review-content").debug_selector(|| "workspace-review-content".into()).max_h(window.viewport_size().height * 0.56).overflow_y_scroll().flex().flex_col().gap_3();
-            let refresh_app = app.clone();
-            let mut actions = div().flex().flex_wrap().gap_2().child(Button::new("refresh-workspace-review").small().label(locale.text("刷新变更"))
-                .disabled(model.workspace_busy).on_click(move |_, _, cx| { refresh_app.update(cx, |app, cx| { app.presenter.review_workspace(id); cx.notify(); }); }));
-            if let Some(review) = model.workspace_review.as_ref().filter(|review| review.workspace_id == id) {
-                content = content.child(format!("{} · {}", review.branch.as_deref().unwrap_or("HEAD"), review.head));
-                for (label, diff) in [("相对创建基准的已提交变更", &review.committed), ("暂存变更", &review.staged), ("未暂存变更", &review.unstaged)] {
-                    content = content.child(diff_block(locale.text(label), diff, true, locale, cx));
-                }
-                for (name, text) in &review.untracked { content = content.child(diff_block(&format!("{} · {name}", locale.text("未跟踪文件")), text, false, locale, cx)); }
-                if let Some(workspace) = model.workspaces.iter().find(|workspace| workspace.id == id)
-                    && let Some(state) = &workspace.merge {
-                    content = content.child(format!("{} → {}\n{}", review.branch.as_deref().unwrap_or_default(), state.target_branch, state.target_path))
-                        .child(format!("{}: {}", locale.text("冲突文件"), review.conflicts.join(", ")))
-                        .child(locale.text("请在目标目录编辑冲突文件并 git add，再刷新此处继续；也可以中止合并。"))
-                        .child(diff_block(locale.text("当前冲突解决内容"), &review.resolution_diff, true, locale, cx))
-                        .child(diff_block(locale.text("已暂存的冲突解决内容"), &review.resolution_staged, true, locale, cx));
-                    for (abort, label) in [(false, "继续合并"), (true, "中止合并")] {
-                        let finish_app = app.clone(); let review = review.clone();
-                        actions = actions.child(Button::new(label).small().label(locale.text(label)).disabled(model.workspace_busy)
-                            .on_click(move |_, window, cx| {
-                                let answer = window.prompt(PromptLevel::Critical, locale.text(label), Some(locale.text("继续会提交当前冲突解决内容；中止会恢复到本次合并开始前的状态。")),
-                                    &[PromptButton::ok(locale.text(label)), PromptButton::cancel(locale.text("取消"))], cx);
-                                let app = finish_app.clone(); let review = review.clone();
-                                cx.spawn(async move |cx| { if answer.await.ok() == Some(0) { app.update(cx, |app, cx| { app.presenter.finish_workspace_merge(review, abort); cx.notify(); }); } }).detach();
-                            }));
-                    }
-                } else if managed {
-                    let preview_app = app.clone(); let target_input = target.clone();
-                    content = content.child(locale.text("合入本地目标分支")).child(Input::new(&target))
-                        .child(review.target_branches.join(" · "));
-                    actions = actions.child(Button::new("preview-workspace-merge").small().label(locale.text("预览合入"))
-                        .disabled(model.workspace_busy || !managed || !review.dirty_paths.is_empty())
-                        .on_click(move |_, _, cx| { let branch = target_input.read(cx).value().to_string(); preview_app.update(cx, |app, cx| { app.presenter.preview_workspace_merge(id, branch); cx.notify(); }); }));
-                }
-            }
-            if let Some(plan) = model.merge_plan.as_ref().filter(|plan| plan.workspace_id == id) {
-                content = content.child(format!("{} → {}\n{}", plan.source_branch, plan.state.target_branch, plan.state.target_path))
-                    .child(diff_block(locale.text("合入预览"), &plan.diff, true, locale, cx));
-                let merge_app = app.clone(); let plan = plan.clone();
-                actions = actions.child(Button::new("confirm-workspace-merge").primary().small().label(locale.text("确认合入本地分支"))
-                    .disabled(model.workspace_busy)
-                    .on_click(move |_, _, cx| { let plan = plan.clone(); merge_app.update(cx, |app, cx| { app.presenter.merge_workspace(plan); cx.notify(); }); }));
-            }
-            dialog.title(locale.text("任务变更与成果接收")).width(px(900.).min(window.viewport_size().width - px(48.)))
-                .child(content).child(div().text_size(px(12.)).child(
-                    model.changes_status.as_ref().map_or_else(|| model.status_text().to_owned(), |status| status.render(locale).to_owned())
-                )).footer(actions)
-        });
-        cx.notify();
-    }
-}
-
-fn diff_block(
-    title: &str,
-    content: &str,
-    diff: bool,
-    locale: Language,
-    cx: &gpui::App,
-) -> AnyElement {
-    if content.is_empty() {
-        return div()
-            .text_size(px(12.))
-            .text_color(rgb(palette(cx).muted))
-            .child(format!("{title} · —"))
-            .into_any_element();
-    }
-    tools::render_detail(
-        format!("workspace-diff-{title}").into(),
-        &crate::model::tools::ToolDetail {
-            title: title.to_owned(),
-            text: content.to_owned(),
-            language: if diff { "diff" } else { "text" }.into(),
-            diff,
-        },
-        locale,
-    )
-    .into_any_element()
 }

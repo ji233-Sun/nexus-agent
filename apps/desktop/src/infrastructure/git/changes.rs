@@ -17,6 +17,9 @@ fn diff(path: &Path, args: &[&str]) -> Result<String> {
         "--no-textconv",
         "--no-renames",
         "--binary",
+        "--no-color",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
     ];
     command.extend(args);
     git(path, &command)

@@ -231,6 +231,8 @@ impl Presenter {
             WorkspaceEvent::Reviewed(_)
                 | WorkspaceEvent::Committed(_)
                 | WorkspaceEvent::CommitPrepared { .. }
+                | WorkspaceEvent::Planned(_)
+                | WorkspaceEvent::Merged(_)
         );
         let result = match event {
             WorkspaceEvent::Resolved(result) => {
@@ -303,7 +305,7 @@ impl Presenter {
             }
             WorkspaceEvent::Planned(result) => result.map(|plan| {
                 self.model.merge_plan = Some(plan);
-                self.model.status = "请确认源分支、目标目录和变更后合入。".into();
+                self.model.changes_status = None;
             }),
             WorkspaceEvent::Merged(result) => result.and_then(|workspace| {
                 let conflicted = workspace.merge.is_some();
@@ -311,11 +313,11 @@ impl Presenter {
                 self.model.merge_plan = None;
                 self.reload_workspaces();
                 self.model.workspace_review = Some(git::changes::review(&workspace)?);
-                self.model.status = if conflicted {
+                self.model.changes_status = Some(if conflicted {
                     "合并存在冲突。请在目标目录解决并暂存文件，然后继续合并；也可以中止。".into()
                 } else {
                     "本地合并操作已完成。".into()
-                };
+                });
                 Ok(())
             }),
         };
@@ -527,7 +529,7 @@ impl Presenter {
         let workspace = match self.workspace_for_write(id) {
             Ok(workspace) => workspace,
             Err(error) => {
-                self.model.status = error.to_string().into();
+                self.model.changes_status = Some(error.to_string().into());
                 return false;
             }
         };
@@ -535,6 +537,7 @@ impl Presenter {
             return false;
         };
         self.model.merge_plan = None;
+        self.model.changes_status = None;
         self.spawn_workspace_operation(move || {
             WorkspaceEvent::Planned(git::changes::plan_merge(
                 Path::new(&project.canonical_path),
@@ -549,7 +552,7 @@ impl Presenter {
         let mut workspace = match self.workspace_for_write(plan.workspace_id) {
             Ok(workspace) => workspace,
             Err(error) => {
-                self.model.status = error.to_string().into();
+                self.model.changes_status = Some(error.to_string().into());
                 return false;
             }
         };
@@ -557,7 +560,7 @@ impl Presenter {
             .model
             .checkout_running(Path::new(&plan.state.target_path))
         {
-            self.model.status = "目标目录仍有任务运行，不能合入。".into();
+            self.model.changes_status = Some("目标目录仍有任务运行，不能合入。".into());
             return false;
         }
         let Ok(Some(project)) = self.storage.project(workspace.project_id) else {
@@ -565,13 +568,14 @@ impl Presenter {
         };
         workspace.merge = Some(plan.state.clone());
         if let Err(error) = self.storage.save_workspace(&workspace) {
-            self.model.status = error.to_string().into();
+            self.model.changes_status = Some(error.to_string().into());
             return false;
         }
         self.model.workspace_operation_paths = vec![
             Path::new(&workspace.path).to_path_buf(),
             Path::new(&plan.state.target_path).to_path_buf(),
         ];
+        self.model.changes_status = None;
         self.spawn_workspace_operation(move || {
             WorkspaceEvent::Merged(git::changes::merge(
                 Path::new(&project.canonical_path),
@@ -586,7 +590,7 @@ impl Presenter {
         let workspace = match self.workspace_for_write(review.workspace_id) {
             Ok(workspace) => workspace,
             Err(error) => {
-                self.model.status = error.to_string().into();
+                self.model.changes_status = Some(error.to_string().into());
                 return false;
             }
         };
@@ -597,6 +601,7 @@ impl Presenter {
             Path::new(&workspace.path).to_path_buf(),
             Path::new(&state.target_path).to_path_buf(),
         ];
+        self.model.changes_status = None;
         self.spawn_workspace_operation(move || {
             WorkspaceEvent::Merged(git::changes::finish_merge(workspace, &review, abort))
         });

@@ -1,6 +1,7 @@
 mod components;
 mod model_picker;
 mod pane;
+mod review;
 mod settings;
 mod sidebar;
 pub(crate) mod theme;
@@ -59,7 +60,10 @@ use std::{
 use theme::*;
 use uuid::Uuid;
 
-gpui::actions!(nexus_view, [SearchSessions, NewTask, ToggleSettings]);
+gpui::actions!(
+    nexus_view,
+    [SearchSessions, NewTask, ToggleSettings, CloseReview]
+);
 
 // Render outside NexusView's update so dialog builders can read its current model.
 struct DialogLayer;
@@ -89,6 +93,7 @@ pub(crate) struct NexusView {
     model_picker_open: bool,
     generation_pickers: BTreeMap<GenerationKind, GenerationPicker>,
     commit_inputs: BTreeMap<Uuid, Entity<TextareaState>>,
+    review_pages: BTreeMap<Uuid, review::ReviewPage>,
     executable_input: Entity<InputState>,
     provider_name_input: Entity<InputState>,
     provider_api_key_env_input: Entity<InputState>,
@@ -296,6 +301,7 @@ impl NexusView {
             KeyBinding::new("secondary-k", SearchSessions, Some("Nexus")),
             KeyBinding::new("secondary-n", NewTask, Some("Nexus")),
             KeyBinding::new("secondary-,", ToggleSettings, Some("Nexus")),
+            KeyBinding::new("escape", CloseReview, Some("Nexus")),
         ]);
         let owner = cx.weak_entity();
         let sidebar_pane = cx.new(|cx| WorkspacePane::new(owner.clone(), PaneKind::Sidebar, cx));
@@ -325,6 +331,7 @@ impl NexusView {
             model_picker_open: false,
             generation_pickers,
             commit_inputs: BTreeMap::new(),
+            review_pages: BTreeMap::new(),
             executable_input,
             provider_name_input,
             provider_api_key_env_input,
@@ -1642,7 +1649,26 @@ impl NexusView {
             )
     }
 
-    fn render_workspace(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_workspace(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(page) = self
+            .review_pages
+            .get(&self.presenter.model().conversation.id)
+        {
+            return div()
+                .size_full()
+                .bg(materials(cx).chrome)
+                .flex()
+                .child(
+                    self.sidebar_pane.clone().cached(
+                        gpui::StyleRefinement::default()
+                            .w(px(SIDEBAR_WIDTH))
+                            .h_full()
+                            .flex_none(),
+                    ),
+                )
+                .child(self.render_workspace_review(page, cx))
+                .into_any_element();
+        }
         let locale = self.presenter.model().language;
         let colors = palette(cx);
         let material = materials(cx);
@@ -2071,6 +2097,7 @@ impl NexusView {
             .when(model.changes_sidebar_open && !history, |element| {
                 element.child(self.render_changes_sidebar(cx))
             })
+            .into_any_element()
     }
 }
 
@@ -2099,6 +2126,16 @@ impl Render for NexusView {
             }))
             .on_action(cx.listener(|app, _: &ToggleSettings, window, cx| {
                 app.toggle_settings(window, cx);
+            }))
+            .on_action(cx.listener(|app, _: &CloseReview, window, cx| {
+                if !app.settings_open
+                    && app
+                        .review_pages
+                        .contains_key(&app.presenter.model().conversation.id)
+                {
+                    app.close_workspace_review(window, cx);
+                    cx.stop_propagation();
+                }
             }))
             .capture_action(cx.listener(|app, action: &Enter, window, cx| {
                 if !app.settings_open
@@ -2459,6 +2496,253 @@ mod catalog_model_tests {
             );
             assert!(cx.debug_bounds("workspace-base").is_none());
         }
+    }
+
+    #[gpui::test]
+    fn workspace_review_uses_full_page_preserves_drafts_and_navigates_files(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::{
+            infrastructure::git,
+            presenter::tests::{finish_workspace_operation, worktree_fixture},
+        };
+        use gpui::{ScrollDelta, ScrollWheelEvent, point};
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (mut presenter, runner, _directory, start) = worktree_fixture("review task");
+        presenter.set_appearance(AppearanceSettings {
+            reduced_motion: true,
+            ..Default::default()
+        });
+        runner.emit(Event::RunExited {
+            run_id: start.run_id,
+            status: RunStatus::Completed,
+            exit_code: Some(0),
+        });
+        presenter.drain_events();
+        let cwd = Path::new(&start.cwd);
+        std::fs::write(
+            cwd.join("tracked.txt"),
+            format!("{}\n", "long diff content ".repeat(30)).repeat(80),
+        )
+        .unwrap();
+        std::fs::write(cwd.join("staged.rs"), "fn staged() {}\n").unwrap();
+        git::git(cwd, &["add", "staged.rs"]).unwrap();
+        std::fs::create_dir(cwd.join("docs")).unwrap();
+        std::fs::write(cwd.join("docs/新文件.md"), "# New document\n").unwrap();
+        presenter.toggle_changes_sidebar();
+        finish_workspace_operation(&mut presenter);
+        presenter.select_changed_file("tracked.txt".into(), true);
+        presenter.set_commit_message("Reviewed draft".into());
+        let original = presenter
+            .model()
+            .workspace_review
+            .as_ref()
+            .unwrap()
+            .unstaged
+            .clone();
+        let id = presenter
+            .model()
+            .workspace_review
+            .as_ref()
+            .unwrap()
+            .workspace_id;
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| NexusView::new(presenter, window, cx));
+            gpui_kit::component::Root::new(view, window, cx)
+        });
+        let view = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<NexusView>().unwrap()
+        });
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                let _ = window.draw(cx);
+            });
+        };
+        cx.simulate_resize(gpui::size(px(1040.), px(680.)));
+        draw(cx);
+        click_debug(cx, "environment-changes");
+        draw(cx);
+        click_debug(cx, "show-workspace-diff");
+        draw(cx);
+        for (width, height, language) in [
+            (1040., 680., Language::Chinese),
+            (1440., 900., Language::English),
+        ] {
+            cx.simulate_resize(gpui::size(px(width), px(height)));
+            view.update_in(cx, |view, window, cx| {
+                view.set_language(language, window, cx)
+            });
+            draw(cx);
+            let page = cx.debug_bounds("workspace-review-page").unwrap();
+            let navigation = cx.debug_bounds("review-file-list").unwrap();
+            let code = cx
+                .debug_bounds(format!("review-diff-{id}-Unstaged-tracked.txt").leak())
+                .unwrap();
+            assert!(page.right() <= px(width) && page.bottom() <= px(height));
+            assert!(
+                code.size.height > px(height * 0.8),
+                "review must use available height: {code:?}"
+            );
+            assert!(code.size.width > px(480.) && code.left() >= navigation.right());
+            assert!(cx.debug_bounds("composer-surface").is_none());
+            assert!(cx.debug_bounds("workspace-header-status").is_none());
+            assert!(cx.debug_bounds("review-status").is_none());
+            assert!(cx.debug_bounds("review-merge-panel").is_none());
+        }
+        let code_key: &'static str = format!("review-diff-{id}-Unstaged-tracked.txt").leak();
+        let viewport = cx.debug_bounds(code_key).unwrap();
+        for delta in [point(px(-80.), px(0.)), point(px(0.), px(-60.))] {
+            let before = cx
+                .debug_bounds(format!("{code_key}-content").leak())
+                .unwrap();
+            cx.simulate_event(ScrollWheelEvent {
+                position: viewport.center(),
+                delta: ScrollDelta::Pixels(delta),
+                ..Default::default()
+            });
+            draw(cx);
+            let after = cx
+                .debug_bounds(format!("{code_key}-content").leak())
+                .unwrap();
+            assert_eq!(after.origin, before.origin + delta);
+        }
+        click_debug(cx, format!("{code_key}-copy").leak());
+        cx.update(|_, cx| assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), original));
+        click_debug(cx, "review-nav-Untracked-docs/新文件.md");
+        draw(cx);
+        assert!(
+            cx.debug_bounds(format!("review-diff-{id}-Untracked-docs/新文件.md").leak())
+                .is_some()
+        );
+        std::fs::write(cwd.join("docs/新文件.md"), "# Updated document\n").unwrap();
+        click_debug(cx, "refresh-workspace-review");
+        view.update(cx, |view, cx| {
+            finish_workspace_operation(&mut view.presenter);
+            cx.notify();
+        });
+        draw(cx);
+        click_debug(
+            cx,
+            format!("review-diff-{id}-Untracked-docs/新文件.md-copy").leak(),
+        );
+        cx.update(|_, cx| {
+            assert_eq!(
+                cx.read_from_clipboard().unwrap().text().unwrap(),
+                "# Updated document\n"
+            )
+        });
+        click_debug(cx, "close-workspace-review");
+        draw(cx);
+        assert!(cx.debug_bounds("composer-surface").is_some());
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.presenter.model().commit_message, "Reviewed draft");
+            assert_eq!(
+                view.presenter
+                    .model()
+                    .selected_changes
+                    .iter()
+                    .collect::<Vec<_>>(),
+                vec!["tracked.txt"]
+            );
+        });
+        click_debug(cx, "open-commit-editor");
+        draw(cx);
+        assert_eq!(
+            cx.debug_bounds("generate-commit-message")
+                .unwrap()
+                .size
+                .width,
+            px(28.)
+        );
+    }
+
+    #[gpui::test]
+    fn workspace_review_keeps_merge_preview_and_confirmation_on_the_page(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::{
+            infrastructure::git,
+            presenter::tests::{finish_workspace_operation, worktree_fixture},
+        };
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (mut presenter, runner, _directory, start) = worktree_fixture("merge task");
+        presenter.set_appearance(AppearanceSettings {
+            reduced_motion: true,
+            ..Default::default()
+        });
+        runner.emit(Event::RunExited {
+            run_id: start.run_id,
+            status: RunStatus::Completed,
+            exit_code: Some(0),
+        });
+        presenter.drain_events();
+        let cwd = Path::new(&start.cwd);
+        std::fs::write(cwd.join("tracked.txt"), "reviewed merge\n").unwrap();
+        git::git(cwd, &["commit", "-am", "reviewed change"]).unwrap();
+        let task_status = presenter.model().status_text().to_owned();
+        let project = presenter.model().selected_project.clone().unwrap();
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| NexusView::new(presenter, window, cx));
+            gpui_kit::component::Root::new(view, window, cx)
+        });
+        let view = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<NexusView>().unwrap()
+        });
+        cx.simulate_resize(gpui::size(px(1040.), px(680.)));
+        view.update_in(cx, |view, window, cx| {
+            view.open_workspace_review(start.task_id, window, cx);
+            finish_workspace_operation(&mut view.presenter);
+            cx.notify();
+        });
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                let _ = window.draw(cx);
+            });
+        };
+        draw(cx);
+        click_debug(cx, "review-merge-options");
+        draw(cx);
+        click_debug(cx, "preview-workspace-merge");
+        view.update(cx, |view, cx| {
+            finish_workspace_operation(&mut view.presenter);
+            cx.notify();
+        });
+        draw(cx);
+        assert!(
+            cx.debug_bounds(format!("review-diff-{}-Merge-tracked.txt", start.task_id).leak())
+                .is_some()
+        );
+        assert_eq!(
+            std::fs::read_to_string(Path::new(&project.canonical_path).join("tracked.txt"))
+                .unwrap(),
+            "base\n"
+        );
+        click_debug(cx, "confirm-workspace-merge");
+        view.update(cx, |view, cx| {
+            finish_workspace_operation(&mut view.presenter);
+            cx.notify();
+        });
+        draw(cx);
+        assert_eq!(
+            std::fs::read_to_string(Path::new(&project.canonical_path).join("tracked.txt"))
+                .unwrap(),
+            "reviewed merge\n"
+        );
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.presenter.model().status_text(), task_status)
+        });
+        assert!(cx.debug_bounds("review-status").is_some());
+        assert!(cx.debug_bounds("workspace-review-page").is_some());
+        cx.simulate_keystrokes("escape");
+        draw(cx);
+        assert!(cx.debug_bounds("workspace-review-page").is_none());
+        assert!(cx.debug_bounds("composer-surface").is_some());
     }
 
     #[gpui::test]
