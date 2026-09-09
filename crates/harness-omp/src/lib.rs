@@ -7,10 +7,11 @@ use std::{
 
 use nexus_domain::{
     HarnessKind, ModelDescriptor, ModelReasoningEffort, PermissionMode, ThinkingEffort,
+    UserAskAnswer, UserAskAnswerMode, UserAskAnswerValue, UserAskQuestion, UserAskStatus,
 };
 use nexus_harness_core::{
-    ApprovalOption, ApprovalPrompt, InputFrame, LineDecoder, resolve_executable, summarize_text,
-    tool_content,
+    ApprovalOption, ApprovalPrompt, InputFrame, LineDecoder, UserAskRequest, resolve_executable,
+    summarize_text, tool_content,
 };
 pub use nexus_harness_core::{DecodedEvent, LaunchSpec, ModelCatalogError};
 use nexus_protocol::{EnvironmentVariable, HarnessProbe};
@@ -334,6 +335,23 @@ impl LineDecoder for EventDecoder {
             json!({"type": "steer", "id": message_id, "message": prompt}),
         ))
     }
+
+    fn answer_user_ask(
+        &mut self,
+        native_request_id: &str,
+        answers: &[UserAskAnswer],
+    ) -> Option<InputFrame> {
+        let [answer] = answers else { return None };
+        let UserAskAnswerValue::Text(value) = &answer.value else {
+            return None;
+        };
+        if answer.question_id != native_request_id {
+            return None;
+        }
+        Some(InputFrame(json!({
+            "type": "extension_ui_response", "id": native_request_id, "value": value
+        })))
+    }
 }
 
 fn decode_frame(frame: &Value) -> Vec<DecodedEvent> {
@@ -446,12 +464,46 @@ fn decode_ui_request(frame: &Value) -> Vec<DecodedEvent> {
         .and_then(Value::as_str)
         .unwrap_or_default();
     if method == "cancel" {
-        return vec![DecodedEvent::ApprovalResolved(
+        let mut events = vec![DecodedEvent::ApprovalResolved(
             frame["targetId"].to_string(),
         )];
+        if let Some(id) = frame["targetId"].as_str() {
+            events.push(DecodedEvent::UserAskFinished {
+                native_request_id: id.into(),
+                status: UserAskStatus::Cancelled,
+                message: None,
+            });
+        }
+        return events;
     }
     let cancel =
         InputFrame(json!({"type": "extension_ui_response", "id": frame["id"], "cancelled": true}));
+    if matches!(method, "input" | "editor") {
+        let Some(id) = frame["id"].as_str().filter(|id| !id.trim().is_empty()) else {
+            return vec![DecodedEvent::WriteStdin(cancel)];
+        };
+        let prompt = ["title", "message", "placeholder", "prefill"]
+            .into_iter()
+            .filter_map(|key| frame[key].as_str())
+            .filter(|text| !text.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        return vec![DecodedEvent::UserAskRequested(UserAskRequest {
+            native_request_id: id.into(),
+            questions: vec![UserAskQuestion {
+                id: id.into(),
+                prompt: if prompt.is_empty() {
+                    "Oh My Pi".into()
+                } else {
+                    prompt
+                },
+                answer_mode: UserAskAnswerMode::Text,
+                options: Vec::new(),
+            }],
+            timeout_ms: frame.get("timeout").and_then(Value::as_u64),
+            resolve_on_send: true,
+        })];
+    }
     let options = match method {
         "select" => frame
             .get("options")
@@ -727,8 +779,58 @@ mod tests {
                 assert_eq!(prompt.options[1].response.0["confirmed"], false);
             }
             assert_eq!(prompt.cancel.0["cancelled"], true);
-            assert_eq!(decoder.decode_line(r#"{"type":"extension_ui_request","method":"cancel","id":"other","targetId":"approval-1"}"#).unwrap(), vec![DecodedEvent::ApprovalResolved(prompt.id.clone())]);
+            assert_eq!(decoder.decode_line(r#"{"type":"extension_ui_request","method":"cancel","id":"other","targetId":"approval-1"}"#).unwrap(), vec![
+                DecodedEvent::ApprovalResolved(prompt.id.clone()),
+                DecodedEvent::UserAskFinished {
+                    native_request_id: "approval-1".into(),
+                    status: UserAskStatus::Cancelled,
+                    message: None,
+                },
+            ]);
         }
+    }
+
+    #[test]
+    fn rpc_text_dialogs_round_trip_without_cancelling() {
+        let mut decoder = EventDecoder;
+        for method in ["input", "editor"] {
+            let frame = json!({"type": "extension_ui_request", "id": "ui_1",
+                "method": method, "title": "Branch name", "timeout": 1234});
+            let events = decoder.decode_line(&frame.to_string()).unwrap();
+            let [DecodedEvent::UserAskRequested(request)] = events.as_slice() else {
+                panic!("expected User Ask, got {events:?}");
+            };
+            assert_eq!(request.native_request_id, "ui_1");
+            assert_eq!(request.timeout_ms, Some(1234));
+            assert!(request.resolve_on_send);
+            assert_eq!(
+                request.questions,
+                vec![UserAskQuestion {
+                    id: "ui_1".into(),
+                    prompt: "Branch name".into(),
+                    answer_mode: UserAskAnswerMode::Text,
+                    options: vec![],
+                }]
+            );
+            let mut answers = vec![UserAskAnswer {
+                question_id: "ui_1".into(),
+                value: UserAskAnswerValue::Text("feature/修复\n\"details\"".into()),
+            }];
+            assert_eq!(
+                decoder.answer_user_ask("ui_1", &answers).unwrap().0,
+                json!({"type": "extension_ui_response", "id": "ui_1", "value": "feature/修复\n\"details\""})
+            );
+            assert!(decoder.answer_user_ask("other", &answers).is_none());
+            assert!(decoder.answer_user_ask("ui_1", &[]).is_none());
+            answers[0].value = UserAskAnswerValue::Selected(vec!["wrong".into()]);
+            assert!(decoder.answer_user_ask("ui_1", &answers).is_none());
+        }
+        let events = decoder.decode_line(r#"{"type":"extension_ui_request","id":"editor-2","method":"editor","title":"Custom answer","prefill":"existing text"}"#).unwrap();
+        assert!(
+            matches!(events.as_slice(), [DecodedEvent::UserAskRequested(request)]
+            if request.questions[0].prompt == "Custom answer\n\nexisting text"
+                && request.timeout_ms.is_none())
+        );
     }
 
     #[test]

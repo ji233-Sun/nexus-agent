@@ -185,6 +185,26 @@ fn run_turn(
         return;
     }
     fs::write(session_file, prompt).unwrap();
+    if prompt.starts_with("omp-text-") {
+        let method = if prompt == "omp-text-editor" { "editor" } else { "input" };
+        let timeout = if prompt == "omp-text-timeout" { ",\"timeout\":50" } else { "" };
+        println!(r#"{{"type":"extension_ui_request","id":"ui_1","method":{method:?},"title":"Branch name"{timeout}}}"#);
+        if matches!(prompt, "omp-text-cancel" | "omp-text-timeout") {
+            if prompt == "omp-text-cancel" {
+                println!(r#"{{"type":"extension_ui_request","id":"cancel-2","method":"cancel","targetId":"ui_1"}}"#);
+            }
+            // Keep the run alive so only the dialog's cancellation/deadline can resolve it.
+            loop {
+                thread::sleep(Duration::from_secs(1));
+            }
+        } else {
+            let answer = input.recv_timeout(Duration::from_secs(5)).expect("missing OMP text answer");
+            fs::write("user-ask-input.json", &answer).unwrap();
+            message(harness, "answered");
+        }
+        terminal(harness);
+        return;
+    }
     if prompt.starts_with("user-ask") {
         emit_user_ask();
         if prompt == "user-ask-exit" {

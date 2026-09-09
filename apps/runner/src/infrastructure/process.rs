@@ -357,10 +357,13 @@ async fn read_stdout(
     let mut input_open = true;
     let mut session_started = false;
     let mut approvals = HashMap::<Uuid, PendingApproval>::new();
+    let mut ask_deadlines = HashMap::<Uuid, Instant>::new();
+    let mut asks_resolved_on_send = HashSet::new();
     'stream: loop {
         let deadline = approvals
             .values()
             .filter_map(|pending| pending.deadline)
+            .chain(ask_deadlines.values().copied())
             .min();
         let line = tokio::select! {
             biased;
@@ -375,6 +378,17 @@ async fn read_stdout(
                         break 'stream;
                     }
                     emitter.send(Event::RunApprovalResolved { run_id, request_id }).await;
+                }
+                let expired: Vec<_> = ask_deadlines.iter().filter_map(|(id, deadline)|
+                    (*deadline <= Instant::now()).then_some(*id)).collect();
+                for request_id in expired {
+                    ask_deadlines.remove(&request_id);
+                    asks_resolved_on_send.remove(&request_id);
+                    if user_asks.finish(request_id) {
+                        emitter.send(Event::RunUserAskFinished {
+                            run_id, request_id, status: UserAskStatus::Expired, message: None,
+                        }).await;
+                    }
                 }
                 continue;
             }
@@ -424,12 +438,23 @@ async fn read_stdout(
                             break 'stream;
                         }
                         if user_asks.mark_answer_sent(answer.request_id) {
+                            ask_deadlines.remove(&answer.request_id);
                             emitter
                                 .send(Event::RunUserAskAnswerSent {
                                     run_id,
                                     request_id: answer.request_id,
                                 })
                                 .await;
+                            if asks_resolved_on_send.remove(&answer.request_id)
+                                && user_asks.finish(answer.request_id)
+                            {
+                                emitter.send(Event::RunUserAskFinished {
+                                    run_id,
+                                    request_id: answer.request_id,
+                                    status: UserAskStatus::Answered,
+                                    message: None,
+                                }).await;
+                            }
                         }
                     }
                     Some(RunInput::Approval { request_id, option }) => {
@@ -529,6 +554,14 @@ async fn read_stdout(
                                 .register(request.native_request_id.clone(), questions.clone())
                             {
                                 Ok(request_id) => {
+                                    if let Some(deadline) = request.timeout_ms.and_then(|ms| {
+                                        Instant::now().checked_add(Duration::from_millis(ms))
+                                    }) {
+                                        ask_deadlines.insert(request_id, deadline);
+                                    }
+                                    if request.resolve_on_send {
+                                        asks_resolved_on_send.insert(request_id);
+                                    }
                                     emitter
                                         .send(Event::RunUserAskRequested {
                                             run_id,
@@ -552,6 +585,8 @@ async fn read_stdout(
                             if let Some(request_id) =
                                 user_asks.finish_native(native_request_id, *status)
                             {
+                                ask_deadlines.remove(&request_id);
+                                asks_resolved_on_send.remove(&request_id);
                                 emitter
                                     .send(Event::RunUserAskFinished {
                                         run_id,
@@ -728,6 +763,8 @@ mod tests {
                     Ok(vec![DecodedEvent::UserAskRequested(UserAskRequest {
                         native_request_id,
                         questions,
+                        timeout_ms: None,
+                        resolve_on_send: false,
                     })])
                 }
                 Some("nexus_test.user_ask.finished") => {
@@ -864,6 +901,108 @@ mod tests {
                 value: UserAskAnswerValue::Selected(vec!["workspace".into()]),
             },
         ]
+    }
+
+    #[tokio::test]
+    async fn omp_user_ask_round_trip_cancel_and_timeout() {
+        let binaries = tempfile::tempdir().unwrap();
+        let executable = compile_fake_harness(binaries.path());
+        for (prompt, expected) in [
+            ("omp-text-input", UserAskStatus::Answered),
+            ("omp-text-editor", UserAskStatus::Answered),
+            ("omp-text-cancel", UserAskStatus::Cancelled),
+            ("omp-text-timeout", UserAskStatus::Expired),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let (request, spec) = prepared_user_ask_run(directory.path(), &executable, prompt);
+            let run_id = request.run_id;
+            let (cancel_tx, cancel) = watch::channel(false);
+            let (input, input_rx) = mpsc::unbounded_channel();
+            let user_asks = PendingUserAsks::default();
+            let (emitter, mut events) = Emitter::channel();
+            let task = tokio::spawn(run_prepared_harness(
+                request,
+                spec,
+                Box::new(nexus_harness_omp::EventDecoder),
+                cancel,
+                input_rx,
+                user_asks.clone(),
+                emitter,
+            ));
+            let (request_id, questions, _) = receive_user_ask(&mut events).await;
+            assert_eq!(questions[0].prompt, "Branch name");
+            let answers = vec![UserAskAnswer {
+                question_id: "ui_1".into(),
+                value: UserAskAnswerValue::Text("feature/修复\nsecond line".into()),
+            }];
+            if expected == UserAskStatus::Answered {
+                input
+                    .send(RunInput::UserAsk(
+                        user_asks.claim_answer(request_id, answers.clone()).unwrap(),
+                    ))
+                    .unwrap();
+            }
+            let mut sent = false;
+            loop {
+                let event = timeout(Duration::from_secs(5), events.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .event;
+                match event {
+                    Event::RunUserAskAnswerSent { request_id: id, .. } => {
+                        assert_eq!(id, request_id);
+                        sent = true;
+                    }
+                    Event::RunUserAskFinished {
+                        run_id: id,
+                        request_id: ask_id,
+                        status,
+                        ..
+                    } => {
+                        assert_eq!((id, ask_id, status), (run_id, request_id, expected));
+                        break;
+                    }
+                    Event::RunExited { .. } => panic!("dialog must finish before the run"),
+                    _ => {}
+                }
+            }
+            assert_eq!(sent, expected == UserAskStatus::Answered);
+            assert!(user_asks.claim_answer(request_id, answers).is_err());
+            if expected != UserAskStatus::Answered {
+                cancel_tx.send(true).unwrap();
+            }
+            assert_eq!(
+                timeout(Duration::from_secs(5), task)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .0,
+                if expected == UserAskStatus::Answered {
+                    RunStatus::Completed
+                } else {
+                    RunStatus::Cancelled
+                }
+            );
+            let remaining = collect_remaining_events(events).await;
+            assert!(
+                !remaining
+                    .iter()
+                    .any(|event| matches!(event, Event::RunUserAskFinished { .. }))
+            );
+            if expected == UserAskStatus::Answered {
+                let frame: Value = serde_json::from_str(
+                    &std::fs::read_to_string(directory.path().join("user-ask-input.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    frame,
+                    serde_json::json!({"type": "extension_ui_response", "id": "ui_1", "value": "feature/修复\nsecond line"})
+                );
+            } else {
+                assert!(!directory.path().join("user-ask-input.json").exists());
+            }
+        }
     }
 
     #[tokio::test]
