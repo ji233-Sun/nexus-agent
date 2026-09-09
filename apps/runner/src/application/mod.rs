@@ -12,7 +12,7 @@ use std::{
 };
 use tokio::{
     sync::{Mutex, mpsc, watch},
-    task::JoinHandle,
+    task::{JoinHandle, JoinSet},
 };
 use uuid::Uuid;
 
@@ -40,6 +40,7 @@ struct BackgroundTask {
 
 pub(crate) struct Runner {
     active: Arc<Mutex<BTreeMap<Uuid, ActiveRun>>>,
+    probe_tasks: JoinSet<()>,
     catalog_tasks: BTreeMap<(ModelCatalogPurpose, Option<Uuid>), BackgroundTask>,
     title_tasks: Vec<BackgroundTask>,
     emitter: Emitter,
@@ -49,6 +50,7 @@ impl Runner {
     pub(crate) fn new(emitter: Emitter) -> Self {
         Self {
             active: Arc::new(Mutex::new(BTreeMap::new())),
+            probe_tasks: JoinSet::new(),
             catalog_tasks: BTreeMap::new(),
             title_tasks: Vec::new(),
             emitter,
@@ -57,17 +59,21 @@ impl Runner {
 
     pub(crate) async fn handle(&mut self, command: Command) -> bool {
         self.reap_title_tasks().await;
+        while self.probe_tasks.try_join_next().is_some() {}
         match command {
             Command::RunnerHello => self.emitter.send(Event::RunnerReady).await,
             Command::HarnessProbe {
                 harness: kind,
                 executable,
             } => {
-                self.emitter
-                    .send(Event::HarnessDetected(
-                        harness::probe(kind, &executable).await,
-                    ))
-                    .await;
+                let emitter = self.emitter.clone();
+                self.probe_tasks.spawn(async move {
+                    emitter
+                        .send(Event::HarnessDetected(
+                            harness::probe(kind, &executable).await,
+                        ))
+                        .await;
+                });
             }
             Command::ModelCatalogRefresh {
                 request_id,
@@ -258,6 +264,7 @@ impl Runner {
     }
 
     pub(crate) async fn shutdown(&mut self) {
+        self.probe_tasks.shutdown().await;
         self.cancel_catalog_task().await;
         let active_runs = self.active.lock().await.clone();
         for run in active_runs.values() {

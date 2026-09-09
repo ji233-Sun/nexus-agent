@@ -16,6 +16,15 @@ enum Harness {
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
+    if args.as_slice() == ["--version"] {
+        if env::var_os("TEST_OMP_VERSION_BLOCK").is_some() {
+            loop {
+                thread::sleep(Duration::from_secs(1));
+            }
+        }
+        println!("fake-omp 1.0");
+        return;
+    }
     if args.first().map(String::as_str) == Some("--child") {
         loop {
             thread::sleep(Duration::from_secs(1));
