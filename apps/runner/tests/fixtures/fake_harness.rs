@@ -185,6 +185,29 @@ fn run_turn(
         return;
     }
     fs::write(session_file, prompt).unwrap();
+    if prompt == "user-ask-native" && harness != Harness::Omp {
+        match harness {
+            Harness::Claude => println!(
+                "{}",
+                r#"{"type":"control_request","request_id":"ask-claude","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Which checks?","multiSelect":true,"options":[{"label":"Tests"},{"label":"Clippy"}]},{"question":"Branch name?"}]}}}"#
+            ),
+            Harness::Codex => println!(
+                "{}{:?}{}",
+                r#"{"id":77,"method":"item/tool/requestUserInput","params":{"threadId":"#,
+                session,
+                r#","turnId":"turn-1","questions":[{"id":"checks","question":"Which checks?","isOther":true,"options":[{"label":"Tests"},{"label":"Clippy"}]},{"id":"branch","question":"Branch name?","options":null}]}}"#
+            ),
+            Harness::Omp => unreachable!(),
+        }
+        io::stdout().flush().unwrap();
+        let answer = input
+            .recv_timeout(Duration::from_secs(5))
+            .expect("missing native User Ask answer");
+        fs::write("user-ask-input.json", &answer).unwrap();
+        message(harness, "answered");
+        terminal(harness);
+        return;
+    }
     if prompt.starts_with("omp-text-") {
         let method = if prompt == "omp-text-editor" { "editor" } else { "input" };
         let timeout = if prompt == "omp-text-timeout" { ",\"timeout\":50" } else { "" };

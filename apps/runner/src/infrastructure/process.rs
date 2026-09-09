@@ -856,6 +856,29 @@ mod tests {
         (request, spec)
     }
 
+    fn prepared_native_user_ask_run(
+        directory: &Path,
+        executable: &Path,
+        harness: HarnessKind,
+    ) -> (StartRun, LaunchSpec, Box<dyn LineDecoder>) {
+        let request = StartRun {
+            title_generation: None,
+            permission_mode: nexus_domain::PermissionMode::AutoEdit,
+            run_id: Uuid::new_v4(),
+            task_id: Uuid::new_v4(),
+            session_id: None,
+            cwd: directory.to_string_lossy().into_owned(),
+            prompt: "user-ask-native".into(),
+            harness,
+            executable: executable.to_string_lossy().into_owned(),
+            model: None,
+            effort: ThinkingEffort::Medium,
+            environment: Vec::new(),
+        };
+        let (spec, decoder) = super::super::harness::prepare(&request, directory);
+        (request, spec, decoder)
+    }
+
     async fn receive_user_ask(
         events: &mut mpsc::Receiver<EventEnvelope>,
     ) -> (Uuid, Vec<UserAskQuestion>, Vec<Event>) {
@@ -1001,6 +1024,121 @@ mod tests {
                 );
             } else {
                 assert!(!directory.path().join("user-ask-input.json").exists());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn claude_and_codex_native_user_ask_round_trip() {
+        let binaries = tempfile::tempdir().unwrap();
+        let executable = compile_fake_harness(binaries.path());
+        for harness in [HarnessKind::Claude, HarnessKind::Codex] {
+            let directory = tempfile::tempdir().unwrap();
+            let (request, spec, decoder) =
+                prepared_native_user_ask_run(directory.path(), &executable, harness);
+            let run_id = request.run_id;
+            let (_cancel, cancel) = watch::channel(false);
+            let (input, input_rx) = mpsc::unbounded_channel();
+            let user_asks = PendingUserAsks::default();
+            let (emitter, mut events) = Emitter::channel();
+            let task = tokio::spawn(run_prepared_harness(
+                request,
+                spec,
+                decoder,
+                cancel,
+                input_rx,
+                user_asks.clone(),
+                emitter,
+            ));
+
+            let (request_id, questions, mut received) = receive_user_ask(&mut events).await;
+            assert_eq!(questions.len(), 2);
+            assert_eq!(questions[0].prompt, "Which checks?");
+            assert_eq!(questions[1].prompt, "Branch name?");
+            let answers = vec![
+                UserAskAnswer {
+                    question_id: questions[0].id.clone(),
+                    value: UserAskAnswerValue::Selected(if harness == HarnessKind::Claude {
+                        vec!["Tests".into(), "Clippy".into()]
+                    } else {
+                        vec!["Tests".into()]
+                    }),
+                },
+                UserAskAnswer {
+                    question_id: questions[1].id.clone(),
+                    value: UserAskAnswerValue::Text("feature/native-ask".into()),
+                },
+            ];
+            let answer = user_asks.claim_answer(request_id, answers.clone()).unwrap();
+            assert!(user_asks.claim_answer(request_id, answers.clone()).is_err());
+            input.send(RunInput::UserAsk(answer)).unwrap();
+
+            assert_eq!(
+                timeout(Duration::from_secs(10), task)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                (RunStatus::Completed, Some(0))
+            );
+            received.extend(collect_remaining_events(events).await);
+            assert_eq!(
+                received
+                    .iter()
+                    .filter(|event| matches!(event,
+                    Event::RunUserAskAnswerSent { run_id: id, request_id: ask }
+                        if *id == run_id && *ask == request_id))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                received
+                    .iter()
+                    .filter(|event| matches!(event,
+                    Event::RunUserAskFinished { run_id: id, request_id: ask,
+                        status: UserAskStatus::Answered, .. }
+                        if *id == run_id && *ask == request_id))
+                    .count(),
+                1
+            );
+            assert!(
+                !received
+                    .iter()
+                    .any(|event| matches!(event, Event::RunApprovalRequested { .. }))
+            );
+            assert!(user_asks.claim_answer(request_id, answers).is_err());
+
+            let frame: Value = serde_json::from_str(
+                &std::fs::read_to_string(directory.path().join("user-ask-input.json")).unwrap(),
+            )
+            .unwrap();
+            match harness {
+                HarnessKind::Claude => assert_eq!(
+                    frame,
+                    json!({
+                        "type": "control_response",
+                        "response": {"subtype": "success", "request_id": "ask-claude", "response": {
+                            "behavior": "allow", "updatedInput": {
+                                "questions": [
+                                    {"question": "Which checks?", "multiSelect": true,
+                                     "options": [{"label": "Tests"}, {"label": "Clippy"}]},
+                                    {"question": "Branch name?"}
+                                ],
+                                "answers": {"Which checks?": "Tests, Clippy", "Branch name?": "feature/native-ask"}
+                            }
+                        }}
+                    })
+                ),
+                HarnessKind::Codex => assert_eq!(
+                    frame,
+                    json!({
+                        "id": 77,
+                        "result": {"answers": {
+                            "checks": {"answers": ["Tests"]},
+                            "branch": {"answers": ["feature/native-ask"]}
+                        }}
+                    })
+                ),
+                HarnessKind::Omp => unreachable!(),
             }
         }
     }

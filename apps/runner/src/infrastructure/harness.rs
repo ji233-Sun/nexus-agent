@@ -41,7 +41,7 @@ pub(crate) fn prepare(request: &StartRun, cwd: &Path) -> (LaunchSpec, Box<dyn Li
                 request.session_id.as_deref(),
                 request.permission_mode,
             ),
-            Box::new(claude::EventDecoder),
+            Box::new(claude::EventDecoder::default()),
         ),
         HarnessKind::Codex => {
             let (spec, decoder) = codex::prepare_run(request, cwd);
@@ -76,7 +76,7 @@ pub(crate) fn prepare_title(
                 request.model.as_deref(),
                 request.effort,
             ),
-            Box::new(claude::EventDecoder),
+            Box::new(claude::EventDecoder::default()),
         ),
         HarnessKind::Codex => (
             codex::build_title_launch_spec(

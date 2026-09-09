@@ -58,7 +58,9 @@ Provider Profile 的名称、Base URL、环境变量名和默认模型保存在 
 
 审批弹窗显示所属任务和操作详情，可允许、拒绝或停止任务。回复只发送给对应运行中的请求；停止、CLI 撤销请求、超时或轮次结束后，旧请求失效。后台标题生成不继承 YOLO：Claude Code / OMP 继续禁用工具，Codex 保留只读沙箱。
 
-OMP 发起 `input` / `editor` 交互问题时，输入区会显示 User Ask 文本回答面板；包括 `ask` 工具选择「Other / 自定义回答」后的编辑器请求。提示文字和原始预填内容显示在问题中，不自动填入回答。提交后将文本回写给 OMP；原生撤销、输入超时、停止或轮次结束后，旧请求失效，不能重复回复。OMP 的 `select` / `confirm` 仍通过现有审批弹窗回答；Claude Code / Codex 尚未接入 User Ask 面板。
+Claude Code 的 `AskUserQuestion`、Codex 的 `item/tool/requestUserInput` 和 OMP 的 `input` / `editor` 会在输入区显示 User Ask 面板。选择项和回答方式遵循原生请求：Claude 支持单选、多选及自定义文本，Codex 支持单选、请求允许的自定义文本及纯文本问题，OMP 支持文本回答（包括 `ask` 工具选择「Other / 自定义回答」后的编辑器请求）。提交只回复对应运行中的问题，不会创建新一轮任务；原生撤销、停止或轮次结束后，旧请求失效，不能重复回复。
+
+OMP 的提示文字和原始预填内容显示在问题中，不自动填入回答；输入请求按原生 timeout 过期。OMP 的 `select` / `confirm` 仍通过现有审批弹窗回答。工具权限审批与 Claude / Codex 的交互提问分开处理。
 
 ## 安装与更新
 
