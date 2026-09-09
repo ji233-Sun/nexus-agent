@@ -149,7 +149,7 @@ impl NexusView {
                     .child(div().text_size(px(12.)).text_color(rgb(colors.muted)).line_height(relative(1.6))
                         .child(ui_locale.text("系统识别可能需要联网，音频可能发送给 Apple；每段最多 60 秒。")))
                     .child(div().text_size(px(13.)).line_height(relative(1.6)).child(voice::native_status(voice.settings.locale.as_deref())))
-                    .child(Button::new("voice-locale").outline().small().h(px(CONTROL_HEIGHT)).label(voice.settings.locale.clone().unwrap_or_else(|| ui_locale.text("跟随系统语言").into()))
+                    .child(Button::new("voice-locale").debug_selector(|| "voice-locale".into()).outline().small().h(px(CONTROL_HEIGHT)).label(voice.settings.locale.clone().unwrap_or_else(|| ui_locale.text("跟随系统语言").into()))
                         .dropdown_menu({ let view = cx.entity().downgrade(); move |menu, _, _| {
                             let mut menu = menu.scrollable(true);
                             for locale in std::iter::once(None).chain(voice::native_locales().into_iter().map(Some)) {

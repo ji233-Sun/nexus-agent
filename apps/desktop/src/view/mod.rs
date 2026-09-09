@@ -2171,6 +2171,45 @@ mod catalog_model_tests {
             "Configure voice input"
         );
         assert!(cx.debug_bounds("voice-mimo-config").is_none());
+        #[cfg(target_os = "macos")]
+        {
+            view.update(cx, |view, cx| {
+                view.presenter
+                    .select_voice_provider(Provider::MacOs)
+                    .unwrap();
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let trigger = cx.debug_bounds("voice-locale").unwrap();
+            let position = gpui::point(trigger.left() + px(16.), trigger.center().y);
+            cx.simulate_click(position, Default::default());
+            cx.run_until_parked();
+            let settings_offset = view.read_with(cx, |view, _| view.settings_scroll.offset());
+            cx.simulate_event(gpui::ScrollWheelEvent {
+                position,
+                delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-10000.))),
+                ..Default::default()
+            });
+            cx.run_until_parked();
+            cx.simulate_click(position, Default::default());
+            cx.run_until_parked();
+            view.read_with(cx, |view, _| {
+                let locales = crate::infrastructure::voice::native_locales();
+                let selected = view
+                    .presenter
+                    .model()
+                    .voice
+                    .settings
+                    .locale
+                    .as_ref()
+                    .unwrap();
+                assert!(
+                    locales[locales.len() / 2..].contains(selected),
+                    "scrolling the language menu should reach its lower entries: {selected}"
+                );
+                assert_eq!(view.settings_scroll.offset(), settings_offset);
+            });
+        }
         view.update(cx, |view, cx| {
             view.presenter
                 .select_voice_provider(Provider::Mimo)
