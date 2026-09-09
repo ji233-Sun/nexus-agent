@@ -45,7 +45,7 @@ impl SettingsSection {
             Self::Appearance => locale.text("外观"),
             Self::Agent => locale.text("执行引擎"),
             Self::Providers => locale.text("凭据配置"),
-            Self::Voice => "语音输入",
+            Self::Voice => locale.text("语音输入"),
             Self::Remote => locale.text("远程访问"),
             Self::Archived => locale.text("归档对话"),
         }
@@ -1689,4 +1689,18 @@ fn masked_token(token: &str) -> String {
     let prefix = token.chars().take(6).collect::<String>();
     let suffix = token.chars().rev().take(4).collect::<String>();
     format!("{prefix}••••{}", suffix.chars().rev().collect::<String>())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn voice_sidebar_label_follows_ui_language() {
+        assert_eq!(SettingsSection::Voice.label(Language::Chinese), "语音输入");
+        assert_eq!(
+            SettingsSection::Voice.label(Language::English),
+            "Voice input"
+        );
+    }
 }

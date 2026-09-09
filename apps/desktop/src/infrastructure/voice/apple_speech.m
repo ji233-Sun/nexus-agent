@@ -53,8 +53,20 @@ int nexus_microphone_authorization(void) {
     }
 }
 
-void nexus_request_microphone_authorization(void) {
+static char *NexusUsageDescriptionError(NSString *key) {
+    id value = [NSBundle.mainBundle objectForInfoDictionaryKey:key];
+    if ([value isKindOfClass:NSString.class] &&
+        [[value stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] length] > 0) {
+        return NULL;
+    }
+    return NexusCopyString([NSString stringWithFormat:@"Missing %@ in the main bundle Info.plist. Run Nexus from an .app bundle containing the privacy usage descriptions instead of a bare cargo run binary.", key]);
+}
+
+char *nexus_request_microphone_authorization(void) {
+    char *error = NexusUsageDescriptionError(@"NSMicrophoneUsageDescription");
+    if (error) return error;
     [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio completionHandler:^(__unused BOOL allowed) {}];
+    return NULL;
 }
 
 int nexus_speech_authorization(void) {
@@ -65,8 +77,11 @@ int nexus_speech_authorization(void) {
     }
 }
 
-void nexus_request_speech_authorization(void) {
+char *nexus_request_speech_authorization(void) {
+    char *error = NexusUsageDescriptionError(@"NSSpeechRecognitionUsageDescription");
+    if (error) return error;
     [SFSpeechRecognizer requestAuthorization:^(__unused SFSpeechRecognizerAuthorizationStatus status) {}];
+    return NULL;
 }
 
 void *nexus_speech_start(const char *locale_name, char **error_out) {
@@ -132,13 +147,14 @@ void nexus_speech_cancel(void *opaque) {
     }
 }
 
-char *nexus_speech_take_result(void *opaque, bool *done) {
+char *nexus_speech_take_result(void *opaque, bool *done, bool *failed) {
     @autoreleasepool {
     NexusSpeechSession *session = (__bridge NexusSpeechSession *)opaque;
     @synchronized (session) {
         *done = session.done;
+        *failed = session.error != nil;
         if (!session.done) return NULL;
-        return NexusCopyString(session.error ? [@"ERROR: " stringByAppendingString:session.error] : (session.result ?: @""));
+        return NexusCopyString(session.error ?: (session.result ?: @""));
     }
     }
 }

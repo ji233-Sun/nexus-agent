@@ -1611,6 +1611,7 @@ impl NexusView {
         let colors = palette(cx);
         let material = materials(cx);
         let model = self.presenter.model();
+        let voice_status = model.voice.status.render(locale);
         let probe = model.selected_probe();
         let history = model.selected_codex_thread.is_some();
         let can_submit = can_send_prompt(model, &self.prompt_input.read(cx).value());
@@ -1889,13 +1890,13 @@ impl NexusView {
                                     .flex()
                                     .flex_col()
                                     .child(self.render_message_queue(cx))
-                                    .when(!model.voice.status.is_empty(), |element| {
+                                    .when(!voice_status.is_empty(), |element| {
                                         element.child(
                                             div()
                                                 .mb_2()
                                                 .text_size(px(12.))
                                                 .text_color(rgb(colors.text_secondary))
-                                                .child(model.voice.status.clone()),
+                                                .child(voice_status.to_owned()),
                                         )
                                     })
                                     .child(
@@ -2150,6 +2151,9 @@ mod catalog_model_tests {
         let (presenter, _, _directory) = fixture();
         let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
         cx.simulate_resize(gpui::size(px(1040.), px(680.)));
+        view.update_in(cx, |view, window, cx| {
+            view.set_language(Language::English, window, cx);
+        });
         cx.run_until_parked();
         let voice = cx.debug_bounds("voice-record").unwrap();
         let submit = cx.debug_bounds("composer-submit").unwrap();
@@ -2160,6 +2164,11 @@ mod catalog_model_tests {
         click_debug(cx, "voice-record");
         cx.run_until_parked();
         assert!(cx.debug_bounds("voice-settings").is_some());
+        assert!(cx.debug_bounds("settings-nav-voice").is_some());
+        assert_eq!(
+            Language::English.text("配置语音输入"),
+            "Configure voice input"
+        );
         assert!(cx.debug_bounds("voice-mimo-config").is_none());
         view.update(cx, |view, cx| {
             view.presenter
@@ -2187,6 +2196,7 @@ mod catalog_model_tests {
             cx.notify();
         });
         cx.run_until_parked();
+        assert!(cx.debug_bounds("voice-record").is_some());
         cx.simulate_keystrokes(if cfg!(target_os = "macos") {
             "cmd-z"
         } else {
