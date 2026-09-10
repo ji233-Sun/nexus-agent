@@ -1208,7 +1208,9 @@ async fn commit_messages_use_each_harness_configuration_without_starting_a_run()
         }
         let args = fs::read_to_string(directory.path().join("title-args.txt")).unwrap();
         assert!(args.contains("--model\ncommit-model"));
-        assert!(!args.contains("selected change"));
+        if harness != HarnessKind::Kimi {
+            assert!(!args.contains("selected change"));
+        }
         assert!(args.contains(match harness {
             HarnessKind::Claude => "--permission-mode\ndontAsk",
             HarnessKind::Codex => "--sandbox\nread-only",
@@ -1323,7 +1325,11 @@ async fn runner_generates_titles_with_each_harness_in_a_safe_background_process(
 
         assert_eq!(title, "Fix authentication flow");
         let args = fs::read_to_string(directory.path().join("title-args.txt")).unwrap();
-        assert!(!args.contains("Please fix the authentication flow"));
+        // Kimi Code receives the title prompt as an argument; every other
+        // harness keeps the user message out of the process arguments.
+        if harness != HarnessKind::Kimi {
+            assert!(!args.contains("Please fix the authentication flow"));
+        }
         assert!(args.contains("--model\ntitle-model"));
         assert!(!args.contains("conversation-model"));
         assert!(!args.contains("high"));
@@ -1365,7 +1371,8 @@ async fn runner_generates_titles_with_each_harness_in_a_safe_background_process(
             }
             HarnessKind::Kimi => {
                 assert!(args.contains("--agent-file"));
-                assert!(args.contains("--mcp-config-file"));
+                assert!(args.contains("--output-format\nstream-json"));
+                assert!(args.contains("-p\nGenerate a concise title"));
             }
             HarnessKind::Qoder | HarnessKind::QoderCn | HarnessKind::Codebuddy => {
                 assert!(args.contains("--tools\n\n"));

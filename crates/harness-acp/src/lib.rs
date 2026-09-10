@@ -610,55 +610,31 @@ pub fn prepare_kimi_text_generation(
     cwd: &Path,
 ) -> Result<(LaunchSpec, KimiTextDecoder), String> {
     let directory = tempfile::tempdir().map_err(|_| "无法创建 Kimi 文本生成配置。")?;
+    // Kimi Code agent files are Markdown with YAML frontmatter. An empty tool
+    // allowlist also denies every MCP tool, so generated text stays tool-free.
     std::fs::write(
-        directory.path().join("system.md"),
-        "Follow the requested output format. Return only the requested text.",
+        directory.path().join("agent.md"),
+        "---\nname: nexus-text\ndescription: Nexus text generation\ntools: []\n---\nFollow the requested output format. Return only the requested text.\n",
     )
-    .map_err(|_| "无法写入 Kimi 文本生成提示。")?;
-    std::fs::write(directory.path().join("agent.yaml"), "version: 1\nagent:\n  name: nexus-text\n  system_prompt_path: system.md\n  tools: []\n  subagents: {}\n").map_err(|_|"无法写入 Kimi 文本生成配置。")?;
-    // Explicit empty MCP config also suppresses the user's global MCP configuration.
-    std::fs::write(directory.path().join("mcp.json"), "{\"mcpServers\":{}}")
-        .map_err(|_| "无法写入 Kimi 文本生成 MCP 配置。")?;
+    .map_err(|_| "无法写入 Kimi 文本生成配置。")?;
     let mut args: Vec<String> = [
-        "--print",
-        "--final-message-only",
-        "--output-format",
-        "text",
-        "--agent-file",
+        "-p".into(),
+        prompt.into(),
+        "--output-format".into(),
+        "stream-json".into(),
+        "--agent-file".into(),
+        directory.path().join("agent.md").to_string_lossy().into(),
     ]
-    .map(Into::into)
     .to_vec();
-    args.push(directory.path().join("agent.yaml").to_string_lossy().into());
-    args.extend([
-        "--work-dir".into(),
-        directory.path().to_string_lossy().into(),
-    ]);
-    args.extend([
-        "--mcp-config-file".into(),
-        directory.path().join("mcp.json").to_string_lossy().into(),
-    ]);
     if let Some(model) = &run.model {
-        let (model, thinking) = model
-            .strip_suffix(",thinking")
-            .map(|m| (m, true))
-            .unwrap_or((model, false));
-        args.extend([
-            "--model".into(),
-            model.into(),
-            if thinking {
-                "--thinking"
-            } else {
-                "--no-thinking"
-            }
-            .into(),
-        ]);
+        args.extend(["--model".into(), model.clone()]);
     }
     Ok((
         LaunchSpec {
             executable: run.executable.clone().into(),
             args,
             cwd: cwd.into(),
-            stdin: prompt.into(),
+            stdin: String::new(),
         },
         KimiTextDecoder {
             _directory: directory,
@@ -672,8 +648,14 @@ pub struct KimiTextDecoder {
 }
 impl LineDecoder for KimiTextDecoder {
     fn decode_line(&mut self, line: &str) -> Result<Vec<DecodedEvent>, serde_json::Error> {
-        self.text.push_str(line);
-        self.text.push('\n');
+        let frame: Value = serde_json::from_str(line)?;
+        if frame["role"] != "assistant" {
+            return Ok(vec![]);
+        }
+        let Some(content) = frame["content"].as_str() else {
+            return Ok(vec![]);
+        };
+        self.text.push_str(content);
         Ok(vec![DecodedEvent::MessageCompleted(self.text.clone())])
     }
     fn steer(&mut self, _: &str, _: &str) -> Option<InputFrame> {
@@ -857,7 +839,7 @@ mod tests {
     fn kimi_title_agent_has_no_tools_or_mcp_and_never_resumes_conversation() {
         let mut run = run(HarnessKind::Kimi);
         run.session_id = Some("saved".into());
-        run.model = Some("model,thinking".into());
+        run.model = Some("kimi-code/k3".into());
         let (spec, mut decoder) = prepare_kimi_text_generation(
             &TextGenerationConfig {
                 harness: run.harness,
@@ -870,13 +852,17 @@ mod tests {
             Path::new("/project"),
         )
         .unwrap();
-        assert!(spec.args.windows(2).any(|p| p == ["--model", "model"]));
-        assert!(spec.args.contains(&"--thinking".into()));
+        assert_eq!(spec.args[..2], ["-p", "title prompt"]);
+        assert!(spec.args.windows(2).any(|p| p == ["--model", "kimi-code/k3"]));
+        assert!(spec.args.windows(2).any(|p| p == ["--output-format", "stream-json"]));
         assert!(!spec.args.contains(&"--session".into()));
+        assert!(spec.stdin.is_empty());
         let path = &spec.args[spec.args.iter().position(|a| a == "--agent-file").unwrap() + 1];
+        assert!(path.ends_with("agent.md"));
         assert!(std::fs::read_to_string(path).unwrap().contains("tools: []"));
         assert!(
-            matches!(&decoder.decode_line("Title").unwrap()[0],DecodedEvent::MessageCompleted(t) if t.trim()=="Title")
+            matches!(&decoder.decode_line(r#"{"role":"assistant","content":"Title"}"#).unwrap()[0],DecodedEvent::MessageCompleted(t) if t.trim()=="Title")
         );
+        assert!(decoder.decode_line(r#"{"role":"meta","type":"session.resume_hint"}"#).unwrap().is_empty());
     }
 }

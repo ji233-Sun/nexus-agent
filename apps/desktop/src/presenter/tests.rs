@@ -5663,9 +5663,14 @@ fn native_transport_and_codebuddy_region_persist_and_reach_launch_configuration(
         HarnessKind::Codebuddy,
     ] {
         presenter.model.selected_harness = harness;
+        // Kimi Code is ACP-only, so its default never falls back to the CLI.
         assert_eq!(
             presenter.harness_transport(harness),
-            nexus_domain::HarnessTransport::Cli
+            if harness == HarnessKind::Kimi {
+                nexus_domain::HarnessTransport::Acp
+            } else {
+                nexus_domain::HarnessTransport::Cli
+            }
         );
         presenter.set_harness_transport(nexus_domain::HarnessTransport::Acp);
         assert_eq!(

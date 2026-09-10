@@ -86,7 +86,14 @@ fn main() {
         )
         .unwrap();
         let mut prompt = String::new();
-        io::stdin().read_to_string(&mut prompt).unwrap();
+        if kimi_title {
+            // Kimi Code print mode takes the prompt as an argument, not on stdin.
+            if let Some(index) = args.iter().position(|arg| arg == "-p") {
+                prompt = args.get(index + 1).cloned().unwrap_or_default();
+            }
+        } else {
+            io::stdin().read_to_string(&mut prompt).unwrap();
+        }
         fs::write("title-prompt.txt", &prompt).unwrap();
         if env::var_os("TEST_TITLE_BLOCK").is_some() {
             let _child = Command::new(env::current_exe().unwrap())
@@ -103,7 +110,10 @@ fn main() {
         } else {
             "**Fix authentication flow.**"
         };
-        if kimi_title { println!("{text}"); return; }
+        if kimi_title {
+            println!(r#"{{"role":"assistant","content":{text:?}}}"#);
+            return;
+        }
         match harness {
             Harness::Codex => println!(
                 r#"{{"type":"item.completed","item":{{"id":"title","type":"agent_message","text":{text:?}}}}}"#

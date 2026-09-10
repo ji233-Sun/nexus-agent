@@ -1013,10 +1013,7 @@ impl NexusView {
             .when(
                 matches!(
                     model.selected_harness,
-                    HarnessKind::Kimi
-                        | HarnessKind::Qoder
-                        | HarnessKind::QoderCn
-                        | HarnessKind::Codebuddy
+                    HarnessKind::Qoder | HarnessKind::QoderCn | HarnessKind::Codebuddy
                 ),
                 |view| {
                     view.child(settings_group(

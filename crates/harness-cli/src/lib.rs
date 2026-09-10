@@ -1,15 +1,11 @@
-mod kimi;
 use nexus_domain::{HarnessKind, UserAskAnswer};
 use nexus_harness_core::{DecodedEvent, InputFrame, LaunchSpec, LineDecoder};
 use nexus_protocol::StartRun;
 use serde_json::{Value, json};
 use std::path::Path;
 
+/// Kimi Code is ACP-only; this decoder serves Qoder / Qoder CN / CodeBuddy.
 pub fn prepare_run(run: &StartRun, cwd: &Path) -> (LaunchSpec, Box<dyn LineDecoder>) {
-    if run.harness == HarnessKind::Kimi {
-        let (spec, decoder) = kimi::prepare(run, cwd);
-        return (spec, Box::new(decoder));
-    }
     let qoder = matches!(run.harness, HarnessKind::Qoder | HarnessKind::QoderCn);
     let mut args: Vec<String> = [
         "--print",

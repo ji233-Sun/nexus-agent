@@ -88,6 +88,11 @@ pub(crate) fn restore_session_settings(request: &mut StartRun) -> Result<(), Str
     } else {
         request.transport = HarnessTransport::Acp;
     }
+    // Sessions recorded before Kimi Code dropped the Wire protocol are resumed
+    // over ACP; the stored native session id may no longer be loadable.
+    if request.harness == HarnessKind::Kimi {
+        request.transport = HarnessTransport::Acp;
+    }
     Ok(())
 }
 
@@ -144,7 +149,12 @@ fn prepare_native(
     cwd: &Path,
 ) -> Result<(LaunchSpec, Box<dyn LineDecoder>), String> {
     Ok(match request.harness {
-        HarnessKind::Kimi | HarnessKind::Qoder | HarnessKind::QoderCn | HarnessKind::Codebuddy => {
+        // Kimi Code no longer ships the Wire protocol; ACP is its only transport.
+        HarnessKind::Kimi => {
+            let (spec, decoder) = acp::prepare_run(request, cwd);
+            (spec, Box::new(decoder) as Box<dyn LineDecoder>)
+        }
+        HarnessKind::Qoder | HarnessKind::QoderCn | HarnessKind::Codebuddy => {
             if request.transport == HarnessTransport::Cli {
                 nexus_harness_cli::prepare_run(request, cwd)
             } else {
