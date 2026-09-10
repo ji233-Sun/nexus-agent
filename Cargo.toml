@@ -44,6 +44,11 @@ uuid = { version = "1.18", features = ["serde", "v4"] }
 [profile.dev]
 opt-level = 2
 debug = 1
+split-debuginfo = "packed"
+
+# Dependency sources rarely need debugging during normal application development.
+[profile.dev.package."*"]
+debug = 0
 
 [profile.release]
 lto = "thin"

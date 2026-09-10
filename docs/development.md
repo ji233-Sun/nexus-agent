@@ -36,11 +36,13 @@ cd nexus-agent
 cargo run -p nexus-desktop --locked
 ```
 
-默认开发构建已开启优化，使用 `debug = 1` 保留有限调试信息和运行时检查，测试配置继承此设置。首次构建依赖较慢，后续可增量编译；评估发布性能时使用 `cargo run -p nexus-desktop --release --locked`。
+默认开发构建已开启优化，workspace 成员使用 `debug = 1` 保留有限调试信息和运行时检查，第三方依赖使用 `debug = 0`，测试配置继承这些设置。调试信息采用 `split-debuginfo = "packed"`：macOS 将其集中到 `.dSYM`，链接后可移除 `deps` 中为调试而保留的临时 `.o` 文件；链接时会增加打包步骤。此模式也支持 Linux 和 Windows MSVC。首次构建依赖较慢，后续可增量编译；评估发布性能时使用 `cargo run -p nexus-desktop --release --locked`。
 
 Desktop 默认以独立子进程运行内置 Runner，确保两者协议版本一致。需要调试外置 Runner 时，可通过 `NEXUS_RUNNER_PATH` 指定完整路径；版本不匹配时会拒绝连接。
 
 ### 控制本地增量缓存大小
+
+新配置不会自动删除此前保留的构建产物。从旧配置迁移时，可先执行一次 `cargo clean --profile dev --locked`，再使用下方命令重建；该操作会清理开发/测试构建缓存，保留 release 产物。
 
 Cargo 没有增量缓存容量上限配置。通过以下包装命令，可在 Cargo 结束后，将本仓库的 `target/debug/incremental` 清理至 **5 GiB** 以内：
 
