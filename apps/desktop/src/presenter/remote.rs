@@ -46,7 +46,7 @@ impl Presenter {
                     if self.start_run(None, &prompt, &executable, self.model.permission_mode) {
                         Ok(())
                     } else {
-                        Err(self.model.status.render(Language::Chinese).to_owned())
+                        Err(self.model.latest_log_text(Language::Chinese).to_owned())
                     }
                 } else {
                     Err("项目不存在，请先在 Nexus 中打开项目".into())
@@ -88,7 +88,7 @@ impl Presenter {
             active_run_id: self.model.active_run,
             active_task_id: self.model.active_task,
             streaming_text: self.model.streaming_text.clone(),
-            status: self.model.status.render(Language::Chinese).to_owned(),
+            status: self.model.run_status.render(Language::Chinese).to_owned(),
             harness: self.model.selected_harness,
             model: selection.model,
             effort: selection.effort,
@@ -127,14 +127,14 @@ impl Presenter {
             remote_control.endpoint(),
             remote_control.token()
         );
-        self.model.status = "远程控制链接已复制。".into();
+        self.model.log_status("远程控制链接已复制。".into());
         self.notify_remote_changed();
         Some(link)
     }
 
     pub(crate) fn copyable_remote_token(&mut self) -> Option<String> {
         let token = self.remote_control.as_ref()?.token().to_owned();
-        self.model.status = "远程控制访问令牌已复制。".into();
+        self.model.log_status("远程控制访问令牌已复制。".into());
         self.notify_remote_changed();
         Some(token)
     }

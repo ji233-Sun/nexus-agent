@@ -68,6 +68,7 @@ impl NexusView {
                                 |element| {
                                     element.child(
                                         div()
+                                            .debug_selector(|| "conversation-run-status".into())
                                             .flex()
                                             .items_center()
                                             .gap_3()
@@ -78,10 +79,9 @@ impl NexusView {
                                                 !self.reduced_motion,
                                             ))
                                             .child(
-                                                div()
-                                                    .flex_1()
-                                                    .min_w_0()
-                                                    .child(model.status_text().to_owned()),
+                                                div().flex_1().min_w_0().child(
+                                                    model.run_status.render(locale).to_owned(),
+                                                ),
                                             )
                                             .when_some(
                                                 model.active_run_elapsed_seconds,
@@ -176,13 +176,6 @@ impl NexusView {
         } else {
             locale.text("从一个想法开始")
         };
-        let description = if has_project {
-            model.status_text().to_owned()
-        } else {
-            locale
-                .text("先选择本地项目，再描述你希望完成的工作。")
-                .into()
-        };
         div()
             .debug_selector(move || selector.into())
             .flex_1()
@@ -213,16 +206,17 @@ impl NexusView {
                     .line_height(relative(1.25))
                     .child(title),
             )
-            .child(
-                div()
-                    .debug_selector(|| "workspace-empty-status".into())
-                    .mt_3()
-                    .max_w(px(520.))
-                    .text_size(px(14.))
-                    .text_color(rgb(colors.muted))
-                    .line_height(relative(1.55))
-                    .child(description),
-            )
+            .when(!has_project, |element| {
+                element.child(
+                    div()
+                        .mt_3()
+                        .max_w(px(520.))
+                        .text_size(px(14.))
+                        .text_color(rgb(colors.muted))
+                        .line_height(relative(1.55))
+                        .child(locale.text("先选择本地项目，再描述你希望完成的工作。")),
+                )
+            })
             .when(has_project, |element| {
                 element.child(
                     div()

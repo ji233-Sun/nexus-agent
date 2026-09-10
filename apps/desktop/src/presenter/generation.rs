@@ -106,7 +106,7 @@ impl Presenter {
             .set_setting(kind.setting_key(), &value)
             .is_err()
         {
-            self.model.status = "无法保存文本生成设置。".into();
+            self.model.log_status("无法保存文本生成设置。".into());
             return false;
         }
         match kind {

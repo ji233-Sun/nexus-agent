@@ -119,12 +119,10 @@ impl Presenter {
             return;
         }
         match event {
-            Event::RunnerReady => {
-                self.model.status = LocalizedText::new(
-                    "Runner 已连接，正在探测 {0}…",
-                    &[("0", (self.model.selected_harness).to_string())],
-                )
-            }
+            Event::RunnerReady => self.model.log_status(LocalizedText::new(
+                "Runner 已连接，正在探测 {0}…",
+                &[("0", (self.model.selected_harness).to_string())],
+            )),
             Event::HarnessDetected(probe) => {
                 let harness = probe.harness;
                 let available = probe.available;
@@ -139,7 +137,7 @@ impl Presenter {
                             self.refresh_model_catalog();
                         }
                     }
-                    self.model.status = message;
+                    self.model.log_status(message);
                 }
             }
             Event::ModelCatalogLoaded {
@@ -169,10 +167,10 @@ impl Presenter {
                         .and_then(|profile| profile.model.as_deref())
                         .is_some()
                     && self.model.selected_catalog_model().is_none();
-                // Catalog progress and diagnostics belong to the model picker. Only
-                // changes requiring the user's attention can replace task status.
+                // Catalog progress belongs to the model picker. Record selection
+                // changes in the runtime log without changing conversation progress.
                 if selected_unavailable {
-                    self.model.status = LocalizedText::new(
+                    self.model.log_status(LocalizedText::new(
                         "当前 {harness} 模型 {0} 不可用，请重新选择或跟随默认。",
                         &[
                             ("harness", (harness).to_string()),
@@ -182,12 +180,14 @@ impl Presenter {
                                     .to_string(),
                             ),
                         ],
-                    );
+                    ));
                 } else if effort_reset {
-                    self.model.status = "当前模型不支持原 effort，已恢复为模型默认。".into();
+                    self.model
+                        .log_status("当前模型不支持原 effort，已恢复为模型默认。".into());
                 } else if profile_model_unverified {
-                    self.model.status =
-                        "Profile 默认模型不在当前目录中；仍可使用，但尚未验证可用。".into();
+                    self.model.log_status(
+                        "Profile 默认模型不在当前目录中；仍可使用，但尚未验证可用。".into(),
+                    );
                 }
             }
             Event::ModelCatalogFailed {
@@ -235,20 +235,20 @@ impl Presenter {
                     .model
                     .active_harness
                     .unwrap_or(self.model.selected_harness);
-                self.model.status = LocalizedText::new(
+                self.model.set_run_status(LocalizedText::new(
                     "{harness} 正在执行…",
                     &[("harness", (harness).to_string())],
-                );
+                ));
                 let _ = self.storage.update_run_status(run_id, RunStatus::Running);
             }
             Event::RunSessionStarted { run_id, session_id }
                 if self.model.active_run == Some(run_id) && !session_id.is_empty() =>
             {
                 if let Err(error) = self.storage.save_run_session(run_id, &session_id) {
-                    self.model.status = LocalizedText::new(
+                    self.model.log_status(LocalizedText::new(
                         "无法保存会话，后续可能无法续聊：{error}",
                         &[("error", (error).to_string())],
-                    );
+                    ));
                 }
             }
             Event::RunOutputDelta { run_id, text } if self.model.active_run == Some(run_id) => {
@@ -265,7 +265,8 @@ impl Presenter {
                 {
                     self.model.pending_approvals.push_back(request);
                 }
-                self.model.status = "等待授权，请在桌面弹窗中处理。".into();
+                self.model
+                    .set_run_status("等待授权，请在桌面弹窗中处理。".into());
             }
             Event::RunApprovalResolved { run_id, request_id }
                 if self.model.active_run == Some(run_id) =>
@@ -276,11 +277,12 @@ impl Presenter {
                 if self.model.responding_approval == Some(request_id) {
                     self.model.responding_approval = None;
                 }
-                self.model.status = if self.model.pending_approvals.is_empty() {
-                    "审批已处理，等待 Agent 继续…".into()
-                } else {
-                    "等待授权，请在桌面弹窗中处理。".into()
-                };
+                self.model
+                    .set_run_status(if self.model.pending_approvals.is_empty() {
+                        "审批已处理，等待 Agent 继续…".into()
+                    } else {
+                        "等待授权，请在桌面弹窗中处理。".into()
+                    });
             }
             Event::RunApprovalRejected {
                 run_id,
@@ -290,7 +292,7 @@ impl Presenter {
                 if self.model.responding_approval == Some(request_id) {
                     self.model.responding_approval = None;
                 }
-                self.model.status = message.into();
+                self.model.set_run_status(message.into());
             }
             Event::RunInputAccepted { run_id, message_id }
                 if self.model.active_run == Some(run_id)
@@ -311,7 +313,7 @@ impl Presenter {
                         &message.prompt,
                         None,
                     );
-                    self.model.status = "Steer 已送达当前轮次。".into();
+                    self.model.log_status("Steer 已送达当前轮次。".into());
                 }
             }
             Event::RunInputRejected {
@@ -322,7 +324,7 @@ impl Presenter {
                 && self.model.steering_message == Some(message_id) =>
             {
                 self.model.steering_message = None;
-                self.model.status = message.into();
+                self.model.log_status(message.into());
             }
             Event::RunUserAskRequested {
                 run_id,
@@ -347,7 +349,7 @@ impl Presenter {
                 self.model
                     .pending_user_asks
                     .push(PendingUserAsk::new(request_id, questions));
-                self.model.status = "Agent 正在等待你的回答。".into();
+                self.model.set_run_status("Agent 正在等待你的回答。".into());
             }
             Event::RunUserAskAnswerRejected {
                 run_id,
@@ -361,7 +363,7 @@ impl Presenter {
                     request.submission = UserAskSubmissionState::Pending;
                     request.error = Some(message.clone());
                     request.submitted_answers = None;
-                    self.model.status = message.into();
+                    self.model.set_run_status(message.into());
                 }
             }
             Event::RunUserAskAnswerSent { run_id, request_id }
@@ -373,7 +375,8 @@ impl Presenter {
                 }) {
                     request.submission = UserAskSubmissionState::Sent;
                     request.error = None;
-                    self.model.status = "回答已发送，等待 Agent 继续…".into();
+                    self.model
+                        .set_run_status("回答已发送，等待 Agent 继续…".into());
                 }
             }
             Event::RunUserAskFinished {
@@ -402,15 +405,16 @@ impl Presenter {
                         &history,
                         None,
                     );
-                    self.model.status = if self.model.pending_user_asks.is_empty() {
-                        message
-                            .unwrap_or_else(|| {
-                                user_ask_status_text(self.model.language, status).into()
-                            })
-                            .into()
-                    } else {
-                        "Agent 正在等待你的回答。".into()
-                    };
+                    self.model
+                        .set_run_status(if self.model.pending_user_asks.is_empty() {
+                            message
+                                .unwrap_or_else(|| {
+                                    user_ask_status_text(self.model.language, status).into()
+                                })
+                                .into()
+                        } else {
+                            "Agent 正在等待你的回答。".into()
+                        });
                 }
             }
             Event::RunMessageCompleted { run_id, text }
@@ -476,13 +480,13 @@ impl Presenter {
             } if self.model.active_run == Some(run_id) => {
                 let _ = self.storage.update_run_status(run_id, status);
                 if let Some(message) = message {
-                    self.model.status = message.into();
+                    self.model.set_run_status(message.into());
                 }
             }
             Event::RunFailed {
                 run_id, message, ..
             } if self.model.active_run == Some(run_id) => {
-                self.model.status = message.clone().into();
+                self.model.set_run_status(message.clone().into());
                 self.persist_live_message(
                     run_id,
                     MessageRole::System,
@@ -532,7 +536,7 @@ impl Presenter {
                 self.model.active_permission_mode = None;
                 self.model.pending_approvals.clear();
                 self.model.responding_approval = None;
-                self.model.status = match status {
+                self.model.set_run_status(match status {
                     RunStatus::Completed => "任务已完成".into(),
                     RunStatus::Cancelled => "任务已取消".into(),
                     RunStatus::Failed => "任务执行失败".into(),
@@ -540,7 +544,7 @@ impl Presenter {
                         "任务状态：{status}",
                         &[("status", (status).to_string())],
                     ),
-                };
+                });
                 self.reload_tasks();
                 self.reload_workspaces();
                 if self.model.selected_task != task_id
@@ -569,9 +573,7 @@ impl Presenter {
                                 .map(|project| project.id))
                 {
                     // Retry an ignored response only if task restoration has not replaced the request.
-                    let status = self.model.status.clone();
                     self.refresh_model_catalog();
-                    self.model.status = status;
                 }
             }
             _ => {}
@@ -631,7 +633,8 @@ impl Presenter {
                     prompt: prompt.trim().to_owned(),
                     permission_mode: self.model.conversation.permission_mode,
                 });
-            self.model.status = "消息已排队，将在当前轮次结束后依次发送。".into();
+            self.model
+                .log_status("消息已排队，将在当前轮次结束后依次发送。".into());
             return true;
         }
         self.start_run(
@@ -692,7 +695,8 @@ impl Presenter {
         if self.model.active_permission_mode
             != Some(self.model.queued_messages[index].permission_mode)
         {
-            self.model.status = "排队消息的权限与当前轮次不同，请等待下一轮发送。".into();
+            self.model
+                .log_status("排队消息的权限与当前轮次不同，请等待下一轮发送。".into());
             return false;
         }
         let command = CommandEnvelope::new(Command::RunSteer {
@@ -705,14 +709,15 @@ impl Presenter {
             .as_ref()
             .is_some_and(|runner| runner.send(command).is_ok())
         {
-            self.model.status = "Runner 不可用，消息仍保留在队列中。".into();
+            self.model
+                .log_status("Runner 不可用，消息仍保留在队列中。".into());
             return false;
         }
         // A Steer that races with turn completion becomes the next queued message.
         let message = self.model.queued_messages.remove(index).unwrap();
         self.model.queued_messages.push_front(message);
         self.model.steering_message = Some(message_id);
-        self.model.status = "等待工具执行结束后介入…".into();
+        self.model.log_status("等待工具执行结束后介入…".into());
         true
     }
 
@@ -896,13 +901,13 @@ impl Presenter {
                 request.submission = UserAskSubmissionState::Submitting;
                 request.error = None;
                 request.submitted_answers = Some(submitted_answers);
-                self.model.status = "正在提交回答…".into();
+                self.model.set_run_status("正在提交回答…".into());
                 true
             }
             Err(error) => {
                 let message = format!("无法提交 User Ask 回答：{error}");
                 self.model.pending_user_asks[index].error = Some(message.clone());
-                self.model.status = message.into();
+                self.model.set_run_status(message.into());
                 false
             }
         }
@@ -916,7 +921,8 @@ impl Presenter {
         permission_mode: PermissionMode,
     ) -> bool {
         if self.model.updates.state.is_installing() {
-            self.model.status = "正在安装应用更新，重启后可继续任务。".into();
+            self.model
+                .log_status("正在安装应用更新，重启后可继续任务。".into());
             return false;
         }
         if self.model.active_run.is_some()
@@ -926,20 +932,20 @@ impl Presenter {
             return false;
         }
         let Some(project) = self.model.selected_project.clone() else {
-            self.model.status = "请先选择项目目录。".into();
+            self.model.log_status("请先选择项目目录。".into());
             return false;
         };
         let prompt = prompt.trim().to_owned();
         if prompt.is_empty() {
-            self.model.status = "Prompt 不能为空。".into();
+            self.model.log_status("Prompt 不能为空。".into());
             return false;
         }
         let configured_executable = configured_executable.trim().to_owned();
         if configured_executable.is_empty() {
-            self.model.status = LocalizedText::new(
+            self.model.log_status(LocalizedText::new(
                 "{0} 可执行文件不能为空。",
                 &[("0", (self.model.selected_harness).to_string())],
-            );
+            ));
             return false;
         }
         let profile_ready = self
@@ -951,10 +957,10 @@ impl Presenter {
             .selected_probe()
             .filter(|probe| probe.available && (probe.authenticated || profile_ready))
         else {
-            self.model.status = LocalizedText::new(
+            self.model.log_status(LocalizedText::new(
                 "{0} 尚未就绪，请先完成探测和登录。",
                 &[("0", (self.model.selected_harness).to_string())],
-            );
+            ));
             return false;
         };
         let executable = probe.executable.clone();
@@ -964,24 +970,26 @@ impl Presenter {
             let config = match self.storage.conversation_config(task_id) {
                 Ok(Some(config)) => config,
                 _ => {
-                    self.model.status = "无法读取当前任务的会话配置。".into();
+                    self.model.log_status("无法读取当前任务的会话配置。".into());
                     return false;
                 }
             };
             if config.harness != harness {
-                self.model.status = LocalizedText::new(
+                self.model.log_status(LocalizedText::new(
                     "当前会话使用 {0}，请切回该 Harness 继续对话，或新建任务。",
                     &[("0", (config.harness).to_string())],
-                );
+                ));
                 return false;
             }
             let Some(session_id) = config.session_id.filter(|id| !id.is_empty()) else {
-                self.model.status = "当前任务未保存可恢复的会话，无法继续对话；请新建任务。".into();
+                self.model
+                    .log_status("当前任务未保存可恢复的会话，无法继续对话；请新建任务。".into());
                 return false;
             };
             if config.executable != executable {
-                self.model.status =
-                    "当前探测结果与任务保存的可执行文件不一致，请重新选择任务并完成探测。".into();
+                self.model.log_status(
+                    "当前探测结果与任务保存的可执行文件不一致，请重新选择任务并完成探测。".into(),
+                );
                 return false;
             }
             Some(session_id)
@@ -989,19 +997,19 @@ impl Presenter {
             None
         };
         if !self.model.catalog_selection_is_valid() {
-            self.model.status = LocalizedText::new(
+            self.model.log_status(LocalizedText::new(
                 "当前 {harness} 模型或 effort 未通过目录验证，请调整选择后重试。",
                 &[("harness", (harness).to_string())],
-            );
+            ));
             return false;
         }
         let environment = match self.provider_launch_configuration(harness) {
             Ok(configuration) => configuration,
             Err(error) => {
-                self.model.status = LocalizedText::new(
+                self.model.log_status(LocalizedText::new(
                     "无法读取 Provider Profile：{error}",
                     &[("error", (error).to_string())],
-                );
+                ));
                 return false;
             }
         };
@@ -1040,7 +1048,7 @@ impl Presenter {
         }) {
             Ok(workspace) => workspace,
             Err(error) => {
-                self.model.status = error.to_string().into();
+                self.model.log_status(error.to_string().into());
                 return false;
             }
         };
@@ -1057,7 +1065,7 @@ impl Presenter {
             permission_mode,
             harness_version: harness_version.as_deref(),
         }) else {
-            self.model.status = "无法保存任务运行。".into();
+            self.model.log_status("无法保存任务运行。".into());
             return false;
         };
         let task_id = pending_run.task_id;
@@ -1097,7 +1105,8 @@ impl Presenter {
         {
             if pending_run.commit().is_err() {
                 let _ = runner.send(CommandEnvelope::new(Command::RunCancel { run_id }));
-                self.model.status = "无法保存任务运行，已请求停止 Runner。".into();
+                self.model
+                    .log_status("无法保存任务运行，已请求停止 Runner。".into());
                 return false;
             }
             self.model.active_run = Some(run_id);
@@ -1115,16 +1124,17 @@ impl Presenter {
                 .flatten()
                 .or(Some(workspace));
             self.model.messages = self.storage.messages(task_id).unwrap_or_default();
-            self.model.status = LocalizedText::translated(|language| {
-                let effort_label = match language {
-                    Language::Chinese => effort.to_string(),
-                    Language::English => language.effort(effort).to_owned(),
-                };
-                language.format(
-                    "正在启动 {harness} · {effort}",
-                    &[("harness", harness.to_string()), ("effort", effort_label)],
-                )
-            });
+            self.model
+                .set_run_status(LocalizedText::translated(|language| {
+                    let effort_label = match language {
+                        Language::Chinese => effort.to_string(),
+                        Language::English => language.effort(effort).to_owned(),
+                    };
+                    language.format(
+                        "正在启动 {harness} · {effort}",
+                        &[("harness", harness.to_string()), ("effort", effort_label)],
+                    )
+                }));
             let _ = self
                 .storage
                 .set_setting(executable_setting_key(harness), &configured_executable);
@@ -1132,7 +1142,7 @@ impl Presenter {
             self.reload_tasks();
             true
         } else {
-            self.model.status = "Runner 不可用，任务未启动。".into();
+            self.model.log_status("Runner 不可用，任务未启动。".into());
             false
         }
     }
@@ -1167,11 +1177,12 @@ impl Presenter {
             .as_ref()
             .is_some_and(|runner| runner.send(command).is_ok())
         {
-            self.model.status = "审批回复发送失败，请重试或停止任务。".into();
+            self.model
+                .set_run_status("审批回复发送失败，请重试或停止任务。".into());
             return false;
         }
         self.model.responding_approval = Some(request_id);
-        self.model.status = "正在发送审批回复…".into();
+        self.model.set_run_status("正在发送审批回复…".into());
         true
     }
 
@@ -1196,8 +1207,10 @@ impl Presenter {
             .model
             .active_harness
             .unwrap_or(self.model.selected_harness);
-        self.model.status =
-            LocalizedText::new("正在停止 {harness}…", &[("harness", (harness).to_string())]);
+        self.model.set_run_status(LocalizedText::new(
+            "正在停止 {harness}…",
+            &[("harness", (harness).to_string())],
+        ));
         Ok(())
     }
 }

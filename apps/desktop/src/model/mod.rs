@@ -221,8 +221,15 @@ pub(crate) struct ResolvedModelSelection {
     pub(crate) effort: ThinkingEffort,
 }
 
+pub(crate) struct RuntimeLogEntry {
+    pub(crate) timestamp: chrono::DateTime<chrono::Local>,
+    pub(crate) message: LocalizedText,
+}
+
 #[derive(Default)]
 pub(crate) struct AppModel {
+    // Logs belong to this launch, independent of conversation selection or deletion.
+    pub(crate) runtime_log: Vec<RuntimeLogEntry>,
     pub(crate) cnb: cnb::CnbModel,
     pub(crate) language: Language,
     pub(crate) voice: voice::VoiceModel,
@@ -286,7 +293,7 @@ pub(crate) struct ConversationState {
     pub(crate) pending_approvals: VecDeque<ApprovalRequest>,
     pub(crate) responding_approval: Option<Uuid>,
     pub(crate) streaming_text: String,
-    pub(crate) status: LocalizedText,
+    pub(crate) run_status: LocalizedText,
     pub(crate) selected_harness: HarnessKind,
     pub(crate) project_dirty: bool,
     pub(crate) model_override: Option<String>,
@@ -410,8 +417,23 @@ impl AppModel {
         cwd.filter(|path| !path.is_empty())
     }
 
-    pub(crate) fn status_text(&self) -> &str {
-        self.status.render(self.language)
+    pub(crate) fn latest_log_text(&self, language: Language) -> &str {
+        self.runtime_log
+            .last()
+            .map(|entry| entry.message.render(language))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn log_status(&mut self, message: LocalizedText) {
+        self.runtime_log.push(RuntimeLogEntry {
+            timestamp: chrono::Local::now(),
+            message,
+        });
+    }
+
+    pub(crate) fn set_run_status(&mut self, message: LocalizedText) {
+        self.run_status = message.clone();
+        self.log_status(message);
     }
 
     pub(crate) fn selected_probe(&self) -> Option<&HarnessProbe> {

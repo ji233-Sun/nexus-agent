@@ -38,10 +38,10 @@ impl Presenter {
                 true
             }
             Err(error) => {
-                self.model.status = LocalizedText::new(
+                self.model.log_status(LocalizedText::new(
                     "无法保存更新偏好：{error}",
                     &[("error", error.to_string())],
-                );
+                ));
                 false
             }
         }
