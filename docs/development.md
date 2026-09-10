@@ -36,9 +36,37 @@ cd nexus-agent
 cargo run -p nexus-desktop --locked
 ```
 
-默认开发构建已开启优化，保留调试信息和运行时检查。首次构建依赖较慢，后续可增量编译；评估发布性能时使用 `cargo run -p nexus-desktop --release --locked`。
+默认开发构建已开启优化，workspace 成员使用 `debug = 1` 保留有限调试信息和运行时检查，第三方依赖使用 `debug = 0`，测试配置继承这些设置。调试信息采用 `split-debuginfo = "packed"`：macOS 将其集中到 `.dSYM`，链接后可移除 `deps` 中为调试而保留的临时 `.o` 文件；链接时会增加打包步骤。此模式也支持 Linux 和 Windows MSVC。首次构建依赖较慢，后续可增量编译；评估发布性能时使用 `cargo run -p nexus-desktop --release --locked`。
 
 Desktop 默认以独立子进程运行内置 Runner，确保两者协议版本一致。需要调试外置 Runner 时，可通过 `NEXUS_RUNNER_PATH` 指定完整路径；版本不匹配时会拒绝连接。
+
+### 控制本地增量缓存大小
+
+新配置不会自动删除此前保留的构建产物。从旧配置迁移时，可先执行一次 `cargo clean --profile dev --locked`，再使用下方命令重建；该操作会清理开发/测试构建缓存，保留 release 产物。
+
+Cargo 没有增量缓存容量上限配置。通过以下包装命令，可在 Cargo 结束后，将本仓库的 `target/debug/incremental` 清理至 **5 GiB** 以内：
+
+```sh
+uv run "scripts/cargo_bounded.py" build --workspace --locked
+uv run "scripts/cargo_bounded.py" test --workspace --locked
+uv run "scripts/cargo_bounded.py" run -p nexus-desktop --locked
+```
+
+脚本通过 uv 管理 Python 3.12+，只使用标准库；也支持 `check` 和 `clippy`。清理会取得 Cargo 构建锁，按缓存内部最后修改时间优先删除最旧的整组缓存，保留 `deps`、可执行文件和源码。容量按硬链接去重计算；macOS/Linux 使用已分配磁盘块，Windows 使用文件大小，因此目录缩小量不等于实际释放的磁盘空间。
+
+这是构建结束后的软上限：编译期间可能超过 5 GiB，`run` 会在程序退出后清理。普通 `cargo` 命令不会触发清理；自定义 target/build 目录、交叉编译目录和其他 profile 的缓存也不在本脚本管理范围内。构建失败后仍会尝试清理并保留 Cargo 的退出码，清理失败会明确报错。清理后再次用到被淘汰的缓存时，需要重新生成它们。
+
+只清理现有缓存、无需重新构建：
+
+```sh
+uv run "scripts/cargo_bounded.py" prune
+```
+
+验证缓存清理逻辑（仅操作临时目录）：
+
+```sh
+uv run "scripts/cargo_bounded_test.py"
+```
 
 ### 语音输入开发与发布验收
 
