@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     infrastructure::cnb::DOCUMENTATION,
-    model::cnb::{Issue, IssueFilter, Label, PAGE_SIZE},
+    model::cnb::{Issue, IssueAction, IssueFilter, Label, PAGE_SIZE},
 };
 use gpui_kit::component::{scroll::ScrollableElement as _, spinner::Spinner};
 
@@ -54,6 +54,303 @@ fn issue_label(label: &Label, colors: Palette) -> impl IntoElement {
 }
 
 impl NexusView {
+    fn send_cnb_issue_to_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(prompt) = self.presenter.prepare_cnb_chat() else {
+            return;
+        };
+        self.prompt_input.update(cx, |input, cx| {
+            let draft = input.value();
+            let text = if draft.is_empty() {
+                prompt
+            } else {
+                format!("{draft}\n\n{prompt}")
+            };
+            input.replace_all(text, window, cx);
+        });
+        self.settings_open = false;
+        self.expanded_messages.clear();
+        self.timeline_scroll.scroll_to_bottom();
+        self.model_picker_open = true;
+        self.focus_prompt(window, cx);
+        self.presenter.notify_remote_changed();
+        cx.notify();
+    }
+
+    fn render_cnb_actions(&self, issue: &Issue, cx: &mut Context<Self>) -> impl IntoElement {
+        let cnb = &self.presenter.model().cnb;
+        let locale = self.presenter.model().language;
+        let colors = palette(cx);
+        let busy = cnb.action_request.is_some();
+        let state = if issue.state == "closed" {
+            IssueFilter::Open
+        } else {
+            IssueFilter::Closed
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Button::new("cnb-chat")
+                            .debug_selector(|| "cnb-chat".into())
+                            .primary()
+                            .small()
+                            .icon(IconName::Bot)
+                            .label(locale.text("用 AI 处理"))
+                            .tooltip(
+                                locale
+                                    .text("将完整 Issue 和评论加入聊天草稿，选择 Harness 后发送。"),
+                            )
+                            .disabled(
+                                busy || cnb.comments.is_none() || cnb.comments_request.is_some(),
+                            )
+                            .on_click(cx.listener(|app, _, window, cx| {
+                                app.send_cnb_issue_to_chat(window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("cnb-assign-self")
+                            .debug_selector(|| "cnb-assign-self".into())
+                            .outline()
+                            .small()
+                            .label(locale.text("指派给我"))
+                            .disabled(busy)
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.presenter.act_on_cnb_issue(IssueAction::AssignSelf);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("cnb-change-state")
+                            .debug_selector(|| "cnb-change-state".into())
+                            .outline()
+                            .small()
+                            .label(locale.text(if state == IssueFilter::Closed {
+                                "关闭 Issue"
+                            } else {
+                                "重新打开 Issue"
+                            }))
+                            .disabled(busy)
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.presenter.act_on_cnb_issue(IssueAction::SetState(state));
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("cnb-npc")
+                            .debug_selector(|| "cnb-npc".into())
+                            .outline()
+                            .small()
+                            .label("CodeBuddy NPC")
+                            .tooltip(
+                                locale.text(
+                                    "向此 Issue 发布评论，委托 CodeBuddy 完成开发并创建 PR。",
+                                ),
+                            )
+                            .disabled(busy || cnb.npc_comment.is_some())
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.presenter.act_on_cnb_issue(IssueAction::StartNpc);
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .when(busy, |el| {
+                el.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(Spinner::new())
+                        .child(locale.text("正在执行 Issue 操作…")),
+                )
+            })
+            .when_some(cnb.action_error.as_ref(), |el, error| {
+                el.child(
+                    div()
+                        .text_color(rgb(colors.danger))
+                        .child(error.render(locale).to_owned()),
+                )
+            })
+            .when_some(cnb.action_success.as_ref(), |el, message| {
+                el.child(
+                    div()
+                        .text_color(rgb(colors.success))
+                        .child(message.render(locale).to_owned()),
+                )
+            })
+            .when_some(cnb.npc_comment.as_ref(), |el, comment| {
+                if let Some(url) = comment.action_url() {
+                    let url = url.to_owned();
+                    el.child(
+                        Button::new("cnb-npc-action")
+                            .debug_selector(|| "cnb-npc-action".into())
+                            .outline()
+                            .small()
+                            .icon(IconName::ExternalLink)
+                            .label(locale.text("查看 Action"))
+                            .on_click(move |_, _, cx| cx.open_url(&url)),
+                    )
+                } else {
+                    el.child(
+                        Button::new("cnb-npc-refresh")
+                            .debug_selector(|| "cnb-npc-refresh".into())
+                            .outline()
+                            .small()
+                            .label(locale.text(if cnb.npc_request.is_some() {
+                                "正在获取 Action 链接…"
+                            } else {
+                                "刷新 NPC 状态"
+                            }))
+                            .disabled(cnb.npc_request.is_some())
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.presenter.refresh_cnb_npc_action();
+                                cx.notify();
+                            })),
+                    )
+                }
+            })
+            .when_some(cnb.npc_error.as_ref(), |el, error| {
+                el.child(
+                    div()
+                        .text_color(rgb(colors.danger))
+                        .child(error.render(locale).to_owned()),
+                )
+            })
+    }
+
+    fn render_cnb_markdown(
+        &self,
+        id: String,
+        text: String,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let cnb = &self.presenter.model().cnb;
+        let colors = palette(cx);
+        TextView::markdown(SharedString::from(id), text)
+            .markdown_extensions(super::cnb_media::extensions(
+                cnb.repository.as_deref().unwrap_or_default(),
+                cnb.cli.as_ref().map(|cli| cli.path.as_path()),
+                self.presenter.model().language,
+            ))
+            .text_size(px(14.))
+            .line_height(relative(1.7))
+            .style(
+                TextViewStyle::default()
+                    .paragraph_gap(gpui::rems(1.))
+                    .code_block(
+                        gpui::StyleRefinement::default()
+                            .font_family(MONO_FONT)
+                            .text_size(px(12.))
+                            .p_4()
+                            .bg(rgb(colors.elevated))
+                            .rounded(px(CONTROL_RADIUS)),
+                    ),
+            )
+    }
+
+    fn render_cnb_comments(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let cnb = &self.presenter.model().cnb;
+        let locale = self.presenter.model().language;
+        let colors = palette(cx);
+        div()
+            .debug_selector(|| "cnb-comments".into())
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(locale.text("评论"))
+                    .child(
+                        Button::new("cnb-comments-refresh")
+                            .debug_selector(|| "cnb-comments-refresh".into())
+                            .ghost()
+                            .small()
+                            .icon(IconName::RotateCw)
+                            .label(locale.text("刷新评论"))
+                            .disabled(cnb.comments_request.is_some())
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.presenter.load_cnb_comments();
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .when(cnb.comments_request.is_some(), |el| {
+                el.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(Spinner::new())
+                        .child(locale.text("正在读取全部评论…")),
+                )
+            })
+            .when_some(cnb.comments_error.as_ref(), |el, error| {
+                el.child(
+                    div()
+                        .text_color(rgb(colors.danger))
+                        .child(error.render(locale).to_owned()),
+                )
+            })
+            .when_some(cnb.comments.as_ref(), |el, comments| {
+                el.when(comments.is_empty(), |el| {
+                    el.child(locale.text("此 Issue 暂无评论。"))
+                })
+                .children(comments.iter().map(|comment| {
+                    let selector = format!("cnb-comment-{}", comment.id);
+                    div()
+                        .debug_selector(move || selector.clone())
+                        .min_w_0()
+                        .p_4()
+                        .rounded(px(CARD_RADIUS))
+                        .bg(rgb(colors.surface))
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .gap_3()
+                                .text_size(px(12.))
+                                .child(comment.author.name().to_owned())
+                                .child(
+                                    div()
+                                        .text_color(rgb(colors.muted))
+                                        .child(issue_date(&comment.created_at)),
+                                ),
+                        )
+                        .child(self.render_cnb_markdown(
+                            format!("cnb-comment-body-{}", comment.id),
+                            comment.body.clone(),
+                            cx,
+                        ))
+                        .when_some(comment.action_url(), |el, url| {
+                            let url = url.to_owned();
+                            el.child(
+                                Button::new(SharedString::from(format!(
+                                    "cnb-comment-action-{}",
+                                    comment.id
+                                )))
+                                .ghost()
+                                .small()
+                                .icon(IconName::ExternalLink)
+                                .label(locale.text("查看 Action"))
+                                .on_click(move |_, _, cx| cx.open_url(&url)),
+                            )
+                        })
+                }))
+            })
+    }
+
     pub(super) fn render_cnb_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let model = self.presenter.model();
         let cnb = &model.cnb;
@@ -557,6 +854,7 @@ impl NexusView {
                             .small()
                             .icon(IconName::ArrowLeft)
                             .label(locale.text("返回 Issues"))
+                            .disabled(cnb.action_request.is_some())
                             .on_click(cx.listener(|app, _, _, cx| {
                                 app.presenter.close_cnb_issue();
                                 cx.notify();
@@ -711,43 +1009,22 @@ impl NexusView {
                                             ),
                                         ),
                                 )
+                                .child(self.render_cnb_actions(issue, cx))
                                 .child(
                                     div()
                                         .debug_selector(|| "cnb-issue-body".into())
                                         .min_w_0()
-                                        .child(
-                                            TextView::markdown(
-                                                SharedString::from(format!(
-                                                    "cnb-body-{}",
-                                                    issue.number
-                                                )),
-                                                if issue.body.trim().is_empty() {
-                                                    locale.text("此 Issue 暂无描述。").to_owned()
-                                                } else {
-                                                    issue.body.clone()
-                                                },
-                                            )
-                                            .markdown_extensions(super::cnb_media::extensions(
-                                                cnb.repository.as_deref().unwrap_or_default(),
-                                                cnb.cli.as_ref().map(|cli| cli.path.as_path()),
-                                                locale,
-                                            ))
-                                            .text_size(px(14.))
-                                            .line_height(relative(1.7))
-                                            .style(
-                                                TextViewStyle::default()
-                                                    .paragraph_gap(gpui::rems(1.))
-                                                    .code_block(
-                                                        gpui::StyleRefinement::default()
-                                                            .font_family(MONO_FONT)
-                                                            .text_size(px(12.))
-                                                            .p_4()
-                                                            .bg(rgb(colors.elevated))
-                                                            .rounded(px(CONTROL_RADIUS)),
-                                                    ),
-                                            ),
-                                        ),
+                                        .child(self.render_cnb_markdown(
+                                            format!("cnb-body-{}", issue.number),
+                                            if issue.body.trim().is_empty() {
+                                                locale.text("此 Issue 暂无描述。").to_owned()
+                                            } else {
+                                                issue.body.clone()
+                                            },
+                                            cx,
+                                        )),
                                 )
+                                .child(self.render_cnb_comments(cx))
                             }),
                     )
                     .vertical_scrollbar(&self.cnb_detail_scroll),

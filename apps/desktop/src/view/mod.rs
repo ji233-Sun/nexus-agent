@@ -2182,6 +2182,100 @@ mod catalog_model_tests {
     use nexus_protocol::Event;
 
     #[gpui::test]
+    fn cnb_issue_actions_import_complete_context_and_offer_harness_selection(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::{
+            infrastructure::cnb::{ActionResult, Response},
+            model::cnb::{IssueAction, IssueFilter},
+            presenter::tests::{cnb_comment, cnb_issue, finish_cnb_request, seed_cnb_issues},
+        };
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (mut presenter, _, _directory) = fixture();
+        seed_cnb_issues(&mut presenter);
+        presenter.open_cnb();
+        presenter.select_cnb_issue("1".into());
+        let mut issue = cnb_issue("1");
+        issue.body = "需要实现的功能描述。".into();
+        finish_cnb_request(&mut presenter, Response::Detail(Ok(issue.clone())));
+        let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
+        cx.simulate_resize(gpui::size(px(1120.), px(900.)));
+        view.update_in(cx, |view, window, cx| {
+            view.prompt_input
+                .update(cx, |input, cx| input.set_value("保留已有草稿", window, cx));
+        });
+        cx.run_until_parked();
+        click_debug(cx, "cnb-chat");
+        view.update(cx, |view, _| assert!(view.presenter.model().cnb.opened));
+        view.update(cx, |view, cx| {
+            let mut comment = cnb_comment("1");
+            comment.body = "完整验收条件，包含 **格式**。".into();
+            finish_cnb_request(&mut view.presenter, Response::Comments(Ok(vec![comment])));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("cnb-comment-1").is_some());
+        click_debug(cx, "cnb-assign-self");
+        view.update(cx, |view, cx| {
+            assert_eq!(
+                view.presenter.model().cnb.action_request.unwrap().1,
+                IssueAction::AssignSelf
+            );
+            finish_cnb_request(
+                &mut view.presenter,
+                Response::Action(Ok(ActionResult::Updated(Box::new(issue.clone())))),
+            );
+            cx.notify();
+        });
+        cx.run_until_parked();
+        for state in [IssueFilter::Closed, IssueFilter::Open] {
+            click_debug(cx, "cnb-change-state");
+            view.update(cx, |view, cx| {
+                assert_eq!(
+                    view.presenter.model().cnb.action_request.unwrap().1,
+                    IssueAction::SetState(state)
+                );
+                issue.state = state.state().into();
+                finish_cnb_request(
+                    &mut view.presenter,
+                    Response::Action(Ok(ActionResult::Updated(Box::new(issue.clone())))),
+                );
+                cx.notify();
+            });
+            cx.run_until_parked();
+        }
+        click_debug(cx, "cnb-npc");
+        view.update(cx, |view, cx| {
+            assert_eq!(view.presenter.model().cnb.action_request.unwrap().1, IssueAction::StartNpc);
+            let comment = serde_json::from_value(serde_json::json!({"id":"987", "body":"@CodeBuddy 请处理", "statuses":{
+                "npc":[{"statuses":[{"target_url":"https://cnb.cool/team/project/-/build/logs/cnb-1"}]}]
+            }})).unwrap();
+            finish_cnb_request(&mut view.presenter, Response::Action(Ok(ActionResult::Npc(comment))));
+            let mut comment = cnb_comment("1");
+            comment.body = "完整验收条件，包含 **格式**。".into();
+            finish_cnb_request(&mut view.presenter, Response::Comments(Ok(vec![comment, cnb_comment("987")])));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("cnb-npc-action").is_some());
+        click_debug(cx, "cnb-chat");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("cnb-page").is_none());
+        assert!(cx.debug_bounds("composer-surface").is_some());
+        assert!(cx.debug_bounds("model-picker-surface").is_some());
+        view.update(cx, |view, cx| {
+            let draft = view.prompt_input.read(cx).value();
+            assert!(draft.starts_with("保留已有草稿\n\n"));
+            assert!(draft.contains("https://cnb.cool/team/project/-/issues/1"));
+            assert!(draft.contains("需要实现的功能描述。"));
+            assert!(draft.contains("完整验收条件，包含 **格式**。"));
+            assert!(view.presenter.model().selected_task.is_none());
+            assert!(view.presenter.model().active_run.is_none());
+        });
+    }
+
+    #[gpui::test]
     fn cnb_navigation_renders_issues_details_and_pagination_without_a_composer(
         cx: &mut gpui::TestAppContext,
     ) {
