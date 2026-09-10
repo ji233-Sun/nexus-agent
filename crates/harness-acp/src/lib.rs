@@ -42,6 +42,7 @@ fn source(harness: HarnessKind) -> ModelSource {
     match harness {
         HarnessKind::Kimi => ModelSource::KimiAcp,
         HarnessKind::Qoder => ModelSource::QoderAcp,
+        HarnessKind::QoderCn => ModelSource::QoderCnAcp,
         HarnessKind::Codebuddy => ModelSource::CodebuddyAcp,
         _ => unreachable!(),
     }
@@ -554,7 +555,11 @@ pub async fn discover_models(
     }
     result
 }
-pub async fn probe(harness: HarnessKind, executable: &str) -> HarnessProbe {
+pub async fn probe(
+    harness: HarnessKind,
+    executable: &str,
+    environment: &[EnvironmentVariable],
+) -> HarnessProbe {
     let mut result = HarnessProbe {
         harness,
         executable: executable.into(),
@@ -585,7 +590,7 @@ pub async fn probe(harness: HarnessKind, executable: &str) -> HarnessProbe {
             harness,
             &result.executable,
             &std::env::current_dir().unwrap_or_else(|_| ".".into()),
-            &[],
+            environment,
             cancel,
         )
         .await

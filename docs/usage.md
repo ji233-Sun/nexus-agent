@@ -174,18 +174,23 @@ Ask 模式允许内置只读工具，其余工具通过审批；Auto Edit 额外
 
 ### Kimi Code、Qoder 与 CodeBuddy
 
-三个引擎通过官方 ACP 接入，支持流式回答、工具结果、审批、模型选择和原生会话续聊。先在各自 CLI 完成登录：`kimi login`、`qoder login`、`codebuddy login`。Kimi ACP 需要原生登录状态，仅填写 Provider API Key 不能替代该登录检查。
+新会话默认使用原生 CLI，设置中的「接入方式」可以切换到 ACP。Kimi 使用 Wire 协议，Qoder / Qoder CN / CodeBuddy 使用原生 stream-json，支持流式回答、工具结果、审批和原生会话续聊。先在各自 CLI 完成登录：`kimi login`、`qoder login`、`qodercn login`、`codebuddy login`。
 
-| 引擎 | 本次验证的 CLI | 安装与配置 |
+| 引擎 | 本次核对的 CLI | 安装与配置 |
 | --- | --- | --- |
-| Kimi Code | `kimi-cli` 1.50.0，`kimi acp` | 安装菜单在存在 uv 时提供 `uv tool install --python 3.13 kimi-cli`；uv 来源通过原管理器更新，其他来源使用[官方安装文档](https://moonshotai.github.io/kimi-cli/en/guides/getting-started.html) |
-| Qoder | `@qoder-ai/qodercli` 1.1.48，`qoder --acp` | 使用本机 Node 包管理器；Provider Token 使用 `QODER_PERSONAL_ACCESS_TOKEN`，有效性由 CLI 验证 |
-| CodeBuddy | `@tencent-ai/codebuddy-code` 2.147.0，`codebuddy --acp` | 使用本机 Node 包管理器；支持 `CODEBUDDY_API_KEY` / `CODEBUDDY_BASE_URL`，地区与账号配置遵循 CLI |
+| Kimi Code | `kimi-cli` 1.50.0 | 安装菜单在存在 uv 时提供 `uv tool install --python 3.13 kimi-cli`；uv 来源通过原管理器更新，其他来源使用[官方安装文档](https://moonshotai.github.io/kimi-cli/en/guides/getting-started.html) |
+| Qoder 国际版 | `@qoder-ai/qodercli` 1.1.48，命令 `qoder` | Provider Token 使用 `QODER_PERSONAL_ACCESS_TOKEN` |
+| Qoder 国内版 | `@qodercn-ai/qoderclicn` 1.1.48，命令 `qodercn` | 独立安装和配置；Provider Token 使用 `QODERCN_PERSONAL_ACCESS_TOKEN` |
+| CodeBuddy | `@tencent-ai/codebuddy-code` 2.147.0 | 国内/国际共用安装包；支持 `CODEBUDDY_API_KEY` / `CODEBUDDY_BASE_URL` |
 
-ACP 每轮恢复原生 `default` 权限模式。Ask 显示 CLI 请求的选项；Auto Edit 自动批准标记为 `edit` 的请求，其余继续询问；YOLO 对 CLI 请求选择「允许一次」，不绕过 CLI 强制策略。CLI 自己允许的只读或已配置操作不会额外弹窗。
+CodeBuddy 设置提供「跟随 CLI」「国内」「国际」。选择地区时仅向子进程传入 `CODEBUDDY_INTERNET_ENVIRONMENT=internal|external`，用于探测、模型目录、任务和后台文本生成，不修改 CLI 全局配置。账号须在相应地区具备访问权限。
 
-模型和思考层级来自当前 CLI 返回值。Kimi 的 thinking 变体直接显示为独立原生模型，不额外虚构思考层级。探测与刷新目录不会调用模型，但 CLI 可能保存空会话。续聊要求原生 Session 仍然存在，并且 CLI 支持 load/resume。
+Ask 显示 CLI 请求的审批；Auto Edit 自动批准编辑请求，其余继续询问；YOLO 批准 CLI 交出的工具审批，仍保留 User Ask 问答，不绕过 CLI 强制策略。CLI 自己允许的只读或已配置操作不会额外弹窗。原生模式支持结构化选择及自定义回答。Kimi / CodeBuddy 支持运行中补充消息的原生接收回执；Qoder 和 ACP 的补充消息在下一轮发送。
 
-ACP v1 没有标准 Steer；运行中补充的消息在下一轮发送。厂商私有 User Ask 扩展暂未接入。后台标题中 Qoder / CodeBuddy 禁用工具与 MCP，并关闭会话保存；Kimi 使用无工具、无 MCP 的独立临时 Agent 配置，CLI 仍可能在自己的数据目录保留标题会话，不续用任务会话。
+模型和思考层级仍通过 ACP 从当前 CLI 获取。Kimi 的 thinking 变体显示为独立原生模型。Kimi ACP 需要原生登录状态，仅填写 Provider API Key 不能替代探测的登录检查；探测与刷新目录不会调用模型，但 CLI 可能保存空会话。
+
+接入方式设置影响新会话；已有会话沿用创建时的协议，旧版本的未标记会话继续使用 ACP。CodeBuddy 新会话同时记录显式选择的地区，续聊时恢复该地区。原生 Session 必须仍然存在。ACP v1 的厂商私有 User Ask 扩展尚未接入，需要结构化问答时使用默认 CLI 模式。
+
+后台标题中 Qoder / CodeBuddy 禁用工具与 MCP，并关闭会话保存；Kimi 使用无工具、无 MCP 的独立临时 Agent 配置，CLI 仍可能在自己的数据目录保留标题会话，不续用任务会话。
 
 四个新增引擎也可用于侧栏的提交说明生成，复用无工具的后台文本生成配置。提交说明保留主题与正文的换行，不会作为会话消息发送。

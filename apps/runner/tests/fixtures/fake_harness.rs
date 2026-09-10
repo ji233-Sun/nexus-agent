@@ -138,6 +138,11 @@ fn main() {
         io::stdout().flush().unwrap();
     }
     while let Ok(line) = input.recv() {
+        if string_field(&line, "subtype") == "initialize" && harness == Harness::Claude {
+            println!(r#"{{"type":"control_response","response":{{"subtype":"success","request_id":"nexus-initialize","response":{{}}}}}}"#);
+            io::stdout().flush().unwrap();
+            continue;
+        }
         let id = request_id(&line);
         if harness == Harness::Codex {
             match string_field(&line, "method").as_str() {

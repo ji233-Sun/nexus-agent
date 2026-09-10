@@ -9,6 +9,7 @@ members = [
     "crates/harness-omp",
     "crates/harness-pi",
     "crates/harness-acp",
+    "crates/harness-cli",
     "crates/protocol",
 ]
 exclude = ["vendor/gpui-kit"]

@@ -84,7 +84,8 @@ flowchart TB
     Infrastructure --> Codex[Codex CLI · app-server]
     Infrastructure --> OMP[Oh My Pi · RPC]
     Infrastructure --> Pi[Pi · RPC]
-    Infrastructure --> ACP[Kimi / Qoder / CodeBuddy · ACP]
+    Infrastructure --> Native[Kimi Wire / Qoder / Qoder CN / CodeBuddy stream-json]
+    Infrastructure --> ACP[可选 ACP / 模型目录]
 ```
 
 - `crates/domain`：领域状态、模型和思考层级。
@@ -94,6 +95,7 @@ flowchart TB
 - `crates/harness-codex`：Codex CLI 探测、App Server 启动配置和事件适配。
 - `crates/harness-omp`：Oh My Pi 探测、受控写入模式和 JSON 事件解码。
 - `crates/harness-pi`：Pi RPC、临时审批扩展、原生 Session 文件与模型目录。
+- `crates/harness-cli`：Kimi Wire 原生协议，以及复用 Claude 事件解码的 Qoder / Qoder CN / CodeBuddy stream-json 接入。
 - `crates/harness-acp`：Kimi Code / Qoder / CodeBuddy 共用的 ACP v1 握手、会话、模型配置、审批和事件适配。
 - `apps/runner/src/transport.rs`：JSONL 命令读取、协议版本校验和事件写出。
 - `apps/runner/src/application`：命令调度、双任务并发、任务与 checkout 互斥、取消和统一事件转换。
@@ -195,10 +197,14 @@ node --test ".github/scripts/resolve-conflicts.test.mjs"
 
 Pi 的适配位于 `crates/harness-pi`，与 OMP 共享 `harness-core::rpc` 事件解码。Pi 通过 `--mode rpc` 启动，审批扩展就绪后获取原生 Session 文件路径并发送 Prompt；后续进程通过 `--session <FILE>` 恢复。
 
-Kimi 使用 `kimi acp`，Qoder / CodeBuddy 使用 `--acp`。初始化不声明文件系统与终端代理能力，工具在原 CLI 中运行。续聊优先使用服务端声明的 `session/resume`，否则使用 `session/load`；准备阶段过滤历史回放，再设置原生 `default` 权限、模型和支持的思考层级，最后发送 `session/prompt`。致命错误同时结束轮次，未知服务端请求返回 method-not-found。
+默认 `HarnessTransport::Cli`：Kimi 使用 `kimi --wire --session <UUID>` 与 Wire 1.10 握手；Qoder / Qoder CN / CodeBuddy 使用 stream-json 控制请求，初始化成功后发送用户输入。Kimi Wire 支持审批、QuestionRequest 和 steer；Qoder / CodeBuddy 共用 Claude 事件与问答编解码。Qoder 不传不支持的 `--verbose`，且暂不发送无接收回执保证的 steer。
+
+可选 ACP 模式：Kimi 使用 `kimi acp`，Qoder / Qoder CN / CodeBuddy 使用 `--acp`。初始化不声明文件系统与终端代理能力，工具在原 CLI 中运行。续聊优先使用服务端声明的 `session/resume`，否则使用 `session/load`；准备阶段过滤历史回放，再设置原生 `default` 权限、模型和支持的思考层级，最后发送 `session/prompt`。致命错误同时结束轮次，未知服务端请求返回 method-not-found。
 
 ACP 模型目录通过无 Prompt 的 `session/new` 获取，CLI 可能保存空会话。模型 ID 与配置项 ID 原样保留，Kimi 的 `,thinking` 是原生模型标识的一部分。ACP v1 无标准 Steer 或通用 User Ask；厂商私有交互扩展不在本适配范围内。CodeBuddy 子成员事件不会混入主回答。
 
-本次实际验证版本：Pi 0.85.1、Kimi CLI 1.50.0、Qoder CLI 1.1.48、CodeBuddy 2.147.0。Pi 与 Kimi 使用隔离配置和本地模拟模型验证了审批、工具、标题与跨进程续聊；Qoder 验证握手和未认证错误，CodeBuddy 验证握手及原生模型目录。Qoder / CodeBuddy 的真实账号模型调用、Windows / Linux 实机运行尚未验证。Kimi 新一代 `kimi-code` 包不属于已验证版本。
+会话 ID 使用 `nexus:v1:` 前缀记录原生 ID、transport 及显式 CodeBuddy region。Runner 启动前恢复这些字段；未标记旧 ID 走 ACP，保证设置变化不会把原会话切换到另一协议。
 
-标题与提交说明统一通过 `TextGenerationConfig` / `prepare_text_generation` 执行；Kimi 的临时 Agent 使用通用文本输出指令，避免把提交说明限制成短标题。Desktop / Runner 协议版本为 15，与主线原有版本 14 区分。
+本次实际验证版本：Pi 0.85.1、Kimi CLI 1.50.0、Qoder CLI 1.1.48、CodeBuddy 2.147.0。Pi 与 Kimi 使用隔离配置和本地模拟模型验证了审批、工具、标题与跨进程续聊；Qoder 验证原生启动参数和未认证错误，国内包 1.1.48 核对命令、Token 环境变量及安装来源；CodeBuddy 验证原生握手及 ACP 模型目录。Qoder / CodeBuddy 的真实账号模型调用、Windows / Linux 实机运行尚未验证。Kimi 新一代 `kimi-code` 包不属于已验证版本。
+
+标题与提交说明统一通过 `TextGenerationConfig` / `prepare_text_generation` 执行；Kimi 的临时 Agent 使用通用文本输出指令，避免把提交说明限制成短标题。Desktop / Runner 协议版本为 16，StartRun 增加默认 CLI 的 transport，HarnessProbe 增加环境配置以支持地区探测。

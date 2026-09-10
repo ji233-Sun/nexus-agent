@@ -707,7 +707,7 @@ fn harness_installation_events_refresh_versions_and_probes_without_switching_har
             presenter.model.selected_project.as_ref().unwrap().id,
             project
         );
-        assert!(runner.0.borrow().commands.iter().any(|command| matches!(&command.command, Command::HarnessProbe { harness: HarnessKind::Claude, executable } if executable == "claude")));
+        assert!(runner.0.borrow().commands.iter().any(|command| matches!(&command.command, Command::HarnessProbe { harness: HarnessKind::Claude, executable, .. } if executable == "claude")));
         assert!(!presenter.drain_installation_events());
     }
 }
@@ -779,7 +779,7 @@ fn harness_scan_adopts_a_verified_manager_path_and_reprobes_it() {
             .as_deref(),
         Some(discovered.to_str().unwrap())
     );
-    assert!(runner.0.borrow().commands.iter().any(|command| matches!(&command.command, Command::HarnessProbe { harness: HarnessKind::Claude, executable } if executable == discovered.to_str().unwrap())));
+    assert!(runner.0.borrow().commands.iter().any(|command| matches!(&command.command, Command::HarnessProbe { harness: HarnessKind::Claude, executable, .. } if executable == discovered.to_str().unwrap())));
 }
 
 #[test]
@@ -1589,6 +1589,7 @@ fn emit_current_catalog(
             HarnessKind::Pi => nexus_domain::ModelSource::PiRpc,
             HarnessKind::Kimi => nexus_domain::ModelSource::KimiAcp,
             HarnessKind::Qoder => nexus_domain::ModelSource::QoderAcp,
+            HarnessKind::QoderCn => nexus_domain::ModelSource::QoderCnAcp,
             HarnessKind::Codebuddy => nexus_domain::ModelSource::CodebuddyAcp,
         };
     }
@@ -1781,7 +1782,7 @@ fn startup_restores_preferences_and_probes_all_harnesses() {
     assert_eq!(state.commands.len(), HarnessKind::ALL.len() + 1);
     assert!(matches!(state.commands[0].command, Command::RunnerHello));
     assert!(state.commands.iter().any(|command| matches!(&command.command,
-        Command::HarnessProbe { harness: HarnessKind::Codex, executable } if executable == "/custom/codex")));
+        Command::HarnessProbe { harness: HarnessKind::Codex, executable, .. } if executable == "/custom/codex")));
     assert!(!presenter.model().can_submit());
 }
 
@@ -3448,7 +3449,7 @@ fn follow_up_resumes_the_saved_session_after_reopening_and_new_task_starts_fresh
         assert!(!presenter.model().can_submit());
         assert_eq!(presenter.model().executable, saved_probe.executable);
         assert!(runner.0.borrow().commands.iter().any(|command| matches!(
-            &command.command, Command::HarnessProbe { harness: probed_harness, executable }
+            &command.command, Command::HarnessProbe { harness: probed_harness, executable, .. }
                 if *probed_harness == harness && executable == &saved_probe.executable
         )));
         if harness == HarnessKind::Codex {
@@ -5274,5 +5275,69 @@ fn voice_completion_rejects_cancelled_wrong_session_and_provider_results() {
     assert_eq!(
         presenter.save_voice_key(" ").unwrap_err().to_string(),
         "Enter a MiMo API key"
+    );
+}
+
+#[test]
+fn native_transport_and_codebuddy_region_persist_and_reach_launch_configuration() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("preferences.sqlite");
+    let runner = FakeRunner::default();
+    let mut presenter = Presenter::new(
+        Storage::open(&database).unwrap(),
+        Ok(Box::new(runner.clone())),
+        None,
+    );
+    for harness in [
+        HarnessKind::Kimi,
+        HarnessKind::Qoder,
+        HarnessKind::QoderCn,
+        HarnessKind::Codebuddy,
+    ] {
+        presenter.model.selected_harness = harness;
+        assert_eq!(
+            presenter.harness_transport(harness),
+            nexus_domain::HarnessTransport::Cli
+        );
+        presenter.set_harness_transport(nexus_domain::HarnessTransport::Acp);
+        assert_eq!(
+            presenter.harness_transport(harness),
+            nexus_domain::HarnessTransport::Acp
+        );
+    }
+    presenter.set_codebuddy_region("external");
+    let environment = presenter
+        .provider_launch_configuration(HarnessKind::Codebuddy)
+        .unwrap();
+    assert_eq!(environment.len(), 1);
+    assert_eq!(environment[0].name, "CODEBUDDY_INTERNET_ENVIRONMENT");
+    assert_eq!(environment[0].value, "external");
+    assert!(
+        presenter
+            .provider_launch_configuration(HarnessKind::QoderCn)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(runner.0.borrow().commands.iter().any(|command| matches!(&command.command,
+        Command::HarnessProbe {harness:HarnessKind::Codebuddy,environment,..} if environment.iter().any(|v|v.value=="external"))));
+    drop(presenter);
+    let mut presenter = Presenter::new(
+        Storage::open(&database).unwrap(),
+        Ok(Box::new(runner)),
+        None,
+    );
+    assert_eq!(presenter.codebuddy_region(), "external");
+    assert_eq!(
+        presenter.harness_transport(HarnessKind::QoderCn),
+        nexus_domain::HarnessTransport::Acp
+    );
+    presenter.set_codebuddy_region("invalid");
+    assert_eq!(presenter.codebuddy_region(), "external");
+    presenter.set_codebuddy_region("");
+    assert!(
+        presenter
+            .provider_launch_configuration(HarnessKind::Codebuddy)
+            .unwrap()
+            .is_empty()
     );
 }

@@ -2194,6 +2194,7 @@ fn provider_environment_defaults(harness: HarnessKind) -> (&'static str, &'stati
         HarnessKind::Pi => ("ANTHROPIC_API_KEY", ""),
         HarnessKind::Kimi => ("KIMI_API_KEY", "KIMI_BASE_URL"),
         HarnessKind::Qoder => ("QODER_PERSONAL_ACCESS_TOKEN", ""),
+        HarnessKind::QoderCn => ("QODERCN_PERSONAL_ACCESS_TOKEN", ""),
         HarnessKind::Codebuddy => ("CODEBUDDY_API_KEY", "CODEBUDDY_BASE_URL"),
     }
 }

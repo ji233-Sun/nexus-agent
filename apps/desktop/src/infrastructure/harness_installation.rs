@@ -76,6 +76,7 @@ pub(crate) fn documentation(harness: HarnessKind) -> &'static str {
         HarnessKind::Pi => "https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent",
         HarnessKind::Kimi => "https://moonshotai.github.io/kimi-cli/en/guides/getting-started.html",
         HarnessKind::Qoder => "https://docs.qoder.com/cli/quick-start",
+        HarnessKind::QoderCn => "https://docs.qoder.cn/cli/what-is-qoder-cli-cn",
         HarnessKind::Codebuddy => "https://www.codebuddy.ai/docs/cli/overview",
     }
 }
@@ -88,6 +89,7 @@ fn package(harness: HarnessKind) -> &'static str {
         HarnessKind::Pi => "@earendil-works/pi-coding-agent",
         HarnessKind::Kimi => "kimi-cli",
         HarnessKind::Qoder => "@qoder-ai/qodercli",
+        HarnessKind::QoderCn => "@qodercn-ai/qoderclicn",
         HarnessKind::Codebuddy => "@tencent-ai/codebuddy-code",
     }
 }
@@ -567,7 +569,11 @@ fn manager_command(
 
 fn native_install(harness: HarnessKind, environment: &Environment) -> Option<MaintenanceCommand> {
     let (unix, windows) = match harness {
-        HarnessKind::Pi | HarnessKind::Kimi | HarnessKind::Qoder | HarnessKind::Codebuddy => {
+        HarnessKind::Pi
+        | HarnessKind::Kimi
+        | HarnessKind::Qoder
+        | HarnessKind::QoderCn
+        | HarnessKind::Codebuddy => {
             return None;
         }
         HarnessKind::Claude => (
@@ -635,7 +641,11 @@ fn install_options(
             HarnessKind::Claude => vec!["install", "--cask", "claude-code"],
             HarnessKind::Codex => vec!["install", "--cask", "codex"],
             HarnessKind::Omp => vec!["install", "can1357/tap/omp"],
-            HarnessKind::Pi | HarnessKind::Kimi | HarnessKind::Qoder | HarnessKind::Codebuddy => {
+            HarnessKind::Pi
+            | HarnessKind::Kimi
+            | HarnessKind::Qoder
+            | HarnessKind::QoderCn
+            | HarnessKind::Codebuddy => {
                 vec![]
             }
         },
@@ -681,6 +691,7 @@ fn winget_id(harness: HarnessKind) -> Option<&'static str> {
         | HarnessKind::Pi
         | HarnessKind::Kimi
         | HarnessKind::Qoder
+        | HarnessKind::QoderCn
         | HarnessKind::Codebuddy => None,
     }
 }
@@ -696,7 +707,11 @@ fn homebrew_owner(real: &Path, harness: HarnessKind) -> Option<(PathBuf, String,
     parts.next()?;
     parts.next()?;
     let expected = match harness {
-        HarnessKind::Pi | HarnessKind::Kimi | HarnessKind::Qoder | HarnessKind::Codebuddy => {
+        HarnessKind::Pi
+        | HarnessKind::Kimi
+        | HarnessKind::Qoder
+        | HarnessKind::QoderCn
+        | HarnessKind::Codebuddy => {
             return None;
         }
         HarnessKind::Claude => "claude-code",
@@ -895,6 +910,7 @@ async fn ownership(
         HarnessKind::Pi => "pi",
         HarnessKind::Kimi => "kimi",
         HarnessKind::Qoder => "qoder",
+        HarnessKind::QoderCn => "qodercn",
         HarnessKind::Codebuddy => "codebuddy",
     };
     if matches!(
@@ -915,7 +931,11 @@ async fn ownership(
         );
     }
     let native = match harness {
-        HarnessKind::Pi | HarnessKind::Kimi | HarnessKind::Qoder | HarnessKind::Codebuddy => false,
+        HarnessKind::Pi
+        | HarnessKind::Kimi
+        | HarnessKind::Qoder
+        | HarnessKind::QoderCn
+        | HarnessKind::Codebuddy => false,
         HarnessKind::Claude => {
             inside(real, &environment.home.join(".local/share/claude/versions"))
                 || (environment.os == "windows"
@@ -1445,6 +1465,7 @@ mod tests {
         for (harness, package) in [
             (HarnessKind::Pi, "@earendil-works/pi-coding-agent@latest"),
             (HarnessKind::Qoder, "@qoder-ai/qodercli@latest"),
+            (HarnessKind::QoderCn, "@qodercn-ai/qoderclicn@latest"),
             (HarnessKind::Codebuddy, "@tencent-ai/codebuddy-code@latest"),
         ] {
             let options = install_options(harness, &environment, std::slice::from_ref(&npm));
@@ -1477,6 +1498,11 @@ mod tests {
             ),
             (HarnessKind::Codex, "/@openai%2Fcodex/latest", "0.153.4"),
             (HarnessKind::Qoder, "/@qoder-ai%2Fqodercli/latest", "1.1.48"),
+            (
+                HarnessKind::QoderCn,
+                "/@qodercn-ai%2Fqoderclicn/latest",
+                "1.1.48",
+            ),
             (
                 HarnessKind::Codebuddy,
                 "/@tencent-ai%2Fcodebuddy-code/latest",

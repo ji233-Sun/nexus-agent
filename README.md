@@ -19,7 +19,7 @@
 
 **Nexus Agent** 是一款基于 Rust 与 GPUI 的原生桌面应用。在一个工作区里选择项目、切换本地编码 Agent、跟进工具执行，并继续已有任务的会话。
 
-支持 **Claude Code、Codex CLI、Oh My Pi（OMP）、Pi、Kimi Code、Qoder 和 CodeBuddy**，提供简体中文与 English 界面。
+支持 **Claude Code、Codex CLI、Oh My Pi（OMP）、Pi、Kimi Code、Qoder（国际/国内版）和 CodeBuddy**，提供简体中文与 English 界面。
 
 ## 核心能力
 

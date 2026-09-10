@@ -363,6 +363,8 @@ function RemoteWorkspace({
                   ? "Pi"
                   : state?.harness === "kimi"
                   ? "Kimi Code"
+                  : state?.harness === "qodercn"
+                  ? "Qoder CN"
                   : state?.harness === "qoder"
                   ? "Qoder"
                   : state?.harness === "codebuddy"

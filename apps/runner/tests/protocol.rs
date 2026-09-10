@@ -154,6 +154,7 @@ impl TestRunner {
 
 fn request(directory: &Path, executable: PathBuf, harness: HarnessKind, prompt: &str) -> StartRun {
     StartRun {
+        transport: nexus_domain::HarnessTransport::Acp,
         title_generation: Some(nexus_protocol::TextGenerationConfig {
             harness,
             executable: executable.to_string_lossy().into_owned(),
@@ -295,7 +296,18 @@ async fn two_checkouts_run_together_and_cancel_and_approval_are_scoped() {
 async fn approval_round_trip_for_each_harness_rejects_invalid_and_duplicate_responses() {
     let fixtures = tempfile::tempdir().unwrap();
     let executable = fake_harness(fixtures.path());
-    for harness in HarnessKind::ALL {
+    for (harness, transport) in HarnessKind::ALL
+        .into_iter()
+        .map(|h| (h, nexus_domain::HarnessTransport::Acp))
+        .chain(
+            [
+                HarnessKind::Qoder,
+                HarnessKind::QoderCn,
+                HarnessKind::Codebuddy,
+            ]
+            .map(|h| (h, nexus_domain::HarnessTransport::Cli)),
+        )
+    {
         for option in [0, 1] {
             let directory = tempfile::tempdir().unwrap();
             let mut request = request(
@@ -304,6 +316,7 @@ async fn approval_round_trip_for_each_harness_rejects_invalid_and_duplicate_resp
                 harness,
                 "approval-round-trip",
             );
+            request.transport = transport;
             request.permission_mode = nexus_domain::PermissionMode::Ask;
             let run_id = request.run_id;
             let mut runner = TestRunner::spawn();
@@ -354,7 +367,9 @@ async fn approval_round_trip_for_each_harness_rejects_invalid_and_duplicate_resp
             )
             .unwrap();
             match harness {
-                HarnessKind::Claude => {
+                h if h == HarnessKind::Claude
+                    || transport == nexus_domain::HarnessTransport::Cli =>
+                {
                     assert_eq!(response["response"]["request_id"], "approval-1");
                     if option == 0 {
                         assert_eq!(
@@ -365,7 +380,11 @@ async fn approval_round_trip_for_each_harness_rejects_invalid_and_duplicate_resp
                 }
                 HarnessKind::Codex => assert_eq!(response["id"], 99),
                 HarnessKind::Omp | HarnessKind::Pi => assert_eq!(response["id"], "approval-1"),
-                HarnessKind::Kimi | HarnessKind::Qoder | HarnessKind::Codebuddy => {
+                HarnessKind::Claude
+                | HarnessKind::Kimi
+                | HarnessKind::Qoder
+                | HarnessKind::QoderCn
+                | HarnessKind::Codebuddy => {
                     assert_eq!(response["result"]["outcome"]["outcome"], "selected")
                 }
             }
@@ -513,13 +532,25 @@ async fn exited_run_releases_the_slot_before_the_next_message_starts() {
 async fn runner_resumes_each_harness_session_across_processes() {
     let directory = tempfile::tempdir().unwrap();
     let executable = fake_harness(directory.path());
-    for harness in HarnessKind::ALL {
+    for (harness, transport) in HarnessKind::ALL
+        .into_iter()
+        .map(|h| (h, nexus_domain::HarnessTransport::Acp))
+        .chain(
+            [
+                HarnessKind::Qoder,
+                HarnessKind::QoderCn,
+                HarnessKind::Codebuddy,
+            ]
+            .map(|h| (h, nexus_domain::HarnessTransport::Cli)),
+        )
+    {
         let mut request = request(
             directory.path(),
             executable.clone(),
             harness,
             "remember this",
         );
+        request.transport = transport;
         let mut runner = TestRunner::spawn();
         runner.send(Command::RunStart(request.clone())).await;
         let events = runner
@@ -555,10 +586,16 @@ async fn runner_resumes_each_harness_session_across_processes() {
             "follow-up"
         );
         let args_file = match harness {
-            HarnessKind::Claude => "args.txt",
+            h if h == HarnessKind::Claude || transport == nexus_domain::HarnessTransport::Cli => {
+                "args.txt"
+            }
             HarnessKind::Codex => "codex-args.txt",
             HarnessKind::Omp | HarnessKind::Pi => "omp-args.txt",
-            HarnessKind::Kimi | HarnessKind::Qoder | HarnessKind::Codebuddy => "acp-args.txt",
+            HarnessKind::Claude
+            | HarnessKind::Kimi
+            | HarnessKind::Qoder
+            | HarnessKind::QoderCn
+            | HarnessKind::Codebuddy => "acp-args.txt",
         };
         let args = fs::read_to_string(directory.path().join(args_file)).unwrap();
         if harness == HarnessKind::Codex {
@@ -568,18 +605,34 @@ async fn runner_resumes_each_harness_session_across_processes() {
             .unwrap();
             assert_eq!(frame["method"], "thread/resume");
             assert_eq!(frame["params"]["threadId"], session_id);
-        } else if matches!(
-            harness,
-            HarnessKind::Kimi | HarnessKind::Qoder | HarnessKind::Codebuddy
-        ) {
+        } else if transport == nexus_domain::HarnessTransport::Acp
+            && matches!(
+                harness,
+                HarnessKind::Kimi
+                    | HarnessKind::Qoder
+                    | HarnessKind::QoderCn
+                    | HarnessKind::Codebuddy
+            )
+        {
             let frame: serde_json::Value = serde_json::from_str(
                 &fs::read_to_string(directory.path().join("acp-session.json")).unwrap(),
             )
             .unwrap();
             assert_eq!(frame["method"], "session/resume");
-            assert_eq!(frame["params"]["sessionId"], session_id);
+            let saved: serde_json::Value =
+                serde_json::from_str(session_id.strip_prefix("nexus:v1:").unwrap()).unwrap();
+            assert_eq!(frame["params"]["sessionId"], saved["session"]);
         } else {
-            assert!(args.lines().any(|arg| arg == session_id));
+            let native = session_id
+                .strip_prefix("nexus:v1:")
+                .map(|s| {
+                    serde_json::from_str::<serde_json::Value>(s).unwrap()["session"]
+                        .as_str()
+                        .unwrap()
+                        .to_owned()
+                })
+                .unwrap_or_else(|| session_id.clone());
+            assert!(args.lines().any(|arg| arg == native));
         }
         assert!(!args.lines().any(|arg| matches!(
             arg,
@@ -769,6 +822,7 @@ async fn omp_probe_times_out_in_both_stages() {
         let started = std::time::Instant::now();
         runner
             .send(Command::HarnessProbe {
+                environment: Vec::new(),
                 harness: HarnessKind::Omp,
                 executable: executable.to_string_lossy().into_owned(),
             })
@@ -819,6 +873,7 @@ async fn blocked_omp_probe_does_not_block_commands_or_shutdown() {
         let approval = next_approval(&mut runner, run_id).await;
         runner
             .send(Command::HarnessProbe {
+                environment: Vec::new(),
                 harness: HarnessKind::Omp,
                 executable: executable.to_string_lossy().into_owned(),
             })
@@ -1159,7 +1214,7 @@ async fn commit_messages_use_each_harness_configuration_without_starting_a_run()
             HarnessKind::Codex => "--sandbox\nread-only",
             HarnessKind::Omp | HarnessKind::Pi => "--no-tools",
             HarnessKind::Kimi => "--agent-file",
-            HarnessKind::Qoder | HarnessKind::Codebuddy => "--tools\n\n",
+            HarnessKind::Qoder | HarnessKind::QoderCn | HarnessKind::Codebuddy => "--tools\n\n",
         }));
         let prompt = fs::read_to_string(directory.path().join("title-prompt.txt")).unwrap();
         assert!(prompt.contains("selected change"));
@@ -1280,6 +1335,7 @@ async fn runner_generates_titles_with_each_harness_in_a_safe_background_process(
             assert!(args.contains(match harness {
                 HarnessKind::Claude | HarnessKind::Codebuddy => "--effort\nlow",
                 HarnessKind::Qoder => "--reasoning-effort\nlow",
+                HarnessKind::QoderCn => "--reasoning-effort\nlow",
                 HarnessKind::Kimi => unreachable!(),
                 HarnessKind::Codex => "--config\nmodel_reasoning_effort=\"low\"",
                 HarnessKind::Omp | HarnessKind::Pi => "--thinking\nlow",
@@ -1311,7 +1367,7 @@ async fn runner_generates_titles_with_each_harness_in_a_safe_background_process(
                 assert!(args.contains("--agent-file"));
                 assert!(args.contains("--mcp-config-file"));
             }
-            HarnessKind::Qoder | HarnessKind::Codebuddy => {
+            HarnessKind::Qoder | HarnessKind::QoderCn | HarnessKind::Codebuddy => {
                 assert!(args.contains("--tools\n\n"));
                 assert!(args.contains("--no-session-persistence"));
                 assert!(args.contains("--strict-mcp-config"));
@@ -1462,7 +1518,10 @@ async fn steer_waits_for_all_tools_and_uses_native_receipts_in_the_same_run() {
                     assert_eq!(frame["params"]["expectedTurnId"], "turn-1");
                     assert_eq!(frame["params"]["input"][0]["text"], prompt);
                 }
-                HarnessKind::Kimi | HarnessKind::Qoder | HarnessKind::Codebuddy => unreachable!(),
+                HarnessKind::Kimi
+                | HarnessKind::Qoder
+                | HarnessKind::QoderCn
+                | HarnessKind::Codebuddy => unreachable!(),
                 HarnessKind::Claude => assert_eq!(frame["message"]["content"], prompt),
                 HarnessKind::Omp | HarnessKind::Pi => {
                     assert_eq!(frame["type"], "steer");
