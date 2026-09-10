@@ -318,6 +318,7 @@
   "无法保存语言偏好：{error}": "Cannot save language preference: {error}",
   "无法保存外观偏好：{error}": "Cannot save appearance preferences: {error}",
   "无法打开项目：{error}": "Cannot open project: {error}",
+  "无法保存项目顺序：{error}": "Cannot save project order: {error}",
   "已准备好新任务。": "Ready for a new task.",
   "正在探测 {0}…": "Detecting {0}…",
   "Runner 不可用，无法探测任务使用的可执行文件。": "Runner unavailable. Cannot check the task's executable.",
