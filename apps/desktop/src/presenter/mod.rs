@@ -1,7 +1,6 @@
 mod cnb;
 mod generation;
 mod harness_installation;
-mod history;
 mod remote;
 mod runs;
 mod updates;
@@ -14,7 +13,6 @@ pub(crate) mod tests;
 use crate::{
     i18n::{Language, LocalizedText},
     infrastructure::{
-        codex_history::Client as CodexHistoryClient,
         credentials::{CredentialStore, SystemCredentialStore},
         storage::Storage,
     },
@@ -65,8 +63,6 @@ pub(crate) struct Presenter {
     voice_worker: Option<crate::infrastructure::voice::Worker>,
     storage: Storage,
     runner: Option<Box<dyn RunnerPort>>,
-    codex_history_client: Option<CodexHistoryClient>,
-    codex_history_executable: Option<String>,
     remote_control: Option<RemoteControl>,
     remote_control_error: Option<String>,
     credentials: Box<dyn CredentialStore>,
@@ -271,8 +267,6 @@ impl Presenter {
                 },
                 ..AppModel::default()
             },
-            codex_history_client: None,
-            codex_history_executable: None,
             remote_control,
             remote_control_error,
             credentials,
@@ -400,19 +394,12 @@ impl Presenter {
             .as_ref()
             .map(|runner| runner.drain_events())
             .unwrap_or_default();
-        let history_events = self
-            .codex_history_client
-            .as_ref()
-            .map(CodexHistoryClient::drain_events)
-            .unwrap_or_default();
         let remote_commands = self
             .remote_control
             .as_ref()
             .map(RemoteControl::drain_commands)
             .unwrap_or_default();
-        let mut changed = self.drain_workspace_events()
-            || !runner_events.is_empty()
-            || !history_events.is_empty();
+        let mut changed = self.drain_workspace_events() || !runner_events.is_empty();
         changed |= self.drain_cli_installation_result();
         for envelope in runner_events {
             if envelope.protocol_version != nexus_protocol::PROTOCOL_VERSION {
@@ -420,9 +407,6 @@ impl Presenter {
                 continue;
             }
             self.handle_event(envelope.event);
-        }
-        for event in history_events {
-            self.handle_codex_history_event(event);
         }
         for command in remote_commands {
             changed |= self.handle_remote_command(command);
@@ -455,10 +439,7 @@ impl Presenter {
         self.model.fresh_conversation();
         self.model.selected_task = None;
         self.reset_workspace_draft();
-        self.model.selected_codex_thread = None;
         self.model.messages.clear();
-        self.model.codex_history_messages.clear();
-        self.model.codex_thread_loading = false;
         self.model.streaming_text.clear();
         self.model.status = "已准备好新任务。".into();
         self.model.permission_mode =
@@ -475,10 +456,7 @@ impl Presenter {
         self.model.selected_task = None;
         self.reset_workspace_draft();
         self.reload_workspaces();
-        self.model.selected_codex_thread = None;
         self.model.messages.clear();
-        self.model.codex_history_messages.clear();
-        self.model.codex_thread_loading = false;
         self.model.streaming_text.clear();
         self.reload_tasks();
         self.refresh_model_catalog();
@@ -553,9 +531,6 @@ impl Presenter {
         self.model.selected_task = Some(task_id);
         self.model.selected_workspace = self.storage.task_workspace(task_id).ok().flatten();
         self.reload_workspaces();
-        self.model.selected_codex_thread = None;
-        self.model.codex_history_messages.clear();
-        self.model.codex_thread_loading = false;
         self.model.messages = self.storage.messages(task_id).unwrap_or_default();
         self.reload_tasks();
         if self.model.active_run.is_some() {
