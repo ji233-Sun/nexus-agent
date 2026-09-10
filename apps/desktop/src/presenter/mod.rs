@@ -430,6 +430,56 @@ impl Presenter {
         }
     }
 
+    pub(crate) fn can_delete_project(&self, project_id: Uuid) -> bool {
+        !self.model.workspace_busy
+            && !self.model.all_conversations().any(|conversation| {
+                conversation
+                    .selected_project
+                    .as_ref()
+                    .is_some_and(|project| project.id == project_id)
+                    && (conversation.active_run.is_some()
+                        || (conversation.pending_workspace_start.is_some()
+                            && !conversation.workspace_retry))
+            })
+    }
+
+    pub(crate) fn delete_project(&mut self, project_id: Uuid) -> bool {
+        if !self.can_delete_project(project_id) {
+            self.model.status = "项目仍有活动任务或工作区操作，请结束后再删除。".into();
+            return false;
+        }
+        if let Err(error) = self.storage.delete_project(project_id) {
+            self.model.status =
+                LocalizedText::new("无法删除项目：{error}", &[("error", error.to_string())]);
+            return false;
+        }
+        if self
+            .model
+            .selected_project
+            .as_ref()
+            .is_some_and(|project| project.id == project_id)
+        {
+            self.cancel_voice();
+            self.model.fresh_conversation();
+            self.model.selected_project = None;
+            self.model.tasks.clear();
+            self.model.model_catalog = ModelCatalogState::Idle;
+            self.model.permission_mode =
+                load_permission_mode(&self.storage, self.model.selected_harness);
+            self.reset_cnb_project();
+        }
+        self.model.conversations.retain(|_, conversation| {
+            conversation
+                .selected_project
+                .as_ref()
+                .is_none_or(|project| project.id != project_id)
+        });
+        self.reload_projects();
+        self.reload_tasks();
+        self.model.status = "项目已删除，磁盘上的文件和 Git 分支已保留。".into();
+        true
+    }
+
     pub(crate) fn new_task(&mut self) {
         if self.model.selected_project.is_none() {
             return;
