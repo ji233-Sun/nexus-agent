@@ -570,10 +570,7 @@ fn manager_command(
 
 fn native_install(harness: HarnessKind, environment: &Environment) -> Option<MaintenanceCommand> {
     let (unix, windows) = match harness {
-        HarnessKind::Pi
-        | HarnessKind::Qoder
-        | HarnessKind::QoderCn
-        | HarnessKind::Codebuddy => {
+        HarnessKind::Pi | HarnessKind::Qoder | HarnessKind::QoderCn | HarnessKind::Codebuddy => {
             return None;
         }
         HarnessKind::Kimi => (
@@ -923,10 +920,9 @@ async fn ownership(
         );
     }
     let native = match harness {
-        HarnessKind::Pi
-        | HarnessKind::Qoder
-        | HarnessKind::QoderCn
-        | HarnessKind::Codebuddy => false,
+        HarnessKind::Pi | HarnessKind::Qoder | HarnessKind::QoderCn | HarnessKind::Codebuddy => {
+            false
+        }
         HarnessKind::Kimi => inside(
             real,
             &environment
@@ -1531,12 +1527,11 @@ mod tests {
                     request.extensions().get::<RequestTimeout>().unwrap().0,
                     PROBE_TIMEOUT
                 );
-                Ok(Response::builder()
-                    .body(if harness == HarnessKind::Kimi {
-                        format!("{version}\n").into()
-                    } else {
-                        serde_json::json!({"version":version}).to_string().into()
-                    })?)
+                Ok(Response::builder().body(if harness == HarnessKind::Kimi {
+                    format!("{version}\n").into()
+                } else {
+                    serde_json::json!({"version":version}).to_string().into()
+                })?)
             });
             assert_eq!(
                 latest_version(harness, http.as_ref(), &cancellation)

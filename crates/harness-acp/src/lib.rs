@@ -853,8 +853,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(spec.args[..2], ["-p", "title prompt"]);
-        assert!(spec.args.windows(2).any(|p| p == ["--model", "kimi-code/k3"]));
-        assert!(spec.args.windows(2).any(|p| p == ["--output-format", "stream-json"]));
+        assert!(
+            spec.args
+                .windows(2)
+                .any(|p| p == ["--model", "kimi-code/k3"])
+        );
+        assert!(
+            spec.args
+                .windows(2)
+                .any(|p| p == ["--output-format", "stream-json"])
+        );
         assert!(!spec.args.contains(&"--session".into()));
         assert!(spec.stdin.is_empty());
         let path = &spec.args[spec.args.iter().position(|a| a == "--agent-file").unwrap() + 1];
@@ -863,6 +871,11 @@ mod tests {
         assert!(
             matches!(&decoder.decode_line(r#"{"role":"assistant","content":"Title"}"#).unwrap()[0],DecodedEvent::MessageCompleted(t) if t.trim()=="Title")
         );
-        assert!(decoder.decode_line(r#"{"role":"meta","type":"session.resume_hint"}"#).unwrap().is_empty());
+        assert!(
+            decoder
+                .decode_line(r#"{"role":"meta","type":"session.resume_hint"}"#)
+                .unwrap()
+                .is_empty()
+        );
     }
 }
