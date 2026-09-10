@@ -1434,6 +1434,126 @@ fn conversation_actions_keep_active_and_archived_models_in_sync() {
     assert!(presenter.model().queued_messages.is_empty());
 }
 
+#[test]
+fn reordering_projects_preserves_the_active_conversation_and_survives_reload() {
+    let (mut presenter, runner, directory) = fixture();
+    for name in ["second", "third"] {
+        let path = directory.path().join(name);
+        fs::create_dir(&path).unwrap();
+        presenter.storage.open_project(&path).unwrap();
+    }
+    presenter.reload_projects();
+    assert!(presenter.submit("Keep this conversation running", "claude"));
+    let selected = presenter.model().selected_project.as_ref().unwrap().id;
+    let conversation = presenter.model().conversation.id;
+    let task = presenter.model().selected_task;
+    let run = presenter.model().active_run;
+    let messages = serde_json::to_value(&presenter.model().messages).unwrap();
+    let commands = runner.0.borrow().commands.len();
+    let original: Vec<_> = presenter
+        .model()
+        .projects
+        .iter()
+        .map(|project| project.id)
+        .collect();
+
+    assert!(presenter.reorder_project(original[0], original[2]));
+    let reordered = vec![original[1], original[2], original[0]];
+    assert_eq!(
+        presenter
+            .model()
+            .projects
+            .iter()
+            .map(|project| project.id)
+            .collect::<Vec<_>>(),
+        reordered,
+    );
+    presenter.reload_projects();
+    assert_eq!(
+        presenter
+            .model()
+            .projects
+            .iter()
+            .map(|project| project.id)
+            .collect::<Vec<_>>(),
+        reordered,
+    );
+    assert!(presenter.reorder_project(original[0], original[1]));
+    assert!(!presenter.reorder_project(original[0], original[0]));
+    assert!(!presenter.reorder_project(Uuid::new_v4(), original[0]));
+    assert!(!presenter.reorder_project(original[0], Uuid::new_v4()));
+    assert_eq!(
+        presenter
+            .storage
+            .projects()
+            .unwrap()
+            .iter()
+            .map(|project| project.id)
+            .collect::<Vec<_>>(),
+        original,
+    );
+    assert_eq!(
+        presenter.model().selected_project.as_ref().unwrap().id,
+        selected
+    );
+    assert_eq!(presenter.model().conversation.id, conversation);
+    assert_eq!(presenter.model().selected_task, task);
+    assert_eq!(presenter.model().active_run, run);
+    assert_eq!(
+        serde_json::to_value(&presenter.model().messages).unwrap(),
+        messages
+    );
+    assert_eq!(runner.0.borrow().commands.len(), commands);
+}
+
+#[test]
+fn reordering_projects_keeps_the_original_order_when_saving_fails() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("nexus.db");
+    let storage = Storage::open(&database).unwrap();
+    for name in ["first", "second"] {
+        let path = directory.path().join(name);
+        fs::create_dir(&path).unwrap();
+        storage.open_project(&path).unwrap();
+    }
+    rusqlite::Connection::open(&database)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER reject_project_order BEFORE INSERT ON settings
+         WHEN NEW.key = 'project_order'
+         BEGIN SELECT RAISE(FAIL, 'cannot save order'); END;",
+        )
+        .unwrap();
+    let mut presenter = Presenter::new(storage, Err(anyhow::anyhow!("test")), None);
+    let original: Vec<_> = presenter
+        .model()
+        .projects
+        .iter()
+        .map(|project| project.id)
+        .collect();
+    assert!(!presenter.reorder_project(original[0], original[1]));
+    assert_eq!(
+        presenter
+            .model()
+            .projects
+            .iter()
+            .map(|project| project.id)
+            .collect::<Vec<_>>(),
+        original,
+    );
+    assert!(
+        presenter
+            .storage
+            .setting("project_order")
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        presenter.model().status.render(Language::English),
+        "Cannot save project order: cannot save order",
+    );
+}
+
 struct ArchivedProjectFixture {
     presenter: Presenter,
     _directory: tempfile::TempDir,
