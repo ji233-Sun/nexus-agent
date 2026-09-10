@@ -7,27 +7,29 @@ use gpui_kit::{
 use std::sync::{Arc, LazyLock};
 
 pub(super) fn harness_icon(harness: HarnessKind, colors: Palette, size: f32) -> AnyElement {
-    // Claude/Codex: assets/harness/LICENSE; OMP: assets/harness/OMP_LICENSE.
+    // LobeHub icons: assets/harness/LICENSE; OMP: assets/harness/OMP_LICENSE.
     let (icon, color): (&[u8], _) = match harness {
-        HarnessKind::Pi
-        | HarnessKind::Kimi
-        | HarnessKind::Qoder
-        | HarnessKind::QoderCn
-        | HarnessKind::Codebuddy => {
+        HarnessKind::Pi => {
             return div()
                 .size(px(size))
                 .flex_none()
                 .text_size(px(size * 0.8))
                 .text_color(rgb(colors.text))
-                .child(match harness {
-                    HarnessKind::Pi => "π",
-                    HarnessKind::Kimi => "K",
-                    HarnessKind::Qoder => "Q",
-                    HarnessKind::QoderCn => "Q",
-                    _ => "B",
-                })
+                .child("π")
                 .into_any_element();
         }
+        HarnessKind::Kimi => (
+            include_bytes!("../../assets/harness/kimi.svg"),
+            rgb(colors.text),
+        ),
+        HarnessKind::Qoder | HarnessKind::QoderCn => (
+            include_bytes!("../../assets/harness/qoder.svg"),
+            rgb(colors.text),
+        ),
+        HarnessKind::Codebuddy => (
+            include_bytes!("../../assets/harness/codebuddy.svg"),
+            rgb(colors.text),
+        ),
         HarnessKind::Claude => (
             include_bytes!("../../assets/harness/claude.svg"),
             rgb(0xd97757),
