@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 14;
+pub const PROTOCOL_VERSION: u32 = 16;
 pub const MAX_COMMIT_DIFF_BYTES: usize = 128 * 1024;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -43,6 +43,8 @@ pub enum Command {
     RunnerHello,
     #[serde(rename = "harness.probe")]
     HarnessProbe {
+        #[serde(default)]
+        environment: Vec<EnvironmentVariable>,
         harness: HarnessKind,
         executable: String,
     },
@@ -95,6 +97,8 @@ pub enum Command {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartRun {
+    #[serde(default)]
+    pub transport: nexus_domain::HarnessTransport,
     pub run_id: Uuid,
     pub task_id: Uuid,
     pub session_id: Option<String>,
@@ -426,6 +430,7 @@ mod tests {
             }],
         };
         let command = CommandEnvelope::new(Command::RunStart(StartRun {
+            transport: nexus_domain::HarnessTransport::Cli,
             title_generation: Some(title_generation.clone()),
             permission_mode: PermissionMode::Yolo,
             run_id: Uuid::new_v4(),

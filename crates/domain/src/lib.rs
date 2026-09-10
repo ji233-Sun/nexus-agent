@@ -11,16 +11,35 @@ pub enum HarnessKind {
     Claude,
     Codex,
     Omp,
+    Pi,
+    Kimi,
+    Qoder,
+    QoderCn,
+    Codebuddy,
 }
 
 impl HarnessKind {
-    pub const ALL: [Self; 3] = [Self::Claude, Self::Codex, Self::Omp];
+    pub const ALL: [Self; 8] = [
+        Self::Claude,
+        Self::Codex,
+        Self::Omp,
+        Self::Pi,
+        Self::Kimi,
+        Self::Qoder,
+        Self::QoderCn,
+        Self::Codebuddy,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Omp => "omp",
+            Self::Pi => "pi",
+            Self::Kimi => "kimi",
+            Self::Qoder => "qoder",
+            Self::QoderCn => "qodercn",
+            Self::Codebuddy => "codebuddy",
         }
     }
 
@@ -28,7 +47,12 @@ impl HarnessKind {
         match self {
             Self::Claude => Self::Codex,
             Self::Codex => Self::Omp,
-            Self::Omp => Self::Claude,
+            Self::Omp => Self::Pi,
+            Self::Pi => Self::Kimi,
+            Self::Kimi => Self::Qoder,
+            Self::Qoder => Self::QoderCn,
+            Self::QoderCn => Self::Codebuddy,
+            Self::Codebuddy => Self::Claude,
         }
     }
 
@@ -37,6 +61,11 @@ impl HarnessKind {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Omp => "omp",
+            Self::Pi => "pi",
+            Self::Kimi => "kimi",
+            Self::Qoder => "qoder",
+            Self::QoderCn => "qodercn",
+            Self::Codebuddy => "codebuddy",
         }
     }
 }
@@ -47,6 +76,11 @@ impl fmt::Display for HarnessKind {
             Self::Claude => "Claude Code",
             Self::Codex => "Codex CLI",
             Self::Omp => "Oh My Pi",
+            Self::Pi => "Pi",
+            Self::Kimi => "Kimi Code",
+            Self::Qoder => "Qoder",
+            Self::QoderCn => "Qoder CN",
+            Self::Codebuddy => "CodeBuddy",
         })
     }
 }
@@ -59,9 +93,22 @@ impl FromStr for HarnessKind {
             "claude" => Ok(Self::Claude),
             "codex" => Ok(Self::Codex),
             "omp" => Ok(Self::Omp),
+            "pi" => Ok(Self::Pi),
+            "kimi" => Ok(Self::Kimi),
+            "qoder" => Ok(Self::Qoder),
+            "qodercn" => Ok(Self::QoderCn),
+            "codebuddy" => Ok(Self::Codebuddy),
             _ => Err(format!("unknown harness: {value}")),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum HarnessTransport {
+    #[default]
+    Cli,
+    Acp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -345,6 +392,11 @@ pub enum ModelSource {
     ClaudeAliases,
     CodexAppServer,
     OmpCli,
+    PiRpc,
+    KimiAcp,
+    QoderAcp,
+    QoderCnAcp,
+    CodebuddyAcp,
 }
 
 impl ModelSource {
@@ -353,6 +405,11 @@ impl ModelSource {
             Self::ClaudeAliases => HarnessKind::Claude,
             Self::CodexAppServer => HarnessKind::Codex,
             Self::OmpCli => HarnessKind::Omp,
+            Self::PiRpc => HarnessKind::Pi,
+            Self::KimiAcp => HarnessKind::Kimi,
+            Self::QoderAcp => HarnessKind::Qoder,
+            Self::QoderCnAcp => HarnessKind::QoderCn,
+            Self::CodebuddyAcp => HarnessKind::Codebuddy,
         }
     }
 }
@@ -535,7 +592,12 @@ mod tests {
     fn model_and_effort_cycle_through_supported_values() {
         assert_eq!(HarnessKind::Claude.next(), HarnessKind::Codex);
         assert_eq!(HarnessKind::Codex.next(), HarnessKind::Omp);
-        assert_eq!(HarnessKind::Omp.next(), HarnessKind::Claude);
+        assert_eq!(HarnessKind::Omp.next(), HarnessKind::Pi);
+        assert_eq!(HarnessKind::Pi.next(), HarnessKind::Kimi);
+        assert_eq!(HarnessKind::Kimi.next(), HarnessKind::Qoder);
+        assert_eq!(HarnessKind::Qoder.next(), HarnessKind::QoderCn);
+        assert_eq!(HarnessKind::QoderCn.next(), HarnessKind::Codebuddy);
+        assert_eq!(HarnessKind::Codebuddy.next(), HarnessKind::Claude);
         assert_eq!(HarnessKind::Codex.default_executable(), "codex");
         assert_eq!(ClaudeModel::Haiku.next(), ClaudeModel::Default);
         assert_eq!(ThinkingEffort::Max.next(), ThinkingEffort::Low);

@@ -63,14 +63,28 @@ impl Runner {
         match command {
             Command::RunnerHello => self.emitter.send(Event::RunnerReady).await,
             Command::HarnessProbe {
+                environment,
                 harness: kind,
                 executable,
             } => {
+                if !environment_is_valid(&environment) {
+                    self.emitter
+                        .send(Event::HarnessDetected(nexus_protocol::HarnessProbe {
+                            harness: kind,
+                            executable,
+                            available: false,
+                            authenticated: false,
+                            version: None,
+                            message: "无效的环境变量配置。".into(),
+                        }))
+                        .await;
+                    return true;
+                }
                 let emitter = self.emitter.clone();
                 self.probe_tasks.spawn(async move {
                     emitter
                         .send(Event::HarnessDetected(
-                            harness::probe(kind, &executable).await,
+                            harness::probe(kind, &executable, &environment).await,
                         ))
                         .await;
                 });
@@ -593,6 +607,7 @@ mod tests {
 
     fn request(cwd: String) -> StartRun {
         StartRun {
+            transport: nexus_domain::HarnessTransport::Acp,
             title_generation: Some(nexus_protocol::TextGenerationConfig {
                 harness: HarnessKind::Claude,
                 executable: "unused".into(),

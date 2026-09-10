@@ -1,3 +1,5 @@
+pub mod rpc;
+
 use std::{
     env,
     path::{Path, PathBuf},

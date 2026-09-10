@@ -73,6 +73,11 @@ pub(crate) fn documentation(harness: HarnessKind) -> &'static str {
         HarnessKind::Claude => "https://code.claude.com/docs/en/setup",
         HarnessKind::Codex => "https://developers.openai.com/codex/cli/",
         HarnessKind::Omp => "https://github.com/can1357/oh-my-pi#install",
+        HarnessKind::Pi => "https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent",
+        HarnessKind::Kimi => "https://moonshotai.github.io/kimi-code/en/guides/getting-started",
+        HarnessKind::Qoder => "https://docs.qoder.com/cli/quick-start",
+        HarnessKind::QoderCn => "https://docs.qoder.cn/cli/what-is-qoder-cli-cn",
+        HarnessKind::Codebuddy => "https://www.codebuddy.ai/docs/cli/overview",
     }
 }
 
@@ -81,6 +86,11 @@ fn package(harness: HarnessKind) -> &'static str {
         HarnessKind::Claude => "@anthropic-ai/claude-code",
         HarnessKind::Codex => "@openai/codex",
         HarnessKind::Omp => "@oh-my-pi/pi-coding-agent",
+        HarnessKind::Pi => "@earendil-works/pi-coding-agent",
+        HarnessKind::Kimi => "@moonshot-ai/kimi-code",
+        HarnessKind::Qoder => "@qoder-ai/qodercli",
+        HarnessKind::QoderCn => "@qodercn-ai/qoderclicn",
+        HarnessKind::Codebuddy => "@tencent-ai/codebuddy-code",
     }
 }
 
@@ -174,6 +184,7 @@ impl Environment {
             "CODEX_HOME",
             "CODEX_INSTALL_DIR",
             "PI_INSTALL_DIR",
+            "KIMI_INSTALL_DIR",
             "LOCALAPPDATA",
             "APPDATA",
             "PATHEXT",
@@ -192,6 +203,7 @@ impl Environment {
             "pnpm",
             "yarn",
             "npm",
+            "uv",
             "brew",
             "winget",
             "scoop",
@@ -558,6 +570,13 @@ fn manager_command(
 
 fn native_install(harness: HarnessKind, environment: &Environment) -> Option<MaintenanceCommand> {
     let (unix, windows) = match harness {
+        HarnessKind::Pi | HarnessKind::Qoder | HarnessKind::QoderCn | HarnessKind::Codebuddy => {
+            return None;
+        }
+        HarnessKind::Kimi => (
+            "curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash",
+            "& ([scriptblock]::Create((Invoke-RestMethod https://code.kimi.com/kimi-code/install.ps1)))",
+        ),
         HarnessKind::Claude => (
             "curl -fsSL https://claude.ai/install.sh | bash",
             "& ([scriptblock]::Create((Invoke-RestMethod https://claude.ai/install.ps1)))",
@@ -596,6 +615,15 @@ fn install_options(
     environment: &Environment,
     managers: &[Manager],
 ) -> Vec<InstallOption> {
+    if harness == HarnessKind::Kimi {
+        return native_install(harness, environment)
+            .map(|command| InstallOption {
+                method: InstallMethod::Native,
+                command,
+            })
+            .into_iter()
+            .collect();
+    }
     let mut options = native_install(harness, environment)
         .map(|command| InstallOption {
             method: InstallMethod::Native,
@@ -613,7 +641,17 @@ fn install_options(
             HarnessKind::Claude => vec!["install", "--cask", "claude-code"],
             HarnessKind::Codex => vec!["install", "--cask", "codex"],
             HarnessKind::Omp => vec!["install", "can1357/tap/omp"],
+            HarnessKind::Pi
+            | HarnessKind::Kimi
+            | HarnessKind::Qoder
+            | HarnessKind::QoderCn
+            | HarnessKind::Codebuddy => {
+                vec![]
+            }
         },
+    ) && matches!(
+        harness,
+        HarnessKind::Claude | HarnessKind::Codex | HarnessKind::Omp
     ) && (environment.os == "macos" || harness == HarnessKind::Omp)
     {
         options.push(InstallOption {
@@ -649,7 +687,12 @@ fn winget_id(harness: HarnessKind) -> Option<&'static str> {
     match harness {
         HarnessKind::Claude => Some("Anthropic.ClaudeCode"),
         HarnessKind::Codex => Some("OpenAI.Codex"),
-        HarnessKind::Omp => None,
+        HarnessKind::Omp
+        | HarnessKind::Pi
+        | HarnessKind::Kimi
+        | HarnessKind::Qoder
+        | HarnessKind::QoderCn
+        | HarnessKind::Codebuddy => None,
     }
 }
 
@@ -664,6 +707,13 @@ fn homebrew_owner(real: &Path, harness: HarnessKind) -> Option<(PathBuf, String,
     parts.next()?;
     parts.next()?;
     let expected = match harness {
+        HarnessKind::Pi
+        | HarnessKind::Kimi
+        | HarnessKind::Qoder
+        | HarnessKind::QoderCn
+        | HarnessKind::Codebuddy => {
+            return None;
+        }
         HarnessKind::Claude => "claude-code",
         HarnessKind::Codex => "codex",
         HarnessKind::Omp => "omp",
@@ -846,8 +896,17 @@ async fn ownership(
         HarnessKind::Claude => "claude-code",
         HarnessKind::Codex => "codex",
         HarnessKind::Omp => "omp",
+        HarnessKind::Pi => "pi",
+        HarnessKind::Kimi => "kimi",
+        HarnessKind::Qoder => "qoder",
+        HarnessKind::QoderCn => "qodercn",
+        HarnessKind::Codebuddy => "codebuddy",
     };
-    if inside(real, &scoop.join("apps").join(scoop_name)) {
+    if matches!(
+        harness,
+        HarnessKind::Claude | HarnessKind::Codex | HarnessKind::Omp
+    ) && inside(real, &scoop.join("apps").join(scoop_name))
+    {
         return (
             "Scoop".into(),
             environment.command("scoop", ["update", scoop_name]),
@@ -861,6 +920,15 @@ async fn ownership(
         );
     }
     let native = match harness {
+        HarnessKind::Pi | HarnessKind::Qoder | HarnessKind::QoderCn | HarnessKind::Codebuddy => {
+            false
+        }
+        HarnessKind::Kimi => inside(
+            real,
+            &environment
+                .home_for("KIMI_INSTALL_DIR", ".kimi-code")
+                .join("bin"),
+        ),
         HarnessKind::Claude => {
             inside(real, &environment.home.join(".local/share/claude/versions"))
                 || (environment.os == "windows"
@@ -916,6 +984,9 @@ async fn ownership(
                         )
                 })
             }
+        } else if harness == HarnessKind::Kimi {
+            // `kimi upgrade` resolves the native install source and updates in place.
+            Some(MaintenanceCommand::new(executable, ["upgrade"]))
         } else {
             Some(MaintenanceCommand::new(executable, ["update"]))
         };
@@ -966,11 +1037,17 @@ async fn latest_version(
 ) -> Result<String> {
     ensure!(!*cancellation.borrow(), "操作已取消");
     let mut cancellation = cancellation.clone();
+    let kimi = harness == HarnessKind::Kimi;
     let lookup = async {
-        let url = format!(
-            "https://registry.npmjs.org/{}/latest",
-            package(harness).replace('/', "%2F")
-        );
+        let url = if kimi {
+            // Kimi Code's installer publishes the latest version as plain text.
+            "https://code.kimi.com/kimi-code/latest".into()
+        } else {
+            format!(
+                "https://registry.npmjs.org/{}/latest",
+                package(harness).replace('/', "%2F")
+            )
+        };
         let mut response = http
             .send(
                 Request::get(url)
@@ -981,7 +1058,7 @@ async fn latest_version(
             .await?;
         ensure!(
             response.status().is_success(),
-            "npm registry returned HTTP {}",
+            "package registry returned HTTP {}",
             response.status()
         );
         let mut body = Vec::new();
@@ -990,12 +1067,16 @@ async fn latest_version(
             .take((MAX_OUTPUT + 1) as u64)
             .read_to_end(&mut body)
             .await?;
-        ensure!(body.len() <= MAX_OUTPUT, "npm metadata is too large");
-        let metadata: serde_json::Value = serde_json::from_slice(&body)?;
-        let version = metadata["version"]
-            .as_str()
-            .context("npm metadata has no version")?;
-        Ok(semver::Version::parse(version)?.to_string())
+        ensure!(body.len() <= MAX_OUTPUT, "package metadata is too large");
+        let version = if kimi {
+            std::str::from_utf8(&body)?.trim().to_owned()
+        } else {
+            serde_json::from_slice::<serde_json::Value>(&body)?["version"]
+                .as_str()
+                .context("package metadata has no version")?
+                .to_owned()
+        };
+        Ok(semver::Version::parse(&version)?.to_string())
     };
     tokio::select! {
         result = tokio::time::timeout(PROBE_TIMEOUT, lookup) => {
@@ -1369,6 +1450,36 @@ mod tests {
         assert!(installed_version("").is_none());
     }
 
+    #[test]
+    fn roadmap_installers_use_official_packages_and_kimi_uses_its_own_installer() {
+        let (_directory, _cancel, mut environment) = fixture();
+        environment.tools.insert("bash".into(), "/bin/bash".into());
+        environment
+            .tools
+            .insert("powershell".into(), "powershell.exe".into());
+        let npm = manager(&environment, InstallMethod::Npm, "npm", "bin", "prefix");
+        for (harness, package) in [
+            (HarnessKind::Pi, "@earendil-works/pi-coding-agent@latest"),
+            (HarnessKind::Qoder, "@qoder-ai/qodercli@latest"),
+            (HarnessKind::QoderCn, "@qodercn-ai/qoderclicn@latest"),
+            (HarnessKind::Codebuddy, "@tencent-ai/codebuddy-code@latest"),
+        ] {
+            let options = install_options(harness, &environment, std::slice::from_ref(&npm));
+            assert_eq!(options.len(), 1);
+            assert!(options[0].command.args.contains(&package.into()));
+        }
+        // Kimi Code ships a standalone installer; npm must not be offered.
+        let options = install_options(HarnessKind::Kimi, &environment, &[npm]);
+        assert_eq!(options.len(), 1);
+        assert_eq!(options[0].method, InstallMethod::Native);
+        let command = options[0].command.args.last().unwrap();
+        assert!(command.contains(if cfg!(windows) {
+            "code.kimi.com/kimi-code/install.ps1"
+        } else {
+            "code.kimi.com/kimi-code/install.sh"
+        }));
+    }
+
     #[tokio::test]
     async fn latest_version_reads_the_latest_tag_for_each_harness() {
         let (_cancel, cancellation) = watch::channel(false);
@@ -1379,6 +1490,23 @@ mod tests {
                 "2.1.263",
             ),
             (HarnessKind::Codex, "/@openai%2Fcodex/latest", "0.153.4"),
+            (HarnessKind::Qoder, "/@qoder-ai%2Fqodercli/latest", "1.1.48"),
+            (
+                HarnessKind::QoderCn,
+                "/@qodercn-ai%2Fqoderclicn/latest",
+                "1.1.48",
+            ),
+            (
+                HarnessKind::Codebuddy,
+                "/@tencent-ai%2Fcodebuddy-code/latest",
+                "2.147.0",
+            ),
+            (HarnessKind::Kimi, "/kimi-code/latest", "0.42.0"),
+            (
+                HarnessKind::Pi,
+                "/@earendil-works%2Fpi-coding-agent/latest",
+                "0.85.1",
+            ),
             (
                 HarnessKind::Omp,
                 "/@oh-my-pi%2Fpi-coding-agent/latest",
@@ -1386,14 +1514,24 @@ mod tests {
             ),
         ] {
             let http = FakeHttpClient::create(move |request| async move {
-                assert_eq!(request.uri().host(), Some("registry.npmjs.org"));
+                assert_eq!(
+                    request.uri().host(),
+                    Some(if harness == HarnessKind::Kimi {
+                        "code.kimi.com"
+                    } else {
+                        "registry.npmjs.org"
+                    })
+                );
                 assert_eq!(request.uri().path(), path);
                 assert_eq!(
                     request.extensions().get::<RequestTimeout>().unwrap().0,
                     PROBE_TIMEOUT
                 );
-                Ok(Response::builder()
-                    .body(serde_json::json!({"version": version}).to_string().into())?)
+                Ok(Response::builder().body(if harness == HarnessKind::Kimi {
+                    format!("{version}\n").into()
+                } else {
+                    serde_json::json!({"version":version}).to_string().into()
+                })?)
             });
             assert_eq!(
                 latest_version(harness, http.as_ref(), &cancellation)
@@ -1807,6 +1945,11 @@ mod tests {
                 ".codex/packages/standalone/releases/1.0/bin/codex",
             ),
             (HarnessKind::Omp, ".local/bin/omp", ".local/bin/omp"),
+            (
+                HarnessKind::Kimi,
+                ".kimi-code/bin/kimi",
+                ".kimi-code/bin/kimi",
+            ),
         ] {
             let (owner, command) = ownership(
                 harness,
@@ -1824,6 +1967,8 @@ mod tests {
                     environment.home.join(".local/bin").display().to_string()
                 );
                 assert_eq!(command.environment["CODEX_NON_INTERACTIVE"], "1");
+            } else if harness == HarnessKind::Kimi {
+                assert_eq!(command.args, ["upgrade"]);
             } else {
                 assert_eq!(command.args, ["update"]);
             }

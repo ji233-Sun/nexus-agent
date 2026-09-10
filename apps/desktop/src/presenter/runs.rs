@@ -1052,6 +1052,7 @@ impl Presenter {
                 return false;
             }
         };
+        let transport = self.harness_transport(harness);
         let Ok(pending_run) = self.storage.prepare_task_run(NewTaskRun {
             workspace_id: Some(workspace.id),
             task_id,
@@ -1087,6 +1088,7 @@ impl Presenter {
             prompt.clone()
         };
         let command = CommandEnvelope::new(Command::RunStart(StartRun {
+            transport,
             run_id,
             task_id,
             session_id,

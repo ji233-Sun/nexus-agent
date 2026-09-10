@@ -288,6 +288,7 @@ impl Presenter {
                     .flatten()
                     .unwrap_or_else(|| harness.default_executable().into());
                 let _ = runner.send(CommandEnvelope::new(Command::HarnessProbe {
+                    environment: presenter.codebuddy_environment(harness),
                     harness,
                     executable,
                 }));
@@ -624,6 +625,7 @@ impl Presenter {
                     if let Some(runner) = &self.runner
                         && runner
                             .send(CommandEnvelope::new(Command::HarnessProbe {
+                                environment: self.codebuddy_environment(config.harness),
                                 harness: config.harness,
                                 executable,
                             }))
@@ -754,6 +756,7 @@ impl Presenter {
         self.model.harness_manager.installations.remove(&harness);
         if let Some(runner) = &self.runner {
             let _ = runner.send(CommandEnvelope::new(Command::HarnessProbe {
+                environment: self.codebuddy_environment(harness),
                 harness,
                 executable: executable.clone(),
             }));
@@ -834,6 +837,7 @@ impl Presenter {
         self.model.executable = executable.clone();
         if let Some(runner) = &self.runner {
             let _ = runner.send(CommandEnvelope::new(Command::HarnessProbe {
+                environment: self.codebuddy_environment(self.model.selected_harness),
                 harness: self.model.selected_harness,
                 executable,
             }));
@@ -1258,20 +1262,96 @@ impl Presenter {
         true
     }
 
+    pub(crate) fn harness_transport(&self, harness: HarnessKind) -> nexus_domain::HarnessTransport {
+        if harness == HarnessKind::Kimi
+            || self
+                .storage
+                .setting(&format!("harness_transport.{}", harness.as_str()))
+                .ok()
+                .flatten()
+                .as_deref()
+                == Some("acp")
+        {
+            nexus_domain::HarnessTransport::Acp
+        } else {
+            nexus_domain::HarnessTransport::Cli
+        }
+    }
+
+    pub(crate) fn set_harness_transport(&mut self, transport: nexus_domain::HarnessTransport) {
+        if self.model.active_run_count() > 0 {
+            return;
+        }
+        let value = if transport == nexus_domain::HarnessTransport::Acp {
+            "acp"
+        } else {
+            "cli"
+        };
+        if self
+            .storage
+            .set_setting(
+                &format!("harness_transport.{}", self.model.selected_harness.as_str()),
+                value,
+            )
+            .is_err()
+        {
+            self.model.log_status("无法保存接入方式。".into());
+        }
+    }
+
+    pub(crate) fn codebuddy_region(&self) -> String {
+        self.storage
+            .setting("codebuddy_region")
+            .ok()
+            .flatten()
+            .filter(|v| matches!(v.as_str(), "internal" | "external"))
+            .unwrap_or_default()
+    }
+
+    fn codebuddy_environment(&self, harness: HarnessKind) -> Vec<EnvironmentVariable> {
+        let region = self.codebuddy_region();
+        if harness == HarnessKind::Codebuddy && !region.is_empty() {
+            vec![EnvironmentVariable {
+                name: "CODEBUDDY_INTERNET_ENVIRONMENT".into(),
+                value: region,
+            }]
+        } else {
+            vec![]
+        }
+    }
+
+    pub(crate) fn set_codebuddy_region(&mut self, region: &str) {
+        if self.model.active_run_count() > 0 || !matches!(region, "" | "internal" | "external") {
+            return;
+        }
+        if self
+            .storage
+            .set_setting("codebuddy_region", region)
+            .is_err()
+        {
+            self.model.log_status("无法保存 CodeBuddy 地区。".into());
+            return;
+        }
+        self.model.model_catalog = ModelCatalogState::Idle;
+        let executable = self.model.executable.clone();
+        self.probe(&executable);
+    }
+
     fn provider_launch_configuration(
         &self,
         harness: HarnessKind,
     ) -> Result<Vec<EnvironmentVariable>> {
+        let mut environment = self.codebuddy_environment(harness);
         let Some(profile) = self.model.provider_profile_for(harness) else {
-            return Ok(Vec::new());
+            return Ok(environment);
         };
         let Some(api_key) = self.credentials.api_key(profile.id)? else {
             bail!("系统凭据库中找不到 {} 的 API Key", profile.name);
         };
-        let mut environment = vec![EnvironmentVariable {
+        environment.push(EnvironmentVariable {
             name: profile.api_key_env.clone(),
             value: api_key,
-        }];
+        });
         if let (Some(name), Some(value)) = (&profile.base_url_env, &profile.base_url) {
             environment.push(EnvironmentVariable {
                 name: name.clone(),
@@ -1373,6 +1453,11 @@ fn executable_setting_key(harness: HarnessKind) -> &'static str {
         HarnessKind::Claude => "claude_executable",
         HarnessKind::Codex => "codex_executable",
         HarnessKind::Omp => "omp_executable",
+        HarnessKind::Pi => "pi_executable",
+        HarnessKind::Kimi => "kimi_executable",
+        HarnessKind::Qoder => "qoder_executable",
+        HarnessKind::QoderCn => "qodercn_executable",
+        HarnessKind::Codebuddy => "codebuddy_executable",
     }
 }
 

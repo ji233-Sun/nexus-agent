@@ -202,6 +202,7 @@ impl Presenter {
                 .find(|(kind, _)| *kind == harness)
         {
             let _ = runner.send(CommandEnvelope::new(Command::HarnessProbe {
+                environment: self.codebuddy_environment(harness),
                 harness,
                 executable,
             }));

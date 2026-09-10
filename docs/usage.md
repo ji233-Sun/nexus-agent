@@ -12,7 +12,7 @@
 
 悬停侧栏项目行，点击「… → 删除项目」并确认，可移除项目及其在 Nexus 中的全部对话（含归档）、消息、运行和工作区记录。磁盘上的项目目录、Worktree、文件和 Git 分支都会保留；重新打开目录可再次添加项目，但不会恢复已删除的 Nexus 记录。项目有活动任务（含后台任务）或应用正在执行工作区操作时，暂不能删除。
 
-三个 Harness 均保存原生 Session，Nexus 在自己的数据库中记录 Session ID、各轮运行状态和消息。旧版本关闭了原生 Session 保存，因此旧任务可能只能浏览历史；缺少 Session ID 时会提示无法续聊。继续对话需使用原任务的 Harness，切换 Harness 请新建任务。
+所有已接入的 Harness 均保存原生 Session，Nexus 在自己的数据库中记录 Session ID、各轮运行状态和消息。旧版本关闭了原生 Session 保存，因此旧任务可能只能浏览历史；缺少 Session ID 时会提示无法续聊。继续对话需使用原任务的 Harness，切换 Harness 请新建任务。
 
 运行中继续发送消息会进入该任务的队列，每轮成功结束后按顺序发送一条。切换聊天后，后台任务仍会继续发送自己的队列；停止或运行失败后暂停自动发送，返回原任务后可手动继续。
 
@@ -82,7 +82,7 @@ OMP 使用 `rpc-ui` 模式向内置 `ask` 工具提供交互能力，需要安�
 
 Windows 的程序探测支持 `PATHEXT` 中的 `.exe`、`.com`、`.bat` 和 `.cmd`，包括 npm 安装生成的命令入口。
 
-在 **设置 → 执行引擎 → Harness 管理** 中，可以同时查看三个 Harness 的当前版本、最新版本、实际路径和安装来源，点击「重新扫描」刷新。未安装时从「安装」菜单选择本机可用的安装器；已安装且检测到更新版本时，显示「更新」入口，并沿用拥有该可执行文件的安装器。执行前显示具体命令，也可复制更新命令。
+在 **设置 → 执行引擎 → Harness 管理** 中，可以同时查看所有已接入的 Harness 的当前版本、最新版本、实际路径和安装来源，点击「重新扫描」刷新。未安装时从「安装」菜单选择本机可用的安装器；已安装且检测到更新版本时，显示「更新」入口，并沿用拥有该可执行文件的安装器。执行前显示具体命令，也可复制更新命令。
 
 | 安装来源 | 安装与更新方式 |
 | --- | --- |
@@ -94,7 +94,7 @@ Windows 的程序探测支持 `PATHEXT` 中的 `.exe`、`.com`、`.bat` 和 `.cm
 
 扫描优先遵循 `PATH`，同时查找官方安装目录、Node 版本管理器及全局包管理器目录，包括自定义 `VP_HOME`、`BUN_INSTALL`、`PNPM_HOME`。Windows 优先选择可执行扩展名，避免误运行 npm 的 Unix 同名脚本。包管理器发现的有效入口若不在 `PATH` 中，会保存到已有可执行路径设置；手动指定但不存在的路径需先修正或恢复命令名。解析来源时同时检查入口和真实路径：Vite+ 的代理入口按 `vp` 处理，Homebrew Node 下的 npm 全局包仍按 npm 更新，共用 `bin` 目录不会被当作安装来源的证据。
 
-安装和更新在后台执行，任务运行期间禁用，完成后重新检测版本及运行环境。版本输出无效、命令失败或超时会显示诊断，可取消或重试；取消、超时和关闭应用时清理安装进程树。不会在启动或扫描时自动安装、更新，也不会为来源不明的文件猜测更新命令。重新扫描会同时读取本地版本与 npm registry 的最新版本；仅在最新版本高于当前版本时提供更新操作。远端查询失败会显示原因，保留本地安装信息。
+安装和更新在后台执行，任务运行期间禁用，完成后重新检测版本及运行环境。版本输出无效、命令失败或超时会显示诊断，可取消或重试；取消、超时和关闭应用时清理安装进程树。不会在启动或扫描时自动安装、更新，也不会为来源不明的文件猜测更新命令。重新扫描会同时读取本地版本与包源的最新版本（Kimi 使用官方版本接口，其余使用 npm registry）；仅在最新版本高于当前版本时提供更新操作。远端查询失败会显示原因，保留本地安装信息。
 
 来源判定参考 [t3code 的维护逻辑](https://github.com/pingdotgg/t3code/blob/main/apps/server/src/provider/providerMaintenance.ts)，安装命令依据 [Claude Code](https://code.claude.com/docs/en/setup)、[Codex CLI](https://developers.openai.com/codex/cli/)、[OMP](https://github.com/can1357/oh-my-pi#install) 和 [Vite+ 全局包管理](https://viteplus.dev/guide/install)说明。
 
@@ -172,3 +172,32 @@ Desktop 启动后默认在 `127.0.0.1:3210` 提供 HTTP/WebSocket 服务。设�
 - Remote Web 的授权请求仍需回到 Desktop 处理；当前不提供多设备账户、云端 Control Plane 或内置 TLS。
 - Codex 的 MCP elicitation 尚未接入。模型能力、权限策略和文本输出时机取决于对应 Harness。
 - macOS 发布包使用本地临时签名，尚无开发者签名或 Apple 公证。
+
+### Pi
+
+Pi 使用官方 `@earendil-works/pi-coding-agent`（`pi`）的 RPC 模式，模型目录保留 `provider/model` 标识。先在 CLI 配置 Provider 和认证。Nexus 记录原生 Session 文件路径，续聊依赖该文件仍然存在。
+
+Ask 模式允许内置只读工具，其余工具通过审批；Auto Edit 额外允许 write/edit；YOLO 放行工具。审批由随进程加载的扩展实现，扩展未就绪时不会发送任务。后台标题生成禁用工具、扩展并关闭会话保存。Pi 的原生选择和文本提问复用 RPC User Ask 面板。
+
+### Kimi Code、Qoder 与 CodeBuddy
+
+Kimi Code 只支持 ACP，新会话固定使用 ACP 接入。Qoder / Qoder CN / CodeBuddy 新会话默认使用原生 stream-json，设置中的「接入方式」可以切换到 ACP，均支持流式回答、工具结果、审批和原生会话续聊。先在各自 CLI 完成登录：`kimi login`、`qoder login`、`qodercn login`、`codebuddy login`。
+
+| 引擎 | 本次核对的 CLI | 安装与配置 |
+| --- | --- | --- |
+| Kimi Code | `@moonshot-ai/kimi-code` 0.42.0 | 安装菜单使用官方安装脚本；官方安装器来源通过 `kimi upgrade` 更新，其他来源使用[官方安装文档](https://moonshotai.github.io/kimi-code/en/guides/getting-started) |
+| Qoder 国际版 | `@qoder-ai/qodercli` 1.1.48，命令 `qoder` | Provider Token 使用 `QODER_PERSONAL_ACCESS_TOKEN` |
+| Qoder 国内版 | `@qodercn-ai/qoderclicn` 1.1.48，命令 `qodercn` | 独立安装和配置；Provider Token 使用 `QODERCN_PERSONAL_ACCESS_TOKEN` |
+| CodeBuddy | `@tencent-ai/codebuddy-code` 2.147.0 | 国内/国际共用安装包；支持 `CODEBUDDY_API_KEY` / `CODEBUDDY_BASE_URL` |
+
+CodeBuddy 设置提供「跟随 CLI」「国内」「国际」。选择地区时仅向子进程传入 `CODEBUDDY_INTERNET_ENVIRONMENT=internal|external`，用于探测、模型目录、任务和后台文本生成，不修改 CLI 全局配置。账号须在相应地区具备访问权限。
+
+Ask 显示 CLI 请求的审批；Auto Edit 自动批准编辑请求，其余继续询问；YOLO 批准 CLI 交出的工具审批，仍保留 User Ask 问答，不绕过 CLI 强制策略。CLI 自己允许的只读或已配置操作不会额外弹窗。原生模式支持结构化选择及自定义回答。CodeBuddy 支持运行中补充消息的原生接收回执；Kimi、Qoder 和 ACP 的补充消息在下一轮发送。
+
+模型和思考层级仍通过 ACP 从当前 CLI 获取。Kimi Code 需要原生登录状态，仅填写 Provider API Key 不能替代探测的登录检查；探测与刷新目录不会调用模型，但 CLI 可能保存空会话。
+
+接入方式设置影响新会话；已有会话沿用创建时的协议，旧版本的未标记会话继续使用 ACP。Kimi Code 只使用 ACP，旧版 `kimi-cli` Wire 会话无法恢复，需升级到 kimi-code 后重新开始会话。CodeBuddy 新会话同时记录显式选择的地区，续聊时恢复该地区。原生 Session 必须仍然存在。ACP v1 的厂商私有 User Ask 扩展尚未接入。
+
+后台标题中 Qoder / CodeBuddy 禁用工具与 MCP，并关闭会话保存；Kimi Code 使用 `kimi -p --output-format stream-json` 与无工具的临时 Markdown Agent。Kimi Code 没有禁用 MCP 或 hooks 的启动参数，标题会话仍会加载用户 MCP 声明、触发已配置的 hooks，并在自己的数据目录保留会话，但不续用任务会话。
+
+四个新增引擎也可用于侧栏的提交说明生成，复用无工具的后台文本生成配置。提交说明保留主题与正文的换行，不会作为会话消息发送。
