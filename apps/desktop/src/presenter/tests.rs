@@ -443,7 +443,10 @@ fn worktree_source_selection_handles_non_git_empty_and_detached_projects() {
     emit_current_catalog(&presenter, &runner, claude_aliases());
     presenter.drain_events();
     assert!(!presenter.submit("needs a source commit", "claude"));
-    assert_eq!(presenter.model.status_text(), "请选择来源分支。");
+    assert_eq!(
+        presenter.model.latest_log_text(presenter.model.language),
+        "请选择来源分支。"
+    );
     let (_repository, project) = git::tests::repository_fixture();
     let path = Path::new(&project.canonical_path);
     git::git(path, &["checkout", "--detach", "HEAD"]).unwrap();
@@ -529,7 +532,12 @@ fn a_second_local_task_cannot_write_to_an_active_checkout() {
     let first = last_start(&runner);
     presenter.new_task();
     assert!(!presenter.submit("second", "claude"));
-    assert!(presenter.model.status_text().contains("checkout"));
+    assert!(
+        presenter
+            .model
+            .latest_log_text(presenter.model.language)
+            .contains("checkout")
+    );
     assert_eq!(last_start(&runner).run_id, first.run_id);
     assert_eq!(presenter.model.active_run_count(), 1);
 }
@@ -997,7 +1005,10 @@ pub(crate) fn pending_cli_installation(
 #[test]
 fn cli_installation_reports_completion_and_failure_without_changing_the_conversation() {
     let (mut presenter, _, _directory) = fixture();
-    let original_status = presenter.model().status.clone();
+    let original_status = presenter
+        .model()
+        .latest_log_text(presenter.model().language)
+        .to_owned();
     let original_project = presenter
         .model()
         .selected_project
@@ -1019,7 +1030,12 @@ fn cli_installation_reports_completion_and_failure_without_changing_the_conversa
         } else {
             "permission denied"
         }));
-        assert_eq!(presenter.model().status, original_status);
+        assert_eq!(
+            presenter
+                .model()
+                .latest_log_text(presenter.model().language),
+            original_status
+        );
         assert_eq!(
             presenter
                 .model()
@@ -1049,7 +1065,10 @@ fn update_events_guard_concurrency_and_preserve_conversations_through_completion
     assert!(presenter.submit("Keep this conversation running", "claude"));
     let task = presenter.model().selected_task;
     let run = presenter.model().active_run;
-    let status = presenter.model().status.clone();
+    let status = presenter
+        .model()
+        .latest_log_text(presenter.model().language)
+        .to_owned();
     let sender = pending_update(&mut presenter);
     let channel = presenter.model().updates.channel;
     assert!(!presenter.set_update_channel(UpdateChannel::Nightly));
@@ -1094,7 +1113,12 @@ fn update_events_guard_concurrency_and_preserve_conversations_through_completion
     ));
     assert_eq!(presenter.model().selected_task, task);
     assert_eq!(presenter.model().active_run, run);
-    assert_eq!(presenter.model().status, status);
+    assert_eq!(
+        presenter
+            .model()
+            .latest_log_text(presenter.model().language),
+        status
+    );
     assert!(!presenter.drain_update_events());
 }
 
@@ -1201,12 +1225,168 @@ fn remote_status(presenter: &mut Presenter) -> String {
 }
 
 #[test]
+fn runtime_log_is_ordered_localized_and_limited_to_the_current_launch() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("logs-test.sqlite3");
+    let runner = FakeRunner::default();
+    let mut presenter = Presenter::new_with_credentials(
+        Storage::open(&path).unwrap(),
+        Ok(Box::new(runner.clone())),
+        None,
+        Box::new(FakeCredentialStore::default()),
+    );
+    assert_eq!(presenter.model.runtime_log.len(), 1);
+    assert_eq!(
+        presenter.model.latest_log_text(Language::Chinese),
+        "正在连接本地 Runner…"
+    );
+    presenter.cnb_client = crate::infrastructure::cnb::Client::fake();
+    presenter.open_project(directory.path());
+    let before = chrono::Local::now();
+    presenter.new_task();
+    assert!(presenter.delete_archived_tasks());
+    let after = chrono::Local::now();
+    assert_eq!(presenter.model.runtime_log.len(), 3);
+    for entry in &presenter.model.runtime_log[1..] {
+        assert!(entry.timestamp >= before && entry.timestamp <= after);
+    }
+    assert_eq!(
+        presenter.model.runtime_log[1]
+            .message
+            .render(Language::Chinese),
+        "已准备好新任务。"
+    );
+    assert_eq!(
+        presenter.model.latest_log_text(Language::Chinese),
+        "已删除 0 个归档对话。"
+    );
+    assert!(presenter.set_language(Language::English));
+    assert_eq!(presenter.model.runtime_log.len(), 3);
+    assert_eq!(
+        presenter.model.latest_log_text(Language::English),
+        "Deleted 0 archived conversations."
+    );
+    drop(presenter);
+    let presenter = Presenter::new_with_credentials(
+        Storage::open(&path).unwrap(),
+        Ok(Box::new(runner)),
+        Some("storage startup diagnostic".into()),
+        Box::new(FakeCredentialStore::default()),
+    );
+    assert_eq!(presenter.model.runtime_log.len(), 1);
+    assert_eq!(
+        presenter.model.latest_log_text(Language::English),
+        "storage startup diagnostic"
+    );
+}
+
+#[test]
+fn runtime_log_records_operations_and_background_events_without_replacing_run_progress() {
+    let (mut presenter, runner, _directory) = fixture();
+    assert!(presenter.submit("first task", "claude"));
+    let first = last_start(&runner);
+    runner.emit(Event::RunStatusChanged {
+        run_id: first.run_id,
+        status: RunStatus::Running,
+        message: Some("thinking".into()),
+    });
+    presenter.drain_events();
+    assert!(presenter.submit("queued message", "claude"));
+    assert!(
+        presenter
+            .model
+            .latest_log_text(Language::Chinese)
+            .contains("消息已排队")
+    );
+    assert_eq!(
+        presenter.model.run_status.render(Language::Chinese),
+        "thinking"
+    );
+    runner.emit(Event::HarnessDetected(ready_probe(HarnessKind::Claude)));
+    presenter.drain_events();
+    assert_eq!(
+        presenter.model.run_status.render(Language::Chinese),
+        "thinking"
+    );
+    assert_eq!(remote_status(&mut presenter), "thinking");
+
+    presenter.new_task();
+    assert_eq!(presenter.model.run_status, LocalizedText::default());
+    let other_directory = tempfile::tempdir().unwrap();
+    presenter.open_project(other_directory.path());
+    assert!(presenter.submit("second task", "claude"));
+    let second = last_start(&runner);
+    runner.emit(Event::RunStatusChanged {
+        run_id: second.run_id,
+        status: RunStatus::Running,
+        message: Some("reading files".into()),
+    });
+    runner.emit(Event::RunStatusChanged {
+        run_id: first.run_id,
+        status: RunStatus::Running,
+        message: Some("testing".into()),
+    });
+    presenter.drain_events();
+    assert_eq!(
+        presenter.model.run_status.render(Language::Chinese),
+        "reading files"
+    );
+    assert_eq!(
+        presenter.model.latest_log_text(Language::Chinese),
+        "testing"
+    );
+    assert_eq!(remote_status(&mut presenter), "reading files");
+    presenter.select_task(first.task_id);
+    assert_eq!(
+        presenter.model.run_status.render(Language::Chinese),
+        "testing"
+    );
+    runner.emit(Event::RunExited {
+        run_id: second.run_id,
+        status: RunStatus::Completed,
+        exit_code: Some(0),
+    });
+    presenter.drain_events();
+    assert_eq!(
+        presenter.model.latest_log_text(Language::Chinese),
+        "任务已完成"
+    );
+    assert_eq!(
+        presenter.model.run_status.render(Language::Chinese),
+        "testing"
+    );
+    assert_eq!(remote_status(&mut presenter), "testing");
+    let count = presenter.model.runtime_log.len();
+    runner.emit(Event::RunStatusChanged {
+        run_id: second.run_id,
+        status: RunStatus::Running,
+        message: Some("stale progress".into()),
+    });
+    presenter.drain_events();
+    assert_eq!(presenter.model.runtime_log.len(), count);
+    presenter.select_task(second.task_id);
+    assert_eq!(
+        presenter.model.run_status.render(Language::Chinese),
+        "任务已完成"
+    );
+}
+
+#[test]
 fn language_switch_updates_status_and_preserves_active_runs_and_remote_content() {
     let (mut presenter, runner, _directory) = fixture();
     assert!(!presenter.submit(" ", "claude"));
     assert!(presenter.set_language(Language::English));
-    assert_eq!(presenter.model().status_text(), "Prompt cannot be empty.");
-    assert_eq!(remote_status(&mut presenter), "Prompt 不能为空。");
+    assert_eq!(
+        presenter
+            .model()
+            .latest_log_text(presenter.model().language),
+        "Prompt cannot be empty."
+    );
+    assert_eq!(
+        presenter.model.latest_log_text(Language::Chinese),
+        "Prompt 不能为空。"
+    );
+    assert_eq!(remote_status(&mut presenter), "");
     assert!(presenter.submit("设置 {count} café", "claude"));
     let task_id = presenter.model().selected_task;
     let run_id = presenter.model().active_run;
@@ -1232,7 +1412,12 @@ fn language_switch_updates_status_and_preserves_active_runs_and_remote_content()
         message: "原始诊断 {message}".into(),
     });
     presenter.drain_events();
-    assert_eq!(presenter.model().status_text(), "原始诊断 {message}");
+    assert_eq!(
+        presenter
+            .model()
+            .latest_log_text(presenter.model().language),
+        "原始诊断 {message}"
+    );
 }
 
 #[test]
@@ -1258,15 +1443,26 @@ fn language_translates_probe_summaries_and_default_effort_without_changing_cli_v
         probe.message = "原始探测诊断".into();
         runner.emit(Event::HarnessDetected(probe));
         presenter.drain_events();
-        assert_eq!(presenter.model().status_text(), expected);
-        assert_eq!(remote_status(&mut presenter), "原始探测诊断");
+        assert_eq!(
+            presenter
+                .model()
+                .latest_log_text(presenter.model().language),
+            expected
+        );
+        assert_eq!(
+            presenter.model.latest_log_text(Language::Chinese),
+            "原始探测诊断"
+        );
+        assert_eq!(remote_status(&mut presenter), "");
     }
     runner.emit(Event::HarnessDetected(ready_probe(HarnessKind::Claude)));
     presenter.drain_events();
     presenter.select_effort(ThinkingEffort::Default);
     assert!(presenter.submit("hello", "claude"));
     assert_eq!(
-        presenter.model().status_text(),
+        presenter
+            .model()
+            .latest_log_text(presenter.model().language),
         "Starting Claude Code · Model default"
     );
     assert_eq!(
@@ -1703,7 +1899,7 @@ fn reordering_projects_keeps_the_original_order_when_saving_fails() {
             .is_none()
     );
     assert_eq!(
-        presenter.model().status.render(Language::English),
+        presenter.model().latest_log_text(Language::English),
         "Cannot save project order: cannot save order",
     );
 }
@@ -2236,9 +2432,14 @@ fn catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
     assert!(presenter.select_harness(HarnessKind::Codex, "claude"));
     let stale_request_id = current_catalog_request_id(&presenter);
 
-    presenter.model.status = "当前任务状态".to_owned().into();
+    presenter.model.log_status("当前任务状态".to_owned().into());
     assert!(presenter.refresh_model_catalog());
-    assert_eq!(presenter.model().status_text(), "当前任务状态");
+    assert_eq!(
+        presenter
+            .model()
+            .latest_log_text(presenter.model().language),
+        "当前任务状态"
+    );
     let failed_request_id = current_catalog_request_id(&presenter);
     assert_ne!(stale_request_id, failed_request_id);
     runner.0.borrow_mut().events.push(EventEnvelope {
@@ -2253,8 +2454,16 @@ fn catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
     });
     presenter.drain_events();
     assert_eq!(current_catalog_request_id(&presenter), failed_request_id);
-    assert!(presenter.model().status_text().contains("协议版本不匹配"));
-    let task_status = presenter.model().status_text().to_owned();
+    assert!(
+        presenter
+            .model()
+            .latest_log_text(presenter.model().language)
+            .contains("协议版本不匹配")
+    );
+    let task_status = presenter
+        .model()
+        .latest_log_text(presenter.model().language)
+        .to_owned();
     runner.emit(Event::ModelCatalogLoaded {
         request_id: stale_request_id,
         harness: HarnessKind::Codex,
@@ -2281,17 +2490,32 @@ fn catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
         &presenter.model().model_catalog,
         ModelCatalogState::Failed { message, .. } if message.render(Language::Chinese) == "model/list unavailable"
     ));
-    assert_eq!(presenter.model().status_text(), task_status);
+    assert_eq!(
+        presenter
+            .model()
+            .latest_log_text(presenter.model().language),
+        task_status
+    );
 
     assert!(presenter.refresh_model_catalog());
-    assert_eq!(presenter.model().status_text(), task_status);
+    assert_eq!(
+        presenter
+            .model()
+            .latest_log_text(presenter.model().language),
+        task_status
+    );
     emit_current_catalog(&presenter, &runner, Vec::new());
     presenter.drain_events();
     assert!(matches!(
         presenter.model().model_catalog,
         ModelCatalogState::Empty
     ));
-    assert_eq!(presenter.model().status_text(), task_status);
+    assert_eq!(
+        presenter
+            .model()
+            .latest_log_text(presenter.model().language),
+        task_status
+    );
 
     assert!(presenter.refresh_model_catalog());
     emit_current_catalog(
@@ -2309,7 +2533,12 @@ fn catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
         panic!("expected a ready model catalog")
     };
     assert_eq!(models[0].id, "codex-current");
-    assert_eq!(presenter.model().status_text(), task_status);
+    assert_eq!(
+        presenter
+            .model()
+            .latest_log_text(presenter.model().language),
+        task_status
+    );
 
     assert!(presenter.refresh_model_catalog());
     let request_id = current_catalog_request_id(&presenter);
@@ -2399,10 +2628,20 @@ fn invalid_submissions_never_create_tasks_or_send_commands() {
     let (mut presenter, runner, _directory) = fixture();
     let project = presenter.model.selected_project.take().unwrap();
     assert!(!presenter.submit("hello", "claude"));
-    assert_eq!(presenter.model().status_text(), "请先选择项目目录。");
+    assert_eq!(
+        presenter
+            .model()
+            .latest_log_text(presenter.model().language),
+        "请先选择项目目录。"
+    );
     presenter.model.selected_project = Some(project.clone());
     assert!(!presenter.submit(" \n ", "claude"));
-    assert_eq!(presenter.model().status_text(), "Prompt 不能为空。");
+    assert_eq!(
+        presenter
+            .model()
+            .latest_log_text(presenter.model().language),
+        "Prompt 不能为空。"
+    );
     assert!(!presenter.submit("hello", " "));
     for (available, authenticated) in [(false, false), (true, false), (false, true)] {
         let probe = presenter
@@ -2454,7 +2693,10 @@ fn expired_remote_start_does_not_change_selection_or_start_a_run() {
     );
     runner.0.borrow_mut().commands.clear();
     let selected_project_id = presenter.model.selected_project.as_ref().unwrap().id;
-    let status = presenter.model.status.clone();
+    let status = presenter
+        .model
+        .latest_log_text(presenter.model.language)
+        .to_owned();
     let (reply, response) = tokio::sync::oneshot::channel();
     drop(response);
 
@@ -2468,7 +2710,10 @@ fn expired_remote_start_does_not_change_selection_or_start_a_run() {
         presenter.model.selected_project.as_ref().unwrap().id,
         selected_project_id
     );
-    assert_eq!(presenter.model.status, status);
+    assert_eq!(
+        presenter.model.latest_log_text(presenter.model.language),
+        status
+    );
     assert!(presenter.model.active_run.is_none());
     assert!(presenter.storage.tasks(project_id).unwrap().is_empty());
     assert!(runner.0.borrow().commands.is_empty());
@@ -2700,10 +2945,10 @@ fn commit_message_generation_uses_selected_changes_and_routes_results_to_the_own
     let cwd = Path::new(&start.cwd);
     fs::write(cwd.join("tracked.txt"), "selected content\n").unwrap();
     fs::write(cwd.join("unselected.txt"), "private unselected content\n").unwrap();
-    let conversation_status = presenter.model.status_text().to_owned();
+    let conversation_status = presenter.model.run_status.clone();
     presenter.toggle_changes_sidebar();
     finish_workspace_operation(&mut presenter);
-    assert_eq!(presenter.model.status_text(), conversation_status);
+    assert_eq!(presenter.model.run_status, conversation_status);
     assert!(presenter.model.changes_status.is_none());
     presenter.select_changed_file("tracked.txt".into(), true);
     assert!(
@@ -2716,7 +2961,7 @@ fn commit_message_generation_uses_selected_changes_and_routes_results_to_the_own
         exit_code: Some(0),
     });
     presenter.drain_events();
-    let conversation_status = presenter.model.status_text().to_owned();
+    let conversation_status = presenter.model.run_status.clone();
     presenter.select_changed_file("tracked.txt".into(), false);
     presenter.toggle_commit_editor();
     assert_eq!(presenter.model.selected_changes.len(), 2);
@@ -2803,7 +3048,7 @@ fn commit_message_generation_uses_selected_changes_and_routes_results_to_the_own
     presenter.drain_events();
     assert_eq!(presenter.model.commit_message, "manual edit");
     assert!(presenter.model.commit_message_request.is_none());
-    assert_eq!(presenter.model.status_text(), conversation_status);
+    assert_eq!(presenter.model.run_status, conversation_status);
     assert_eq!(
         presenter
             .model
@@ -3031,7 +3276,10 @@ fn title_model_catalog_is_independent_and_ignores_stale_results() {
     let ModelCatalogState::Loading { request_id, .. } = presenter.model.title_model_catalog else {
         panic!("loading")
     };
-    let status = presenter.model.status.clone();
+    let status = presenter
+        .model
+        .latest_log_text(presenter.model.language)
+        .to_owned();
     for (id, harness) in [
         (stale_request, HarnessKind::Claude),
         (request_id, HarnessKind::Claude),
@@ -3056,7 +3304,10 @@ fn title_model_catalog_is_independent_and_ignores_stale_results() {
         )],
     });
     presenter.drain_events();
-    assert_eq!(presenter.model.status, status);
+    assert_eq!(
+        presenter.model.latest_log_text(presenter.model.language),
+        status
+    );
     assert!(
         presenter
             .select_generation_model(GenerationKind::Title, Some("provider/title-model".into()))
@@ -3201,7 +3452,7 @@ fn queued_message_survives_missing_session_and_runner_send_failure() {
         assert!(
             presenter
                 .model()
-                .status_text()
+                .latest_log_text(presenter.model().language)
                 .contains(if missing_session {
                     "无法继续对话"
                 } else {
@@ -3604,7 +3855,12 @@ fn user_ask_terminal_events_preserve_request_order_and_write_read_only_history()
     presenter.drain_events();
     assert_eq!(presenter.model().pending_user_asks.len(), 1);
     assert_eq!(presenter.model().pending_user_asks[0].request_id, second);
-    assert_eq!(presenter.model().status_text(), "Agent 正在等待你的回答。");
+    assert_eq!(
+        presenter
+            .model()
+            .latest_log_text(presenter.model().language),
+        "Agent 正在等待你的回答。"
+    );
     assert!(presenter.model().messages.iter().any(|message| {
         message.content.contains("User Ask 已取消")
             && message.content.contains("native request closed")
@@ -3905,7 +4161,12 @@ fn follow_up_resumes_the_saved_session_after_reopening_and_new_task_starts_fresh
         runner.emit(Event::HarnessDetected(other_probe));
         presenter.drain_events();
         assert!(!presenter.submit("follow-up with stale probe", &saved_probe.executable));
-        assert!(presenter.model().status_text().contains("可执行文件不一致"));
+        assert!(
+            presenter
+                .model()
+                .latest_log_text(presenter.model().language)
+                .contains("可执行文件不一致")
+        );
         assert!(
             runner
                 .0
@@ -4029,7 +4290,7 @@ fn follow_up_does_not_silently_restart_when_the_session_is_missing_or_harness_ch
         assert!(
             presenter
                 .model()
-                .status_text()
+                .latest_log_text(presenter.model().language)
                 .contains(if missing_session {
                     "未保存可恢复的会话"
                 } else {
@@ -4048,7 +4309,9 @@ fn send_failure_rolls_back_a_new_task_without_entering_busy_state() {
     assert!(presenter.model.active_run_started_at.is_none());
     assert!(presenter.model().active_run_elapsed_seconds.is_none());
     assert_eq!(
-        presenter.model().status_text(),
+        presenter
+            .model()
+            .latest_log_text(presenter.model().language),
         "Runner 不可用，任务未启动。"
     );
     let project_id = presenter.model().selected_project.as_ref().unwrap().id;
@@ -4516,7 +4779,12 @@ fn codex_preferences_are_isolated_per_profile_and_invalid_effort_resets() {
             .as_deref(),
         Some("default")
     );
-    assert!(presenter.model().status_text().contains("恢复为模型默认"));
+    assert!(
+        presenter
+            .model()
+            .latest_log_text(presenter.model().language)
+            .contains("恢复为模型默认")
+    );
 }
 
 #[test]
@@ -4923,7 +5191,12 @@ fn unavailable_models_and_unknown_efforts_cannot_change_the_requested_configurat
     presenter.select_catalog_model(Some("opus".into()));
     presenter.select_effort(ThinkingEffort::Max);
     assert_eq!(presenter.model().effort, ThinkingEffort::Default);
-    assert!(presenter.model().status_text().contains("不支持"));
+    assert!(
+        presenter
+            .model()
+            .latest_log_text(presenter.model().language)
+            .contains("不支持")
+    );
     assert!(presenter.refresh_model_catalog());
     let mut unavailable = claude_aliases().remove(1);
     unavailable.availability = nexus_domain::ModelAvailability::Unavailable {
@@ -5090,7 +5363,12 @@ fn omp_profile_custom_model_is_preserved_when_catalog_availability_is_unknown() 
     );
     assert!(presenter.model().selected_catalog_model().is_none());
     assert!(presenter.model().can_submit());
-    assert!(presenter.model().status_text().contains("尚未验证可用"));
+    assert!(
+        presenter
+            .model()
+            .latest_log_text(presenter.model().language)
+            .contains("尚未验证可用")
+    );
 }
 
 #[test]
@@ -5129,7 +5407,12 @@ fn invalid_codex_catalog_selection_cannot_be_submitted() {
             .is_empty()
     );
     assert!(runner.0.borrow().commands.is_empty());
-    assert!(presenter.model().status_text().contains("未通过目录验证"));
+    assert!(
+        presenter
+            .model()
+            .latest_log_text(presenter.model().language)
+            .contains("未通过目录验证")
+    );
 }
 
 #[test]
@@ -5268,7 +5551,12 @@ fn provider_profiles_can_be_updated_switched_and_deleted() {
             .unwrap()
             .credential_configured
     );
-    assert!(presenter.model().status_text().contains("没有 API Key"));
+    assert!(
+        presenter
+            .model()
+            .latest_log_text(presenter.model().language)
+            .contains("没有 API Key")
+    );
     assert!(presenter.delete_provider_profile(profile_id));
     assert!(presenter.model().provider_profiles.is_empty());
     assert!(!credentials.0.borrow().contains_key(&profile_id));
@@ -5288,7 +5576,12 @@ fn provider_profiles_reject_process_control_environment_variables() {
 
     assert!(presenter.save_provider_profile(draft).is_none());
     assert!(presenter.model().provider_profiles.is_empty());
-    assert!(presenter.model().status_text().contains("*_API_KEY"));
+    assert!(
+        presenter
+            .model()
+            .latest_log_text(presenter.model().language)
+            .contains("*_API_KEY")
+    );
 }
 
 #[test]
@@ -5303,12 +5596,22 @@ fn provider_profiles_bound_visible_name_and_model_lengths() {
     let mut draft = profile_draft(None, &"n".repeat(49), "secret");
 
     assert!(presenter.save_provider_profile(draft).is_none());
-    assert!(presenter.model().status_text().contains("48"));
+    assert!(
+        presenter
+            .model()
+            .latest_log_text(presenter.model().language)
+            .contains("48")
+    );
 
     draft = profile_draft(None, "Valid name", "secret");
     draft.model = "m".repeat(129);
     assert!(presenter.save_provider_profile(draft).is_none());
-    assert!(presenter.model().status_text().contains("128"));
+    assert!(
+        presenter
+            .model()
+            .latest_log_text(presenter.model().language)
+            .contains("128")
+    );
     assert!(presenter.model().provider_profiles.is_empty());
 }
 

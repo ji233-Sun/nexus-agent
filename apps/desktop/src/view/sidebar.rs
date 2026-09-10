@@ -788,9 +788,9 @@ mod tests {
             let composer = cx.debug_bounds("composer-surface").unwrap();
             let project = cx.debug_bounds("workspace-header-project").unwrap();
             let task = cx.debug_bounds("workspace-header-task").unwrap();
-            let status = cx.debug_bounds("workspace-header-status").unwrap();
+            let settings = cx.debug_bounds("open-settings").unwrap();
 
-            for bounds in [sidebar, header, timeline, composer, project, task, status] {
+            for bounds in [sidebar, header, timeline, composer, project, task, settings] {
                 assert!(
                     bounds.left() >= page.left()
                         && bounds.right() <= page.right()
@@ -803,14 +803,15 @@ mod tests {
             assert!(header.bottom() <= timeline.top());
             assert!(timeline.bottom() <= composer.top());
             assert!(project.right() <= task.left());
-            assert!(task.right() <= status.left());
+            assert!(task.right() <= settings.left());
+            assert!(cx.debug_bounds("workspace-header-status").is_none());
             assert!(composer.left() >= timeline.left());
             assert!(composer.right() <= timeline.right());
         }
     }
 
     #[gpui::test]
-    fn empty_workspace_surfaces_project_and_agent_readiness(cx: &mut TestAppContext) {
+    fn empty_workspace_keeps_project_guidance_without_operation_status(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         cx.update(theme::configure_theme);
         let directory = tempfile::tempdir().unwrap();
@@ -825,7 +826,7 @@ mod tests {
         assert!(cx.debug_bounds("workspace-empty-no-project").is_some());
         assert!(cx.debug_bounds("workspace-empty-agent-status").is_none());
         assert!(cx.debug_bounds("workspace-header-task").is_none());
-        assert!(cx.debug_bounds("workspace-header-settled-status").is_some());
+        assert!(cx.debug_bounds("workspace-header-settled-status").is_none());
         assert!(cx.debug_bounds("workspace-header-pending-status").is_none());
 
         for size in [
@@ -854,15 +855,13 @@ mod tests {
         });
         assert!(cx.debug_bounds("workspace-empty-no-project").is_none());
         assert!(cx.debug_bounds("workspace-empty-agent-status").is_some());
-        assert!(cx.debug_bounds("workspace-empty-status").is_some());
+        assert!(cx.debug_bounds("workspace-empty-status").is_none());
         assert!(cx.debug_bounds("workspace-header-task").is_some());
-        assert!(cx.debug_bounds("workspace-header-settled-status").is_some());
+        assert!(cx.debug_bounds("workspace-header-settled-status").is_none());
     }
 
     #[gpui::test]
-    fn header_marks_an_active_run_as_background_after_selecting_another_task(
-        cx: &mut TestAppContext,
-    ) {
+    fn background_run_does_not_add_operation_status_to_the_workspace(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         cx.update(theme::configure_theme);
         let (mut presenter, runner, _directory) = crate::presenter::tests::fixture();
@@ -889,9 +888,69 @@ mod tests {
 
         assert!(
             cx.debug_bounds("workspace-header-background-status")
-                .is_some()
+                .is_none()
         );
         assert!(cx.debug_bounds("workspace-header-task").is_some());
+        assert!(cx.debug_bounds("conversation-run-status").is_none());
+    }
+
+    #[gpui::test]
+    fn runtime_log_settings_show_newest_entries_and_refresh_while_open(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (mut presenter, runner, _directory) = crate::presenter::tests::fixture();
+        for _ in 0..30 {
+            presenter.new_task();
+        }
+        let count = presenter.model().runtime_log.len();
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut view = NexusView::new(presenter, window, cx);
+            view.settings_open = true;
+            view.settings_section = SettingsSection::RuntimeLog;
+            view
+        });
+        for (size, language) in [
+            (gpui::size(px(1040.), px(680.)), Language::Chinese),
+            (gpui::size(px(1280.), px(800.)), Language::English),
+        ] {
+            cx.simulate_resize(size);
+            view.update_in(cx, |view, window, cx| {
+                view.set_language(language, window, cx)
+            });
+            cx.run_until_parked();
+            let content = cx.debug_bounds("settings-content-runtime-log").unwrap();
+            let newest = cx
+                .debug_bounds(format!("runtime-log-entry-{}", count - 1).leak())
+                .unwrap();
+            let previous = cx
+                .debug_bounds(format!("runtime-log-entry-{}", count - 2).leak())
+                .unwrap();
+            assert!(newest.bottom() <= previous.top());
+            assert!(newest.left() >= content.left() && newest.right() <= content.right());
+            let navigation = cx.debug_bounds("settings-nav-runtime-log").unwrap();
+            assert!(navigation.bottom() <= size.height);
+            assert!(view.read_with(cx, |view, _| view.settings_scroll.max_offset().y) > px(0.));
+        }
+        runner.emit(Event::RunnerReady);
+        view.update(cx, |view, cx| {
+            assert!(view.presenter.drain_events());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds(format!("runtime-log-entry-{count}").leak())
+                .is_some()
+        );
+        view.update(cx, |view, cx| {
+            view.settings_scroll.scroll_to_bottom();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let oldest = cx.debug_bounds("runtime-log-entry-0").unwrap();
+        assert!(
+            view.read_with(cx, |view, _| view.settings_scroll.bounds())
+                .contains(&oldest.center())
+        );
     }
 
     #[gpui::test]
@@ -1992,6 +2051,7 @@ mod tests {
             ("settings-nav-remote", SettingsSection::Remote),
             ("settings-nav-appearance", SettingsSection::Appearance),
             ("settings-nav-general", SettingsSection::General),
+            ("settings-nav-runtime-log", SettingsSection::RuntimeLog),
             ("settings-nav-providers", SettingsSection::Providers),
         ] {
             cx.run_until_parked();

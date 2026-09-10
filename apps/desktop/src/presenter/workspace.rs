@@ -76,7 +76,7 @@ impl Presenter {
                 .storage
                 .set_setting(&format!("workspace_mode:{}", project.id), value)
             {
-                self.model.status = error.to_string().into();
+                self.model.log_status(error.to_string().into());
             }
         }
     }
@@ -161,13 +161,13 @@ impl Presenter {
             return false;
         };
         if self.model.workspace_draft.base.is_empty() {
-            self.model.status = "请选择来源分支。".into();
+            self.model.log_status("请选择来源分支。".into());
             return false;
         }
         let root = match &self.worktree_root {
             Ok(root) => root,
             Err(error) => {
-                self.model.status = error.to_string().into();
+                self.model.log_status(error.to_string().into());
                 return false;
             }
         };
@@ -186,7 +186,7 @@ impl Presenter {
                 &base,
             ))
         });
-        self.model.status = "正在解析 Worktree 创建基准…".into();
+        self.model.log_status("正在解析 Worktree 创建基准…".into());
         true
     }
 
@@ -250,7 +250,7 @@ impl Presenter {
                             workspace,
                         ))
                     });
-                    self.model.status = "正在创建任务专属 Worktree…".into();
+                    self.model.log_status("正在创建任务专属 Worktree…".into());
                     Ok(())
                 })
             }
@@ -260,7 +260,8 @@ impl Presenter {
                 self.reload_workspaces();
                 // Catalog discovery and the Harness now resolve the same task cwd.
                 if self.refresh_model_catalog() {
-                    self.model.status = "Worktree 已创建，正在读取任务目录的模型配置…".into();
+                    self.model
+                        .log_status("Worktree 已创建，正在读取任务目录的模型配置…".into());
                 } else {
                     self.retry_workspace_start();
                 }
@@ -326,7 +327,7 @@ impl Presenter {
             if changes_operation {
                 self.model.changes_status = Some(message);
             } else {
-                self.model.status = message;
+                self.model.log_status(message);
             }
             self.model.workspace_retry = self.model.pending_workspace_start.is_some();
             self.reload_workspaces();

@@ -15,10 +15,11 @@ pub(super) enum SettingsSection {
     Voice,
     Remote,
     Archived,
+    RuntimeLog,
 }
 
 impl SettingsSection {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::General,
         Self::Appearance,
         Self::Agent,
@@ -27,6 +28,7 @@ impl SettingsSection {
         Self::Voice,
         Self::Remote,
         Self::Archived,
+        Self::RuntimeLog,
     ];
 
     fn id(self) -> &'static str {
@@ -39,6 +41,7 @@ impl SettingsSection {
             Self::Voice => "voice",
             Self::Remote => "remote",
             Self::Archived => "archived",
+            Self::RuntimeLog => "runtime-log",
         }
     }
 
@@ -52,6 +55,7 @@ impl SettingsSection {
             Self::Voice => locale.text("语音输入"),
             Self::Remote => locale.text("远程访问"),
             Self::Archived => locale.text("归档对话"),
+            Self::RuntimeLog => locale.text("运行日志"),
         }
     }
 
@@ -65,6 +69,7 @@ impl SettingsSection {
             Self::Voice => IconName::Play,
             Self::Remote => IconName::Globe,
             Self::Archived => IconName::Inbox,
+            Self::RuntimeLog => IconName::FileText,
         }
     }
 }
@@ -102,6 +107,7 @@ impl NexusView {
             SettingsSection::Voice => self.render_voice_settings(cx).into_any_element(),
             SettingsSection::Remote => self.render_remote_settings(cx).into_any_element(),
             SettingsSection::Archived => self.render_archived_settings(cx).into_any_element(),
+            SettingsSection::RuntimeLog => self.render_runtime_log(cx).into_any_element(),
         };
         let titlebar_inset = if cfg!(target_os = "macos") { 36. } else { 0. };
 
@@ -256,6 +262,60 @@ impl NexusView {
                             )
                             .vertical_scrollbar(&self.settings_scroll),
                     ),
+            )
+    }
+
+    fn render_runtime_log(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let model = self.presenter.model();
+        let locale = model.language;
+        let colors = palette(cx);
+        div()
+            .flex()
+            .flex_col()
+            .gap_5()
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .text_color(rgb(colors.muted))
+                    .child(locale.text("仅保留本次启动的运行日志，重启后清空。最新记录在前。")),
+            )
+            .when(model.runtime_log.is_empty(), |element| {
+                element.child(locale.text("暂无运行日志。"))
+            })
+            .children(
+                model
+                    .runtime_log
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .map(|(index, entry)| {
+                        div()
+                            .debug_selector(move || format!("runtime-log-entry-{index}"))
+                            .min_w_0()
+                            .p_4()
+                            .rounded(px(CARD_RADIUS))
+                            .border_1()
+                            .border_color(rgb(colors.border))
+                            .bg(rgb(colors.elevated))
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .font_family(MONO_FONT)
+                                    .text_size(px(12.))
+                                    .text_color(rgb(colors.muted))
+                                    .child(
+                                        entry.timestamp.format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .text_color(rgb(colors.text))
+                                    .child(entry.message.render(locale).to_owned()),
+                            )
+                    }),
             )
     }
 

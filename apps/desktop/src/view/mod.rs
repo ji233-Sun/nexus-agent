@@ -618,7 +618,7 @@ impl NexusView {
                 .child(
                     div()
                         .text_size(px(12.))
-                        .child(model.status_text().to_owned()),
+                        .child(model.run_status.render(model.language).to_owned()),
                 )
                 .footer(buttons)
         });
@@ -1714,7 +1714,6 @@ impl NexusView {
         let material = materials(cx);
         let model = self.presenter.model();
         let voice_status = model.voice.status.render(locale);
-        let probe = model.selected_probe();
         let can_submit = can_send_prompt(model, &self.prompt_input.read(cx).value());
         let prompt_focused = self
             .prompt_input
@@ -1735,30 +1734,6 @@ impl NexusView {
         let selected_task = model
             .selected_task
             .and_then(|task_id| model.tasks.iter().find(|task| task.id == task_id));
-        let selected_profile_ready = model
-            .selected_provider_profile()
-            .is_some_and(|profile| profile.credential_configured);
-        let background_run = model.active_run.is_none() && model.active_run_count() > 0;
-        let header_status_pending = model.active_run.is_some();
-        let header_status_color = if header_status_pending {
-            rgb(colors.accent).into()
-        } else if selected_task.is_some_and(|task| task.status == RunStatus::Failed) {
-            rgb(colors.danger).into()
-        } else if selected_task.is_some_and(|task| {
-            matches!(task.status, RunStatus::Cancelled | RunStatus::Interrupted)
-        }) {
-            rgb(colors.warning).into()
-        } else {
-            probe
-                .map(|probe| {
-                    if probe.available && (probe.authenticated || selected_profile_ready) {
-                        rgb(colors.success).into()
-                    } else {
-                        rgb(colors.danger).into()
-                    }
-                })
-                .unwrap_or_else(|| rgb(colors.muted).into())
-        };
         let header_project = model
             .selected_project
             .as_ref()
@@ -1773,21 +1748,6 @@ impl NexusView {
                 .map(|task| task.title.clone())
                 .unwrap_or_else(|| locale.text("新建任务").into())
         });
-        let header_status = if background_run {
-            locale.format(
-                "其他任务 · {status}",
-                &[("status", model.status_text().to_owned())],
-            )
-        } else {
-            model.status_text().to_owned()
-        };
-        let header_status_selector = if background_run {
-            "workspace-header-background-status"
-        } else if header_status_pending {
-            "workspace-header-pending-status"
-        } else {
-            "workspace-header-settled-status"
-        };
         div()
             .debug_selector(|| "workspace-page".into())
             .size_full()
@@ -1878,34 +1838,11 @@ impl NexusView {
                             )
                             .child(
                                 div()
-                                    .debug_selector(move || header_status_selector.into())
                                     .flex_none()
                                     .flex()
                                     .items_center()
                                     .gap_2()
                                     .pl_3()
-                                    .text_size(px(12.))
-                                    .text_color(rgb(colors.muted))
-                                    .child(live_status_dot(
-                                        header_status_color,
-                                        header_status_pending && !self.reduced_motion,
-                                    ))
-                                    .child(
-                                        div()
-                                            .id("workspace-header-status")
-                                            .debug_selector(|| "workspace-header-status".into())
-                                            .max_w(px(180.))
-                                            .min_w_0()
-                                            .truncate()
-                                            .tooltip({
-                                                let header_status = header_status.clone();
-                                                move |window, cx| {
-                                                    Tooltip::new(header_status.clone())
-                                                        .build(window, cx)
-                                                }
-                                            })
-                                            .child(header_status),
-                                    )
                                     .when(model.selected_project.is_some(), |element| {
                                         element.child(
                                             Button::new("toggle-changes-sidebar")
@@ -2834,7 +2771,10 @@ mod catalog_model_tests {
         let cwd = Path::new(&start.cwd);
         std::fs::write(cwd.join("tracked.txt"), "reviewed merge\n").unwrap();
         git::git(cwd, &["commit", "-am", "reviewed change"]).unwrap();
-        let task_status = presenter.model().status_text().to_owned();
+        let task_status = presenter
+            .model()
+            .latest_log_text(presenter.model().language)
+            .to_owned();
         let project = presenter.model().selected_project.clone().unwrap();
         let (root, cx) = cx.add_window_view(|window, cx| {
             let view = cx.new(|cx| NexusView::new(presenter, window, cx));
@@ -2886,7 +2826,12 @@ mod catalog_model_tests {
             "reviewed merge\n"
         );
         view.read_with(cx, |view, _| {
-            assert_eq!(view.presenter.model().status_text(), task_status)
+            assert_eq!(
+                view.presenter
+                    .model()
+                    .latest_log_text(view.presenter.model().language),
+                task_status
+            )
         });
         assert!(cx.debug_bounds("review-status").is_some());
         assert!(cx.debug_bounds("workspace-review-page").is_some());
