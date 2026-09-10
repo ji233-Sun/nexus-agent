@@ -549,6 +549,31 @@ impl Presenter {
         self.model.projects = projects;
     }
 
+    pub(crate) fn reorder_project(&mut self, project_id: Uuid, target_id: Uuid) -> bool {
+        let projects = &self.model.projects;
+        let Some(source) = projects.iter().position(|project| project.id == project_id) else {
+            return false;
+        };
+        let Some(target) = projects.iter().position(|project| project.id == target_id) else {
+            return false;
+        };
+        if source == target {
+            return false;
+        }
+        let mut order: Vec<_> = projects.iter().map(|project| project.id).collect();
+        order.remove(source);
+        order.insert(target, project_id);
+        if let Err(error) = self.storage.save_project_order(&order) {
+            self.model.status =
+                LocalizedText::new("无法保存项目顺序：{error}", &[("error", error.to_string())]);
+            return false;
+        }
+        let project = self.model.projects.remove(source);
+        self.model.projects.insert(target, project);
+        self.notify_remote_changed();
+        true
+    }
+
     fn reload_tasks(&mut self) {
         self.model.tasks = self
             .model

@@ -294,8 +294,23 @@ impl Storage {
              ORDER BY last_opened_at DESC",
         )?;
         let rows = statement.query_map([], project_from_row)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+        let mut projects = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        let order: Vec<Uuid> = self
+            .setting("project_order")?
+            .and_then(|value| serde_json::from_str(&value).ok())
+            .unwrap_or_default();
+        // Keep recency order for projects that have not been manually positioned.
+        projects.sort_by_key(|project| {
+            order
+                .iter()
+                .position(|id| *id == project.id)
+                .unwrap_or(order.len())
+        });
+        Ok(projects)
+    }
+
+    pub(crate) fn save_project_order(&self, order: &[Uuid]) -> Result<()> {
+        self.set_setting("project_order", &serde_json::to_string(order)?)
     }
 
     pub(crate) fn project(&self, id: Uuid) -> Result<Option<Project>> {
@@ -1237,6 +1252,64 @@ mod tests {
         let storage = Storage::open(&directory.path().join("nexus.db")).unwrap();
         storage.set_setting("model", "opus").unwrap();
         assert_eq!(storage.setting("model").unwrap().as_deref(), Some("opus"));
+    }
+
+    #[test]
+    fn project_order_persists_across_restarts_and_new_projects() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("nexus.db");
+        let storage = Storage::open(&database).unwrap();
+        let mut projects = Vec::new();
+        for name in ["first", "second", "third"] {
+            let path = directory.path().join(name);
+            fs::create_dir(&path).unwrap();
+            projects.push(storage.open_project(&path).unwrap());
+        }
+        let ids = |storage: &Storage| {
+            storage
+                .projects()
+                .unwrap()
+                .iter()
+                .map(|project| project.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(&storage),
+            vec![projects[2].id, projects[1].id, projects[0].id]
+        );
+        let order = vec![projects[0].id, projects[2].id, projects[1].id];
+        storage.save_project_order(&order).unwrap();
+        for project in &projects {
+            assert_eq!(
+                storage.project(project.id).unwrap().unwrap().last_opened_at,
+                project.last_opened_at,
+            );
+        }
+        drop(storage);
+
+        let storage = Storage::open(&database).unwrap();
+        assert_eq!(ids(&storage), order);
+        storage
+            .open_project(Path::new(&projects[1].canonical_path))
+            .unwrap();
+        assert_eq!(ids(&storage), order);
+        let path = directory.path().join("new-project");
+        fs::create_dir(&path).unwrap();
+        let new_project = storage.open_project(&path).unwrap();
+        assert_eq!(ids(&storage), [order, vec![new_project.id]].concat());
+
+        storage
+            .set_setting("project_order", "invalid JSON")
+            .unwrap();
+        assert_eq!(
+            ids(&storage),
+            vec![
+                new_project.id,
+                projects[1].id,
+                projects[2].id,
+                projects[0].id
+            ],
+        );
     }
 
     #[test]

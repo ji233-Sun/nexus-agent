@@ -5,6 +5,39 @@ use gpui_kit::component::{list::ListItem, scroll::Scrollbar, spinner::Spinner};
 const SIDEBAR_ROW_HEIGHT: f32 = 40.;
 pub(super) const HISTORY_PAGE_SIZE: usize = 10;
 
+#[derive(Clone)]
+struct ProjectDrag {
+    id: Uuid,
+    index: usize,
+    name: SharedString,
+}
+
+impl Render for ProjectDrag {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = palette(cx);
+        div()
+            .w(px(SIDEBAR_WIDTH - 28.))
+            .h(px(SIDEBAR_ROW_HEIGHT))
+            .px(px(10.))
+            .flex()
+            .items_center()
+            .gap_2()
+            .rounded(px(CONTROL_RADIUS))
+            .bg(rgb(colors.elevated))
+            .border_1()
+            .border_color(rgb(colors.accent))
+            .text_color(rgb(colors.text))
+            .text_size(px(13.))
+            .shadow_md()
+            .child(
+                Icon::new(IconName::Folder)
+                    .size(px(16.))
+                    .text_color(rgb(colors.muted)),
+            )
+            .child(div().flex_1().min_w_0().truncate().child(self.name.clone()))
+    }
+}
+
 fn visible_history<'a>(
     threads: &'a [ThreadSummary],
     query: &str,
@@ -75,11 +108,12 @@ impl NexusView {
         } else {
             locale.text("等待检测 Codex CLI").to_owned()
         };
+        let project_rows = model.projects.iter().enumerate();
         let projects = div()
             .flex()
             .flex_col()
             .gap(px(12.))
-            .children(model.projects.iter().map(|project| {
+            .children(project_rows.map(|(index, project)| {
                 let selected = selected_project_id == Some(project.id);
                 let open = selected && !self.collapsed_projects.contains(&project.id);
                 let progress = disclosure_progress(
@@ -208,6 +242,34 @@ impl NexusView {
                         .pr(px(70.))
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .debug_selector(move || format!("sidebar-project-{project_id}"))
+                        .cursor_move()
+                        .on_drag(
+                            ProjectDrag {
+                                id: project_id,
+                                index,
+                                name: project.display_name.clone().into(),
+                            },
+                            |drag, _, _, cx| cx.new(|_| drag.clone()),
+                        )
+                        .can_drop(move |value, _, _| {
+                            value
+                                .downcast_ref::<ProjectDrag>()
+                                .is_some_and(|drag| drag.id != project_id)
+                        })
+                        .drag_over::<ProjectDrag>(move |style, drag, _, _| {
+                            let style = style
+                                .bg(rgb(colors.selected))
+                                .border_color(rgb(colors.accent));
+                            if drag.index > index {
+                                style.border_t_2()
+                            } else {
+                                style.border_b_2()
+                            }
+                        })
+                        .on_drop(cx.listener(move |app, drag: &ProjectDrag, _, cx| {
+                            app.presenter.reorder_project(drag.id, project_id);
+                            cx.notify();
+                        }))
                         .on_click(cx.listener(move |app, _, _, cx| {
                             if !selected {
                                 app.select_project(project.clone());
@@ -1337,6 +1399,132 @@ mod tests {
             view.read_with(cx, |view, _| view.presenter.model().selected_task),
             selected_task,
         );
+    }
+
+    #[gpui::test]
+    fn project_drag_reorders_without_switching_conversations(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (mut presenter, _, directory) = crate::presenter::tests::fixture();
+        let selected = presenter.model().selected_project.clone().unwrap();
+        assert!(presenter.submit("Keep the active conversation", "claude"));
+        let task = presenter.model().selected_task;
+        for name in ["second", "third"] {
+            let path = directory.path().join(name);
+            std::fs::create_dir(&path).unwrap();
+            presenter.open_project(&path);
+        }
+        presenter.select_project(selected.clone());
+        presenter.select_task(task.unwrap());
+        let original: Vec<_> = presenter
+            .model()
+            .projects
+            .iter()
+            .map(|project| project.id)
+            .collect();
+        let selectors: Vec<&'static str> = original
+            .iter()
+            .map(|id| &*format!("sidebar-project-{id}").leak())
+            .collect();
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut view = NexusView::new(presenter, window, cx);
+            view.set_appearance(
+                AppearanceSettings {
+                    reduced_motion: true,
+                    ..Default::default()
+                },
+                window,
+                cx,
+            );
+            view.prompt_input
+                .update(cx, |input, cx| input.set_value("Keep my draft", window, cx));
+            view
+        });
+        cx.simulate_resize(gpui::size(px(1040.), px(720.)));
+        cx.run_until_parked();
+
+        for (source, target, expected) in [
+            (0, 2, vec![original[1], original[2], original[0]]),
+            (0, 1, original.clone()),
+            (2, 0, vec![original[2], original[0], original[1]]),
+        ] {
+            let from = cx.debug_bounds(selectors[source]).unwrap().center();
+            let to = cx.debug_bounds(selectors[target]).unwrap().center();
+            cx.simulate_mouse_down(from, gpui::MouseButton::Left, Default::default());
+            cx.simulate_mouse_move(
+                from + point(px(8.), px(0.)),
+                gpui::MouseButton::Left,
+                Default::default(),
+            );
+            cx.update(|_, cx| assert!(cx.has_active_drag()));
+            cx.simulate_mouse_move(to, gpui::MouseButton::Left, Default::default());
+            cx.simulate_mouse_up(to, gpui::MouseButton::Left, Default::default());
+            cx.run_until_parked();
+            view.read_with(cx, |view, cx| {
+                assert_eq!(
+                    view.presenter
+                        .model()
+                        .projects
+                        .iter()
+                        .map(|project| project.id)
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+                assert_eq!(
+                    view.presenter.model().selected_project.as_ref().unwrap().id,
+                    selected.id
+                );
+                assert_eq!(view.presenter.model().selected_task, task);
+                assert!(!view.collapsed_projects.contains(&selected.id));
+                assert_eq!(view.prompt_input.read(cx).value(), "Keep my draft");
+            });
+            let positions: Vec<_> = expected
+                .iter()
+                .map(|id| {
+                    let index = original
+                        .iter()
+                        .position(|original_id| original_id == id)
+                        .unwrap();
+                    cx.debug_bounds(selectors[index]).unwrap().top()
+                })
+                .collect();
+            assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+        }
+
+        let before = view.read_with(cx, |view, _| {
+            view.presenter
+                .model()
+                .projects
+                .iter()
+                .map(|project| project.id)
+                .collect::<Vec<_>>()
+        });
+        for destination in [
+            cx.debug_bounds(selectors[0]).unwrap().center(),
+            cx.debug_bounds("workspace-header").unwrap().center(),
+        ] {
+            let from = cx.debug_bounds(selectors[0]).unwrap().center();
+            cx.simulate_mouse_down(from, gpui::MouseButton::Left, Default::default());
+            cx.simulate_mouse_move(
+                from + point(px(8.), px(0.)),
+                gpui::MouseButton::Left,
+                Default::default(),
+            );
+            cx.simulate_mouse_move(destination, gpui::MouseButton::Left, Default::default());
+            cx.simulate_mouse_up(destination, gpui::MouseButton::Left, Default::default());
+            view.read_with(cx, |view, _| {
+                assert_eq!(
+                    view.presenter
+                        .model()
+                        .projects
+                        .iter()
+                        .map(|project| project.id)
+                        .collect::<Vec<_>>(),
+                    before,
+                );
+                assert_eq!(view.presenter.model().selected_task, task);
+            });
+        }
     }
 
     #[gpui::test]

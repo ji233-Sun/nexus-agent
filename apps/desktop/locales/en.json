@@ -344,6 +344,7 @@
   "无法删除项目：{error}": "Cannot delete project: {error}",
   "项目仍有活动任务或工作区操作，请结束后再删除。": "Finish active tasks and workspace operations before deleting the project.",
   "项目已删除，磁盘上的文件和 Git 分支已保留。": "Project deleted. Files and Git branches on disk have been kept.",
+  "无法保存项目顺序：{error}": "Cannot save project order: {error}",
   "已准备好新任务。": "Ready for a new task.",
   "正在探测 {0}…": "Detecting {0}…",
   "Runner 不可用，无法探测任务使用的可执行文件。": "Runner unavailable. Cannot check the task's executable.",
