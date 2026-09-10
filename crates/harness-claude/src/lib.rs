@@ -197,9 +197,24 @@ pub async fn probe(configured_executable: &str) -> HarnessProbe {
     }
 }
 
-#[derive(Default)]
 pub struct EventDecoder {
+    harness: HarnessKind,
     pending_user_asks: HashMap<String, Value>,
+}
+
+impl Default for EventDecoder {
+    fn default() -> Self {
+        Self::for_harness(HarnessKind::Claude)
+    }
+}
+
+impl EventDecoder {
+    pub fn for_harness(harness: HarnessKind) -> Self {
+        Self {
+            harness,
+            pending_user_asks: HashMap::new(),
+        }
+    }
 }
 
 impl LineDecoder for EventDecoder {
@@ -225,7 +240,7 @@ impl LineDecoder for EventDecoder {
         if frame.get("type").and_then(Value::as_str) == Some("result") {
             self.pending_user_asks.clear();
         }
-        Ok(decode_frame(&frame))
+        Ok(decode_frame(&frame, self.harness))
     }
 
     fn steer(&mut self, message_id: &str, prompt: &str) -> Option<InputFrame> {
@@ -341,7 +356,12 @@ impl EventDecoder {
     }
 }
 
-fn decode_frame(frame: &Value) -> Vec<DecodedEvent> {
+fn decode_frame(frame: &Value, harness: HarnessKind) -> Vec<DecodedEvent> {
+    let name = if harness == HarnessKind::Claude {
+        "Claude".to_owned()
+    } else {
+        harness.to_string()
+    };
     match frame.get("type").and_then(Value::as_str) {
         Some("stream_event") => decode_stream_event(frame),
         Some("assistant") => decode_assistant(frame),
@@ -363,7 +383,7 @@ fn decode_frame(frame: &Value) -> Vec<DecodedEvent> {
                 {
                     events.push(DecodedEvent::SessionStarted(session_id.to_owned()));
                 }
-                events.push(DecodedEvent::Status(format!("Claude: {subtype}")));
+                events.push(DecodedEvent::Status(format!("{name}: {subtype}")));
             }
             events
         }
@@ -374,7 +394,7 @@ fn decode_frame(frame: &Value) -> Vec<DecodedEvent> {
                     frame
                         .get("errors")
                         .map(tool_content)
-                        .unwrap_or_else(|| "Claude 轮次执行失败。".into()),
+                        .unwrap_or_else(|| format!("{name} 轮次执行失败。")),
                 ));
             }
             events.push(DecodedEvent::TurnCompleted);
@@ -397,8 +417,8 @@ fn decode_frame(frame: &Value) -> Vec<DecodedEvent> {
                     title: frame
                         .pointer("/request/tool_name")
                         .and_then(Value::as_str)
-                        .unwrap_or("Claude Code")
-                        .into(),
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| harness.to_string()),
                     details: serde_json::to_string_pretty(&frame["request"]["input"])
                         .unwrap_or_default(),
                     options: vec![

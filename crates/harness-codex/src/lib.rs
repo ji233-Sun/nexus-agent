@@ -1249,6 +1249,7 @@ mod tests {
 
     fn request() -> StartRun {
         StartRun {
+            transport: nexus_domain::HarnessTransport::Acp,
             title_generation: None,
             permission_mode: nexus_domain::PermissionMode::AutoEdit,
             run_id: Default::default(),

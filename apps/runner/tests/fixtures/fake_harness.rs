@@ -34,12 +34,14 @@ fn main() {
         run_omp_catalog();
         return;
     }
+    if args.iter().any(|arg| matches!(arg.as_str(), "acp" | "--acp")) { run_acp(&args); return; }
+    let kimi_title = args.iter().any(|arg| arg == "--agent-file");
     let harness = if matches!(
         args.first().map(String::as_str),
         Some("app-server" | "exec")
     ) {
         Harness::Codex
-    } else if args.windows(2).any(|pair| pair[0] == "--mode" && matches!(pair[1].as_str(), "rpc" | "rpc-ui")) {
+    } else if args.windows(2).any(|pair| pair[0] == "--mode" && matches!(pair[1].as_str(), "rpc" | "rpc-ui" | "json")) {
         Harness::Omp
     } else {
         Harness::Claude
@@ -49,7 +51,7 @@ fn main() {
             .windows(2)
             .any(|pair| pair == ["--sandbox", "read-only"]),
         Harness::Omp => args.iter().any(|arg| arg == "--no-tools"),
-        Harness::Claude => args
+        Harness::Claude => kimi_title || args
             .windows(2)
             .any(|pair| pair[0] == "--tools" && pair[1].is_empty()),
     };
@@ -84,7 +86,14 @@ fn main() {
         )
         .unwrap();
         let mut prompt = String::new();
-        io::stdin().read_to_string(&mut prompt).unwrap();
+        if kimi_title {
+            // Kimi Code print mode takes the prompt as an argument, not on stdin.
+            if let Some(index) = args.iter().position(|arg| arg == "-p") {
+                prompt = args.get(index + 1).cloned().unwrap_or_default();
+            }
+        } else {
+            io::stdin().read_to_string(&mut prompt).unwrap();
+        }
         fs::write("title-prompt.txt", &prompt).unwrap();
         if env::var_os("TEST_TITLE_BLOCK").is_some() {
             let _child = Command::new(env::current_exe().unwrap())
@@ -101,6 +110,10 @@ fn main() {
         } else {
             "**Fix authentication flow.**"
         };
+        if kimi_title {
+            println!(r#"{{"role":"assistant","content":{text:?}}}"#);
+            return;
+        }
         match harness {
             Harness::Codex => println!(
                 r#"{{"type":"item.completed","item":{{"id":"title","type":"agent_message","text":{text:?}}}}}"#
@@ -125,11 +138,21 @@ fn main() {
     });
     let resume = args
         .windows(2)
-        .find(|pair| pair[0] == "--resume")
+        .find(|pair| matches!(pair[0].as_str(), "--resume" | "--session"))
         .map(|pair| pair[1].clone());
     let mut resumed = resume.is_some();
     let mut session = resume.unwrap_or_else(|| format!("session-{}", std::process::id()));
+    let pi = args.iter().any(|arg| arg == "--extension");
+    if pi {
+        println!(r#"{{"type":"extension_ui_request","method":"notify","message":"nexus-permissions-ready"}}"#);
+        io::stdout().flush().unwrap();
+    }
     while let Ok(line) = input.recv() {
+        if string_field(&line, "subtype") == "initialize" && harness == Harness::Claude {
+            println!(r#"{{"type":"control_response","response":{{"subtype":"success","request_id":"nexus-initialize","response":{{}}}}}}"#);
+            io::stdout().flush().unwrap();
+            continue;
+        }
         let id = request_id(&line);
         if harness == Harness::Codex {
             match string_field(&line, "method").as_str() {
@@ -158,9 +181,11 @@ fn main() {
                 "model/list" => run_codex_catalog(&line, &id),
                 _ => {}
             }
+        } else if harness == Harness::Omp && string_field(&line, "type") == "get_available_models" {
+            println!(r#"{{"type":"response","id":{id},"success":true,"data":{{"models":[{{"id":"test","provider":"local","name":"Test"}}]}}}}"#);
         } else if harness == Harness::Omp && string_field(&line, "type") == "get_state" {
             println!(
-                r#"{{"type":"response","command":"get_state","id":{id},"success":true,"data":{{"sessionId":{session:?}}}}}"#
+                r#"{{"type":"response","command":"get_state","id":{id},"success":true,"data":{{"sessionId":{session:?},"sessionFile":{session:?}}}}}"#
             );
         } else {
             let prompt = string_field(
@@ -564,4 +589,62 @@ fn request_id(line: &str) -> String {
     } else {
         value.chars().take_while(char::is_ascii_digit).collect()
     }
+}
+
+fn acp_text(session: &str, text: &str) {
+    println!(r#"{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":{session:?},"update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":{text:?}}}}}}}}}"#);
+}
+fn run_acp(args: &[String]) {
+    fs::write("acp-args.txt", args.join("\n")).unwrap();
+    if let Ok(value) = env::var("TEST_PROVIDER_API_KEY") { fs::write("provider-env.txt", value).unwrap(); }
+    let mut session = format!("session-{}", std::process::id());
+    let mut resumed = false;
+    let mut input = io::stdin().lock().lines();
+    while let Some(Ok(line)) = input.next() {
+        let id = request_id(&line);
+        match string_field(&line, "method").as_str() {
+            "initialize" => {
+                if env::var_os("TEST_ACP_AUTH_ERROR").is_some() {
+                    println!(r#"{{"jsonrpc":"2.0","id":{id},"error":{{"code":-32000,"message":"private secret"}}}}"#);
+                } else {
+                    println!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{"protocolVersion":1,"agentCapabilities":{{"loadSession":true,"sessionCapabilities":{{"resume":{{}}}}}}}}}}"#);
+                }
+            }
+            "session/new" | "session/resume" | "session/load" => {
+                let saved = string_field(&line, "sessionId");
+                resumed = !saved.is_empty();
+                if resumed { session = saved; }
+                fs::write("acp-session.json", &line).unwrap();
+                acp_text(&session, "historical replay must be ignored");
+                println!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{"sessionId":{session:?},"models":{{"currentModelId":"test-model","availableModels":[{{"modelId":"test-model","name":"Test"}}]}},"modes":{{"currentModeId":"default","availableModes":[{{"id":"default","name":"Default"}}]}},"configOptions":[{{"id":"thinking","type":"select","category":"thought_level","currentValue":"high","options":[{{"value":"high","name":"High"}},{{"value":"low","name":"Low"}}]}}]}}}}"#);
+            }
+            "session/set_mode" | "session/set_model" | "session/set_config_option" => println!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{}}}}"#),
+            "session/prompt" => {
+                let prompt = string_field(&line, "text");
+                fs::write("stdin.txt", &prompt).unwrap();
+                let file = format!("{session}.txt");
+                if resumed {
+                    acp_text(&session, &fs::read_to_string(file).unwrap());
+                } else {
+                    fs::write(file, &prompt).unwrap();
+                    if prompt == "wait-for-cancel" {
+                        let _child = Command::new(env::current_exe().unwrap()).arg("--child").stdin(Stdio::null()).spawn().unwrap();
+                        acp_text(&session, "ready"); io::stdout().flush().unwrap();
+                        loop { thread::sleep(Duration::from_secs(1)); }
+                    }
+                    if prompt.starts_with("approval-") {
+                        println!(r#"{{"jsonrpc":"2.0","id":"approval-1","method":"session/request_permission","params":{{"sessionId":{session:?},"toolCall":{{"toolCallId":"tool-1","kind":"execute","title":"echo approved"}},"options":[{{"optionId":"allow","name":"Approve","kind":"allow_once"}},{{"optionId":"deny","name":"Deny","kind":"reject_once"}}]}}}}"#);
+                        io::stdout().flush().unwrap();
+                        let response = input.next().unwrap().unwrap();
+                        fs::write("approval-response.json", &response).unwrap();
+                        acp_text(&session, if string_field(&response,"optionId") == "allow" { "approved" } else { "denied" });
+                    } else { acp_text(&session, "hello"); }
+                }
+                println!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{"stopReason":"end_turn"}}}}"#);
+            }
+            _ => {}
+        }
+        io::stdout().flush().unwrap();
+    }
+    fs::write("catalog-stopped.txt", "stopped").unwrap();
 }

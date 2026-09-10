@@ -57,14 +57,28 @@ struct SessionOutput {
 }
 
 pub(crate) async fn run_harness(
-    request: StartRun,
+    mut request: StartRun,
     cwd: std::path::PathBuf,
     cancel: watch::Receiver<bool>,
     input: mpsc::UnboundedReceiver<RunInput>,
     user_asks: PendingUserAsks,
     emitter: Emitter,
 ) -> (RunStatus, Option<i32>) {
-    let (spec, decoder) = super::harness::prepare(&request, &cwd);
+    let prepared = super::harness::restore_session_settings(&mut request)
+        .and_then(|()| super::harness::prepare(&request, &cwd));
+    let (spec, decoder) = match prepared {
+        Ok(prepared) => prepared,
+        Err(message) => {
+            emitter
+                .send(Event::RunFailed {
+                    run_id: request.run_id,
+                    code: ErrorCode::LaunchFailed,
+                    message,
+                })
+                .await;
+            return (RunStatus::Failed, None);
+        }
+    };
     run_prepared_harness(request, spec, decoder, cancel, input, user_asks, emitter).await
 }
 
@@ -237,7 +251,8 @@ async fn generate_text(
     prompt: String,
     mut cancel: watch::Receiver<bool>,
 ) -> Option<String> {
-    let (mut spec, decoder) = super::harness::prepare_text_generation(&request, &cwd, &prompt);
+    let (mut spec, decoder) =
+        super::harness::prepare_text_generation(&request, &cwd, &prompt).ok()?;
     spec.executable = nexus_harness_core::resolve_executable(&request.executable)?;
     let mut child = process_command(&spec, &request.environment).spawn().ok()?;
     let pid = child.id().unwrap_or_default();
@@ -866,6 +881,7 @@ mod tests {
     ) -> (StartRun, LaunchSpec) {
         let executable = executable.to_string_lossy().into_owned();
         let request = StartRun {
+            transport: nexus_domain::HarnessTransport::Acp,
             title_generation: None,
             permission_mode: nexus_domain::PermissionMode::AutoEdit,
             run_id: Uuid::new_v4(),
@@ -897,6 +913,7 @@ mod tests {
         harness: HarnessKind,
     ) -> (StartRun, LaunchSpec, Box<dyn LineDecoder>) {
         let request = StartRun {
+            transport: nexus_domain::HarnessTransport::Cli,
             title_generation: None,
             permission_mode: nexus_domain::PermissionMode::AutoEdit,
             run_id: Uuid::new_v4(),
@@ -910,7 +927,7 @@ mod tests {
             effort: ThinkingEffort::Medium,
             environment: Vec::new(),
         };
-        let (spec, decoder) = super::super::harness::prepare(&request, directory);
+        let (spec, decoder) = super::super::harness::prepare(&request, directory).unwrap();
         (request, spec, decoder)
     }
 
@@ -1078,10 +1095,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn claude_and_codex_native_user_ask_round_trip() {
+    async fn native_stream_user_ask_round_trip() {
         let binaries = tempfile::tempdir().unwrap();
         let executable = compile_fake_harness(binaries.path());
-        for harness in [HarnessKind::Claude, HarnessKind::Codex] {
+        for harness in [
+            HarnessKind::Claude,
+            HarnessKind::Codex,
+            HarnessKind::Qoder,
+            HarnessKind::QoderCn,
+            HarnessKind::Codebuddy,
+        ] {
             let directory = tempfile::tempdir().unwrap();
             let (request, spec, decoder) =
                 prepared_native_user_ask_run(directory.path(), &executable, harness);
@@ -1107,7 +1130,7 @@ mod tests {
             let answers = vec![
                 UserAskAnswer {
                     question_id: questions[0].id.clone(),
-                    value: UserAskAnswerValue::Selected(if harness == HarnessKind::Claude {
+                    value: UserAskAnswerValue::Selected(if harness != HarnessKind::Codex {
                         vec!["Tests".into(), "Clippy".into()]
                     } else {
                         vec!["Tests".into()]
@@ -1161,7 +1184,10 @@ mod tests {
             )
             .unwrap();
             match harness {
-                HarnessKind::Claude => assert_eq!(
+                HarnessKind::Claude
+                | HarnessKind::Qoder
+                | HarnessKind::QoderCn
+                | HarnessKind::Codebuddy => assert_eq!(
                     frame,
                     json!({
                         "type": "control_response",
@@ -1187,7 +1213,7 @@ mod tests {
                         }}
                     })
                 ),
-                HarnessKind::Omp => unreachable!(),
+                HarnessKind::Omp | HarnessKind::Pi | HarnessKind::Kimi => unreachable!(),
             }
         }
     }
@@ -1201,7 +1227,8 @@ mod tests {
             let (mut request, _, _) =
                 prepared_native_user_ask_run(directory.path(), &executable, HarnessKind::Codex);
             request.prompt = format!("codex-async-{scenario}");
-            let (spec, decoder) = super::super::harness::prepare(&request, directory.path());
+            let (spec, decoder) =
+                super::super::harness::prepare(&request, directory.path()).unwrap();
             let (cancel_tx, cancel) = watch::channel(false);
             let (input, input_rx) = mpsc::unbounded_channel();
             let user_asks = PendingUserAsks::default();

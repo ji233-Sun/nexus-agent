@@ -557,5 +557,16 @@
   "安装 CLI": "Install CLI",
   "正在安装 CLI…": "Installing CLI…",
   "CLI 已安装。重新打开终端后可运行 nexus-desktop .": "CLI installed. Reopen your terminal to run nexus-desktop .",
-  "CLI 安装失败：{error}": "CLI installation failed: {error}"
+  "CLI 安装失败：{error}": "CLI installation failed: {error}",
+  "接入方式": "Connection mode",
+  "运行协议": "Run protocol",
+  "新会话默认使用 CLI；已有会话沿用原接入方式。": "New sessions default to CLI; existing sessions retain their original protocol.",
+  "CodeBuddy 地区": "CodeBuddy region",
+  "账号地区": "Account region",
+  "使用对应地区的登录与服务端点，不修改 CLI 全局配置。": "Use the selected region’s login and endpoints without changing global CLI configuration.",
+  "跟随 CLI": "Follow CLI",
+  "国内": "China",
+  "国际": "International",
+  "无法保存接入方式。": "Could not save connection mode.",
+  "无法保存 CodeBuddy 地区。": "Could not save CodeBuddy region."
 }

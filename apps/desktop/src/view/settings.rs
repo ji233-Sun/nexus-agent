@@ -1010,6 +1010,78 @@ impl NexusView {
             .flex_col()
             .gap_8()
             .child(self.render_harness_management(cx))
+            .when(
+                matches!(
+                    model.selected_harness,
+                    HarnessKind::Qoder | HarnessKind::QoderCn | HarnessKind::Codebuddy
+                ),
+                |view| {
+                    view.child(settings_group(
+                        colors,
+                        locale.text("接入方式"),
+                        [settings_row(
+                            colors,
+                            locale.text("运行协议"),
+                            locale.text("新会话默认使用 CLI；已有会话沿用原接入方式。"),
+                            div().flex().gap_2().children(
+                                [
+                                    (nexus_domain::HarnessTransport::Cli, "CLI"),
+                                    (nexus_domain::HarnessTransport::Acp, "ACP"),
+                                ]
+                                .map(|(transport, label)| {
+                                    Button::new(label)
+                                        .outline()
+                                        .small()
+                                        .label(label)
+                                        .selected(
+                                            self.presenter
+                                                .harness_transport(model.selected_harness)
+                                                == transport,
+                                        )
+                                        .disabled(
+                                            model.active_run_count() > 0
+                                                || model.harness_manager.busy,
+                                        )
+                                        .on_click(cx.listener(move |app, _, _, cx| {
+                                            app.presenter.set_harness_transport(transport);
+                                            cx.notify();
+                                        }))
+                                }),
+                            ),
+                        )],
+                    ))
+                },
+            )
+            .when(model.selected_harness == HarnessKind::Codebuddy, |view| {
+                view.child(settings_group(
+                    colors,
+                    locale.text("CodeBuddy 地区"),
+                    [settings_row(
+                        colors,
+                        locale.text("账号地区"),
+                        locale.text("使用对应地区的登录与服务端点，不修改 CLI 全局配置。"),
+                        div().flex().gap_2().children(
+                            [("", "跟随 CLI"), ("internal", "国内"), ("external", "国际")].map(
+                                |(region, label)| {
+                                    Button::new(label)
+                                        .outline()
+                                        .small()
+                                        .label(locale.text(label))
+                                        .selected(self.presenter.codebuddy_region() == region)
+                                        .disabled(
+                                            model.active_run_count() > 0
+                                                || model.harness_manager.busy,
+                                        )
+                                        .on_click(cx.listener(move |app, _, _, cx| {
+                                            app.presenter.set_codebuddy_region(region);
+                                            cx.notify();
+                                        }))
+                                },
+                            ),
+                        ),
+                    )],
+                ))
+            })
             .child(settings_group(
                 colors,
                 locale.text("执行环境"),
