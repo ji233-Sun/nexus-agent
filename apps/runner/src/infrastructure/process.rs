@@ -986,6 +986,8 @@ mod tests {
             ("omp-text-input", UserAskStatus::Answered),
             ("omp-text-editor", UserAskStatus::Answered),
             ("omp-text-select", UserAskStatus::Answered),
+            ("omp-text-custom", UserAskStatus::Answered),
+            ("omp-text-custom-only", UserAskStatus::Answered),
             ("omp-text-confirm", UserAskStatus::Answered),
             ("omp-text-cancel", UserAskStatus::Cancelled),
             ("omp-text-timeout", UserAskStatus::Expired),
@@ -1010,8 +1012,10 @@ mod tests {
             assert_eq!(questions[0].prompt, "Branch name");
             let answers = vec![UserAskAnswer {
                 question_id: "ui_1".into(),
-                value: if questions[0].options.is_empty() {
+                value: if questions[0].options.is_empty() || prompt == "omp-text-custom" {
                     UserAskAnswerValue::Text("feature/修复\nsecond line".into())
+                } else if prompt == "omp-text-select" {
+                    UserAskAnswerValue::Selected(vec![questions[0].options[0].id.clone()])
                 } else {
                     UserAskAnswerValue::Selected(vec![questions[0].options[1].id.clone()])
                 },
@@ -1045,6 +1049,7 @@ mod tests {
                         break;
                     }
                     Event::RunExited { .. } => panic!("dialog must finish before the run"),
+                    Event::RunUserAskRequested { .. } => panic!("custom input must not ask twice"),
                     _ => {}
                 }
             }
@@ -1066,11 +1071,10 @@ mod tests {
                 }
             );
             let remaining = collect_remaining_events(events).await;
-            assert!(
-                !remaining
-                    .iter()
-                    .any(|event| matches!(event, Event::RunUserAskFinished { .. }))
-            );
+            assert!(!remaining.iter().any(|event| matches!(
+                event,
+                Event::RunUserAskFinished { .. } | Event::RunUserAskRequested { .. }
+            )));
             if expected == UserAskStatus::Answered {
                 let frame: Value = serde_json::from_str(
                     &std::fs::read_to_string(directory.path().join("user-ask-input.json")).unwrap(),
@@ -1081,6 +1085,9 @@ mod tests {
                         json!({"type": "extension_ui_response", "id": "ui_1", "confirmed": false})
                     }
                     "omp-text-select" => {
+                        json!({"type": "extension_ui_response", "id": "ui_1", "value": "Tests"})
+                    }
+                    "omp-text-custom" | "omp-text-custom-only" => {
                         json!({"type": "extension_ui_response", "id": "ui_1", "value": "Other (type your own)"})
                     }
                     _ => {
@@ -1088,6 +1095,21 @@ mod tests {
                     }
                 };
                 assert_eq!(frame, expected);
+                if matches!(prompt, "omp-text-custom" | "omp-text-custom-only") {
+                    let frame: Value = serde_json::from_str(
+                        &std::fs::read_to_string(
+                            directory.path().join("user-ask-custom-input.json"),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        frame,
+                        json!({
+                            "type": "extension_ui_response", "id": "ui_2", "value": "feature/修复\nsecond line"
+                        })
+                    );
+                }
             } else {
                 assert!(!directory.path().join("user-ask-input.json").exists());
             }

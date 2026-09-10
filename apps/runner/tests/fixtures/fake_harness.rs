@@ -269,12 +269,17 @@ fn run_turn(
     if prompt.starts_with("omp-text-") {
         let method = match prompt {
             "omp-text-editor" => "editor",
-            "omp-text-select" => "select",
+            "omp-text-select" | "omp-text-custom" | "omp-text-custom-only" => "select",
             "omp-text-confirm" => "confirm",
             _ => "input",
         };
         let timeout = if prompt == "omp-text-timeout" { ",\"timeout\":50" } else { "" };
-        println!(r#"{{"type":"extension_ui_request","id":"ui_1","method":{method:?},"title":"Branch name","options":["Tests","Other (type your own)"]{timeout}}}"#);
+        let options = if prompt == "omp-text-custom-only" {
+            r#"["Other (type your own)"]"#
+        } else {
+            r#"["Tests","Other (type your own)"]"#
+        };
+        println!(r#"{{"type":"extension_ui_request","id":"ui_1","method":{method:?},"title":"Branch name","options":{options}{timeout}}}"#);
         if matches!(prompt, "omp-text-cancel" | "omp-text-timeout") {
             if prompt == "omp-text-cancel" {
                 println!(r#"{{"type":"extension_ui_request","id":"cancel-2","method":"cancel","targetId":"ui_1"}}"#);
@@ -286,6 +291,12 @@ fn run_turn(
         } else {
             let answer = input.recv_timeout(Duration::from_secs(5)).expect("missing OMP text answer");
             fs::write("user-ask-input.json", &answer).unwrap();
+            if matches!(prompt, "omp-text-custom" | "omp-text-custom-only") {
+                println!(r#"{{"type":"extension_ui_request","id":"ui_2","method":"editor","title":"Branch name\n\n◉ Other (type your own)\n\nEnter your response:","promptStyle":true}}"#);
+                io::stdout().flush().unwrap();
+                let answer = input.recv_timeout(Duration::from_secs(5)).expect("missing OMP custom answer");
+                fs::write("user-ask-custom-input.json", &answer).unwrap();
+            }
             message(harness, "answered");
         }
         terminal(harness);

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -7,7 +7,7 @@ use std::{
 
 use nexus_domain::{
     HarnessKind, ModelDescriptor, ModelReasoningEffort, PermissionMode, ThinkingEffort,
-    UserAskAnswer,
+    UserAskAnswer, UserAskAnswerMode, UserAskAnswerValue,
 };
 pub use nexus_harness_core::{DecodedEvent, LaunchSpec, ModelCatalogError};
 use nexus_harness_core::{InputFrame, LineDecoder, resolve_executable};
@@ -340,23 +340,118 @@ pub async fn probe(configured_executable: &str) -> HarnessProbe {
     }
 }
 
-pub struct EventDecoder(nexus_harness_core::rpc::RpcEventDecoder);
+const OTHER_OPTION: &str = "Other (type your own)";
+
+pub struct EventDecoder {
+    rpc: nexus_harness_core::rpc::RpcEventDecoder,
+    custom_options: HashMap<String, String>,
+    custom_answers: VecDeque<(String, String)>,
+}
 
 impl Default for EventDecoder {
     fn default() -> Self {
-        Self(nexus_harness_core::rpc::RpcEventDecoder::new("Oh My Pi"))
+        Self {
+            rpc: nexus_harness_core::rpc::RpcEventDecoder::new("Oh My Pi"),
+            custom_options: HashMap::new(),
+            custom_answers: VecDeque::new(),
+        }
     }
 }
 
 impl LineDecoder for EventDecoder {
     fn decode_line(&mut self, line: &str) -> Result<Vec<DecodedEvent>, serde_json::Error> {
-        self.0.decode_line(line)
+        let mut events = self.rpc.decode_line(line)?;
+        if !self.custom_answers.is_empty() {
+            let frame: Value = serde_json::from_str(line)?;
+            if frame["type"] == "extension_ui_request" {
+                if frame["method"] == "cancel" {
+                    self.custom_answers
+                        .retain(|(id, _)| Some(id.as_str()) != frame["targetId"].as_str());
+                } else if frame["method"] == "editor"
+                    && frame["promptStyle"] == true
+                    && frame["title"].as_str().is_some_and(|title| {
+                        title.contains(OTHER_OPTION) && title.ends_with("\nEnter your response:")
+                    })
+                    && let [DecodedEvent::UserAskRequested(request)] = events.as_slice()
+                    && let Some((_, text)) = self.custom_answers.front()
+                    && let Some(response) = self.rpc.answer_user_ask(
+                        &request.native_request_id,
+                        &[UserAskAnswer {
+                            question_id: request.native_request_id.clone(),
+                            value: UserAskAnswerValue::Text(text.clone()),
+                        }],
+                    )
+                {
+                    // OMP opens these editors in selection-response order. Complete its
+                    // native Other -> editor exchange without asking the user twice.
+                    self.custom_answers.pop_front();
+                    return Ok(vec![DecodedEvent::WriteStdin(response)]);
+                }
+            }
+        }
+        for event in &mut events {
+            match event {
+                DecodedEvent::UserAskRequested(request) => {
+                    for question in &mut request.questions {
+                        if let UserAskAnswerMode::Choice { allow_custom, .. } =
+                            &mut question.answer_mode
+                            && let Some(index) = question
+                                .options
+                                .iter()
+                                .position(|option| option.label == OTHER_OPTION)
+                        {
+                            *allow_custom = true;
+                            let other = question.options.remove(index);
+                            if question.options.is_empty() {
+                                question.answer_mode = UserAskAnswerMode::Text;
+                            }
+                            self.custom_options
+                                .insert(request.native_request_id.clone(), other.id);
+                        }
+                    }
+                }
+                DecodedEvent::UserAskFinished {
+                    native_request_id, ..
+                } => {
+                    self.custom_options.remove(native_request_id);
+                }
+                DecodedEvent::TurnCompleted => {
+                    self.custom_options.clear();
+                    self.custom_answers.clear();
+                }
+                _ => {}
+            }
+        }
+        Ok(events)
     }
     fn steer(&mut self, id: &str, prompt: &str) -> Option<InputFrame> {
-        self.0.steer(id, prompt)
+        self.rpc.steer(id, prompt)
     }
     fn answer_user_ask(&mut self, id: &str, answers: &[UserAskAnswer]) -> Option<InputFrame> {
-        self.0.answer_user_ask(id, answers)
+        let [answer] = answers else { return None };
+        if answer.question_id != id {
+            return None;
+        }
+        let response = if let Some(option) = self.custom_options.get(id)
+            && let UserAskAnswerValue::Text(text) = &answer.value
+        {
+            if text.trim().is_empty() {
+                return None;
+            }
+            let response = self.rpc.answer_user_ask(
+                id,
+                &[UserAskAnswer {
+                    question_id: id.into(),
+                    value: UserAskAnswerValue::Selected(vec![option.clone()]),
+                }],
+            )?;
+            self.custom_answers.push_back((id.into(), text.clone()));
+            response
+        } else {
+            self.rpc.answer_user_ask(id, answers)?
+        };
+        self.custom_options.remove(id);
+        Some(response)
     }
 }
 
@@ -513,9 +608,9 @@ mod tests {
         for (method, options, answer_key, expected) in [
             (
                 "select",
-                json!(["Tests", "Other (type your own)"]),
+                json!(["Tests", "Clippy"]),
                 "value",
-                json!("Other (type your own)"),
+                json!("Clippy"),
             ),
             ("confirm", Value::Null, "confirmed", json!(false)),
         ] {
@@ -566,6 +661,173 @@ mod tests {
                     )
                     .is_none()
             );
+        }
+    }
+
+    #[test]
+    fn rpc_custom_choice_uses_inline_text_and_answers_the_native_editor_once() {
+        let mut decoder = EventDecoder::default();
+        let events = decoder.decode_line(&json!({
+            "type": "extension_ui_request", "id": "choice", "method": "select",
+            "title": "Which checks?", "timeout": 5000,
+            "options": ["Tests", "Other (type your own)", "Clippy"],
+            "optionDetails": [{"description": "Run tests"}, {}, {"description": "Lint code"}]
+        }).to_string()).unwrap();
+        let [DecodedEvent::UserAskRequested(request)] = events.as_slice() else {
+            panic!("expected User Ask, got {events:?}");
+        };
+        assert_eq!(request.timeout_ms, Some(5000));
+        assert_eq!(
+            request.questions[0].answer_mode,
+            UserAskAnswerMode::Choice {
+                multiple: false,
+                allow_custom: true,
+            }
+        );
+        assert_eq!(
+            request.questions[0]
+                .options
+                .iter()
+                .map(|option| (
+                    option.id.as_str(),
+                    option.label.as_str(),
+                    option.description.as_deref()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("0", "Tests", Some("Run tests")),
+                ("2", "Clippy", Some("Lint code"))
+            ]
+        );
+        assert!(
+            decoder
+                .decode_line(
+                    &json!({
+                        "type": "extension_ui_request", "id": "choice", "method": "select",
+                        "options": ["Tests", "Other (type your own)"]
+                    })
+                    .to_string()
+                )
+                .unwrap()
+                .is_empty()
+        );
+
+        let mut answer = [UserAskAnswer {
+            question_id: "wrong".into(),
+            value: UserAskAnswerValue::Text("只运行测试\n\"details\"".into()),
+        }];
+        assert!(decoder.answer_user_ask("choice", &answer).is_none());
+        answer[0].question_id = "choice".into();
+        assert_eq!(
+            decoder.answer_user_ask("choice", &answer).unwrap().0,
+            json!({"type": "extension_ui_response", "id": "choice", "value": "Other (type your own)"})
+        );
+        assert!(decoder.answer_user_ask("choice", &answer).is_none());
+
+        // Unrelated text dialogs must not consume the queued custom answer.
+        for method in ["input", "editor"] {
+            let events = decoder
+                .decode_line(
+                    &json!({
+                        "type": "extension_ui_request", "id": format!("unrelated-{method}"),
+                        "method": method, "title": "Another question"
+                    })
+                    .to_string(),
+                )
+                .unwrap();
+            assert!(matches!(
+                events.as_slice(),
+                [DecodedEvent::UserAskRequested(_)]
+            ));
+        }
+        let events = decoder
+            .decode_line(
+                &json!({
+                    "type": "extension_ui_request", "id": "custom-editor", "method": "editor",
+                    "title": "Which checks?\n\n◉ Other (type your own)\n\nEnter your response:",
+                    "promptStyle": true
+                })
+                .to_string(),
+            )
+            .unwrap();
+        assert_eq!(
+            events,
+            vec![DecodedEvent::WriteStdin(InputFrame(json!({
+                "type": "extension_ui_response", "id": "custom-editor", "value": "只运行测试\n\"details\""
+            })))]
+        );
+        assert!(
+            decoder
+                .answer_user_ask(
+                    "custom-editor",
+                    &[UserAskAnswer {
+                        question_id: "custom-editor".into(),
+                        value: UserAskAnswerValue::Text("again".into()),
+                    }]
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn rpc_custom_choice_preserves_regular_selection_and_clears_abandoned_answers() {
+        for value in [
+            UserAskAnswerValue::Selected(vec!["1".into()]),
+            UserAskAnswerValue::Text("custom".into()),
+        ] {
+            for end in [
+                json!({"type": "extension_ui_request", "method": "cancel", "targetId": "choice"}),
+                json!({"type": "agent_end"}),
+            ] {
+                let mut decoder = EventDecoder::default();
+                decoder
+                    .decode_line(
+                        &json!({
+                            "type": "extension_ui_request", "id": "choice", "method": "select",
+                            "title": "Which checks?", "options": ["Other (type your own)", "Tests"]
+                        })
+                        .to_string(),
+                    )
+                    .unwrap();
+                assert!(
+                    decoder
+                        .answer_user_ask(
+                            "choice",
+                            &[UserAskAnswer {
+                                question_id: "choice".into(),
+                                value: UserAskAnswerValue::Text("  \n".into()),
+                            }]
+                        )
+                        .is_none()
+                );
+                let response = decoder
+                    .answer_user_ask(
+                        "choice",
+                        &[UserAskAnswer {
+                            question_id: "choice".into(),
+                            value: value.clone(),
+                        }],
+                    )
+                    .unwrap();
+                assert_eq!(
+                    response.0["value"],
+                    if matches!(value, UserAskAnswerValue::Text(_)) {
+                        "Other (type your own)"
+                    } else {
+                        "Tests"
+                    }
+                );
+                decoder.decode_line(&end.to_string()).unwrap();
+                let events = decoder.decode_line(&json!({
+                    "type": "extension_ui_request", "id": "later-editor", "method": "editor",
+                    "title": "Which checks?\n\n◉ Other (type your own)\n\nEnter your response:",
+                    "promptStyle": true
+                }).to_string()).unwrap();
+                assert!(matches!(
+                    events.as_slice(),
+                    [DecodedEvent::UserAskRequested(_)]
+                ));
+            }
         }
     }
 
