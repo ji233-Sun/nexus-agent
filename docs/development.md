@@ -74,7 +74,7 @@ flowchart TB
         View[View · GPUI] --> Presenter
         Presenter --> Model
         Model -. 渲染状态 .-> View
-        Presenter --> Storage[SQLite / 系统凭据库 / Codex 历史]
+        Presenter --> Storage[SQLite / 系统凭据库]
     end
     Presenter -->|版本化 JSONL · stdio| Runner
     subgraph Runner[nexus-runner]
@@ -101,10 +101,10 @@ flowchart TB
 - `apps/runner/src/application`：命令调度、双任务并发、任务与 checkout 互斥、取消和统一事件转换。
 - `apps/runner/src/infrastructure`：Harness 适配器选择、子进程执行和平台相关的进程树清理。
 - `apps/desktop/src/bootstrap.rs`：窗口、主题、存储和 Runner 的启动装配。
-- `apps/desktop/src/model`：界面状态、历史消息数据和提交可用性，不依赖 GPUI。
+- `apps/desktop/src/model`：界面状态、会话数据和提交可用性，不依赖 GPUI。
 - `apps/desktop/src/presenter`：项目选择、配置、提交、远程命令、事件处理和持久化协调，不依赖 GPUI；通过 `RunnerPort` 注入真实或测试 Runner。
 - `apps/desktop/src/view`：GPUI 渲染、控件状态和事件转交，按侧栏、时间线、设置、组件和主题拆分。
-- `apps/desktop/src/infrastructure`：平台数据目录、SQLite、系统凭据库、Runner 进程通信、Codex 历史、Worktree 生命周期和本地 Git 成果接收。
+- `apps/desktop/src/infrastructure`：平台数据目录、SQLite、系统凭据库、Runner 进程通信、Worktree 生命周期和本地 Git 成果接收。
 - `apps/desktop/src/remote_control.rs`：带令牌鉴权的 HTTP/WebSocket 服务及静态资源托管。
 - `apps/remote-web`：React + Vite 静态 Remote Client，生产构建产物嵌入 Desktop。
 
@@ -133,7 +133,7 @@ cargo build --workspace --locked
 
 [CI 工作流](https://github.com/ji233-Sun/nexus-agent/blob/main/.github/workflows/ci.yml) 在推送到 main、PR 和手动触发时，于 Ubuntu、macOS、Windows 执行以上检查。Remote Web 的类型检查和静态资源构建命令见[修改远程页面](#修改远程页面)。
 
-Presenter 测试使用内存 SQLite 与 Fake Runner，GPUI 测试验证界面交互；Fake Harness 测试验证子进程、协议、流式输出、取消和关闭，不调用真实模型。Codex 历史的 shell fixture 测试目前仅在 Unix 运行。
+Presenter 测试使用内存 SQLite 与 Fake Runner，GPUI 测试验证界面交互；Fake Harness 测试验证子进程、协议、流式输出、取消和关闭，不调用真实模型。
 
 <details>
 <summary>滚动性能测试与发布构建</summary>

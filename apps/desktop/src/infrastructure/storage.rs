@@ -294,8 +294,23 @@ impl Storage {
              ORDER BY last_opened_at DESC",
         )?;
         let rows = statement.query_map([], project_from_row)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+        let mut projects = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        let order: Vec<Uuid> = self
+            .setting("project_order")?
+            .and_then(|value| serde_json::from_str(&value).ok())
+            .unwrap_or_default();
+        // Keep recency order for projects that have not been manually positioned.
+        projects.sort_by_key(|project| {
+            order
+                .iter()
+                .position(|id| *id == project.id)
+                .unwrap_or(order.len())
+        });
+        Ok(projects)
+    }
+
+    pub(crate) fn save_project_order(&self, order: &[Uuid]) -> Result<()> {
+        self.set_setting("project_order", &serde_json::to_string(order)?)
     }
 
     pub(crate) fn project(&self, id: Uuid) -> Result<Option<Project>> {
@@ -308,6 +323,31 @@ impl Storage {
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    pub(crate) fn delete_project(&mut self, project_id: Uuid) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        let id = project_id.to_string();
+        transaction.execute(
+            "DELETE FROM messages WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?1)",
+            [&id],
+        )?;
+        transaction.execute(
+            "DELETE FROM runs WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?1)",
+            [&id],
+        )?;
+        transaction.execute("DELETE FROM tasks WHERE project_id = ?1", [&id])?;
+        // Forget workspace ownership without touching directories or Git branches.
+        transaction.execute("DELETE FROM workspaces WHERE project_id = ?1", [&id])?;
+        transaction.execute(
+            "DELETE FROM settings WHERE key = ?1",
+            [format!("workspace_mode:{project_id}")],
+        )?;
+        if transaction.execute("DELETE FROM projects WHERE id = ?1", [&id])? != 1 {
+            return Err(anyhow!("项目不存在"));
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn tasks(&self, project_id: Uuid) -> Result<Vec<TaskSummary>> {
@@ -1109,11 +1149,167 @@ mod tests {
     }
 
     #[test]
+    fn project_deletion_is_atomic_persistent_and_scoped_to_its_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("nexus.db");
+        let project_dir = directory.path().join("project");
+        let other_dir = directory.path().join("other");
+        fs::create_dir(&project_dir).unwrap();
+        fs::create_dir(&other_dir).unwrap();
+        fs::write(project_dir.join("keep.txt"), "local changes").unwrap();
+        let mut storage = Storage::open(&database).unwrap();
+        let project = storage.open_project(&project_dir).unwrap();
+        let other = storage.open_project(&other_dir).unwrap();
+        let workspace_mode = format!("workspace_mode:{}", project.id);
+        storage.set_setting(&workspace_mode, "worktree").unwrap();
+        storage.set_setting("language", "en").unwrap();
+        let tasks = [project.id, project.id, other.id].map(|project_id| {
+            storage
+                .create_task_run(NewTaskRun {
+                    task_id: None,
+                    workspace_id: None,
+                    project_id,
+                    title: "Conversation",
+                    prompt: "Saved message",
+                    harness: HarnessKind::Claude,
+                    executable: "claude",
+                    model: None,
+                    effort: ThinkingEffort::Default,
+                    permission_mode: PermissionMode::AutoEdit,
+                    harness_version: None,
+                })
+                .unwrap()
+                .0
+        });
+        storage.archive_task(tasks[0]).unwrap();
+
+        storage
+            .connection
+            .execute_batch(
+                "CREATE TEMP TRIGGER reject_project_delete BEFORE DELETE ON projects
+                 BEGIN SELECT RAISE(ABORT, 'test deletion failure'); END;",
+            )
+            .unwrap();
+        assert!(storage.delete_project(project.id).is_err());
+        assert!(storage.project(project.id).unwrap().is_some());
+        assert_eq!(storage.tasks(project.id).unwrap()[0].id, tasks[1]);
+        assert_eq!(storage.archived_tasks().unwrap()[0].id, tasks[0]);
+        for task_id in tasks {
+            assert_eq!(
+                storage.messages(task_id).unwrap()[0].content,
+                "Saved message"
+            );
+            assert!(storage.conversation_config(task_id).unwrap().is_some());
+            assert!(storage.task_workspace(task_id).unwrap().is_some());
+        }
+        assert_eq!(
+            storage.setting(&workspace_mode).unwrap().as_deref(),
+            Some("worktree")
+        );
+        storage
+            .connection
+            .execute_batch("DROP TRIGGER reject_project_delete;")
+            .unwrap();
+
+        storage.delete_project(project.id).unwrap();
+        drop(storage);
+        let mut storage = Storage::open(&database).unwrap();
+        assert!(storage.project(project.id).unwrap().is_none());
+        assert_eq!(storage.projects().unwrap()[0].id, other.id);
+        assert_eq!(storage.projects().unwrap().len(), 1);
+        assert!(storage.tasks(project.id).unwrap().is_empty());
+        assert!(storage.archived_tasks().unwrap().is_empty());
+        assert!(storage.workspaces(project.id).unwrap().is_empty());
+        assert!(storage.setting(&workspace_mode).unwrap().is_none());
+        for task_id in &tasks[..2] {
+            assert!(storage.messages(*task_id).unwrap().is_empty());
+            assert!(storage.conversation_config(*task_id).unwrap().is_none());
+        }
+        assert_eq!(storage.tasks(other.id).unwrap()[0].id, tasks[2]);
+        assert_eq!(
+            storage.messages(tasks[2]).unwrap()[0].content,
+            "Saved message"
+        );
+        assert!(storage.conversation_config(tasks[2]).unwrap().is_some());
+        assert!(storage.task_workspace(tasks[2]).unwrap().is_some());
+        assert_eq!(storage.setting("language").unwrap().as_deref(), Some("en"));
+        assert_eq!(
+            fs::read_to_string(project_dir.join("keep.txt")).unwrap(),
+            "local changes"
+        );
+
+        assert!(storage.delete_project(project.id).is_err());
+        let reopened = storage.open_project(&project_dir).unwrap();
+        assert_ne!(reopened.id, project.id);
+        assert!(storage.tasks(reopened.id).unwrap().is_empty());
+        storage.delete_project(reopened.id).unwrap();
+        assert_eq!(storage.projects().unwrap().len(), 1);
+    }
+
+    #[test]
     fn settings_round_trip() {
         let directory = tempfile::tempdir().unwrap();
         let storage = Storage::open(&directory.path().join("nexus.db")).unwrap();
         storage.set_setting("model", "opus").unwrap();
         assert_eq!(storage.setting("model").unwrap().as_deref(), Some("opus"));
+    }
+
+    #[test]
+    fn project_order_persists_across_restarts_and_new_projects() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("nexus.db");
+        let storage = Storage::open(&database).unwrap();
+        let mut projects = Vec::new();
+        for name in ["first", "second", "third"] {
+            let path = directory.path().join(name);
+            fs::create_dir(&path).unwrap();
+            projects.push(storage.open_project(&path).unwrap());
+        }
+        let ids = |storage: &Storage| {
+            storage
+                .projects()
+                .unwrap()
+                .iter()
+                .map(|project| project.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(&storage),
+            vec![projects[2].id, projects[1].id, projects[0].id]
+        );
+        let order = vec![projects[0].id, projects[2].id, projects[1].id];
+        storage.save_project_order(&order).unwrap();
+        for project in &projects {
+            assert_eq!(
+                storage.project(project.id).unwrap().unwrap().last_opened_at,
+                project.last_opened_at,
+            );
+        }
+        drop(storage);
+
+        let storage = Storage::open(&database).unwrap();
+        assert_eq!(ids(&storage), order);
+        storage
+            .open_project(Path::new(&projects[1].canonical_path))
+            .unwrap();
+        assert_eq!(ids(&storage), order);
+        let path = directory.path().join("new-project");
+        fs::create_dir(&path).unwrap();
+        let new_project = storage.open_project(&path).unwrap();
+        assert_eq!(ids(&storage), [order, vec![new_project.id]].concat());
+
+        storage
+            .set_setting("project_order", "invalid JSON")
+            .unwrap();
+        assert_eq!(
+            ids(&storage),
+            vec![
+                new_project.id,
+                projects[1].id,
+                projects[2].id,
+                projects[0].id
+            ],
+        );
     }
 
     #[test]

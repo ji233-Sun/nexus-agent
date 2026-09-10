@@ -8,13 +8,8 @@ use std::{
 
 use super::*;
 use crate::{
-    infrastructure::{
-        codex_history::Event as HistoryEvent, credentials::CredentialStore, storage::NewTaskRun,
-    },
-    model::{
-        UserAskSubmissionState,
-        history::{HistoryMessage, ThreadSummary},
-    },
+    infrastructure::{credentials::CredentialStore, storage::NewTaskRun},
+    model::UserAskSubmissionState,
 };
 use nexus_domain::{
     MessageKind, MessageRole, ModelDescriptor, ModelReasoningEffort, RunStatus, UserAskAnswer,
@@ -94,6 +89,7 @@ pub(crate) fn fixture() -> (Presenter, FakeRunner, tempfile::TempDir) {
     let storage = Storage::open(Path::new(":memory:")).unwrap();
     let runner = FakeRunner::default();
     let mut presenter = Presenter::new(storage, Ok(Box::new(runner.clone())), None);
+    presenter.cnb_client = crate::infrastructure::cnb::Client::fake();
     presenter.open_project(directory.path());
     presenter.model.model_catalog = ModelCatalogState::Ready(claude_aliases());
     presenter
@@ -102,6 +98,175 @@ pub(crate) fn fixture() -> (Presenter, FakeRunner, tempfile::TempDir) {
         .insert(HarnessKind::Claude, ready_probe(HarnessKind::Claude));
     runner.0.borrow_mut().commands.clear();
     (presenter, runner, directory)
+}
+
+pub(crate) fn cnb_issue(number: &str) -> crate::model::cnb::Issue {
+    serde_json::from_value(serde_json::json!({
+        "number":number, "title":format!("CNB 集成测试 #{number}"), "state":"open",
+        "body":"## 问题描述\n\n支持 **Markdown**、链接与代码。\n\n```rust\nfn main() {}\n```",
+        "author":{"username":"author", "nickname":"开发者"},
+        "assignees":[{"username":"owner"}], "labels":[{"name":"enhancement", "color":"#315DC5"}],
+        "created_at":"2026-09-09T00:00:00Z", "updated_at":"2026-09-09T01:00:00Z", "priority":"P1", "comment_count":2
+    })).unwrap()
+}
+
+pub(crate) fn seed_cnb_issues(presenter: &mut Presenter) {
+    presenter.model.cnb = crate::model::cnb::CnbModel {
+        repository: Some("team/project".into()),
+        cli: Some(crate::model::cnb::Cli {
+            path: "/missing-test-cnb".into(),
+            version: "1.10.10".into(),
+        }),
+        issues: (1..=30)
+            .map(|number| cnb_issue(&number.to_string()))
+            .collect(),
+        total: 61,
+        ..Default::default()
+    };
+}
+
+pub(crate) fn finish_cnb_request(
+    presenter: &mut Presenter,
+    response: crate::infrastructure::cnb::Response,
+) {
+    use crate::infrastructure::cnb::{Event, Response};
+    let id = match &response {
+        Response::Inspection { .. } => presenter.model.cnb.detection_request,
+        Response::List(_) => presenter.model.cnb.list_request,
+        Response::Detail(_) => presenter.model.cnb.detail_request,
+    }
+    .expect("pending CNB request");
+    presenter.handle_cnb_event(Event { id, response });
+}
+
+#[test]
+fn cnb_navigation_preserves_conversation_and_ignores_obsolete_project_and_detail_results() {
+    use crate::{
+        infrastructure::cnb::{Event, Response},
+        model::cnb::{IssueFilter, IssuePage},
+    };
+    let (mut presenter, runner, directory) = fixture();
+    seed_cnb_issues(&mut presenter);
+    let conversation = presenter.model.conversation.id;
+    presenter.open_cnb();
+    assert!(presenter.model.cnb.opened);
+    assert_eq!(presenter.model.conversation.id, conversation);
+    assert!(runner.0.borrow().commands.is_empty());
+    presenter.select_cnb_issue("1".into());
+    let earlier = presenter.model.cnb.detail_request.unwrap();
+    presenter.select_cnb_issue("2".into());
+    presenter.handle_cnb_event(Event {
+        id: earlier,
+        response: Response::Detail(Ok(cnb_issue("1"))),
+    });
+    assert!(presenter.model.cnb.detail.is_none());
+    finish_cnb_request(&mut presenter, Response::Detail(Ok(cnb_issue("2"))));
+    assert_eq!(presenter.model.cnb.detail.as_ref().unwrap().number, "2");
+    presenter.close_cnb_issue();
+    assert_eq!(presenter.model.cnb.issues.len(), 30);
+    assert_eq!(presenter.model.cnb.page, 1);
+    presenter.load_cnb_issues(2, IssueFilter::Closed);
+    let previous = presenter.model.cnb.list_request.unwrap();
+    assert!(presenter.model.cnb.issues.is_empty());
+    assert_eq!(presenter.model.cnb.filter, IssueFilter::Closed);
+    let project = directory.path().join("other-project");
+    fs::create_dir(&project).unwrap();
+    presenter.open_project(&project);
+    presenter.handle_cnb_event(Event {
+        id: previous,
+        response: Response::List(Ok(IssuePage {
+            issues: vec![cnb_issue("3")],
+            total: 1,
+        })),
+    });
+    assert!(!presenter.model.cnb.opened);
+    assert!(presenter.model.cnb.repository.is_none());
+    assert!(presenter.model.cnb.issues.is_empty());
+}
+
+#[test]
+fn cnb_failures_can_be_retried_and_disabling_invalidates_requests_and_persists() {
+    use crate::{
+        infrastructure::cnb::{Event, Response},
+        model::cnb::{IssueFilter, IssuePage},
+    };
+    let (mut presenter, _, _directory) = fixture();
+    seed_cnb_issues(&mut presenter);
+    presenter.load_cnb_issues(1, IssueFilter::Open);
+    finish_cnb_request(&mut presenter, Response::List(Err("需要登录".into())));
+    assert!(presenter.model.cnb.list_request.is_none());
+    assert!(presenter.model.cnb.list_error.is_some());
+    presenter.load_cnb_issues(1, IssueFilter::Open);
+    finish_cnb_request(
+        &mut presenter,
+        Response::List(Ok(IssuePage {
+            issues: vec![cnb_issue("2")],
+            total: 1,
+        })),
+    );
+    assert!(presenter.model.cnb.list_error.is_none());
+    assert_eq!(presenter.model.cnb.total, 1);
+    presenter.select_cnb_issue("2".into());
+    let id = presenter.model.cnb.detail_request.unwrap();
+    presenter.set_cnb_enabled(false);
+    assert!(!presenter.model.cnb.enabled);
+    assert_eq!(
+        presenter.storage.setting("cnb_enabled").unwrap().as_deref(),
+        Some("false")
+    );
+    presenter.handle_cnb_event(Event {
+        id,
+        response: Response::Detail(Ok(cnb_issue("2"))),
+    });
+    assert!(presenter.model.cnb.detail.is_none());
+    let presenter = Presenter::new(presenter.storage, Err(anyhow::anyhow!("test runner")), None);
+    assert!(!presenter.model.cnb.enabled);
+}
+
+#[test]
+fn cnb_inspection_keeps_repository_visible_when_cli_is_missing_and_rejects_stale_inspections() {
+    use crate::infrastructure::cnb::{Event, Response};
+    let (mut presenter, _, _directory) = fixture();
+    let old = Uuid::new_v4();
+    let current = Uuid::new_v4();
+    presenter.model.cnb.detection_request = Some(current);
+    presenter.handle_cnb_event(Event {
+        id: old,
+        response: Response::Inspection {
+            repository: Some("wrong/project".into()),
+            cli: Err("missing".into()),
+        },
+    });
+    assert!(presenter.model.cnb.repository.is_none());
+    finish_cnb_request(
+        &mut presenter,
+        Response::Inspection {
+            repository: Some("team/project".into()),
+            cli: Err("missing".into()),
+        },
+    );
+    assert_eq!(
+        presenter.model.cnb.repository.as_deref(),
+        Some("team/project")
+    );
+    assert!(presenter.model.cnb.cli.is_none());
+    presenter.open_cnb();
+    assert!(presenter.model.cnb.opened);
+    assert!(presenter.model.cnb.list_request.is_none());
+    presenter.model.cnb.detection_request = Some(Uuid::new_v4());
+    finish_cnb_request(
+        &mut presenter,
+        Response::Inspection {
+            repository: Some("team/project".into()),
+            cli: Ok(crate::model::cnb::Cli {
+                path: "/missing-test-cnb".into(),
+                version: "1.10.10".into(),
+            }),
+        },
+    );
+    assert!(presenter.model.cnb.list_request.is_some());
+    presenter.new_task();
+    assert!(!presenter.model.cnb.opened);
 }
 
 pub(crate) fn finish_workspace_operation(presenter: &mut Presenter) {
@@ -1167,6 +1332,165 @@ fn appearance_preferences_restore_and_accept_missing_or_invalid_settings() {
 }
 
 #[test]
+fn project_deletion_clears_selected_and_cached_state_and_preserves_worktree_files() {
+    use crate::infrastructure::git;
+    let (mut presenter, runner, _directory, start) = worktree_fixture("Keep my worktree");
+    let project = presenter.model.selected_project.clone().unwrap();
+    let workspace = presenter.model.selected_workspace.clone().unwrap();
+    let repository = Path::new(&project.canonical_path);
+    let worktree = Path::new(&workspace.path);
+    fs::write(repository.join("tracked.txt"), "project edits\n").unwrap();
+    fs::write(worktree.join("tracked.txt"), "worktree edits\n").unwrap();
+    fs::write(worktree.join("untracked.txt"), "untracked work\n").unwrap();
+    let worktrees = git::git(repository, &["worktree", "list", "--porcelain"]).unwrap();
+    let branches = git::git(repository, &["show-ref", "--heads"]).unwrap();
+    runner.emit(Event::RunExited {
+        run_id: start.run_id,
+        status: RunStatus::Completed,
+        exit_code: Some(0),
+    });
+    presenter.drain_events();
+    presenter
+        .model
+        .queued_messages
+        .push_back(crate::model::QueuedMessage {
+            id: Uuid::new_v4(),
+            task_id: start.task_id,
+            prompt: "unsent follow-up".into(),
+            permission_mode: PermissionMode::AutoEdit,
+        });
+    assert!(presenter.archive_task(start.task_id));
+    seed_cnb_issues(&mut presenter);
+    presenter.open_cnb();
+    assert!(presenter.model.cnb.opened);
+    assert!(presenter.model.all_conversations().any(|conversation| {
+        conversation.selected_task == Some(start.task_id)
+            && !conversation.queued_messages.is_empty()
+    }));
+
+    assert!(presenter.delete_project(project.id));
+    assert!(presenter.model.selected_project.is_none());
+    assert!(presenter.model.selected_task.is_none());
+    assert!(presenter.model.selected_workspace.is_none());
+    assert!(presenter.model.workspaces.is_empty());
+    assert!(presenter.model.messages.is_empty());
+    assert!(presenter.model.tasks.is_empty());
+    assert!(presenter.model.archived_tasks.is_empty());
+    assert!(presenter.model.queued_messages.is_empty());
+    assert!(!presenter.model.project_is_git);
+    assert!(matches!(
+        presenter.model.model_catalog,
+        ModelCatalogState::Idle
+    ));
+    assert!(!presenter.model.cnb.opened);
+    assert!(presenter.model.cnb.repository.is_none());
+    assert!(presenter.model.all_conversations().all(|conversation| {
+        conversation
+            .selected_project
+            .as_ref()
+            .is_none_or(|item| item.id != project.id)
+    }));
+    assert!(presenter.storage.workspace(workspace.id).unwrap().is_none());
+    let remote = presenter.remote_state();
+    assert!(remote.projects.iter().all(|item| item.id != project.id));
+    assert!(
+        remote
+            .tasks
+            .iter()
+            .all(|task| task.project_id != project.id)
+    );
+    assert!(remote.selected_project_id.is_none());
+    assert_eq!(
+        fs::read_to_string(repository.join("tracked.txt")).unwrap(),
+        "project edits\n"
+    );
+    assert_eq!(
+        fs::read_to_string(worktree.join("tracked.txt")).unwrap(),
+        "worktree edits\n"
+    );
+    assert_eq!(
+        fs::read_to_string(worktree.join("untracked.txt")).unwrap(),
+        "untracked work\n"
+    );
+    assert_eq!(
+        git::git(repository, &["worktree", "list", "--porcelain"]).unwrap(),
+        worktrees
+    );
+    assert_eq!(
+        git::git(repository, &["show-ref", "--heads"]).unwrap(),
+        branches
+    );
+}
+
+#[test]
+fn project_deletion_guards_background_runs_and_preserves_other_conversations() {
+    let (mut presenter, runner, _directory) = fixture();
+    let project = presenter.model.selected_project.clone().unwrap();
+    assert!(presenter.submit("background task", "claude"));
+    let start = last_start(&runner);
+    assert!(!presenter.can_delete_project(project.id));
+    let other_dir = tempfile::tempdir().unwrap();
+    presenter.open_project(other_dir.path());
+    let other = presenter.model.selected_project.clone().unwrap();
+    assert!(presenter.submit("keep running", "claude"));
+    let other_start = last_start(&runner);
+    let selected_conversation = presenter.model.conversation.id;
+    assert!(!presenter.delete_project(project.id));
+    assert!(presenter.storage.project(project.id).unwrap().is_some());
+    runner.emit(Event::RunExited {
+        run_id: start.run_id,
+        status: RunStatus::Completed,
+        exit_code: Some(0),
+    });
+    presenter.drain_events();
+    presenter.model.workspace_busy = true;
+    assert!(!presenter.delete_project(project.id));
+    presenter.model.workspace_busy = false;
+    assert!(presenter.can_delete_project(project.id));
+    assert!(presenter.delete_project(project.id));
+    assert_eq!(presenter.model.conversation.id, selected_conversation);
+    assert_eq!(
+        presenter.model.selected_project.as_ref().unwrap().id,
+        other.id
+    );
+    assert_eq!(presenter.model.active_run, Some(other_start.run_id));
+    assert_eq!(presenter.model.selected_task, Some(other_start.task_id));
+    assert_eq!(presenter.model.messages[0].content, "keep running");
+    assert_eq!(presenter.model.active_run_count(), 1);
+    assert!(presenter.model.conversations.values().all(|conversation| {
+        conversation
+            .selected_project
+            .as_ref()
+            .is_none_or(|item| item.id != project.id)
+    }));
+}
+
+#[test]
+fn project_deletion_waits_for_pending_workspace_start_but_allows_failed_retry() {
+    use crate::model::workspace::PendingWorkspaceStart;
+    let (mut presenter, _runner, _directory) = fixture();
+    let project = presenter.model.selected_project.clone().unwrap();
+    presenter.model.pending_workspace_start = Some(PendingWorkspaceStart {
+        context_id: presenter.model.conversation.id,
+        prompt: "pending worktree".into(),
+        executable: "claude".into(),
+        permission: PermissionMode::AutoEdit,
+    });
+    let pending = presenter.model.conversation.id;
+    presenter.new_task();
+    assert!(!presenter.delete_project(project.id));
+    presenter
+        .model
+        .conversations
+        .get_mut(&pending)
+        .unwrap()
+        .workspace_retry = true;
+    assert!(presenter.delete_project(project.id));
+    assert!(presenter.model.pending_workspace_start.is_none());
+    assert!(presenter.model.conversations.is_empty());
+}
+
+#[test]
 fn conversation_actions_keep_active_and_archived_models_in_sync() {
     let (mut presenter, _runner, _directory) = fixture();
     let project = presenter.model().selected_project.clone().unwrap();
@@ -1262,6 +1586,126 @@ fn conversation_actions_keep_active_and_archived_models_in_sync() {
     assert!(presenter.model().archived_tasks.is_empty());
     assert!(presenter.model().tasks.is_empty());
     assert!(presenter.model().queued_messages.is_empty());
+}
+
+#[test]
+fn reordering_projects_preserves_the_active_conversation_and_survives_reload() {
+    let (mut presenter, runner, directory) = fixture();
+    for name in ["second", "third"] {
+        let path = directory.path().join(name);
+        fs::create_dir(&path).unwrap();
+        presenter.storage.open_project(&path).unwrap();
+    }
+    presenter.reload_projects();
+    assert!(presenter.submit("Keep this conversation running", "claude"));
+    let selected = presenter.model().selected_project.as_ref().unwrap().id;
+    let conversation = presenter.model().conversation.id;
+    let task = presenter.model().selected_task;
+    let run = presenter.model().active_run;
+    let messages = serde_json::to_value(&presenter.model().messages).unwrap();
+    let commands = runner.0.borrow().commands.len();
+    let original: Vec<_> = presenter
+        .model()
+        .projects
+        .iter()
+        .map(|project| project.id)
+        .collect();
+
+    assert!(presenter.reorder_project(original[0], original[2]));
+    let reordered = vec![original[1], original[2], original[0]];
+    assert_eq!(
+        presenter
+            .model()
+            .projects
+            .iter()
+            .map(|project| project.id)
+            .collect::<Vec<_>>(),
+        reordered,
+    );
+    presenter.reload_projects();
+    assert_eq!(
+        presenter
+            .model()
+            .projects
+            .iter()
+            .map(|project| project.id)
+            .collect::<Vec<_>>(),
+        reordered,
+    );
+    assert!(presenter.reorder_project(original[0], original[1]));
+    assert!(!presenter.reorder_project(original[0], original[0]));
+    assert!(!presenter.reorder_project(Uuid::new_v4(), original[0]));
+    assert!(!presenter.reorder_project(original[0], Uuid::new_v4()));
+    assert_eq!(
+        presenter
+            .storage
+            .projects()
+            .unwrap()
+            .iter()
+            .map(|project| project.id)
+            .collect::<Vec<_>>(),
+        original,
+    );
+    assert_eq!(
+        presenter.model().selected_project.as_ref().unwrap().id,
+        selected
+    );
+    assert_eq!(presenter.model().conversation.id, conversation);
+    assert_eq!(presenter.model().selected_task, task);
+    assert_eq!(presenter.model().active_run, run);
+    assert_eq!(
+        serde_json::to_value(&presenter.model().messages).unwrap(),
+        messages
+    );
+    assert_eq!(runner.0.borrow().commands.len(), commands);
+}
+
+#[test]
+fn reordering_projects_keeps_the_original_order_when_saving_fails() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("nexus.db");
+    let storage = Storage::open(&database).unwrap();
+    for name in ["first", "second"] {
+        let path = directory.path().join(name);
+        fs::create_dir(&path).unwrap();
+        storage.open_project(&path).unwrap();
+    }
+    rusqlite::Connection::open(&database)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER reject_project_order BEFORE INSERT ON settings
+         WHEN NEW.key = 'project_order'
+         BEGIN SELECT RAISE(FAIL, 'cannot save order'); END;",
+        )
+        .unwrap();
+    let mut presenter = Presenter::new(storage, Err(anyhow::anyhow!("test")), None);
+    let original: Vec<_> = presenter
+        .model()
+        .projects
+        .iter()
+        .map(|project| project.id)
+        .collect();
+    assert!(!presenter.reorder_project(original[0], original[1]));
+    assert_eq!(
+        presenter
+            .model()
+            .projects
+            .iter()
+            .map(|project| project.id)
+            .collect::<Vec<_>>(),
+        original,
+    );
+    assert!(
+        presenter
+            .storage
+            .setting("project_order")
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        presenter.model().status.render(Language::English),
+        "Cannot save project order: cannot save order",
+    );
 }
 
 struct ArchivedProjectFixture {
@@ -1867,16 +2311,15 @@ fn catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
     assert_eq!(models[0].id, "codex-current");
     assert_eq!(presenter.model().status_text(), task_status);
 
-    // Claude exercises the shared readiness state without starting a Codex history client.
-    assert!(presenter.select_harness(HarnessKind::Claude, "codex"));
+    assert!(presenter.refresh_model_catalog());
     let request_id = current_catalog_request_id(&presenter);
     runner.emit(Event::HarnessDetected(HarnessProbe {
         available: false,
-        ..ready_probe(HarnessKind::Claude)
+        ..ready_probe(HarnessKind::Codex)
     }));
     runner.emit(Event::ModelCatalogFailed {
         request_id,
-        harness: HarnessKind::Claude,
+        harness: HarnessKind::Codex,
         message: "late catalog failure".into(),
     });
     presenter.drain_events();
@@ -1884,7 +2327,7 @@ fn catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
         presenter.model().model_catalog,
         ModelCatalogState::NotReady(_)
     ));
-    runner.emit(Event::HarnessDetected(ready_probe(HarnessKind::Claude)));
+    runner.emit(Event::HarnessDetected(ready_probe(HarnessKind::Codex)));
     presenter.drain_events();
     assert_ne!(current_catalog_request_id(&presenter), request_id);
 }
@@ -3769,14 +4212,9 @@ fn active_run_locks_configuration_and_cancels_the_matching_run() {
     assert!(!presenter.select_harness(HarnessKind::Codex, "claude"));
     assert!(!presenter.select_model_configuration(HarnessKind::Codex, None, "claude"));
     presenter.new_task();
-    presenter.select_codex_thread("history".into());
     assert!(presenter.model().model_override.is_none());
     assert_eq!(presenter.model().effort, ThinkingEffort::Default);
     assert!(presenter.model().selected_task.is_none());
-    assert_eq!(
-        presenter.model().selected_codex_thread.as_deref(),
-        Some("history")
-    );
     assert_eq!(presenter.model().active_run_count(), 1);
     presenter.select_task(task_id.unwrap());
     presenter.cancel();
@@ -5027,76 +5465,6 @@ fn working_directory_follows_project_and_task_selection_during_background_runs()
     assert_eq!(
         presenter.model().working_directory(),
         Some(second_project.canonical_path.as_str())
-    );
-}
-
-#[test]
-fn history_responses_only_update_the_selected_thread() {
-    let (mut presenter, _, _directory) = fixture();
-    let local_path = presenter.model().working_directory().unwrap().to_owned();
-    let history_path = Path::new(&local_path)
-        .join("Codex 历史")
-        .display()
-        .to_string();
-    presenter.handle_codex_history_event(HistoryEvent::ThreadsLoaded(Ok(vec![ThreadSummary {
-        id: "selected".into(),
-        title: "history".into(),
-        cwd: history_path.clone(),
-        source: "cli".into(),
-        updated_at: 0,
-        archived: false,
-    }])));
-    presenter.select_codex_thread("selected".into());
-    assert_eq!(
-        presenter.model().working_directory(),
-        Some(history_path.as_str())
-    );
-    presenter.model.codex_thread_loading = true;
-    presenter.handle_codex_history_event(HistoryEvent::ThreadLoaded {
-        thread_id: "previous".into(),
-        result: Err("stale error".into()),
-    });
-    assert!(presenter.model().codex_thread_loading);
-    assert!(presenter.model().codex_history_messages.is_empty());
-    assert_eq!(
-        presenter.model().working_directory(),
-        Some(history_path.as_str())
-    );
-    let message = HistoryMessage {
-        role: MessageRole::Assistant,
-        kind: MessageKind::Text,
-        content: "history".into(),
-    };
-    presenter.handle_codex_history_event(HistoryEvent::ThreadLoaded {
-        thread_id: "selected".into(),
-        result: Ok(vec![message.clone()]),
-    });
-    assert!(!presenter.model().codex_thread_loading);
-    assert_eq!(presenter.model().codex_history_messages, vec![message]);
-    presenter.handle_codex_history_event(HistoryEvent::ThreadLoaded {
-        thread_id: "selected".into(),
-        result: Err("read failed".into()),
-    });
-    assert_eq!(
-        presenter.model().codex_history_messages[0].kind,
-        MessageKind::Error
-    );
-    assert_eq!(
-        presenter.model().codex_history_messages[0].content,
-        "read failed"
-    );
-    assert_eq!(
-        presenter.model().working_directory(),
-        Some(history_path.as_str())
-    );
-    presenter.model.codex_threads[0].cwd.clear();
-    assert_eq!(presenter.model().working_directory(), None);
-    presenter.select_codex_thread("missing-thread".into());
-    assert_eq!(presenter.model().working_directory(), None);
-    presenter.new_task();
-    assert_eq!(
-        presenter.model().working_directory(),
-        Some(local_path.as_str())
     );
 }
 

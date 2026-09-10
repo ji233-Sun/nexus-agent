@@ -423,7 +423,7 @@ impl Presenter {
     }
 
     pub(crate) fn review_conversation_changes(&mut self) -> bool {
-        if self.model.workspace_busy || self.model.selected_codex_thread.is_some() {
+        if self.model.workspace_busy {
             return false;
         }
         let workspace = self.model.selected_workspace.clone().or_else(|| {

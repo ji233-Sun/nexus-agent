@@ -1,3 +1,5 @@
+mod cnb;
+mod cnb_media;
 mod components;
 mod model_picker;
 mod pane;
@@ -15,7 +17,7 @@ use crate::{
     i18n::Language,
     model::{
         AppModel, AppearanceSettings, GenerationKind, ModelCatalogState, PendingUserAsk,
-        ThemePreference, UserAskSubmissionState, history::HistoryMessage,
+        ThemePreference, UserAskSubmissionState,
     },
     presenter::{Presenter, ProviderProfileDraft},
 };
@@ -108,13 +110,13 @@ pub(crate) struct NexusView {
     timeline_scroll: ScrollHandle,
     sidebar_scroll: ScrollHandle,
     settings_scroll: ScrollHandle,
+    cnb_scroll: ScrollHandle,
+    cnb_detail_scroll: ScrollHandle,
     sidebar_pane: Entity<WorkspacePane>,
     timeline_pane: Entity<WorkspacePane>,
     settings_pane: Entity<WorkspacePane>,
     expanded_messages: HashSet<ElementId>,
     collapsed_projects: HashSet<Uuid>,
-    codex_history_open: bool,
-    codex_history_visible_count: usize,
     settings_open: bool,
     settings_section: SettingsSection,
     reduced_motion: bool,
@@ -189,7 +191,7 @@ impl NexusView {
                 .placeholder(locale.text("可选，例如 deepseek/deepseek-v4-pro"))
         });
         let search_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder(locale.text("搜索任务与历史…")));
+            cx.new(|cx| InputState::new(window, cx).placeholder(locale.text("搜索任务…")));
         let project_search_input = cx.new(|cx| InputState::new(window, cx));
         cx.subscribe(&project_search_input, |_, _, _: &InputEvent, cx| {
             cx.notify()
@@ -260,10 +262,7 @@ impl NexusView {
             }
         })
         .detach();
-        cx.subscribe(&search_input, |app, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) {
-                app.codex_history_visible_count = sidebar::HISTORY_PAGE_SIZE;
-            }
+        cx.subscribe(&search_input, |_, _, _: &InputEvent, cx| {
             cx.notify();
         })
         .detach();
@@ -346,13 +345,13 @@ impl NexusView {
             timeline_scroll: ScrollHandle::new(),
             sidebar_scroll: ScrollHandle::new(),
             settings_scroll: ScrollHandle::new(),
+            cnb_scroll: ScrollHandle::new(),
+            cnb_detail_scroll: ScrollHandle::new(),
             sidebar_pane,
             timeline_pane,
             settings_pane,
             expanded_messages: HashSet::new(),
             collapsed_projects: HashSet::new(),
-            codex_history_open: false,
-            codex_history_visible_count: sidebar::HISTORY_PAGE_SIZE,
             settings_open,
             settings_section: SettingsSection::General,
             reduced_motion: false,
@@ -426,7 +425,7 @@ impl NexusView {
                     &self.provider_model_input,
                     "可选，例如 deepseek/deepseek-v4-pro",
                 ),
-                (&self.search_input, "搜索任务与历史…"),
+                (&self.search_input, "搜索任务…"),
             ] {
                 input.update(cx, |input, cx| {
                     input.set_placeholder(language.text(placeholder), window, cx);
@@ -626,6 +625,9 @@ impl NexusView {
     }
 
     fn poll_events(&mut self, now: Instant, cx: &mut Context<Self>) {
+        if self.presenter.drain_cnb_events() {
+            cx.notify();
+        }
         if self.presenter.drain_installation_events() {
             cx.notify();
         }
@@ -687,6 +689,69 @@ impl NexusView {
         self.expanded_messages.clear();
         self.timeline_scroll.scroll_to_bottom();
         self.presenter.notify_remote_changed();
+    }
+
+    fn confirm_delete_project(
+        &mut self,
+        project_id: Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.presenter.can_delete_project(project_id) {
+            return;
+        }
+        let model = self.presenter.model();
+        let Some(project) = model
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+        else {
+            return;
+        };
+        let locale = model.language;
+        let message = locale.format(
+            "删除项目“{title}”？",
+            &[("title", project.display_name.clone())],
+        );
+        let answer = window.prompt(
+            PromptLevel::Critical,
+            &message,
+            Some(locale.text(
+                "此操作会永久删除 Nexus 中该项目的全部对话（含归档）、消息、运行和工作区记录，且无法撤销。磁盘上的项目目录、Worktree、文件和 Git 分支不会删除。",
+            )),
+            &[
+                PromptButton::ok(locale.text("删除项目")),
+                PromptButton::cancel(locale.text("取消")),
+            ],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await.ok() == Some(0) {
+                let _ = this.update_in(cx, |app, window, cx| {
+                    app.delete_project(project_id, window, cx)
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn delete_project(&mut self, project_id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        let selected = self
+            .presenter
+            .model()
+            .selected_project
+            .as_ref()
+            .is_some_and(|project| project.id == project_id);
+        if self.presenter.delete_project(project_id) {
+            self.collapsed_projects.remove(&project_id);
+            if selected {
+                self.expanded_messages.clear();
+                self.timeline_scroll.scroll_to_bottom();
+                self.focus_handle.focus(window, cx);
+            }
+        }
+        self.presenter.notify_remote_changed();
+        cx.notify();
     }
 
     fn select_task(&mut self, task_id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
@@ -813,24 +878,6 @@ impl NexusView {
         cx.notify();
     }
 
-    fn select_codex_thread(&mut self, thread_id: String, cx: &mut Context<Self>) {
-        self.presenter.select_codex_thread(thread_id);
-        self.expanded_messages.clear();
-        self.timeline_scroll.scroll_to_bottom();
-        self.presenter.notify_remote_changed();
-        cx.notify();
-    }
-
-    fn refresh_codex_history(
-        &mut self,
-        _: &gpui::ClickEvent,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.presenter.request_codex_history_refresh();
-        cx.notify();
-    }
-
     fn submit(&mut self, _: &gpui::ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.submit_prompt(window, cx);
     }
@@ -853,10 +900,6 @@ impl NexusView {
     }
 
     fn focus_prompt(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.presenter.model().selected_codex_thread.is_some() {
-            self.focus_handle.focus(window, cx);
-            return;
-        }
         self.prompt_input
             .update(cx, |input, cx| input.focus(window, cx));
     }
@@ -1274,10 +1317,7 @@ impl NexusView {
             .h(px(COMPACT_CONTROL_HEIGHT))
             .label(locale.permission_mode(selected))
             .tooltip(locale.text("设置下一条消息的权限，已开始的轮次保持原权限。"))
-            .disabled(
-                model.selected_codex_thread.is_some()
-                    || (model.active_run.is_some() && !model.can_queue()),
-            );
+            .disabled(model.active_run.is_some() && !model.can_queue());
         AnimatedDropdown::new(button_id, button, self.reduced_motion, move |menu, _, _| {
             PermissionMode::ALL
                 .into_iter()
@@ -1557,11 +1597,7 @@ impl NexusView {
         let locale = model.language;
         let colors = palette(cx);
         let query = self.project_search_input.read(cx).value();
-        let selected = model
-            .selected_project
-            .as_ref()
-            .filter(|_| model.selected_codex_thread.is_none())
-            .map(|project| project.id);
+        let selected = model.selected_project.as_ref().map(|project| project.id);
         let projects: Vec<_> = model
             .projects
             .iter()
@@ -1650,10 +1686,14 @@ impl NexusView {
     }
 
     fn render_workspace(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        if let Some(page) = self
-            .review_pages
-            .get(&self.presenter.model().conversation.id)
-        {
+        let page = if self.presenter.model().cnb.opened {
+            Some(self.render_cnb(cx).into_any_element())
+        } else {
+            self.review_pages
+                .get(&self.presenter.model().conversation.id)
+                .map(|page| self.render_workspace_review(page, cx))
+        };
+        if let Some(page) = page {
             return div()
                 .size_full()
                 .bg(materials(cx).chrome)
@@ -1666,7 +1706,7 @@ impl NexusView {
                             .flex_none(),
                     ),
                 )
-                .child(self.render_workspace_review(page, cx))
+                .child(page)
                 .into_any_element();
         }
         let locale = self.presenter.model().language;
@@ -1675,16 +1715,13 @@ impl NexusView {
         let model = self.presenter.model();
         let voice_status = model.voice.status.render(locale);
         let probe = model.selected_probe();
-        let history = model.selected_codex_thread.is_some();
         let can_submit = can_send_prompt(model, &self.prompt_input.read(cx).value());
         let prompt_focused = self
             .prompt_input
             .read(cx)
             .focus_handle(cx)
             .is_focused(window);
-        let composer_hint = if history {
-            locale.text("这是只读历史。选择项目并新建任务后即可开始。")
-        } else if model.selected_project.is_none() {
+        let composer_hint = if model.selected_project.is_none() {
             locale.text("先选择本地项目，再描述你希望完成的工作。")
         } else if model.active_run.is_some() {
             locale.text("Agent 正在执行 · 发送后排队，每轮结束后发送一条")
@@ -1695,12 +1732,6 @@ impl NexusView {
         } else {
             locale.text("Ctrl Enter 发送消息 · Enter 换行")
         };
-        let selected_thread = model.selected_codex_thread.as_ref().and_then(|thread_id| {
-            model
-                .codex_threads
-                .iter()
-                .find(|thread| &thread.id == thread_id)
-        });
         let selected_task = model
             .selected_task
             .and_then(|task_id| model.tasks.iter().find(|task| task.id == task_id));
@@ -1708,10 +1739,10 @@ impl NexusView {
             .selected_provider_profile()
             .is_some_and(|profile| profile.credential_configured);
         let background_run = model.active_run.is_none() && model.active_run_count() > 0;
-        let header_status_pending = model.active_run.is_some() || model.codex_thread_loading;
+        let header_status_pending = model.active_run.is_some();
         let header_status_color = if header_status_pending {
             rgb(colors.accent).into()
-        } else if !history && selected_task.is_some_and(|task| task.status == RunStatus::Failed) {
+        } else if selected_task.is_some_and(|task| task.status == RunStatus::Failed) {
             rgb(colors.danger).into()
         } else if selected_task.is_some_and(|task| {
             matches!(task.status, RunStatus::Cancelled | RunStatus::Interrupted)
@@ -1728,32 +1759,20 @@ impl NexusView {
                 })
                 .unwrap_or_else(|| rgb(colors.muted).into())
         };
-        let header_project = if history {
-            locale.text("Codex 历史").to_owned()
-        } else {
-            model
-                .selected_project
-                .as_ref()
-                .map(|project| project.display_name.clone())
-                .unwrap_or_else(|| locale.text("未选择项目").into())
-        };
-        let header_project_tooltip = if history {
-            header_project.clone()
-        } else {
-            model.selected_project.as_ref().map_or_else(
-                || header_project.clone(),
-                |project| format!("{}\n{}", project.display_name, project.canonical_path),
-            )
-        };
-        let header_task = selected_thread
-            .map(|thread| thread.title.clone())
-            .or_else(|| {
-                model.selected_project.as_ref().map(|_| {
-                    selected_task
-                        .map(|task| task.title.clone())
-                        .unwrap_or_else(|| locale.text("新建任务").into())
-                })
-            });
+        let header_project = model
+            .selected_project
+            .as_ref()
+            .map(|project| project.display_name.clone())
+            .unwrap_or_else(|| locale.text("未选择项目").into());
+        let header_project_tooltip = model.selected_project.as_ref().map_or_else(
+            || header_project.clone(),
+            |project| format!("{}\n{}", project.display_name, project.canonical_path),
+        );
+        let header_task = model.selected_project.as_ref().map(|_| {
+            selected_task
+                .map(|task| task.title.clone())
+                .unwrap_or_else(|| locale.text("新建任务").into())
+        });
         let header_status = if background_run {
             locale.format(
                 "其他任务 · {status}",
@@ -1814,12 +1833,7 @@ impl NexusView {
                                     .items_center()
                                     .gap_2()
                                     .child(
-                                        Icon::new(if history {
-                                            IconName::FileText
-                                        } else {
-                                            IconName::Folder
-                                        })
-                                        .text_color(rgb(colors.muted)),
+                                        Icon::new(IconName::Folder).text_color(rgb(colors.muted)),
                                     )
                                     .child(
                                         div()
@@ -1892,7 +1906,7 @@ impl NexusView {
                                             })
                                             .child(header_status),
                                     )
-                                    .when(!history && model.selected_project.is_some(), |element| {
+                                    .when(model.selected_project.is_some(), |element| {
                                         element.child(
                                             Button::new("toggle-changes-sidebar")
                                                 .debug_selector(|| "toggle-changes-sidebar".into())
@@ -1972,7 +1986,6 @@ impl NexusView {
                                     })
                                     .child(
                                         Textarea::new(&self.prompt_input)
-                                            .disabled(history)
                                             .appearance(false)
                                             .bordered(false)
                                             .text_size(px(15.))
@@ -2074,8 +2087,7 @@ impl NexusView {
                                             .child(composer_hint),
                                     )
                                     .when(
-                                        !history
-                                            && model.selected_project.is_some()
+                                        model.selected_project.is_some()
                                             && !model.can_submit()
                                             && model.active_run.is_none(),
                                         |element| {
@@ -2094,7 +2106,7 @@ impl NexusView {
                             ),
                     ),
             )
-            .when(model.changes_sidebar_open && !history, |element| {
+            .when(model.changes_sidebar_open, |element| {
                 element.child(self.render_changes_sidebar(cx))
             })
             .into_any_element()
@@ -2129,6 +2141,7 @@ impl Render for NexusView {
             }))
             .on_action(cx.listener(|app, _: &CloseReview, window, cx| {
                 if !app.settings_open
+                    && !app.presenter.model().cnb.opened
                     && app
                         .review_pages
                         .contains_key(&app.presenter.model().conversation.id)
@@ -2181,7 +2194,6 @@ fn working_directory_label(model: &AppModel) -> &str {
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or(path),
-        None if model.selected_codex_thread.is_some() => model.language.text("未知目录"),
         None => model.language.text("未选择目录"),
     }
 }
@@ -2231,6 +2243,121 @@ mod catalog_model_tests {
     use crate::presenter::tests::fixture;
     use nexus_domain::{ModelReasoningEffort, UserAskOption, UserAskQuestion};
     use nexus_protocol::Event;
+
+    #[gpui::test]
+    fn cnb_navigation_renders_issues_details_and_pagination_without_a_composer(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::{
+            infrastructure::cnb::Response,
+            model::cnb::{IssueFilter, IssuePage},
+            presenter::tests::{cnb_issue, finish_cnb_request, seed_cnb_issues},
+        };
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (mut presenter, _, _directory) = fixture();
+        let project = presenter.model().selected_project.as_ref().unwrap().id;
+        seed_cnb_issues(&mut presenter);
+        let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
+        cx.simulate_resize(gpui::size(px(1040.), px(720.)));
+        view.update_in(cx, |view, window, cx| {
+            view.set_appearance(
+                AppearanceSettings {
+                    theme: ThemePreference::Light,
+                    reduced_motion: true,
+                    ..Default::default()
+                },
+                window,
+                cx,
+            );
+            view.prompt_input
+                .update(cx, |input, cx| input.set_value("保留会话草稿", window, cx));
+        });
+        cx.run_until_parked();
+        let project_selector: &'static str = format!("sidebar-project-{project}").leak();
+        let project_row = cx.debug_bounds(project_selector).unwrap();
+        let cnb_row = cx.debug_bounds("sidebar-cnb").unwrap();
+        assert!(cnb_row.top() >= project_row.bottom());
+        assert_eq!(cnb_row.size.height, px(40.));
+        click_debug(cx, "sidebar-cnb");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("cnb-page").is_some());
+        assert!(cx.debug_bounds("cnb-issue-tab").is_some());
+        let icon = cx.debug_bounds("sidebar-cnb-icon").unwrap();
+        assert!(icon.left() >= cnb_row.left() && icon.right() < cnb_row.left() + px(34.));
+        assert!(cx.debug_bounds("composer-surface").is_none());
+        let issue = cx.debug_bounds("cnb-issue-1").unwrap();
+        let page = cx.debug_bounds("cnb-page").unwrap();
+        assert!(issue.left() > page.left() && issue.right() < page.right());
+        click_debug(cx, "cnb-issue-1");
+        view.update(cx, |view, cx| {
+            let mut issue = cnb_issue("1");
+            issue.body = "截图说明\n\n![截图](https://example.test/screenshot.png)\n\n[录屏.mp4](undefined/team/repo/-/files/issues/1/clip.mp4)\n\nhttps://example.test/sound.mp3\n\n[普通链接](https://example.test/page)\n\n```text\nhttps://example.test/code.mp4\n```".into();
+            finish_cnb_request(&mut view.presenter, Response::Detail(Ok(issue)));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("cnb-detail").is_some());
+        assert!(cx.debug_bounds("cnb-issue-body").is_some());
+        assert!(cx.debug_bounds("cnb-media-image").is_some());
+        assert!(cx.debug_bounds("cnb-media-video").is_some());
+        assert!(cx.debug_bounds("cnb-media-audio").is_some());
+        click_debug(cx, "cnb-back");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("cnb-issue-1").is_some());
+        assert!(cx.debug_bounds("cnb-media-video").is_none());
+        click_debug(cx, "cnb-next");
+        view.update(cx, |view, cx| {
+            assert_eq!(view.presenter.model().cnb.page, 2);
+            finish_cnb_request(
+                &mut view.presenter,
+                Response::List(Ok(IssuePage {
+                    issues: vec![cnb_issue("31")],
+                    total: 61,
+                })),
+            );
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("cnb-issue-31").is_some());
+        click_debug(cx, "cnb-filter-closed");
+        view.update_in(cx, |view, window, cx| {
+            assert_eq!(view.presenter.model().cnb.filter, IssueFilter::Closed);
+            assert_eq!(view.presenter.model().cnb.page, 1);
+            finish_cnb_request(
+                &mut view.presenter,
+                Response::List(Ok(IssuePage {
+                    issues: vec![],
+                    total: 0,
+                })),
+            );
+            view.set_appearance(
+                AppearanceSettings {
+                    theme: ThemePreference::Dark,
+                    reduced_motion: true,
+                    ..Default::default()
+                },
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("cnb-empty").is_some());
+        view.update_in(cx, |view, window, cx| {
+            view.new_task(window, cx);
+            assert_eq!(view.prompt_input.read(cx).value(), "保留会话草稿");
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("cnb-page").is_none());
+        assert!(cx.debug_bounds("composer-surface").is_some());
+        view.update_in(cx, |view, window, cx| {
+            view.settings_open = true;
+            view.select_settings_section(SettingsSection::SourceControl, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("settings-nav-source-control").is_some());
+        assert!(cx.debug_bounds("cnb-enabled").is_some());
+    }
 
     #[gpui::test]
     fn voice_settings_select_before_configure_and_draft_insertion_is_undoable(
@@ -2509,7 +2636,7 @@ mod catalog_model_tests {
     ) {
         use crate::{
             infrastructure::git,
-            presenter::tests::{finish_workspace_operation, worktree_fixture},
+            presenter::tests::{finish_workspace_operation, seed_cnb_issues, worktree_fixture},
         };
         use gpui::{ScrollDelta, ScrollWheelEvent, point};
         cx.update(gpui_kit::init);
@@ -2539,6 +2666,7 @@ mod catalog_model_tests {
         finish_workspace_operation(&mut presenter);
         presenter.select_changed_file("tracked.txt".into(), true);
         presenter.set_commit_message("Reviewed draft".into());
+        seed_cnb_issues(&mut presenter);
         let original = presenter
             .model()
             .workspace_review
@@ -2618,6 +2746,24 @@ mod catalog_model_tests {
         cx.update(|_, cx| assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), original));
         click_debug(cx, "review-nav-Untracked-docs/新文件.md");
         draw(cx);
+        assert!(
+            cx.debug_bounds(format!("review-diff-{id}-Untracked-docs/新文件.md").leak())
+                .is_some()
+        );
+        click_debug(cx, "sidebar-cnb");
+        draw(cx);
+        assert!(cx.debug_bounds("cnb-page").is_some());
+        assert!(cx.debug_bounds("workspace-review-page").is_none());
+        assert!(cx.debug_bounds("composer-surface").is_none());
+        cx.simulate_keystrokes("escape");
+        draw(cx);
+        assert!(cx.debug_bounds("cnb-page").is_some());
+        view.update_in(cx, |view, window, cx| {
+            view.select_task(start.task_id, window, cx);
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("cnb-page").is_none());
+        assert!(cx.debug_bounds("workspace-review-page").is_some());
         assert!(
             cx.debug_bounds(format!("review-diff-{id}-Untracked-docs/新文件.md").leak())
                 .is_some()
@@ -3024,17 +3170,12 @@ mod catalog_model_tests {
     fn working_directory_labels_preserve_paths_and_localize_empty_states() {
         let (presenter, _, _directory) = fixture();
         let mut model = AppModel::default();
-        for (language, no_directory, unknown) in [
-            (Language::Chinese, "未选择目录", "未知目录"),
-            (
-                Language::English,
-                "No directory selected",
-                "Unknown directory",
-            ),
+        for (language, no_directory) in [
+            (Language::Chinese, "未选择目录"),
+            (Language::English, "No directory selected"),
         ] {
             model.language = language;
             model.selected_project = None;
-            model.selected_codex_thread = None;
             assert_eq!(working_directory_label(&model), no_directory);
             model.selected_project = presenter.model().selected_project.clone();
             let long_name = "中文 long directory ".repeat(30);
@@ -3050,21 +3191,14 @@ mod catalog_model_tests {
             model.selected_project.as_mut().unwrap().canonical_path = root.into();
             assert_eq!(working_directory_label(&model), root);
 
-            model.selected_codex_thread = Some("history".into());
-            assert_eq!(working_directory_label(&model), unknown);
-            model.codex_threads = vec![crate::model::history::ThreadSummary {
-                id: "history".into(),
-                title: "history".into(),
-                cwd: Path::new("history").join("独立目录").display().to_string(),
-                source: "cli".into(),
-                updated_at: 0,
-                archived: false,
-            }];
-            assert_eq!(working_directory_label(&model), "独立目录");
-            model.codex_threads[0].cwd.clear();
-            assert_eq!(working_directory_label(&model), unknown);
+            model
+                .selected_project
+                .as_mut()
+                .unwrap()
+                .canonical_path
+                .clear();
+            assert_eq!(working_directory_label(&model), no_directory);
             assert_eq!(model.working_directory(), None);
-            model.codex_threads.clear();
         }
     }
 
@@ -3162,23 +3296,6 @@ mod catalog_model_tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("project-picker-surface").is_none());
         view.read_with(cx, |view, _| {
-            assert_eq!(
-                view.presenter.model().selected_project.as_ref().unwrap().id,
-                first.id
-            );
-        });
-        view.update(cx, |view, cx| {
-            view.presenter
-                .select_codex_thread("read-only-history".into());
-            cx.notify();
-        });
-        cx.run_until_parked();
-        click_debug(cx, "composer-directory");
-        cx.run_until_parked();
-        click_debug(cx, first_row);
-        cx.run_until_parked();
-        view.read_with(cx, |view, _| {
-            assert!(view.presenter.model().selected_codex_thread.is_none());
             assert_eq!(
                 view.presenter.model().selected_project.as_ref().unwrap().id,
                 first.id
@@ -3322,22 +3439,6 @@ mod catalog_model_tests {
         cx.executor().advance_clock(Duration::from_secs(1));
         cx.run_until_parked();
         assert!(cx.debug_bounds("composer-directory-tooltip").is_some());
-        view.update(cx, |view, cx| {
-            view.presenter.select_codex_thread("missing-history".into());
-            cx.notify();
-        });
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("composer-directory").is_some());
-        assert!(cx.debug_bounds("composer-directory-tooltip").is_none());
-        assert!(cx.debug_bounds("message-queue").is_none());
-        assert!(cx.debug_bounds("composer-cancel").is_none());
-        view.update_in(cx, |view, window, cx| {
-            view.prompt_input
-                .update(cx, |input, cx| input.set_value("read only", window, cx));
-        });
-        cx.run_until_parked();
-        click_debug(cx, "composer-submit");
-        assert!(view.read_with(cx, |view, _| view.presenter.model().active_run.is_none()));
     }
 
     #[test]

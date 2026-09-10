@@ -1,6 +1,6 @@
+mod cnb;
 mod generation;
 mod harness_installation;
-mod history;
 mod remote;
 mod runs;
 mod updates;
@@ -13,7 +13,6 @@ pub(crate) mod tests;
 use crate::{
     i18n::{Language, LocalizedText},
     infrastructure::{
-        codex_history::Client as CodexHistoryClient,
         credentials::{CredentialStore, SystemCredentialStore},
         storage::Storage,
     },
@@ -59,12 +58,11 @@ pub(crate) trait RunnerPort {
 }
 
 pub(crate) struct Presenter {
+    cnb_client: crate::infrastructure::cnb::Client,
     model: AppModel,
     voice_worker: Option<crate::infrastructure::voice::Worker>,
     storage: Storage,
     runner: Option<Box<dyn RunnerPort>>,
-    codex_history_client: Option<CodexHistoryClient>,
-    codex_history_executable: Option<String>,
     remote_control: Option<RemoteControl>,
     remote_control_error: Option<String>,
     credentials: Box<dyn CredentialStore>,
@@ -233,6 +231,7 @@ impl Presenter {
             Err(error) => (None, Some(error.to_string())),
         };
         let mut presenter = Self {
+            cnb_client: crate::infrastructure::cnb::Client::default(),
             voice_worker: None,
             storage,
             runner,
@@ -268,8 +267,6 @@ impl Presenter {
                 },
                 ..AppModel::default()
             },
-            codex_history_client: None,
-            codex_history_executable: None,
             remote_control,
             remote_control_error,
             credentials,
@@ -298,6 +295,12 @@ impl Presenter {
             presenter.model.status = runner_error.unwrap_or_default().into();
         }
         presenter.load_voice_settings();
+        presenter.model.cnb.enabled = presenter
+            .storage
+            .setting("cnb_enabled")
+            .ok()
+            .flatten()
+            .is_none_or(|value| value != "false");
         presenter
     }
 
@@ -392,19 +395,12 @@ impl Presenter {
             .as_ref()
             .map(|runner| runner.drain_events())
             .unwrap_or_default();
-        let history_events = self
-            .codex_history_client
-            .as_ref()
-            .map(CodexHistoryClient::drain_events)
-            .unwrap_or_default();
         let remote_commands = self
             .remote_control
             .as_ref()
             .map(RemoteControl::drain_commands)
             .unwrap_or_default();
-        let mut changed = self.drain_workspace_events()
-            || !runner_events.is_empty()
-            || !history_events.is_empty();
+        let mut changed = self.drain_workspace_events() || !runner_events.is_empty();
         changed |= self.drain_cli_installation_result();
         for envelope in runner_events {
             if envelope.protocol_version != nexus_protocol::PROTOCOL_VERSION {
@@ -412,9 +408,6 @@ impl Presenter {
                 continue;
             }
             self.handle_event(envelope.event);
-        }
-        for event in history_events {
-            self.handle_codex_history_event(event);
         }
         for command in remote_commands {
             changed |= self.handle_remote_command(command);
@@ -438,18 +431,66 @@ impl Presenter {
         }
     }
 
+    pub(crate) fn can_delete_project(&self, project_id: Uuid) -> bool {
+        !self.model.workspace_busy
+            && !self.model.all_conversations().any(|conversation| {
+                conversation
+                    .selected_project
+                    .as_ref()
+                    .is_some_and(|project| project.id == project_id)
+                    && (conversation.active_run.is_some()
+                        || (conversation.pending_workspace_start.is_some()
+                            && !conversation.workspace_retry))
+            })
+    }
+
+    pub(crate) fn delete_project(&mut self, project_id: Uuid) -> bool {
+        if !self.can_delete_project(project_id) {
+            self.model.status = "项目仍有活动任务或工作区操作，请结束后再删除。".into();
+            return false;
+        }
+        if let Err(error) = self.storage.delete_project(project_id) {
+            self.model.status =
+                LocalizedText::new("无法删除项目：{error}", &[("error", error.to_string())]);
+            return false;
+        }
+        if self
+            .model
+            .selected_project
+            .as_ref()
+            .is_some_and(|project| project.id == project_id)
+        {
+            self.cancel_voice();
+            self.model.fresh_conversation();
+            self.model.selected_project = None;
+            self.model.tasks.clear();
+            self.model.model_catalog = ModelCatalogState::Idle;
+            self.model.permission_mode =
+                load_permission_mode(&self.storage, self.model.selected_harness);
+            self.reset_cnb_project();
+        }
+        self.model.conversations.retain(|_, conversation| {
+            conversation
+                .selected_project
+                .as_ref()
+                .is_none_or(|project| project.id != project_id)
+        });
+        self.reload_projects();
+        self.reload_tasks();
+        self.model.status = "项目已删除，磁盘上的文件和 Git 分支已保留。".into();
+        true
+    }
+
     pub(crate) fn new_task(&mut self) {
         if self.model.selected_project.is_none() {
             return;
         }
+        self.model.cnb.opened = false;
         self.cancel_voice();
         self.model.fresh_conversation();
         self.model.selected_task = None;
         self.reset_workspace_draft();
-        self.model.selected_codex_thread = None;
         self.model.messages.clear();
-        self.model.codex_history_messages.clear();
-        self.model.codex_thread_loading = false;
         self.model.streaming_text.clear();
         self.model.status = "已准备好新任务。".into();
         self.model.permission_mode =
@@ -466,13 +507,11 @@ impl Presenter {
         self.model.selected_task = None;
         self.reset_workspace_draft();
         self.reload_workspaces();
-        self.model.selected_codex_thread = None;
         self.model.messages.clear();
-        self.model.codex_history_messages.clear();
-        self.model.codex_thread_loading = false;
         self.model.streaming_text.clear();
         self.reload_tasks();
         self.refresh_model_catalog();
+        self.reset_cnb_project();
     }
 
     fn reload_projects(&mut self) {
@@ -489,6 +528,31 @@ impl Presenter {
         self.model.projects = projects;
     }
 
+    pub(crate) fn reorder_project(&mut self, project_id: Uuid, target_id: Uuid) -> bool {
+        let projects = &self.model.projects;
+        let Some(source) = projects.iter().position(|project| project.id == project_id) else {
+            return false;
+        };
+        let Some(target) = projects.iter().position(|project| project.id == target_id) else {
+            return false;
+        };
+        if source == target {
+            return false;
+        }
+        let mut order: Vec<_> = projects.iter().map(|project| project.id).collect();
+        order.remove(source);
+        order.insert(target, project_id);
+        if let Err(error) = self.storage.save_project_order(&order) {
+            self.model.status =
+                LocalizedText::new("无法保存项目顺序：{error}", &[("error", error.to_string())]);
+            return false;
+        }
+        let project = self.model.projects.remove(source);
+        self.model.projects.insert(target, project);
+        self.notify_remote_changed();
+        true
+    }
+
     fn reload_tasks(&mut self) {
         self.model.tasks = self
             .model
@@ -500,6 +564,7 @@ impl Presenter {
     }
 
     pub(crate) fn select_task(&mut self, task_id: Uuid) {
+        self.model.cnb.opened = false;
         self.cancel_voice();
         if self.model.selected_task != Some(task_id) {
             let existing = self
@@ -517,9 +582,6 @@ impl Presenter {
         self.model.selected_task = Some(task_id);
         self.model.selected_workspace = self.storage.task_workspace(task_id).ok().flatten();
         self.reload_workspaces();
-        self.model.selected_codex_thread = None;
-        self.model.codex_history_messages.clear();
-        self.model.codex_thread_loading = false;
         self.model.messages = self.storage.messages(task_id).unwrap_or_default();
         self.reload_tasks();
         if self.model.active_run.is_some() {

@@ -126,6 +126,12 @@ pub(crate) fn run() -> anyhow::Result<()> {
 
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
+        .with_http_client(std::sync::Arc::new(
+            reqwest_client::ReqwestClient::user_agent(concat!(
+                "Nexus-Agent/",
+                env!("CARGO_PKG_VERSION")
+            ))?,
+        ))
         .run(move |cx: &mut App| {
             gpui_kit::init(cx);
             theme::configure_theme(cx);

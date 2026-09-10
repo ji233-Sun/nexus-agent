@@ -1,5 +1,6 @@
 pub(crate) mod cli_installation;
-pub(crate) mod codex_history;
+pub(crate) mod cnb;
+pub(crate) mod cnb_media;
 pub(crate) mod credentials;
 pub(crate) mod git;
 pub(crate) mod harness_installation;

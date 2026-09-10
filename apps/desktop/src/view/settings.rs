@@ -11,17 +11,19 @@ pub(super) enum SettingsSection {
     Appearance,
     Agent,
     Providers,
+    SourceControl,
     Voice,
     Remote,
     Archived,
 }
 
 impl SettingsSection {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::General,
         Self::Appearance,
         Self::Agent,
         Self::Providers,
+        Self::SourceControl,
         Self::Voice,
         Self::Remote,
         Self::Archived,
@@ -33,6 +35,7 @@ impl SettingsSection {
             Self::Appearance => "appearance",
             Self::Agent => "agent",
             Self::Providers => "providers",
+            Self::SourceControl => "source-control",
             Self::Voice => "voice",
             Self::Remote => "remote",
             Self::Archived => "archived",
@@ -45,6 +48,7 @@ impl SettingsSection {
             Self::Appearance => locale.text("外观"),
             Self::Agent => locale.text("执行引擎"),
             Self::Providers => locale.text("凭据配置"),
+            Self::SourceControl => "Source Control",
             Self::Voice => locale.text("语音输入"),
             Self::Remote => locale.text("远程访问"),
             Self::Archived => locale.text("归档对话"),
@@ -57,6 +61,7 @@ impl SettingsSection {
             Self::Appearance => IconName::Palette,
             Self::Agent => IconName::Bot,
             Self::Providers => IconName::Cpu,
+            Self::SourceControl => IconName::Network,
             Self::Voice => IconName::Play,
             Self::Remote => IconName::Globe,
             Self::Archived => IconName::Inbox,
@@ -75,6 +80,9 @@ impl NexusView {
             return;
         }
         self.settings_section = section;
+        if section == SettingsSection::SourceControl {
+            self.presenter.inspect_cnb();
+        }
         self.settings_scroll.set_offset(gpui::point(px(0.), px(0.)));
         self.focus_handle.focus(window, cx);
         cx.notify();
@@ -90,6 +98,7 @@ impl NexusView {
             SettingsSection::Appearance => self.render_appearance_settings(cx).into_any_element(),
             SettingsSection::Agent => self.render_agent_settings(cx).into_any_element(),
             SettingsSection::Providers => self.render_provider_profiles(cx).into_any_element(),
+            SettingsSection::SourceControl => self.render_cnb_settings(cx).into_any_element(),
             SettingsSection::Voice => self.render_voice_settings(cx).into_any_element(),
             SettingsSection::Remote => self.render_remote_settings(cx).into_any_element(),
             SettingsSection::Archived => self.render_archived_settings(cx).into_any_element(),

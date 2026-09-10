@@ -95,9 +95,6 @@ impl Presenter {
         if self.model.voice.operation.is_some() {
             bail!(self.model.language.text("语音操作正在进行"));
         }
-        if self.model.selected_codex_thread.is_some() {
-            bail!(self.model.language.text("历史记录不可输入"));
-        }
         let provider = self.model.voice.settings.provider.unwrap();
         let key = if provider == Provider::Mimo {
             self.credentials
@@ -136,9 +133,7 @@ impl Presenter {
 
     pub(crate) fn poll_voice(&mut self) -> Option<String> {
         let operation = self.model.voice.operation?;
-        if operation.conversation != self.model.conversation.id
-            || self.model.selected_codex_thread.is_some()
-        {
+        if operation.conversation != self.model.conversation.id {
             self.cancel_voice();
             return None;
         }

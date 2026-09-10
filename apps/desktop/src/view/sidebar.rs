@@ -1,21 +1,39 @@
 use super::*;
-use crate::model::history::ThreadSummary;
 use gpui_kit::component::{list::ListItem, scroll::Scrollbar, spinner::Spinner};
 
 const SIDEBAR_ROW_HEIGHT: f32 = 40.;
-pub(super) const HISTORY_PAGE_SIZE: usize = 10;
 
-fn visible_history<'a>(
-    threads: &'a [ThreadSummary],
-    query: &str,
-    limit: usize,
-) -> (Vec<&'a ThreadSummary>, bool) {
-    let mut matching = threads
-        .iter()
-        .filter(|thread| matches_search(&format!("{} {}", thread.title, thread.detail()), query));
-    let visible = matching.by_ref().take(limit).collect();
-    let has_more = matching.next().is_some();
-    (visible, has_more)
+#[derive(Clone)]
+struct ProjectDrag {
+    id: Uuid,
+    index: usize,
+    name: SharedString,
+}
+
+impl Render for ProjectDrag {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = palette(cx);
+        div()
+            .w(px(SIDEBAR_WIDTH - 28.))
+            .h(px(SIDEBAR_ROW_HEIGHT))
+            .px(px(10.))
+            .flex()
+            .items_center()
+            .gap_2()
+            .rounded(px(CONTROL_RADIUS))
+            .bg(rgb(colors.elevated))
+            .border_1()
+            .border_color(rgb(colors.accent))
+            .text_color(rgb(colors.text))
+            .text_size(px(13.))
+            .shadow_md()
+            .child(
+                Icon::new(IconName::Folder)
+                    .size(px(16.))
+                    .text_color(rgb(colors.muted)),
+            )
+            .child(div().flex_1().min_w_0().truncate().child(self.name.clone()))
+    }
 }
 
 pub(super) fn navigation_row(
@@ -60,26 +78,12 @@ impl NexusView {
         let model = self.presenter.model();
         let query = self.search_input.read(cx).value();
         let selected_project_id = model.selected_project.as_ref().map(|project| project.id);
-        let history_status = if model.codex_history_loading {
-            locale.text("正在读取本机会话…").to_owned()
-        } else if let Some(error) = &model.codex_history_error {
-            locale.format(
-                "历史不可用：{error}",
-                &[("error", error.render(locale).to_owned())],
-            )
-        } else if self.presenter.history_available() {
-            locale.format(
-                "{0} 条本机会话 · 只读浏览",
-                &[("0", (model.codex_threads.len()).to_string())],
-            )
-        } else {
-            locale.text("等待检测 Codex CLI").to_owned()
-        };
+        let project_rows = model.projects.iter().enumerate();
         let projects = div()
             .flex()
             .flex_col()
             .gap(px(12.))
-            .children(model.projects.iter().map(|project| {
+            .children(project_rows.map(|(index, project)| {
                 let selected = selected_project_id == Some(project.id);
                 let open = selected && !self.collapsed_projects.contains(&project.id);
                 let progress = disclosure_progress(
@@ -92,6 +96,8 @@ impl NexusView {
                 let project_id = project.id;
                 let project = project.clone();
                 let new_task_project = project.clone();
+                let can_delete = self.presenter.can_delete_project(project_id);
+                let reduced_motion = self.reduced_motion;
                 let tasks: Vec<_> = model
                     .tasks
                     .iter()
@@ -107,10 +113,7 @@ impl NexusView {
                             .pr(px(62.))
                             .group("sidebar-task")
                             .debug_selector(move || format!("sidebar-task-{id}"))
-                            .selected(
-                                model.selected_task == Some(id)
-                                    && model.selected_codex_thread.is_none(),
-                            )
+                            .selected(model.selected_task == Some(id) && !model.cnb.opened)
                             .suffix(move |_, _| {
                                 let archive_app = app.clone();
                                 let delete_app = app.clone();
@@ -202,8 +205,37 @@ impl NexusView {
                             Some(IconName::Folder),
                         )
                         .group("sidebar-project")
+                        .pr(px(70.))
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .debug_selector(move || format!("sidebar-project-{project_id}"))
+                        .cursor_move()
+                        .on_drag(
+                            ProjectDrag {
+                                id: project_id,
+                                index,
+                                name: project.display_name.clone().into(),
+                            },
+                            |drag, _, _, cx| cx.new(|_| drag.clone()),
+                        )
+                        .can_drop(move |value, _, _| {
+                            value
+                                .downcast_ref::<ProjectDrag>()
+                                .is_some_and(|drag| drag.id != project_id)
+                        })
+                        .drag_over::<ProjectDrag>(move |style, drag, _, _| {
+                            let style = style
+                                .bg(rgb(colors.selected))
+                                .border_color(rgb(colors.accent));
+                            if drag.index > index {
+                                style.border_t_2()
+                            } else {
+                                style.border_b_2()
+                            }
+                        })
+                        .on_drop(cx.listener(move |app, drag: &ProjectDrag, _, cx| {
+                            app.presenter.reorder_project(drag.id, project_id);
+                            cx.notify();
+                        }))
                         .on_click(cx.listener(move |app, _, _, cx| {
                             if !selected {
                                 app.select_project(project.clone());
@@ -217,11 +249,14 @@ impl NexusView {
                             let app = cx.entity();
                             move |_, _| {
                                 let app = app.clone();
+                                let delete_app = app.clone();
                                 let project = new_task_project.clone();
                                 div()
                                     .absolute()
                                     .right(px(2.))
                                     .top(px((SIDEBAR_ROW_HEIGHT - COMPACT_CONTROL_HEIGHT) / 2.))
+                                    .flex()
+                                    .items_center()
                                     .invisible()
                                     .group_hover("sidebar-project", |style| style.visible())
                                     .child(
@@ -258,6 +293,39 @@ impl NexusView {
                                                 });
                                             }),
                                     )
+                                    .child(
+                                        AnimatedDropdown::new(
+                                            (ElementId::from(project_id), "actions-menu"),
+                                            Button::new((ElementId::from(project_id), "actions"))
+                                                .debug_selector(move || {
+                                                    format!("project-actions-{project_id}")
+                                                })
+                                                .ghost()
+                                                .small()
+                                                .size(px(COMPACT_CONTROL_HEIGHT))
+                                                .p_0()
+                                                .icon(IconName::Ellipsis)
+                                                .accessibility_label(locale.text("项目操作"))
+                                                .tooltip(locale.text("项目操作"))
+                                                .disabled(!can_delete),
+                                            reduced_motion,
+                                            move |menu, _, _| {
+                                                let delete_app = delete_app.clone();
+                                                menu.min_w(px(144.)).item(
+                                                    PopupMenuItem::new(locale.text("删除项目"))
+                                                        .icon(IconName::Delete)
+                                                        .on_click(move |_, window, cx| {
+                                                            delete_app.update(cx, |app, cx| {
+                                                                app.confirm_delete_project(
+                                                                    project_id, window, cx,
+                                                                )
+                                                            });
+                                                        }),
+                                                )
+                                            },
+                                        )
+                                        .show_caret(false),
+                                    )
                             }
                         }),
                     )
@@ -270,6 +338,39 @@ impl NexusView {
                             .flex()
                             .flex_col()
                             .gap_1()
+                            .when(
+                                selected && model.cnb.enabled && model.cnb.repository.is_some(),
+                                |list| {
+                                    list.child(
+                                        div().relative().ml(-px(24.)).child(
+                                            navigation_row(
+                                                colors,
+                                                (ElementId::from(project_id), "cnb"),
+                                                "CNB",
+                                                None,
+                                            )
+                                            .pl(px(34.))
+                                            .suffix(move |_, _| {
+                                                div()
+                                                    .debug_selector(|| "sidebar-cnb-icon".into())
+                                                    .absolute()
+                                                    .left(px(10.))
+                                                    .top(px(12.))
+                                                    .child(cnb::cnb_icon(16., colors.accent))
+                                            })
+                                            .debug_selector(|| "sidebar-cnb".into())
+                                            .selected(model.cnb.opened)
+                                            .on_click(
+                                                cx.listener(|app, _, window, cx| {
+                                                    app.presenter.open_cnb();
+                                                    app.focus_handle.focus(window, cx);
+                                                    cx.notify();
+                                                }),
+                                            ),
+                                        ),
+                                    )
+                                },
+                            )
                             .when(tasks.is_empty(), |list| {
                                 list.child(
                                     navigation_row(
@@ -288,33 +389,6 @@ impl NexusView {
                             .children(tasks),
                     )
             }));
-        let (visible_threads, has_more_history) = visible_history(
-            &model.codex_threads,
-            &query,
-            self.codex_history_visible_count,
-        );
-        let history: Vec<_> = visible_threads
-            .into_iter()
-            .map(|thread| {
-                let id = thread.id.clone();
-                navigation_row(
-                    colors,
-                    SharedString::from(format!("codex-{id}")),
-                    thread.title.clone(),
-                    None,
-                )
-                .selected(model.selected_codex_thread.as_deref() == Some(thread.id.as_str()))
-                .on_click(cx.listener(move |app, _, _, cx| app.select_codex_thread(id.clone(), cx)))
-            })
-            .collect();
-        let history_open = self.codex_history_open;
-        let history_progress = disclosure_progress(
-            "history-reveal",
-            history_open,
-            self.reduced_motion,
-            window,
-            cx,
-        );
         div()
             .id("workspace-sidebar")
             .debug_selector(|| "workspace-sidebar".into())
@@ -446,80 +520,6 @@ impl NexusView {
                                 .mt(px(8.))
                                 .text_color(rgb(colors.muted))
                                 .on_click(cx.listener(Self::choose_project)),
-                            )
-                            .child(
-                                gpui_kit::base::Collapsible::new()
-                                    .open(history_open)
-                                    .reveal("history-content", history_progress)
-                                    .mt(px(24.))
-                                    .flex()
-                                    .flex_col()
-                                    .child(
-                                        navigation_row(
-                                            colors,
-                                            "codex-history-disclosure",
-                                            locale.text("Codex 最近会话"),
-                                            Some(IconName::FileText),
-                                        )
-                                        .suffix(move |_, _| {
-                                            Icon::new(IconName::ChevronRight)
-                                                .rotate(gpui::radians(
-                                                    std::f32::consts::FRAC_PI_2 * history_progress,
-                                                ))
-                                                .size(px(14.))
-                                                .absolute()
-                                                .right(px(12.))
-                                                .top(px((SIDEBAR_ROW_HEIGHT - 14.) / 2.))
-                                        })
-                                        .on_click(
-                                            cx.listener(|app, _, _, cx| {
-                                                app.codex_history_open = !app.codex_history_open;
-                                                cx.notify();
-                                            }),
-                                        ),
-                                    )
-                                    .content(
-                                        div()
-                                            .pt(px(4.))
-                                            .opacity(history_progress)
-                                            .w_full()
-                                            .pl(px(24.))
-                                            .flex()
-                                            .flex_col()
-                                            .gap_1()
-                                            .when(history.is_empty(), |list| {
-                                                list.child(
-                                                    navigation_row(
-                                                        colors,
-                                                        "history-empty",
-                                                        if query.trim().is_empty() {
-                                                            locale.text("暂无可显示的会话")
-                                                        } else {
-                                                            locale.text("没有匹配的历史会话")
-                                                        },
-                                                        None,
-                                                    )
-                                                    .disabled(true),
-                                                )
-                                            })
-                                            .children(history)
-                                            .when(has_more_history, |list| {
-                                                list.child(
-                                                    navigation_row(
-                                                        colors,
-                                                        "codex-history-read-more",
-                                                        locale.text("查看更多"),
-                                                        Some(IconName::ChevronDown),
-                                                    )
-                                                    .text_color(rgb(colors.muted))
-                                                    .on_click(cx.listener(|app, _, _, cx| {
-                                                        app.codex_history_visible_count +=
-                                                            HISTORY_PAGE_SIZE;
-                                                        cx.notify();
-                                                    })),
-                                                )
-                                            }),
-                                    ),
                             ),
                     )
                     .map(|navigation| {
@@ -543,34 +543,6 @@ impl NexusView {
                         .flex()
                         .flex_col()
                         .gap_2()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .text_size(px(12.))
-                                        .text_color(rgb(colors.muted))
-                                        .line_clamp(2)
-                                        .child(history_status),
-                                )
-                                .child(
-                                    Button::new("refresh-codex-history")
-                                        .ghost()
-                                        .small()
-                                        .size(px(COMPACT_CONTROL_HEIGHT))
-                                        .icon(IconName::RotateCw)
-                                        .tooltip(locale.text("刷新本机 Codex 历史"))
-                                        .disabled(
-                                            !self.presenter.history_available()
-                                                || model.codex_history_loading,
-                                        )
-                                        .on_click(cx.listener(Self::refresh_codex_history)),
-                                ),
-                        )
                         .child(
                             Button::new("sidebar-settings")
                                 .debug_selector(|| "sidebar-settings".into())
@@ -978,6 +950,65 @@ mod tests {
     }
 
     #[gpui::test]
+    fn project_deletion_menu_requires_confirmation_and_preserves_selection_on_cancel(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, cx) = scroll_test_view(cx);
+        let (project, task_id) = view.read_with(cx, |view, _| {
+            (
+                view.presenter.model().selected_project.clone().unwrap(),
+                view.presenter.model().selected_task,
+            )
+        });
+        let project_selector = format!("sidebar-project-{}", project.id).leak();
+        let actions_selector = format!("project-actions-{}", project.id).leak();
+        let bounds = cx.debug_bounds(project_selector).unwrap();
+        cx.simulate_mouse_move(bounds.center(), None, Default::default());
+        let actions = cx.debug_bounds(actions_selector).unwrap().center();
+        cx.simulate_click(actions, Default::default());
+        cx.update(|window, cx| {
+            window.refresh();
+            let _ = window.draw(cx);
+        });
+        let menu = cx.debug_bounds("animated-menu-surface").unwrap().center();
+        cx.simulate_mouse_move(menu, None, Default::default());
+        cx.simulate_click(menu, Default::default());
+        let (message, detail) = cx.pending_prompt().unwrap();
+        assert_eq!(message, format!("删除项目“{}”？", project.display_name));
+        assert!(detail.contains("含归档"));
+        assert!(detail.contains("无法撤销"));
+        assert!(detail.contains("Worktree、文件和 Git 分支不会删除"));
+        cx.simulate_prompt_answer("取消");
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.presenter.model().selected_task, task_id);
+            assert!(!view.collapsed_projects.contains(&project.id));
+            assert_eq!(view.presenter.model().projects.len(), 1);
+        });
+
+        view.update_in(cx, |view, window, cx| {
+            view.set_language(Language::English, window, cx);
+            view.confirm_delete_project(project.id, window, cx);
+        });
+        let (message, detail) = cx.pending_prompt().unwrap();
+        assert_eq!(
+            message,
+            format!("Delete project “{}”?", project.display_name)
+        );
+        assert!(detail.contains("files, and Git branches on disk will be kept"));
+        cx.simulate_prompt_answer("Delete project");
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert!(view.presenter.model().projects.is_empty());
+            assert!(view.presenter.model().selected_project.is_none());
+            assert!(view.presenter.model().selected_task.is_none());
+            assert!(view.presenter.model().messages.is_empty());
+        });
+        assert!(cx.debug_bounds(project_selector).is_none());
+        assert!(cx.debug_bounds("add-project").is_some());
+    }
+
+    #[gpui::test]
     fn permanent_task_deletion_requires_explicit_confirmation(cx: &mut TestAppContext) {
         let (view, cx) = scroll_test_view(cx);
         let (task_id, task_title) = view.read_with(cx, |view, _| {
@@ -1205,6 +1236,132 @@ mod tests {
             view.read_with(cx, |view, _| view.presenter.model().selected_task),
             selected_task,
         );
+    }
+
+    #[gpui::test]
+    fn project_drag_reorders_without_switching_conversations(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (mut presenter, _, directory) = crate::presenter::tests::fixture();
+        let selected = presenter.model().selected_project.clone().unwrap();
+        assert!(presenter.submit("Keep the active conversation", "claude"));
+        let task = presenter.model().selected_task;
+        for name in ["second", "third"] {
+            let path = directory.path().join(name);
+            std::fs::create_dir(&path).unwrap();
+            presenter.open_project(&path);
+        }
+        presenter.select_project(selected.clone());
+        presenter.select_task(task.unwrap());
+        let original: Vec<_> = presenter
+            .model()
+            .projects
+            .iter()
+            .map(|project| project.id)
+            .collect();
+        let selectors: Vec<&'static str> = original
+            .iter()
+            .map(|id| &*format!("sidebar-project-{id}").leak())
+            .collect();
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut view = NexusView::new(presenter, window, cx);
+            view.set_appearance(
+                AppearanceSettings {
+                    reduced_motion: true,
+                    ..Default::default()
+                },
+                window,
+                cx,
+            );
+            view.prompt_input
+                .update(cx, |input, cx| input.set_value("Keep my draft", window, cx));
+            view
+        });
+        cx.simulate_resize(gpui::size(px(1040.), px(720.)));
+        cx.run_until_parked();
+
+        for (source, target, expected) in [
+            (0, 2, vec![original[1], original[2], original[0]]),
+            (0, 1, original.clone()),
+            (2, 0, vec![original[2], original[0], original[1]]),
+        ] {
+            let from = cx.debug_bounds(selectors[source]).unwrap().center();
+            let to = cx.debug_bounds(selectors[target]).unwrap().center();
+            cx.simulate_mouse_down(from, gpui::MouseButton::Left, Default::default());
+            cx.simulate_mouse_move(
+                from + point(px(8.), px(0.)),
+                gpui::MouseButton::Left,
+                Default::default(),
+            );
+            cx.update(|_, cx| assert!(cx.has_active_drag()));
+            cx.simulate_mouse_move(to, gpui::MouseButton::Left, Default::default());
+            cx.simulate_mouse_up(to, gpui::MouseButton::Left, Default::default());
+            cx.run_until_parked();
+            view.read_with(cx, |view, cx| {
+                assert_eq!(
+                    view.presenter
+                        .model()
+                        .projects
+                        .iter()
+                        .map(|project| project.id)
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+                assert_eq!(
+                    view.presenter.model().selected_project.as_ref().unwrap().id,
+                    selected.id
+                );
+                assert_eq!(view.presenter.model().selected_task, task);
+                assert!(!view.collapsed_projects.contains(&selected.id));
+                assert_eq!(view.prompt_input.read(cx).value(), "Keep my draft");
+            });
+            let positions: Vec<_> = expected
+                .iter()
+                .map(|id| {
+                    let index = original
+                        .iter()
+                        .position(|original_id| original_id == id)
+                        .unwrap();
+                    cx.debug_bounds(selectors[index]).unwrap().top()
+                })
+                .collect();
+            assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+        }
+
+        let before = view.read_with(cx, |view, _| {
+            view.presenter
+                .model()
+                .projects
+                .iter()
+                .map(|project| project.id)
+                .collect::<Vec<_>>()
+        });
+        for destination in [
+            cx.debug_bounds(selectors[0]).unwrap().center(),
+            cx.debug_bounds("workspace-header").unwrap().center(),
+        ] {
+            let from = cx.debug_bounds(selectors[0]).unwrap().center();
+            cx.simulate_mouse_down(from, gpui::MouseButton::Left, Default::default());
+            cx.simulate_mouse_move(
+                from + point(px(8.), px(0.)),
+                gpui::MouseButton::Left,
+                Default::default(),
+            );
+            cx.simulate_mouse_move(destination, gpui::MouseButton::Left, Default::default());
+            cx.simulate_mouse_up(destination, gpui::MouseButton::Left, Default::default());
+            view.read_with(cx, |view, _| {
+                assert_eq!(
+                    view.presenter
+                        .model()
+                        .projects
+                        .iter()
+                        .map(|project| project.id)
+                        .collect::<Vec<_>>(),
+                    before,
+                );
+                assert_eq!(view.presenter.model().selected_task, task);
+            });
+        }
     }
 
     #[gpui::test]
@@ -1865,17 +2022,19 @@ mod tests {
                 assert_eq!(harness.size, profile.size);
             }
             if section == SettingsSection::General {
-                for (selector, language, prompt_placeholder, group_title) in [
+                for (selector, language, prompt_placeholder, search_placeholder, group_title) in [
                     (
                         "language-en",
                         Language::English,
                         "Describe a goal for the agent…",
+                        "Search tasks…",
                         "Default",
                     ),
                     (
                         "language-zh-CN",
                         Language::Chinese,
                         "描述一个目标，让 Agent 开始工作…",
+                        "搜索任务…",
                         "默认",
                     ),
                 ] {
@@ -1888,6 +2047,10 @@ mod tests {
                         assert_eq!(
                             view.prompt_input.read(cx).presentation().placeholder(),
                             prompt_placeholder
+                        );
+                        assert_eq!(
+                            view.search_input.read(cx).presentation().placeholder(),
+                            search_placeholder
                         );
                         assert_eq!(
                             view.catalog_model_select_content.groups[0].title,
@@ -2113,60 +2276,5 @@ mod tests {
             let _ = window.draw(cx);
         });
         assert_eq!(scroll.offset(), manual_offset);
-    }
-
-    fn threads(count: usize) -> Vec<ThreadSummary> {
-        (0..count)
-            .map(|index| ThreadSummary {
-                id: index.to_string(),
-                title: format!("Session {index}"),
-                cwd: "/workspace/project".into(),
-                source: "cli".into(),
-                updated_at: 0,
-                archived: false,
-            })
-            .collect()
-    }
-
-    #[test]
-    fn history_expands_in_tens_until_all_sessions_are_visible() {
-        let threads = threads(58);
-        let mut limit = HISTORY_PAGE_SIZE;
-        for expected_count in [10, 20, 30, 40, 50, 58] {
-            let (visible, has_more) = visible_history(&threads, "", limit);
-            assert_eq!(
-                visible,
-                threads[..expected_count].iter().collect::<Vec<_>>()
-            );
-            assert_eq!(has_more, expected_count < threads.len());
-            limit += HISTORY_PAGE_SIZE;
-        }
-    }
-
-    #[test]
-    fn history_hides_read_more_when_results_fit_on_one_page() {
-        for count in [0, 1, 9, 10] {
-            let threads = threads(count);
-            let (visible, has_more) = visible_history(&threads, "", HISTORY_PAGE_SIZE);
-            assert_eq!(visible.len(), count);
-            assert!(!has_more);
-        }
-    }
-
-    #[test]
-    fn history_search_filters_all_sessions_before_pagination() {
-        let threads = threads(58);
-        let (visible, has_more) = visible_history(&threads, "Session 4", HISTORY_PAGE_SIZE);
-        assert_eq!(visible.len(), 10);
-        assert_eq!(visible[0].id, "4");
-        assert_eq!(visible[9].id, "48");
-        assert!(has_more);
-        let (visible, has_more) = visible_history(&threads, "Session 4", HISTORY_PAGE_SIZE * 2);
-        assert_eq!(visible.len(), 11);
-        assert_eq!(visible[10].id, "49");
-        assert!(!has_more);
-        let (visible, has_more) = visible_history(&threads, "missing", HISTORY_PAGE_SIZE);
-        assert!(visible.is_empty());
-        assert!(!has_more);
     }
 }

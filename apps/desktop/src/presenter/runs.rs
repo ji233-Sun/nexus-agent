@@ -8,7 +8,7 @@ use crate::model::{
     UserAskSubmissionState,
 };
 use nexus_domain::{
-    HarnessKind, MessageKind, MessageRole, PermissionMode, RunStatus, ToolMetadata, UserAskAnswer,
+    MessageKind, MessageRole, PermissionMode, RunStatus, ToolMetadata, UserAskAnswer,
     UserAskAnswerMode, UserAskAnswerValue, UserAskQuestion, UserAskStatus, compact_task_title,
 };
 use nexus_protocol::{Command, CommandEnvelope, Event, StartRun};
@@ -129,8 +129,6 @@ impl Presenter {
                 let harness = probe.harness;
                 let available = probe.available;
                 let message = probe_status(&probe);
-                let history_executable =
-                    (harness == HarnessKind::Codex).then(|| probe.executable.clone());
                 self.model.harnesses.insert(harness, probe);
                 if harness == self.model.selected_harness {
                     if self.model.active_run.is_none() {
@@ -142,9 +140,6 @@ impl Presenter {
                         }
                     }
                     self.model.status = message;
-                }
-                if let Some(executable) = history_executable {
-                    self.connect_codex_history(executable);
                 }
             }
             Event::ModelCatalogLoaded {
@@ -1121,9 +1116,6 @@ impl Presenter {
                 .ok()
                 .flatten()
                 .or(Some(workspace));
-            self.model.selected_codex_thread = None;
-            self.model.codex_history_messages.clear();
-            self.model.codex_thread_loading = false;
             self.model.messages = self.storage.messages(task_id).unwrap_or_default();
             self.model.status = LocalizedText::translated(|language| {
                 let effort_label = match language {

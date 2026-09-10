@@ -12,12 +12,7 @@ impl NexusView {
         let colors = palette(cx);
         let model = self.presenter.model();
         let compact = window.viewport_size().height < px(740.);
-        let history = model.selected_codex_thread.is_some();
-        let empty = if history {
-            model.codex_history_messages.is_empty()
-        } else {
-            model.messages.is_empty() && model.streaming_text.is_empty()
-        };
+        let empty = model.messages.is_empty() && model.streaming_text.is_empty();
         div()
             .relative()
             .bg(rgb(colors.canvas))
@@ -47,28 +42,17 @@ impl NexusView {
                             .when(empty, |element| {
                                 element.child(self.render_welcome(colors, compact, cx))
                             })
-                            .when(!history, |element| {
-                                element.children(timeline_items(&model.messages).iter().map(
-                                    |item| match item {
-                                        TimelineItem::Message(message) => {
-                                            self.render_message(message, window, cx)
-                                        }
-                                        TimelineItem::Tools(batch) => {
-                                            self.render_tool_batch(batch, window, cx)
-                                        }
-                                    },
-                                ))
-                            })
-                            .when(history, |element| {
-                                element.children(
-                                    model.codex_history_messages.iter().enumerate().map(
-                                        |(index, message)| {
-                                            self.render_history_message(index, message, window, cx)
-                                        },
-                                    ),
-                                )
-                            })
-                            .when(!history && !model.streaming_text.is_empty(), |element| {
+                            .children(timeline_items(&model.messages).iter().map(
+                                |item| match item {
+                                    TimelineItem::Message(message) => {
+                                        self.render_message(message, window, cx)
+                                    }
+                                    TimelineItem::Tools(batch) => {
+                                        self.render_tool_batch(batch, window, cx)
+                                    }
+                                },
+                            ))
+                            .when(!model.streaming_text.is_empty(), |element| {
                                 element.child(self.message_card(
                                     "streaming-message",
                                     MessageRole::Assistant,
@@ -79,8 +63,7 @@ impl NexusView {
                                 ))
                             })
                             .when(
-                                !history
-                                    && model.active_run.is_some()
+                                model.active_run.is_some()
                                     && model.selected_task == model.active_task,
                                 |element| {
                                     element.child(
@@ -178,117 +161,30 @@ impl NexusView {
     ) -> impl IntoElement {
         let locale = self.presenter.model().language;
         let model = self.presenter.model();
-        let history = model.selected_codex_thread.is_some();
-        if !history {
-            let project = model.selected_project.as_ref();
-            let has_project = project.is_some();
-            let selector = if has_project {
-                "workspace-empty-agent-status"
-            } else {
-                "workspace-empty-no-project"
-            };
-            let context = project
-                .map(|project| project.display_name.clone())
-                .unwrap_or_else(|| "Nexus Agent".into());
-            let title = if has_project {
-                locale.text("今天想完成什么？")
-            } else {
-                locale.text("从一个想法开始")
-            };
-            let description = if has_project {
-                model.status_text().to_owned()
-            } else {
-                locale
-                    .text("先选择本地项目，再描述你希望完成的工作。")
-                    .into()
-            };
-            return div()
-                .debug_selector(move || selector.into())
-                .flex_1()
-                .w_full()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .py(px(if compact { 8. } else { 32. }))
-                .text_center()
-                .child(brand_mark(if compact { 48. } else { 64. }))
-                .child(
-                    div()
-                        .debug_selector(|| "workspace-empty-context".into())
-                        .mt_5()
-                        .max_w_full()
-                        .truncate()
-                        .text_size(px(13.))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(rgb(colors.muted))
-                        .child(context),
-                )
-                .child(
-                    div()
-                        .mt_3()
-                        .text_size(px(if compact { 26. } else { 32. }))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .line_height(relative(1.25))
-                        .child(title),
-                )
-                .child(
-                    div()
-                        .debug_selector(|| "workspace-empty-status".into())
-                        .mt_3()
-                        .max_w(px(520.))
-                        .text_size(px(14.))
-                        .text_color(rgb(colors.muted))
-                        .line_height(relative(1.55))
-                        .child(description),
-                )
-                .when(has_project, |element| {
-                    element.child(
-                        div()
-                            .mt_5()
-                            .px_3()
-                            .py_2()
-                            .rounded(px(CONTROL_RADIUS))
-                            .bg(rgb(colors.elevated))
-                            .border_1()
-                            .border_color(rgb(colors.border))
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .text_size(px(12.))
-                            .text_color(rgb(colors.text_secondary))
-                            .child(harness_icon(model.selected_harness, colors, 16.))
-                            .child(model.selected_harness.to_string()),
-                    )
-                })
-                .when(!has_project, |element| {
-                    element.child(
-                        Button::new("welcome-choose-project")
-                            .debug_selector(|| "welcome-choose-project".into())
-                            .mt_5()
-                            .primary()
-                            .h(px(CONTROL_HEIGHT))
-                            .icon(IconName::FolderOpen)
-                            .label(locale.text("选择项目"))
-                            .on_click(cx.listener(Self::choose_project)),
-                    )
-                })
-                .map(|element| entrance(element, "empty-state-enter", !self.reduced_motion));
-        }
-        let (eyebrow, title, description) = if model.codex_thread_loading {
-            (
-                locale.text("Codex 历史"),
-                locale.text("正在读取会话"),
-                locale.text("正在从本机加载消息，稍等片刻。"),
-            )
+        let project = model.selected_project.as_ref();
+        let has_project = project.is_some();
+        let selector = if has_project {
+            "workspace-empty-agent-status"
         } else {
-            (
-                locale.text("Codex 历史"),
-                locale.text("此会话没有消息"),
-                locale.text("这条历史记录中没有可显示的用户或助手消息。"),
-            )
+            "workspace-empty-no-project"
+        };
+        let context = project
+            .map(|project| project.display_name.clone())
+            .unwrap_or_else(|| "Nexus Agent".into());
+        let title = if has_project {
+            locale.text("今天想完成什么？")
+        } else {
+            locale.text("从一个想法开始")
+        };
+        let description = if has_project {
+            model.status_text().to_owned()
+        } else {
+            locale
+                .text("先选择本地项目，再描述你希望完成的工作。")
+                .into()
         };
         div()
+            .debug_selector(move || selector.into())
             .flex_1()
             .w_full()
             .flex()
@@ -297,46 +193,65 @@ impl NexusView {
             .justify_center()
             .py(px(if compact { 8. } else { 32. }))
             .text_center()
-            .child(brand_mark(if compact { 40. } else { 48. }))
-            .when(!compact, |element| {
-                element.child(
-                    div()
-                        .mt_6()
-                        .text_size(px(12.))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(rgb(colors.muted))
-                        .child(eyebrow),
-                )
-            })
+            .child(brand_mark(if compact { 48. } else { 64. }))
+            .child(
+                div()
+                    .debug_selector(|| "workspace-empty-context".into())
+                    .mt_5()
+                    .max_w_full()
+                    .truncate()
+                    .text_size(px(13.))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(rgb(colors.muted))
+                    .child(context),
+            )
             .child(
                 div()
                     .mt_3()
-                    .text_size(px(if compact { 24. } else { 28. }))
-                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_size(px(if compact { 26. } else { 32. }))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
                     .line_height(relative(1.25))
                     .child(title),
             )
             .child(
                 div()
+                    .debug_selector(|| "workspace-empty-status".into())
                     .mt_3()
-                    .text_base()
+                    .max_w(px(520.))
+                    .text_size(px(14.))
                     .text_color(rgb(colors.muted))
-                    .line_height(relative(1.6))
+                    .line_height(relative(1.55))
                     .child(description),
             )
-            .when(model.codex_thread_loading, |element| {
+            .when(has_project, |element| {
                 element.child(
                     div()
-                        .mt_8()
+                        .mt_5()
+                        .px_3()
+                        .py_2()
+                        .rounded(px(CONTROL_RADIUS))
+                        .bg(rgb(colors.elevated))
+                        .border_1()
+                        .border_color(rgb(colors.border))
                         .flex()
                         .items_center()
                         .gap_2()
-                        .text_color(rgb(colors.muted))
-                        .child(live_status_dot(
-                            rgb(colors.accent).into(),
-                            !self.reduced_motion,
-                        ))
-                        .child(locale.text("正在加载…")),
+                        .text_size(px(12.))
+                        .text_color(rgb(colors.text_secondary))
+                        .child(harness_icon(model.selected_harness, colors, 16.))
+                        .child(model.selected_harness.to_string()),
+                )
+            })
+            .when(!has_project, |element| {
+                element.child(
+                    Button::new("welcome-choose-project")
+                        .debug_selector(|| "welcome-choose-project".into())
+                        .mt_5()
+                        .primary()
+                        .h(px(CONTROL_HEIGHT))
+                        .icon(IconName::FolderOpen)
+                        .label(locale.text("选择项目"))
+                        .on_click(cx.listener(Self::choose_project)),
                 )
             })
             .map(|element| entrance(element, "empty-state-enter", !self.reduced_motion))
