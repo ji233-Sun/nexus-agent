@@ -69,7 +69,7 @@ impl NexusView {
                             .text_color(rgb(colors.text_secondary))
                             .into_any_element()
                     })
-                    .disabled(model.selected_codex_thread.is_some() || voice.transcribing)
+                    .disabled(voice.transcribing)
                     .on_click(cx.listener(|this, _, window, cx| {
                         if this.presenter.model().voice.operation.is_some() {
                             this.presenter.stop_voice();

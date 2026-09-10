@@ -1,13 +1,11 @@
 pub(crate) mod cnb;
 pub(crate) mod harness_installation;
-pub(crate) mod history;
 pub(crate) mod tools;
 pub(crate) mod updates;
 pub(crate) mod voice;
 pub(crate) mod workspace;
 
 use crate::i18n::{Language, LocalizedText};
-use history::{HistoryMessage, ThreadSummary};
 use nexus_domain::{
     HarnessKind, Message, ModelDescriptor, PermissionMode, Project, ProviderProfile, TaskSummary,
     ThinkingEffort, UserAskAnswer, UserAskAnswerMode, UserAskAnswerValue, UserAskQuestion,
@@ -241,9 +239,6 @@ pub(crate) struct AppModel {
     pub(crate) workspace_operation_context: Option<Uuid>,
     pub(crate) workspace_operation_paths: Vec<std::path::PathBuf>,
     pub(crate) harnesses: BTreeMap<HarnessKind, HarnessProbe>,
-    pub(crate) codex_threads: Vec<ThreadSummary>,
-    pub(crate) codex_history_loading: bool,
-    pub(crate) codex_history_error: Option<LocalizedText>,
     pub(crate) provider_profiles: Vec<ProviderProfile>,
     pub(crate) conversation: ConversationState,
     pub(crate) conversations: BTreeMap<Uuid, ConversationState>,
@@ -292,9 +287,6 @@ pub(crate) struct ConversationState {
     pub(crate) responding_approval: Option<Uuid>,
     pub(crate) streaming_text: String,
     pub(crate) status: LocalizedText,
-    pub(crate) selected_codex_thread: Option<String>,
-    pub(crate) codex_history_messages: Vec<HistoryMessage>,
-    pub(crate) codex_thread_loading: bool,
     pub(crate) selected_harness: HarnessKind,
     pub(crate) project_dirty: bool,
     pub(crate) model_override: Option<String>,
@@ -406,12 +398,7 @@ impl AppModel {
     }
 
     pub(crate) fn working_directory(&self) -> Option<&str> {
-        let cwd = if let Some(thread_id) = &self.selected_codex_thread {
-            self.codex_threads
-                .iter()
-                .find(|thread| &thread.id == thread_id)
-                .map(|thread| thread.cwd.as_str())
-        } else if let Some(workspace) = &self.selected_workspace {
+        let cwd = if let Some(workspace) = &self.selected_workspace {
             Some(workspace.path.as_str())
         } else if self.selected_task.is_some() {
             None
@@ -458,7 +445,6 @@ impl AppModel {
             && !self.run_cancelling
             && self.active_task.is_some()
             && self.active_task == self.selected_task
-            && self.selected_codex_thread.is_none()
     }
 
     pub(crate) fn selected_provider_profile(&self) -> Option<&ProviderProfile> {

@@ -106,7 +106,6 @@ impl Presenter {
         // Release the embedded Runner and server before the installer restarts the app.
         self.runner.take();
         self.remote_control.take();
-        self.codex_history_client.take();
         self.installation_worker.take();
     }
 

@@ -18,10 +18,6 @@
 
 队列只保留在当前应用内，退出后不恢复；归档时保留，永久删除对话时清理。任务运行时使用固定绑定的本地目录或独立 Worktree，界面会提示未提交修改。
 
-### 浏览 Codex 原有历史
-
-Codex 原有历史通过 CLI 自带的实验性 `codex app-server` 协议读取，不复制到 Nexus 数据库，也不会被 Nexus 修改。若独立 CLI 无法读取 Desktop 创建的新版分页会话，Nexus 会自动尝试 Desktop 内置的 Codex。Nexus 自己完成或失败的任务继续保存在 `nexus.db` 中。
-
 ## 任务 Worktree
 
 在新任务输入区，目录名称旁的下拉菜单可选择「本地 / Worktree」。Git 项目默认本地模式，之后按项目记忆选择；非 Git 项目仅支持本地。选择 Worktree 后，旁边的来源分支下拉菜单列出本地分支，默认选中当前分支；项目处于 detached HEAD 时默认选择列表中的第一个分支。没有已提交分支的仓库需要先创建提交。
@@ -161,7 +157,7 @@ Desktop 启动后默认在 `127.0.0.1:3210` 提供 HTTP/WebSocket 服务。设�
 
 远程页面可以：
 
-- 浏览 Nexus 自己保存的项目、会话和消息；Codex CLI/Desktop 的只读导入历史不通过 Remote API 暴露。
+- 浏览 Nexus 自己保存的项目、会话和消息。
 - 使用 Desktop 当前选择的 Harness、模型和思考层级发起任务。
 - 发起任务时使用 Desktop 当前选择的权限模式；需要授权时在 Desktop 弹窗中处理，Remote Web 暂不提供审批入口。
 - 通过 WebSocket 接收状态变化和流式输出，并取消当前运行。
@@ -171,7 +167,6 @@ Desktop 启动后默认在 `127.0.0.1:3210` 提供 HTTP/WebSocket 服务。设�
 ## 已知限制
 
 - 最多两个独立 checkout 并发，同任务或同一 checkout 串行；Git 成果接收只操作本地，不自动执行 Push、PR、Rebase 或 Cherry-pick。
-- Codex 原有历史只读，不能从 Nexus 续聊这些导入会话。
 - Remote Web 的授权请求仍需回到 Desktop 处理；当前不提供多设备账户、云端 Control Plane 或内置 TLS。
 - Codex 的 MCP elicitation 尚未接入。模型能力、权限策略和文本输出时机取决于对应 Harness。
 - macOS 发布包使用本地临时签名，尚无开发者签名或 Apple 公证。

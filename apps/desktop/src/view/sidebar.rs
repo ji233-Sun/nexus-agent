@@ -1,22 +1,7 @@
 use super::*;
-use crate::model::history::ThreadSummary;
 use gpui_kit::component::{list::ListItem, scroll::Scrollbar, spinner::Spinner};
 
 const SIDEBAR_ROW_HEIGHT: f32 = 40.;
-pub(super) const HISTORY_PAGE_SIZE: usize = 10;
-
-fn visible_history<'a>(
-    threads: &'a [ThreadSummary],
-    query: &str,
-    limit: usize,
-) -> (Vec<&'a ThreadSummary>, bool) {
-    let mut matching = threads
-        .iter()
-        .filter(|thread| matches_search(&format!("{} {}", thread.title, thread.detail()), query));
-    let visible = matching.by_ref().take(limit).collect();
-    let has_more = matching.next().is_some();
-    (visible, has_more)
-}
 
 pub(super) fn navigation_row(
     colors: Palette,
@@ -60,21 +45,6 @@ impl NexusView {
         let model = self.presenter.model();
         let query = self.search_input.read(cx).value();
         let selected_project_id = model.selected_project.as_ref().map(|project| project.id);
-        let history_status = if model.codex_history_loading {
-            locale.text("正在读取本机会话…").to_owned()
-        } else if let Some(error) = &model.codex_history_error {
-            locale.format(
-                "历史不可用：{error}",
-                &[("error", error.render(locale).to_owned())],
-            )
-        } else if self.presenter.history_available() {
-            locale.format(
-                "{0} 条本机会话 · 只读浏览",
-                &[("0", (model.codex_threads.len()).to_string())],
-            )
-        } else {
-            locale.text("等待检测 Codex CLI").to_owned()
-        };
         let projects = div()
             .flex()
             .flex_col()
@@ -107,11 +77,7 @@ impl NexusView {
                             .pr(px(62.))
                             .group("sidebar-task")
                             .debug_selector(move || format!("sidebar-task-{id}"))
-                            .selected(
-                                model.selected_task == Some(id)
-                                    && model.selected_codex_thread.is_none()
-                                    && !model.cnb.opened,
-                            )
+                            .selected(model.selected_task == Some(id) && !model.cnb.opened)
                             .suffix(move |_, _| {
                                 let archive_app = app.clone();
                                 let delete_app = app.clone();
@@ -322,33 +288,6 @@ impl NexusView {
                             .children(tasks),
                     )
             }));
-        let (visible_threads, has_more_history) = visible_history(
-            &model.codex_threads,
-            &query,
-            self.codex_history_visible_count,
-        );
-        let history: Vec<_> = visible_threads
-            .into_iter()
-            .map(|thread| {
-                let id = thread.id.clone();
-                navigation_row(
-                    colors,
-                    SharedString::from(format!("codex-{id}")),
-                    thread.title.clone(),
-                    None,
-                )
-                .selected(model.selected_codex_thread.as_deref() == Some(thread.id.as_str()))
-                .on_click(cx.listener(move |app, _, _, cx| app.select_codex_thread(id.clone(), cx)))
-            })
-            .collect();
-        let history_open = self.codex_history_open;
-        let history_progress = disclosure_progress(
-            "history-reveal",
-            history_open,
-            self.reduced_motion,
-            window,
-            cx,
-        );
         div()
             .id("workspace-sidebar")
             .debug_selector(|| "workspace-sidebar".into())
@@ -480,80 +419,6 @@ impl NexusView {
                                 .mt(px(8.))
                                 .text_color(rgb(colors.muted))
                                 .on_click(cx.listener(Self::choose_project)),
-                            )
-                            .child(
-                                gpui_kit::base::Collapsible::new()
-                                    .open(history_open)
-                                    .reveal("history-content", history_progress)
-                                    .mt(px(24.))
-                                    .flex()
-                                    .flex_col()
-                                    .child(
-                                        navigation_row(
-                                            colors,
-                                            "codex-history-disclosure",
-                                            locale.text("Codex 最近会话"),
-                                            Some(IconName::FileText),
-                                        )
-                                        .suffix(move |_, _| {
-                                            Icon::new(IconName::ChevronRight)
-                                                .rotate(gpui::radians(
-                                                    std::f32::consts::FRAC_PI_2 * history_progress,
-                                                ))
-                                                .size(px(14.))
-                                                .absolute()
-                                                .right(px(12.))
-                                                .top(px((SIDEBAR_ROW_HEIGHT - 14.) / 2.))
-                                        })
-                                        .on_click(
-                                            cx.listener(|app, _, _, cx| {
-                                                app.codex_history_open = !app.codex_history_open;
-                                                cx.notify();
-                                            }),
-                                        ),
-                                    )
-                                    .content(
-                                        div()
-                                            .pt(px(4.))
-                                            .opacity(history_progress)
-                                            .w_full()
-                                            .pl(px(24.))
-                                            .flex()
-                                            .flex_col()
-                                            .gap_1()
-                                            .when(history.is_empty(), |list| {
-                                                list.child(
-                                                    navigation_row(
-                                                        colors,
-                                                        "history-empty",
-                                                        if query.trim().is_empty() {
-                                                            locale.text("暂无可显示的会话")
-                                                        } else {
-                                                            locale.text("没有匹配的历史会话")
-                                                        },
-                                                        None,
-                                                    )
-                                                    .disabled(true),
-                                                )
-                                            })
-                                            .children(history)
-                                            .when(has_more_history, |list| {
-                                                list.child(
-                                                    navigation_row(
-                                                        colors,
-                                                        "codex-history-read-more",
-                                                        locale.text("查看更多"),
-                                                        Some(IconName::ChevronDown),
-                                                    )
-                                                    .text_color(rgb(colors.muted))
-                                                    .on_click(cx.listener(|app, _, _, cx| {
-                                                        app.codex_history_visible_count +=
-                                                            HISTORY_PAGE_SIZE;
-                                                        cx.notify();
-                                                    })),
-                                                )
-                                            }),
-                                    ),
                             ),
                     )
                     .map(|navigation| {
@@ -577,34 +442,6 @@ impl NexusView {
                         .flex()
                         .flex_col()
                         .gap_2()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .text_size(px(12.))
-                                        .text_color(rgb(colors.muted))
-                                        .line_clamp(2)
-                                        .child(history_status),
-                                )
-                                .child(
-                                    Button::new("refresh-codex-history")
-                                        .ghost()
-                                        .small()
-                                        .size(px(COMPACT_CONTROL_HEIGHT))
-                                        .icon(IconName::RotateCw)
-                                        .tooltip(locale.text("刷新本机 Codex 历史"))
-                                        .disabled(
-                                            !self.presenter.history_available()
-                                                || model.codex_history_loading,
-                                        )
-                                        .on_click(cx.listener(Self::refresh_codex_history)),
-                                ),
-                        )
                         .child(
                             Button::new("sidebar-settings")
                                 .debug_selector(|| "sidebar-settings".into())
@@ -1899,17 +1736,19 @@ mod tests {
                 assert_eq!(harness.size, profile.size);
             }
             if section == SettingsSection::General {
-                for (selector, language, prompt_placeholder, group_title) in [
+                for (selector, language, prompt_placeholder, search_placeholder, group_title) in [
                     (
                         "language-en",
                         Language::English,
                         "Describe a goal for the agent…",
+                        "Search tasks…",
                         "Default",
                     ),
                     (
                         "language-zh-CN",
                         Language::Chinese,
                         "描述一个目标，让 Agent 开始工作…",
+                        "搜索任务…",
                         "默认",
                     ),
                 ] {
@@ -1922,6 +1761,10 @@ mod tests {
                         assert_eq!(
                             view.prompt_input.read(cx).presentation().placeholder(),
                             prompt_placeholder
+                        );
+                        assert_eq!(
+                            view.search_input.read(cx).presentation().placeholder(),
+                            search_placeholder
                         );
                         assert_eq!(
                             view.catalog_model_select_content.groups[0].title,
@@ -2147,60 +1990,5 @@ mod tests {
             let _ = window.draw(cx);
         });
         assert_eq!(scroll.offset(), manual_offset);
-    }
-
-    fn threads(count: usize) -> Vec<ThreadSummary> {
-        (0..count)
-            .map(|index| ThreadSummary {
-                id: index.to_string(),
-                title: format!("Session {index}"),
-                cwd: "/workspace/project".into(),
-                source: "cli".into(),
-                updated_at: 0,
-                archived: false,
-            })
-            .collect()
-    }
-
-    #[test]
-    fn history_expands_in_tens_until_all_sessions_are_visible() {
-        let threads = threads(58);
-        let mut limit = HISTORY_PAGE_SIZE;
-        for expected_count in [10, 20, 30, 40, 50, 58] {
-            let (visible, has_more) = visible_history(&threads, "", limit);
-            assert_eq!(
-                visible,
-                threads[..expected_count].iter().collect::<Vec<_>>()
-            );
-            assert_eq!(has_more, expected_count < threads.len());
-            limit += HISTORY_PAGE_SIZE;
-        }
-    }
-
-    #[test]
-    fn history_hides_read_more_when_results_fit_on_one_page() {
-        for count in [0, 1, 9, 10] {
-            let threads = threads(count);
-            let (visible, has_more) = visible_history(&threads, "", HISTORY_PAGE_SIZE);
-            assert_eq!(visible.len(), count);
-            assert!(!has_more);
-        }
-    }
-
-    #[test]
-    fn history_search_filters_all_sessions_before_pagination() {
-        let threads = threads(58);
-        let (visible, has_more) = visible_history(&threads, "Session 4", HISTORY_PAGE_SIZE);
-        assert_eq!(visible.len(), 10);
-        assert_eq!(visible[0].id, "4");
-        assert_eq!(visible[9].id, "48");
-        assert!(has_more);
-        let (visible, has_more) = visible_history(&threads, "Session 4", HISTORY_PAGE_SIZE * 2);
-        assert_eq!(visible.len(), 11);
-        assert_eq!(visible[10].id, "49");
-        assert!(!has_more);
-        let (visible, has_more) = visible_history(&threads, "missing", HISTORY_PAGE_SIZE);
-        assert!(visible.is_empty());
-        assert!(!has_more);
     }
 }

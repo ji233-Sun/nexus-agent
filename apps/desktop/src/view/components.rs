@@ -252,9 +252,7 @@ pub(super) fn matches_search(text: &str, query: &str) -> bool {
 }
 
 pub(super) fn can_send_prompt(model: &crate::model::AppModel, prompt: &str) -> bool {
-    (model.can_submit() || model.can_queue())
-        && model.selected_codex_thread.is_none()
-        && !prompt.trim().is_empty()
+    (model.can_submit() || model.can_queue()) && !prompt.trim().is_empty()
 }
 
 impl NexusView {
@@ -266,30 +264,6 @@ impl NexusView {
     ) -> AnyElement {
         self.message_card(
             message.id,
-            message.role,
-            &message.content,
-            message.kind,
-            window,
-            cx,
-        )
-    }
-
-    pub(super) fn render_history_message(
-        &self,
-        index: usize,
-        message: &HistoryMessage,
-        window: &mut Window,
-        cx: &mut Context<NexusView>,
-    ) -> AnyElement {
-        self.message_card(
-            SharedString::from(format!(
-                "history-{}-{index}",
-                self.presenter
-                    .model()
-                    .selected_codex_thread
-                    .as_deref()
-                    .unwrap_or_default()
-            )),
             message.role,
             &message.content,
             message.kind,
@@ -880,9 +854,6 @@ mod tests {
         for prompt in ["", "  ", "\n\t", "\u{3000}"] {
             assert!(!can_send_prompt(&model, prompt));
         }
-        model.selected_codex_thread = Some("read-only-thread".into());
-        assert!(!can_send_prompt(&model, "检查当前项目"));
-        model.selected_codex_thread = None;
         model.active_run = Some(Uuid::new_v4());
         assert!(!can_send_prompt(&model, "检查当前项目"));
         model.active_task = Some(Uuid::new_v4());

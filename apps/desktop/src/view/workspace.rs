@@ -564,7 +564,7 @@ impl NexusView {
             .items_center()
             .gap_2()
             .text_size(px(12.));
-        if model.selected_project.is_none() || model.selected_codex_thread.is_some() {
+        if model.selected_project.is_none() {
             return row;
         }
         if creating {
@@ -755,11 +755,7 @@ impl NexusView {
             .as_ref()
             .is_some_and(|workspace| workspace.status != WorkspaceStatus::Ready);
         let hints = div();
-        if model.selected_project.is_none()
-            || model.selected_codex_thread.is_some()
-            || creating
-            || !unavailable
-        {
+        if model.selected_project.is_none() || creating || !unavailable {
             return hints;
         }
         hints

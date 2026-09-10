@@ -8,13 +8,8 @@ use std::{
 
 use super::*;
 use crate::{
-    infrastructure::{
-        codex_history::Event as HistoryEvent, credentials::CredentialStore, storage::NewTaskRun,
-    },
-    model::{
-        UserAskSubmissionState,
-        history::{HistoryMessage, ThreadSummary},
-    },
+    infrastructure::{credentials::CredentialStore, storage::NewTaskRun},
+    model::UserAskSubmissionState,
 };
 use nexus_domain::{
     MessageKind, MessageRole, ModelDescriptor, ModelReasoningEffort, RunStatus, UserAskAnswer,
@@ -2032,16 +2027,15 @@ fn catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
     assert_eq!(models[0].id, "codex-current");
     assert_eq!(presenter.model().status_text(), task_status);
 
-    // Claude exercises the shared readiness state without starting a Codex history client.
-    assert!(presenter.select_harness(HarnessKind::Claude, "codex"));
+    assert!(presenter.refresh_model_catalog());
     let request_id = current_catalog_request_id(&presenter);
     runner.emit(Event::HarnessDetected(HarnessProbe {
         available: false,
-        ..ready_probe(HarnessKind::Claude)
+        ..ready_probe(HarnessKind::Codex)
     }));
     runner.emit(Event::ModelCatalogFailed {
         request_id,
-        harness: HarnessKind::Claude,
+        harness: HarnessKind::Codex,
         message: "late catalog failure".into(),
     });
     presenter.drain_events();
@@ -2049,7 +2043,7 @@ fn catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
         presenter.model().model_catalog,
         ModelCatalogState::NotReady(_)
     ));
-    runner.emit(Event::HarnessDetected(ready_probe(HarnessKind::Claude)));
+    runner.emit(Event::HarnessDetected(ready_probe(HarnessKind::Codex)));
     presenter.drain_events();
     assert_ne!(current_catalog_request_id(&presenter), request_id);
 }
@@ -3934,14 +3928,9 @@ fn active_run_locks_configuration_and_cancels_the_matching_run() {
     assert!(!presenter.select_harness(HarnessKind::Codex, "claude"));
     assert!(!presenter.select_model_configuration(HarnessKind::Codex, None, "claude"));
     presenter.new_task();
-    presenter.select_codex_thread("history".into());
     assert!(presenter.model().model_override.is_none());
     assert_eq!(presenter.model().effort, ThinkingEffort::Default);
     assert!(presenter.model().selected_task.is_none());
-    assert_eq!(
-        presenter.model().selected_codex_thread.as_deref(),
-        Some("history")
-    );
     assert_eq!(presenter.model().active_run_count(), 1);
     presenter.select_task(task_id.unwrap());
     presenter.cancel();
@@ -5192,76 +5181,6 @@ fn working_directory_follows_project_and_task_selection_during_background_runs()
     assert_eq!(
         presenter.model().working_directory(),
         Some(second_project.canonical_path.as_str())
-    );
-}
-
-#[test]
-fn history_responses_only_update_the_selected_thread() {
-    let (mut presenter, _, _directory) = fixture();
-    let local_path = presenter.model().working_directory().unwrap().to_owned();
-    let history_path = Path::new(&local_path)
-        .join("Codex 历史")
-        .display()
-        .to_string();
-    presenter.handle_codex_history_event(HistoryEvent::ThreadsLoaded(Ok(vec![ThreadSummary {
-        id: "selected".into(),
-        title: "history".into(),
-        cwd: history_path.clone(),
-        source: "cli".into(),
-        updated_at: 0,
-        archived: false,
-    }])));
-    presenter.select_codex_thread("selected".into());
-    assert_eq!(
-        presenter.model().working_directory(),
-        Some(history_path.as_str())
-    );
-    presenter.model.codex_thread_loading = true;
-    presenter.handle_codex_history_event(HistoryEvent::ThreadLoaded {
-        thread_id: "previous".into(),
-        result: Err("stale error".into()),
-    });
-    assert!(presenter.model().codex_thread_loading);
-    assert!(presenter.model().codex_history_messages.is_empty());
-    assert_eq!(
-        presenter.model().working_directory(),
-        Some(history_path.as_str())
-    );
-    let message = HistoryMessage {
-        role: MessageRole::Assistant,
-        kind: MessageKind::Text,
-        content: "history".into(),
-    };
-    presenter.handle_codex_history_event(HistoryEvent::ThreadLoaded {
-        thread_id: "selected".into(),
-        result: Ok(vec![message.clone()]),
-    });
-    assert!(!presenter.model().codex_thread_loading);
-    assert_eq!(presenter.model().codex_history_messages, vec![message]);
-    presenter.handle_codex_history_event(HistoryEvent::ThreadLoaded {
-        thread_id: "selected".into(),
-        result: Err("read failed".into()),
-    });
-    assert_eq!(
-        presenter.model().codex_history_messages[0].kind,
-        MessageKind::Error
-    );
-    assert_eq!(
-        presenter.model().codex_history_messages[0].content,
-        "read failed"
-    );
-    assert_eq!(
-        presenter.model().working_directory(),
-        Some(history_path.as_str())
-    );
-    presenter.model.codex_threads[0].cwd.clear();
-    assert_eq!(presenter.model().working_directory(), None);
-    presenter.select_codex_thread("missing-thread".into());
-    assert_eq!(presenter.model().working_directory(), None);
-    presenter.new_task();
-    assert_eq!(
-        presenter.model().working_directory(),
-        Some(local_path.as_str())
     );
 }
 

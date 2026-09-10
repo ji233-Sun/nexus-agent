@@ -228,7 +228,7 @@ apps/
     model/             # MVP 状态与数据
     presenter/         # 用户操作、事件处理和持久化协调
     view/              # GPUI 渲染与控件
-    infrastructure/    # SQLite、RunnerClient、Codex 历史、Git 状态
+    infrastructure/    # SQLite、RunnerClient、Git 状态
   desktop/tests/       # 内置 Runner 协议集成测试
   runner/src/
     main.rs            # 调用库入口
