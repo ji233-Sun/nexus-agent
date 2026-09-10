@@ -44,7 +44,7 @@ pub fn prepare_run(run: &StartRun, cwd: &Path) -> (LaunchSpec, Box<dyn LineDecod
             stdin: format!("{initialize}\n"),
         },
         Box::new(StreamDecoder {
-            inner: Default::default(),
+            inner: nexus_harness_claude::EventDecoder::for_harness(run.harness),
             prompt: Some(run.prompt.clone()),
             permission: run.permission_mode,
             qoder,
@@ -223,7 +223,28 @@ mod tests {
                 "run_id":uuid::Uuid::new_v4(),"task_id":uuid::Uuid::new_v4(),"cwd":"/tmp","prompt":"hello","permission_mode":"ask","effort":ThinkingEffort::Off,
                 "harness":harness,"executable":harness.default_executable()
             })).unwrap();
-            let (spec, _) = prepare_run(&run, Path::new("/tmp"));
+            let (spec, mut decoder) = prepare_run(&run, Path::new("/tmp"));
+            assert_eq!(spec.executable, Path::new(harness.default_executable()));
+            assert_eq!(
+                decoder
+                    .decode_line(
+                        r#"{"type":"system","subtype":"init","session_id":"native-session"}"#
+                    )
+                    .unwrap(),
+                vec![
+                    DecodedEvent::SessionStarted("native-session".into()),
+                    DecodedEvent::Status(format!("{harness}: init"))
+                ],
+            );
+            assert_eq!(
+                decoder
+                    .decode_line(r#"{"type":"result","is_error":true}"#)
+                    .unwrap(),
+                vec![
+                    DecodedEvent::Error(format!("{harness} 轮次执行失败。")),
+                    DecodedEvent::TurnCompleted
+                ],
+            );
             if harness == HarnessKind::Codebuddy {
                 assert!(
                     spec.args

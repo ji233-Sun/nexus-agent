@@ -225,7 +225,7 @@ pub(crate) fn prepare_text_generation(
                     args,
                     stdin: prompt.into(),
                 },
-                Box::new(claude::EventDecoder::default()),
+                Box::new(claude::EventDecoder::for_harness(request.harness)),
             )
         }
         HarnessKind::Pi => {
