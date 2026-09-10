@@ -1337,6 +1337,165 @@ fn appearance_preferences_restore_and_accept_missing_or_invalid_settings() {
 }
 
 #[test]
+fn project_deletion_clears_selected_and_cached_state_and_preserves_worktree_files() {
+    use crate::infrastructure::git;
+    let (mut presenter, runner, _directory, start) = worktree_fixture("Keep my worktree");
+    let project = presenter.model.selected_project.clone().unwrap();
+    let workspace = presenter.model.selected_workspace.clone().unwrap();
+    let repository = Path::new(&project.canonical_path);
+    let worktree = Path::new(&workspace.path);
+    fs::write(repository.join("tracked.txt"), "project edits\n").unwrap();
+    fs::write(worktree.join("tracked.txt"), "worktree edits\n").unwrap();
+    fs::write(worktree.join("untracked.txt"), "untracked work\n").unwrap();
+    let worktrees = git::git(repository, &["worktree", "list", "--porcelain"]).unwrap();
+    let branches = git::git(repository, &["show-ref", "--heads"]).unwrap();
+    runner.emit(Event::RunExited {
+        run_id: start.run_id,
+        status: RunStatus::Completed,
+        exit_code: Some(0),
+    });
+    presenter.drain_events();
+    presenter
+        .model
+        .queued_messages
+        .push_back(crate::model::QueuedMessage {
+            id: Uuid::new_v4(),
+            task_id: start.task_id,
+            prompt: "unsent follow-up".into(),
+            permission_mode: PermissionMode::AutoEdit,
+        });
+    assert!(presenter.archive_task(start.task_id));
+    seed_cnb_issues(&mut presenter);
+    presenter.open_cnb();
+    assert!(presenter.model.cnb.opened);
+    assert!(presenter.model.all_conversations().any(|conversation| {
+        conversation.selected_task == Some(start.task_id)
+            && !conversation.queued_messages.is_empty()
+    }));
+
+    assert!(presenter.delete_project(project.id));
+    assert!(presenter.model.selected_project.is_none());
+    assert!(presenter.model.selected_task.is_none());
+    assert!(presenter.model.selected_workspace.is_none());
+    assert!(presenter.model.workspaces.is_empty());
+    assert!(presenter.model.messages.is_empty());
+    assert!(presenter.model.tasks.is_empty());
+    assert!(presenter.model.archived_tasks.is_empty());
+    assert!(presenter.model.queued_messages.is_empty());
+    assert!(!presenter.model.project_is_git);
+    assert!(matches!(
+        presenter.model.model_catalog,
+        ModelCatalogState::Idle
+    ));
+    assert!(!presenter.model.cnb.opened);
+    assert!(presenter.model.cnb.repository.is_none());
+    assert!(presenter.model.all_conversations().all(|conversation| {
+        conversation
+            .selected_project
+            .as_ref()
+            .is_none_or(|item| item.id != project.id)
+    }));
+    assert!(presenter.storage.workspace(workspace.id).unwrap().is_none());
+    let remote = presenter.remote_state();
+    assert!(remote.projects.iter().all(|item| item.id != project.id));
+    assert!(
+        remote
+            .tasks
+            .iter()
+            .all(|task| task.project_id != project.id)
+    );
+    assert!(remote.selected_project_id.is_none());
+    assert_eq!(
+        fs::read_to_string(repository.join("tracked.txt")).unwrap(),
+        "project edits\n"
+    );
+    assert_eq!(
+        fs::read_to_string(worktree.join("tracked.txt")).unwrap(),
+        "worktree edits\n"
+    );
+    assert_eq!(
+        fs::read_to_string(worktree.join("untracked.txt")).unwrap(),
+        "untracked work\n"
+    );
+    assert_eq!(
+        git::git(repository, &["worktree", "list", "--porcelain"]).unwrap(),
+        worktrees
+    );
+    assert_eq!(
+        git::git(repository, &["show-ref", "--heads"]).unwrap(),
+        branches
+    );
+}
+
+#[test]
+fn project_deletion_guards_background_runs_and_preserves_other_conversations() {
+    let (mut presenter, runner, _directory) = fixture();
+    let project = presenter.model.selected_project.clone().unwrap();
+    assert!(presenter.submit("background task", "claude"));
+    let start = last_start(&runner);
+    assert!(!presenter.can_delete_project(project.id));
+    let other_dir = tempfile::tempdir().unwrap();
+    presenter.open_project(other_dir.path());
+    let other = presenter.model.selected_project.clone().unwrap();
+    assert!(presenter.submit("keep running", "claude"));
+    let other_start = last_start(&runner);
+    let selected_conversation = presenter.model.conversation.id;
+    assert!(!presenter.delete_project(project.id));
+    assert!(presenter.storage.project(project.id).unwrap().is_some());
+    runner.emit(Event::RunExited {
+        run_id: start.run_id,
+        status: RunStatus::Completed,
+        exit_code: Some(0),
+    });
+    presenter.drain_events();
+    presenter.model.workspace_busy = true;
+    assert!(!presenter.delete_project(project.id));
+    presenter.model.workspace_busy = false;
+    assert!(presenter.can_delete_project(project.id));
+    assert!(presenter.delete_project(project.id));
+    assert_eq!(presenter.model.conversation.id, selected_conversation);
+    assert_eq!(
+        presenter.model.selected_project.as_ref().unwrap().id,
+        other.id
+    );
+    assert_eq!(presenter.model.active_run, Some(other_start.run_id));
+    assert_eq!(presenter.model.selected_task, Some(other_start.task_id));
+    assert_eq!(presenter.model.messages[0].content, "keep running");
+    assert_eq!(presenter.model.active_run_count(), 1);
+    assert!(presenter.model.conversations.values().all(|conversation| {
+        conversation
+            .selected_project
+            .as_ref()
+            .is_none_or(|item| item.id != project.id)
+    }));
+}
+
+#[test]
+fn project_deletion_waits_for_pending_workspace_start_but_allows_failed_retry() {
+    use crate::model::workspace::PendingWorkspaceStart;
+    let (mut presenter, _runner, _directory) = fixture();
+    let project = presenter.model.selected_project.clone().unwrap();
+    presenter.model.pending_workspace_start = Some(PendingWorkspaceStart {
+        context_id: presenter.model.conversation.id,
+        prompt: "pending worktree".into(),
+        executable: "claude".into(),
+        permission: PermissionMode::AutoEdit,
+    });
+    let pending = presenter.model.conversation.id;
+    presenter.new_task();
+    assert!(!presenter.delete_project(project.id));
+    presenter
+        .model
+        .conversations
+        .get_mut(&pending)
+        .unwrap()
+        .workspace_retry = true;
+    assert!(presenter.delete_project(project.id));
+    assert!(presenter.model.pending_workspace_start.is_none());
+    assert!(presenter.model.conversations.is_empty());
+}
+
+#[test]
 fn conversation_actions_keep_active_and_archived_models_in_sync() {
     let (mut presenter, _runner, _directory) = fixture();
     let project = presenter.model().selected_project.clone().unwrap();

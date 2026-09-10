@@ -92,6 +92,8 @@ impl NexusView {
                 let project_id = project.id;
                 let project = project.clone();
                 let new_task_project = project.clone();
+                let can_delete = self.presenter.can_delete_project(project_id);
+                let reduced_motion = self.reduced_motion;
                 let tasks: Vec<_> = model
                     .tasks
                     .iter()
@@ -203,6 +205,7 @@ impl NexusView {
                             Some(IconName::Folder),
                         )
                         .group("sidebar-project")
+                        .pr(px(70.))
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .debug_selector(move || format!("sidebar-project-{project_id}"))
                         .on_click(cx.listener(move |app, _, _, cx| {
@@ -218,11 +221,14 @@ impl NexusView {
                             let app = cx.entity();
                             move |_, _| {
                                 let app = app.clone();
+                                let delete_app = app.clone();
                                 let project = new_task_project.clone();
                                 div()
                                     .absolute()
                                     .right(px(2.))
                                     .top(px((SIDEBAR_ROW_HEIGHT - COMPACT_CONTROL_HEIGHT) / 2.))
+                                    .flex()
+                                    .items_center()
                                     .invisible()
                                     .group_hover("sidebar-project", |style| style.visible())
                                     .child(
@@ -258,6 +264,39 @@ impl NexusView {
                                                     app.new_task(window, cx);
                                                 });
                                             }),
+                                    )
+                                    .child(
+                                        AnimatedDropdown::new(
+                                            (ElementId::from(project_id), "actions-menu"),
+                                            Button::new((ElementId::from(project_id), "actions"))
+                                                .debug_selector(move || {
+                                                    format!("project-actions-{project_id}")
+                                                })
+                                                .ghost()
+                                                .small()
+                                                .size(px(COMPACT_CONTROL_HEIGHT))
+                                                .p_0()
+                                                .icon(IconName::Ellipsis)
+                                                .accessibility_label(locale.text("项目操作"))
+                                                .tooltip(locale.text("项目操作"))
+                                                .disabled(!can_delete),
+                                            reduced_motion,
+                                            move |menu, _, _| {
+                                                let delete_app = delete_app.clone();
+                                                menu.min_w(px(144.)).item(
+                                                    PopupMenuItem::new(locale.text("删除项目"))
+                                                        .icon(IconName::Delete)
+                                                        .on_click(move |_, window, cx| {
+                                                            delete_app.update(cx, |app, cx| {
+                                                                app.confirm_delete_project(
+                                                                    project_id, window, cx,
+                                                                )
+                                                            });
+                                                        }),
+                                                )
+                                            },
+                                        )
+                                        .show_caret(false),
                                     )
                             }
                         }),
@@ -1009,6 +1048,65 @@ mod tests {
                     .any(|task| task.id == task_id)
             );
         });
+    }
+
+    #[gpui::test]
+    fn project_deletion_menu_requires_confirmation_and_preserves_selection_on_cancel(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, cx) = scroll_test_view(cx);
+        let (project, task_id) = view.read_with(cx, |view, _| {
+            (
+                view.presenter.model().selected_project.clone().unwrap(),
+                view.presenter.model().selected_task,
+            )
+        });
+        let project_selector = format!("sidebar-project-{}", project.id).leak();
+        let actions_selector = format!("project-actions-{}", project.id).leak();
+        let bounds = cx.debug_bounds(project_selector).unwrap();
+        cx.simulate_mouse_move(bounds.center(), None, Default::default());
+        let actions = cx.debug_bounds(actions_selector).unwrap().center();
+        cx.simulate_click(actions, Default::default());
+        cx.update(|window, cx| {
+            window.refresh();
+            let _ = window.draw(cx);
+        });
+        let menu = cx.debug_bounds("animated-menu-surface").unwrap().center();
+        cx.simulate_mouse_move(menu, None, Default::default());
+        cx.simulate_click(menu, Default::default());
+        let (message, detail) = cx.pending_prompt().unwrap();
+        assert_eq!(message, format!("删除项目“{}”？", project.display_name));
+        assert!(detail.contains("含归档"));
+        assert!(detail.contains("无法撤销"));
+        assert!(detail.contains("Worktree、文件和 Git 分支不会删除"));
+        cx.simulate_prompt_answer("取消");
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.presenter.model().selected_task, task_id);
+            assert!(!view.collapsed_projects.contains(&project.id));
+            assert_eq!(view.presenter.model().projects.len(), 1);
+        });
+
+        view.update_in(cx, |view, window, cx| {
+            view.set_language(Language::English, window, cx);
+            view.confirm_delete_project(project.id, window, cx);
+        });
+        let (message, detail) = cx.pending_prompt().unwrap();
+        assert_eq!(
+            message,
+            format!("Delete project “{}”?", project.display_name)
+        );
+        assert!(detail.contains("files, and Git branches on disk will be kept"));
+        cx.simulate_prompt_answer("Delete project");
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert!(view.presenter.model().projects.is_empty());
+            assert!(view.presenter.model().selected_project.is_none());
+            assert!(view.presenter.model().selected_task.is_none());
+            assert!(view.presenter.model().messages.is_empty());
+        });
+        assert!(cx.debug_bounds(project_selector).is_none());
+        assert!(cx.debug_bounds("add-project").is_some());
     }
 
     #[gpui::test]

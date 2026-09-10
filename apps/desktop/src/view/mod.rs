@@ -698,6 +698,69 @@ impl NexusView {
         self.presenter.notify_remote_changed();
     }
 
+    fn confirm_delete_project(
+        &mut self,
+        project_id: Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.presenter.can_delete_project(project_id) {
+            return;
+        }
+        let model = self.presenter.model();
+        let Some(project) = model
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+        else {
+            return;
+        };
+        let locale = model.language;
+        let message = locale.format(
+            "删除项目“{title}”？",
+            &[("title", project.display_name.clone())],
+        );
+        let answer = window.prompt(
+            PromptLevel::Critical,
+            &message,
+            Some(locale.text(
+                "此操作会永久删除 Nexus 中该项目的全部对话（含归档）、消息、运行和工作区记录，且无法撤销。磁盘上的项目目录、Worktree、文件和 Git 分支不会删除。",
+            )),
+            &[
+                PromptButton::ok(locale.text("删除项目")),
+                PromptButton::cancel(locale.text("取消")),
+            ],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await.ok() == Some(0) {
+                let _ = this.update_in(cx, |app, window, cx| {
+                    app.delete_project(project_id, window, cx)
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn delete_project(&mut self, project_id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        let selected = self
+            .presenter
+            .model()
+            .selected_project
+            .as_ref()
+            .is_some_and(|project| project.id == project_id);
+        if self.presenter.delete_project(project_id) {
+            self.collapsed_projects.remove(&project_id);
+            if selected {
+                self.expanded_messages.clear();
+                self.timeline_scroll.scroll_to_bottom();
+                self.focus_handle.focus(window, cx);
+            }
+        }
+        self.presenter.notify_remote_changed();
+        cx.notify();
+    }
+
     fn select_task(&mut self, task_id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
         self.presenter.select_task(task_id);
         self.expanded_messages.clear();

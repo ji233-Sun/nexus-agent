@@ -310,6 +310,31 @@ impl Storage {
             .map_err(Into::into)
     }
 
+    pub(crate) fn delete_project(&mut self, project_id: Uuid) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        let id = project_id.to_string();
+        transaction.execute(
+            "DELETE FROM messages WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?1)",
+            [&id],
+        )?;
+        transaction.execute(
+            "DELETE FROM runs WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?1)",
+            [&id],
+        )?;
+        transaction.execute("DELETE FROM tasks WHERE project_id = ?1", [&id])?;
+        // Forget workspace ownership without touching directories or Git branches.
+        transaction.execute("DELETE FROM workspaces WHERE project_id = ?1", [&id])?;
+        transaction.execute(
+            "DELETE FROM settings WHERE key = ?1",
+            [format!("workspace_mode:{project_id}")],
+        )?;
+        if transaction.execute("DELETE FROM projects WHERE id = ?1", [&id])? != 1 {
+            return Err(anyhow!("项目不存在"));
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn tasks(&self, project_id: Uuid) -> Result<Vec<TaskSummary>> {
         let mut statement = self.connection.prepare(
             "SELECT id, project_id, title, status, created_at
@@ -1106,6 +1131,104 @@ mod tests {
         assert_eq!(storage.delete_archived_tasks().unwrap(), 1);
         assert!(storage.archived_tasks().unwrap().is_empty());
         assert!(storage.tasks(project.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn project_deletion_is_atomic_persistent_and_scoped_to_its_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("nexus.db");
+        let project_dir = directory.path().join("project");
+        let other_dir = directory.path().join("other");
+        fs::create_dir(&project_dir).unwrap();
+        fs::create_dir(&other_dir).unwrap();
+        fs::write(project_dir.join("keep.txt"), "local changes").unwrap();
+        let mut storage = Storage::open(&database).unwrap();
+        let project = storage.open_project(&project_dir).unwrap();
+        let other = storage.open_project(&other_dir).unwrap();
+        let workspace_mode = format!("workspace_mode:{}", project.id);
+        storage.set_setting(&workspace_mode, "worktree").unwrap();
+        storage.set_setting("language", "en").unwrap();
+        let tasks = [project.id, project.id, other.id].map(|project_id| {
+            storage
+                .create_task_run(NewTaskRun {
+                    task_id: None,
+                    workspace_id: None,
+                    project_id,
+                    title: "Conversation",
+                    prompt: "Saved message",
+                    harness: HarnessKind::Claude,
+                    executable: "claude",
+                    model: None,
+                    effort: ThinkingEffort::Default,
+                    permission_mode: PermissionMode::AutoEdit,
+                    harness_version: None,
+                })
+                .unwrap()
+                .0
+        });
+        storage.archive_task(tasks[0]).unwrap();
+
+        storage
+            .connection
+            .execute_batch(
+                "CREATE TEMP TRIGGER reject_project_delete BEFORE DELETE ON projects
+                 BEGIN SELECT RAISE(ABORT, 'test deletion failure'); END;",
+            )
+            .unwrap();
+        assert!(storage.delete_project(project.id).is_err());
+        assert!(storage.project(project.id).unwrap().is_some());
+        assert_eq!(storage.tasks(project.id).unwrap()[0].id, tasks[1]);
+        assert_eq!(storage.archived_tasks().unwrap()[0].id, tasks[0]);
+        for task_id in tasks {
+            assert_eq!(
+                storage.messages(task_id).unwrap()[0].content,
+                "Saved message"
+            );
+            assert!(storage.conversation_config(task_id).unwrap().is_some());
+            assert!(storage.task_workspace(task_id).unwrap().is_some());
+        }
+        assert_eq!(
+            storage.setting(&workspace_mode).unwrap().as_deref(),
+            Some("worktree")
+        );
+        storage
+            .connection
+            .execute_batch("DROP TRIGGER reject_project_delete;")
+            .unwrap();
+
+        storage.delete_project(project.id).unwrap();
+        drop(storage);
+        let mut storage = Storage::open(&database).unwrap();
+        assert!(storage.project(project.id).unwrap().is_none());
+        assert_eq!(storage.projects().unwrap()[0].id, other.id);
+        assert_eq!(storage.projects().unwrap().len(), 1);
+        assert!(storage.tasks(project.id).unwrap().is_empty());
+        assert!(storage.archived_tasks().unwrap().is_empty());
+        assert!(storage.workspaces(project.id).unwrap().is_empty());
+        assert!(storage.setting(&workspace_mode).unwrap().is_none());
+        for task_id in &tasks[..2] {
+            assert!(storage.messages(*task_id).unwrap().is_empty());
+            assert!(storage.conversation_config(*task_id).unwrap().is_none());
+        }
+        assert_eq!(storage.tasks(other.id).unwrap()[0].id, tasks[2]);
+        assert_eq!(
+            storage.messages(tasks[2]).unwrap()[0].content,
+            "Saved message"
+        );
+        assert!(storage.conversation_config(tasks[2]).unwrap().is_some());
+        assert!(storage.task_workspace(tasks[2]).unwrap().is_some());
+        assert_eq!(storage.setting("language").unwrap().as_deref(), Some("en"));
+        assert_eq!(
+            fs::read_to_string(project_dir.join("keep.txt")).unwrap(),
+            "local changes"
+        );
+
+        assert!(storage.delete_project(project.id).is_err());
+        let reopened = storage.open_project(&project_dir).unwrap();
+        assert_ne!(reopened.id, project.id);
+        assert!(storage.tasks(reopened.id).unwrap().is_empty());
+        storage.delete_project(reopened.id).unwrap();
+        assert_eq!(storage.projects().unwrap().len(), 1);
     }
 
     #[test]
