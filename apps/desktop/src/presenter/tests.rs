@@ -1567,7 +1567,15 @@ fn project_deletion_clears_selected_and_cached_state_and_preserves_worktree_file
     assert!(presenter.delete_project(project.id));
     assert!(presenter.model.selected_project.is_none());
     assert!(presenter.model.selected_task.is_none());
-    assert!(presenter.model.selected_workspace.is_none());
+    assert!(
+        presenter
+            .model
+            .selected_workspace
+            .as_ref()
+            .unwrap()
+            .project_id
+            .is_none()
+    );
     assert!(presenter.model.workspaces.is_empty());
     assert!(presenter.model.messages.is_empty());
     assert!(presenter.model.tasks.is_empty());
@@ -1576,7 +1584,7 @@ fn project_deletion_clears_selected_and_cached_state_and_preserves_worktree_file
     assert!(!presenter.model.project_is_git);
     assert!(matches!(
         presenter.model.model_catalog,
-        ModelCatalogState::Idle
+        ModelCatalogState::Loading { .. }
     ));
     assert!(!presenter.model.cnb.opened);
     assert!(presenter.model.cnb.repository.is_none());
@@ -1593,7 +1601,7 @@ fn project_deletion_clears_selected_and_cached_state_and_preserves_worktree_file
         remote
             .tasks
             .iter()
-            .all(|task| task.project_id != project.id)
+            .all(|task| task.project_id != Some(project.id))
     );
     assert!(remote.selected_project_id.is_none());
     assert_eq!(
@@ -1697,7 +1705,7 @@ fn conversation_actions_keep_active_and_archived_models_in_sync() {
                 workspace_id: None,
                 permission_mode: nexus_domain::PermissionMode::AutoEdit,
                 task_id: None,
-                project_id: project.id,
+                project_id: Some(project.id),
                 title,
                 prompt: title,
                 harness: HarnessKind::Claude,
@@ -1924,7 +1932,7 @@ fn archived_project_fixture() -> ArchivedProjectFixture {
             workspace_id: None,
             permission_mode: nexus_domain::PermissionMode::AutoEdit,
             task_id: None,
-            project_id: archived_project.id,
+            project_id: Some(archived_project.id),
             title: "Archived conversation",
             prompt: "Archived conversation",
             harness: HarnessKind::Claude,
@@ -1947,7 +1955,7 @@ fn archived_project_fixture() -> ArchivedProjectFixture {
                     workspace_id: None,
                     permission_mode: nexus_domain::PermissionMode::AutoEdit,
                     task_id: None,
-                    project_id: project.id,
+                    project_id: Some(project.id),
                     title: "Selected conversation",
                     prompt: "Selected conversation",
                     harness: HarnessKind::Claude,
@@ -2419,7 +2427,7 @@ fn startup_restores_preferences_and_probes_all_harnesses() {
     assert_eq!(presenter.model().permission_mode, PermissionMode::Yolo);
     assert_eq!(presenter.model().executable, "/custom/codex");
     let state = runner.0.borrow();
-    assert_eq!(state.commands.len(), HarnessKind::ALL.len() + 1);
+    assert_eq!(state.commands.len(), HarnessKind::ALL.len() + 2);
     assert!(matches!(state.commands[0].command, Command::RunnerHello));
     assert!(state.commands.iter().any(|command| matches!(&command.command,
         Command::HarnessProbe { harness: HarnessKind::Codex, executable, .. } if executable == "/custom/codex")));
@@ -2632,7 +2640,7 @@ fn invalid_submissions_never_create_tasks_or_send_commands() {
         presenter
             .model()
             .latest_log_text(presenter.model().language),
-        "请先选择项目目录。"
+        "任务缺少绑定目录"
     );
     presenter.model.selected_project = Some(project.clone());
     assert!(!presenter.submit(" \n ", "claude"));
@@ -2658,6 +2666,171 @@ fn invalid_submissions_never_create_tasks_or_send_commands() {
     assert!(runner.0.borrow().commands.is_empty());
     assert!(presenter.model.active_run_started_at.is_none());
     assert!(presenter.model().active_run_elapsed_seconds.is_none());
+}
+
+#[test]
+fn projectless_chat_discovers_models_saves_history_and_resumes_after_restart() {
+    for harness in [HarnessKind::Claude, HarnessKind::Codex] {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("nexus.db");
+        let storage = Storage::open(&database).unwrap();
+        storage
+            .set_setting("default_harness", harness.as_str())
+            .unwrap();
+        let runner = FakeRunner::default();
+        let mut presenter = Presenter::new(storage, Ok(Box::new(runner.clone())), None);
+        assert!(presenter.model.projects.is_empty());
+        assert!(presenter.model.selected_project.is_none());
+        assert!(!presenter.model.can_submit());
+        let cwd = presenter.model.working_directory().unwrap().to_owned();
+        assert!(Path::new(&cwd).is_dir());
+        assert!(
+            Path::new(&cwd).starts_with(directory.path().canonicalize().unwrap().join("sessions"))
+        );
+        assert!(runner.0.borrow().commands.iter().any(|command| matches!(
+            &command.command, Command::ModelCatalogRefresh { cwd: catalog_cwd, .. } if catalog_cwd == &cwd
+        )));
+        runner.emit(Event::HarnessDetected(ready_probe(harness)));
+        emit_current_catalog(&presenter, &runner, claude_aliases());
+        presenter.drain_events();
+        assert!(presenter.model.can_submit());
+        runner.0.borrow_mut().fail_send = true;
+        assert!(!presenter.submit("你好", harness.default_executable()));
+        assert!(presenter.storage.tasks(None).unwrap().is_empty());
+        assert!(presenter.model.messages.is_empty());
+        runner.0.borrow_mut().fail_send = false;
+        assert!(presenter.submit("你好", harness.default_executable()));
+        let start = last_start(&runner);
+        assert_eq!(start.cwd, cwd);
+        assert_eq!(start.prompt, "你好");
+        assert!(start.session_id.is_none());
+        assert_eq!(presenter.model.projectless_tasks[0].id, start.task_id);
+        assert!(presenter.model.tasks[0].project_id.is_none());
+        assert!(presenter.storage.projects().unwrap().is_empty());
+        fs::write(Path::new(&cwd).join("conversation.txt"), "saved context").unwrap();
+        runner.emit(Event::RunSessionStarted {
+            run_id: start.run_id,
+            session_id: "projectless-session".into(),
+        });
+        runner.emit(Event::RunOutputDelta {
+            run_id: start.run_id,
+            text: "你好！".into(),
+        });
+        runner.emit(Event::RunMessageCompleted {
+            run_id: start.run_id,
+            text: "你好！".into(),
+        });
+        runner.emit(Event::RunExited {
+            run_id: start.run_id,
+            status: RunStatus::Completed,
+            exit_code: Some(0),
+        });
+        presenter.drain_events();
+        drop(presenter);
+
+        let mut presenter = Presenter::new(
+            Storage::open(&database).unwrap(),
+            Ok(Box::new(runner.clone())),
+            None,
+        );
+        assert!(presenter.model.projects.is_empty());
+        assert_eq!(presenter.model.projectless_tasks[0].id, start.task_id);
+        assert!(presenter.archive_task(start.task_id));
+        assert!(presenter.model.projectless_tasks.is_empty());
+        assert!(presenter.model.archived_tasks[0].project_id.is_none());
+        assert!(presenter.restore_task(start.task_id));
+        presenter.select_task(start.task_id);
+        assert!(presenter.model.selected_project.is_none());
+        assert_eq!(presenter.model.working_directory(), Some(cwd.as_str()));
+        assert_eq!(
+            presenter
+                .model
+                .messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            ["你好", "你好！"]
+        );
+        assert_eq!(
+            fs::read_to_string(Path::new(&cwd).join("conversation.txt")).unwrap(),
+            "saved context"
+        );
+        runner.emit(Event::HarnessDetected(ready_probe(harness)));
+        emit_current_catalog(&presenter, &runner, claude_aliases());
+        presenter.drain_events();
+        assert!(presenter.model.can_submit());
+        assert!(presenter.submit("继续", harness.default_executable()));
+        let resumed = last_start(&runner);
+        assert_eq!(resumed.task_id, start.task_id);
+        assert_eq!(resumed.cwd, cwd);
+        assert_eq!(resumed.session_id.as_deref(), Some("projectless-session"));
+    }
+}
+
+#[test]
+fn projectless_tasks_isolate_directories_and_preserve_project_context_when_switching() {
+    let (mut presenter, runner, directory) = fixture();
+    let project = presenter.model.selected_project.clone().unwrap();
+    assert!(presenter.submit("project task", "claude"));
+    let project_start = last_start(&runner);
+    presenter.new_projectless_task();
+    emit_current_catalog(&presenter, &runner, claude_aliases());
+    presenter.drain_events();
+    assert!(presenter.model.can_submit());
+    assert!(presenter.model.selected_project.is_none());
+    assert!(presenter.submit("independent chat", "claude"));
+    let first = last_start(&runner);
+    assert_ne!(first.cwd, project.canonical_path);
+    assert!(!Path::new(&first.cwd).starts_with(directory.path()));
+    assert!(presenter.model.projectless_tasks[0].project_id.is_none());
+    runner.emit(Event::RunSessionStarted {
+        run_id: first.run_id,
+        session_id: "independent-session".into(),
+    });
+    runner.emit(Event::RunExited {
+        run_id: first.run_id,
+        status: RunStatus::Completed,
+        exit_code: Some(0),
+    });
+    presenter.drain_events();
+    presenter.new_task();
+    let second_cwd = presenter.model.working_directory().unwrap().to_owned();
+    assert_ne!(second_cwd, first.cwd);
+    assert_ne!(second_cwd, project.canonical_path);
+    assert!(presenter.submit("another chat", "claude"));
+    let second = last_start(&runner);
+    assert_eq!(second.cwd, second_cwd);
+    assert_ne!(second.task_id, first.task_id);
+    assert!(second.session_id.is_none());
+    presenter.select_task(project_start.task_id);
+    assert_eq!(
+        presenter.model.selected_project.as_ref().unwrap().id,
+        project.id
+    );
+    assert_eq!(
+        presenter.model.working_directory(),
+        Some(project.canonical_path.as_str())
+    );
+    assert_eq!(presenter.model.active_run, Some(project_start.run_id));
+    presenter.select_task(first.task_id);
+    assert!(presenter.model.selected_project.is_none());
+    assert_eq!(
+        presenter.model.working_directory(),
+        Some(first.cwd.as_str())
+    );
+    assert_eq!(presenter.model.messages[0].content, "independent chat");
+    runner.emit(Event::RunExited {
+        run_id: second.run_id,
+        status: RunStatus::Completed,
+        exit_code: Some(0),
+    });
+    presenter.drain_events();
+    fs::rename(&first.cwd, format!("{}-missing", first.cwd)).unwrap();
+    assert!(!presenter.submit("must not fall back", "claude"));
+    assert_eq!(last_start(&runner).run_id, second.run_id);
+    assert!(!Path::new(&first.cwd).exists());
+    assert_eq!(presenter.storage.tasks(project.id).unwrap().len(), 1);
+    assert_eq!(presenter.storage.tasks(None).unwrap().len(), 2);
 }
 
 #[test]

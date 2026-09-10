@@ -516,7 +516,7 @@ mod tests {
                 workspace_id: None,
                 permission_mode: nexus_domain::PermissionMode::AutoEdit,
                 task_id: None,
-                project_id: project.id,
+                project_id: Some(project.id),
                 title: "Tool details",
                 prompt: "Check these tools",
                 harness: HarnessKind::Claude,

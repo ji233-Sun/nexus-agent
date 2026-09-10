@@ -931,10 +931,11 @@ impl Presenter {
         {
             return false;
         }
-        let Some(project) = self.model.selected_project.clone() else {
-            self.model.log_status("请先选择项目目录。".into());
-            return false;
-        };
+        let project_id = self
+            .model
+            .selected_project
+            .as_ref()
+            .map(|project| project.id);
         let prompt = prompt.trim().to_owned();
         if prompt.is_empty() {
             self.model.log_status("Prompt 不能为空。".into());
@@ -1029,8 +1030,10 @@ impl Presenter {
             self.storage.task_workspace(task_id)
         } else if let Some(workspace) = &self.model.selected_workspace {
             Ok(Some(workspace.clone()))
+        } else if let Some(project_id) = project_id {
+            self.storage.workspace(project_id)
         } else {
-            self.storage.workspace(project.id)
+            Ok(None)
         };
         let (workspace, checkout) = match workspace.and_then(|workspace| {
             let workspace = workspace.ok_or_else(|| anyhow::anyhow!("任务缺少绑定目录"))?;
@@ -1056,7 +1059,7 @@ impl Presenter {
         let Ok(pending_run) = self.storage.prepare_task_run(NewTaskRun {
             workspace_id: Some(workspace.id),
             task_id,
-            project_id: project.id,
+            project_id,
             title: &title,
             prompt: &prompt,
             harness,
@@ -1072,7 +1075,10 @@ impl Presenter {
         let task_id = pending_run.task_id;
         let run_id = pending_run.run_id;
         // Keep the user's message and initial title unchanged in the local history.
-        let run_prompt = if session_id.is_none() && workspace.managed {
+        let run_prompt = if session_id.is_none()
+            && workspace.managed
+            && workspace.kind == WorkspaceKind::Worktree
+        {
             format!(
                 "{prompt}\n\n<nexus_worktree_context>\n\
                  Nexus has already created a dedicated worktree for this task. \

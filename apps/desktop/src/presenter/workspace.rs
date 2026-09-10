@@ -31,6 +31,8 @@ impl Presenter {
         self.model.pending_workspace_start = None;
         self.model.workspace_retry = false;
         self.model.workspace_draft = WorkspaceDraft::default();
+        self.model.project_dirty = false;
+        self.model.project_is_git = false;
         if let Some(project) = self.model.selected_project.clone() {
             self.model.project_dirty = git::is_git_dirty(Path::new(&project.canonical_path));
             self.model.project_is_git = git::repository(Path::new(&project.canonical_path)).is_ok();
@@ -110,9 +112,15 @@ impl Presenter {
     }
 
     pub(crate) fn reload_workspaces(&mut self) {
-        let Some(project) = &self.model.selected_project else {
+        let Some(project) = self.model.selected_project.clone() else {
+            self.model.workspaces.clear();
+            self.model.project_dirty = false;
+            self.model.project_is_git = false;
+            self.model.workspace_branch = None;
             return;
         };
+        self.model.project_is_git = git::repository(Path::new(&project.canonical_path)).is_ok();
+        self.model.project_dirty = git::is_git_dirty(Path::new(&project.canonical_path));
         self.model.workspaces = self
             .storage
             .workspaces(project.id)
@@ -242,7 +250,11 @@ impl Presenter {
                     self.model.selected_workspace = Some(workspace.clone());
                     let project = self
                         .storage
-                        .project(workspace.project_id)?
+                        .project(
+                            workspace
+                                .project_id
+                                .ok_or_else(|| anyhow::anyhow!("Worktree 缺少项目"))?,
+                        )?
                         .ok_or_else(|| anyhow::anyhow!("项目不存在"))?;
                     self.spawn_workspace_operation(move || {
                         WorkspaceEvent::Created(git::create_worktree(
@@ -534,7 +546,10 @@ impl Presenter {
                 return false;
             }
         };
-        let Ok(Some(project)) = self.storage.project(workspace.project_id) else {
+        let Some(project_id) = workspace.project_id else {
+            return false;
+        };
+        let Ok(Some(project)) = self.storage.project(project_id) else {
             return false;
         };
         self.model.merge_plan = None;
@@ -564,7 +579,10 @@ impl Presenter {
             self.model.changes_status = Some("目标目录仍有任务运行，不能合入。".into());
             return false;
         }
-        let Ok(Some(project)) = self.storage.project(workspace.project_id) else {
+        let Some(project_id) = workspace.project_id else {
+            return false;
+        };
+        let Ok(Some(project)) = self.storage.project(project_id) else {
             return false;
         };
         workspace.merge = Some(plan.state.clone());

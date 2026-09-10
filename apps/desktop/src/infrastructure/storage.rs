@@ -1,6 +1,10 @@
-use std::{fs, path::Path, str::FromStr as _};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    str::FromStr as _,
+};
 
-use crate::model::workspace::{Workspace, WorkspaceStatus};
+use crate::model::workspace::{Workspace, WorkspaceKind, WorkspaceStatus};
 use anyhow::{Context as _, Result, anyhow};
 use chrono::{DateTime, Utc};
 use nexus_domain::{
@@ -12,6 +16,8 @@ use uuid::Uuid;
 
 pub struct Storage {
     connection: Connection,
+    session_root: PathBuf,
+    _temporary_directory: Option<tempfile::TempDir>,
 }
 
 pub struct ConversationConfig {
@@ -26,7 +32,7 @@ pub struct ConversationConfig {
 pub struct NewTaskRun<'a> {
     pub task_id: Option<Uuid>,
     pub workspace_id: Option<Uuid>,
-    pub project_id: Uuid,
+    pub project_id: Option<Uuid>,
     pub title: &'a str,
     pub prompt: &'a str,
     pub harness: HarnessKind,
@@ -58,7 +64,7 @@ impl Storage {
     }
 
     pub fn open(path: &Path) -> Result<Self> {
-        let connection = Connection::open(path).context("打开 SQLite 数据库")?;
+        let mut connection = Connection::open(path).context("打开 SQLite 数据库")?;
         connection.execute_batch(
             "PRAGMA foreign_keys = ON;
              PRAGMA journal_mode = WAL;
@@ -71,7 +77,7 @@ impl Storage {
              );
              CREATE TABLE IF NOT EXISTS tasks (
                  id TEXT PRIMARY KEY,
-                 project_id TEXT NOT NULL REFERENCES projects(id),
+                 project_id TEXT REFERENCES projects(id),
                  title TEXT NOT NULL,
                  status TEXT NOT NULL,
                  created_at TEXT NOT NULL,
@@ -141,7 +147,7 @@ impl Storage {
         connection.execute_batch(
             "CREATE TABLE IF NOT EXISTS workspaces (
                 id TEXT PRIMARY KEY,
-                project_id TEXT NOT NULL REFERENCES projects(id),
+                project_id TEXT REFERENCES projects(id),
                 record TEXT NOT NULL
             );",
         )?;
@@ -154,7 +160,25 @@ impl Storage {
         if !table_has_column(&connection, "runs", "cwd")? {
             connection.execute("ALTER TABLE runs ADD COLUMN cwd TEXT", [])?;
         }
-        let storage = Self { connection };
+        migrate_optional_projects(&mut connection)?;
+        // In-memory stores own temporary session files; persisted stores keep them
+        // beside the database so a restart resolves exactly the same task directory.
+        let temporary_directory = (path == Path::new(":memory:"))
+            .then(tempfile::tempdir)
+            .transpose()?;
+        let session_root = temporary_directory.as_ref().map_or_else(
+            || {
+                path.parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join("sessions")
+            },
+            |directory| directory.path().join("sessions"),
+        );
+        let storage = Self {
+            connection,
+            session_root,
+            _temporary_directory: temporary_directory,
+        };
         let projects = {
             let mut statement = storage.connection.prepare(
                 "SELECT id, display_name, canonical_path, created_at, last_opened_at FROM projects",
@@ -171,7 +195,7 @@ impl Storage {
              UPDATE runs SET cwd = (SELECT projects.canonical_path FROM tasks
                  JOIN projects ON projects.id = tasks.project_id WHERE tasks.id = runs.task_id)
                  WHERE cwd IS NULL;
-             PRAGMA user_version = 7;",
+             PRAGMA user_version = 8;",
         )?;
         let legacy_tasks = {
             let mut statement = storage
@@ -350,15 +374,27 @@ impl Storage {
         Ok(())
     }
 
-    pub fn tasks(&self, project_id: Uuid) -> Result<Vec<TaskSummary>> {
+    pub fn tasks(&self, project_id: impl Into<Option<Uuid>>) -> Result<Vec<TaskSummary>> {
         let mut statement = self.connection.prepare(
             "SELECT id, project_id, title, status, created_at
              FROM tasks
-             WHERE project_id = ?1 AND archived_at IS NULL
+             WHERE project_id IS ?1 AND archived_at IS NULL
              ORDER BY created_at DESC",
         )?;
-        let rows = statement.query_map([project_id.to_string()], task_from_row)?;
+        let rows =
+            statement.query_map([project_id.into().map(|id| id.to_string())], task_from_row)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn task(&self, task_id: Uuid) -> Result<Option<TaskSummary>> {
+        self.connection
+            .query_row(
+                "SELECT id, project_id, title, status, created_at FROM tasks WHERE id = ?1",
+                [task_id.to_string()],
+                task_from_row,
+            )
+            .optional()
             .map_err(Into::into)
     }
 
@@ -409,14 +445,11 @@ impl Storage {
         if updated != 1 {
             return Err(anyhow!("归档对话不存在"));
         }
-        let updated = transaction.execute(
+        transaction.execute(
             "UPDATE projects SET last_opened_at = ?2
              WHERE id = (SELECT project_id FROM tasks WHERE id = ?1)",
             params![task_id.to_string(), now],
         )?;
-        if updated != 1 {
-            return Err(anyhow!("归档对话所属项目不存在"));
-        }
         transaction.commit()?;
         Ok(())
     }
@@ -484,8 +517,12 @@ impl Storage {
             self.task_workspace(task_id)?
                 .ok_or_else(|| anyhow!("任务缺少执行目录"))?
         } else {
-            self.workspace(workspace_id.unwrap_or(project_id))?
-                .ok_or_else(|| anyhow!("项目缺少执行目录"))?
+            self.workspace(
+                workspace_id
+                    .or(project_id)
+                    .ok_or_else(|| anyhow!("任务缺少执行目录"))?,
+            )?
+            .ok_or_else(|| anyhow!("项目缺少执行目录"))?
         };
         if workspace.project_id != project_id || workspace.status != WorkspaceStatus::Ready {
             return Err(anyhow!("任务目录不属于项目或尚未就绪"));
@@ -507,8 +544,12 @@ impl Storage {
         if existing_task.is_some() {
             let updated = transaction.execute(
                 "UPDATE tasks SET status = 'starting', updated_at = ?3
-                 WHERE id = ?1 AND project_id = ?2",
-                params![task_id.to_string(), project_id.to_string(), now],
+                 WHERE id = ?1 AND project_id IS ?2",
+                params![
+                    task_id.to_string(),
+                    project_id.map(|id| id.to_string()),
+                    now
+                ],
             )?;
             if updated != 1 {
                 return Err(anyhow!("任务不属于当前项目"));
@@ -517,7 +558,7 @@ impl Storage {
             transaction.execute(
                 "INSERT INTO tasks(id, project_id, title, status, created_at, updated_at, workspace_id)
                  VALUES(?1, ?2, ?3, 'starting', ?4, ?4, ?5)",
-                params![task_id.to_string(), project_id.to_string(), title, now, workspace.id.to_string()],
+                params![task_id.to_string(), project_id.map(|id| id.to_string()), title, now, workspace.id.to_string()],
             )?;
         }
         transaction.execute(
@@ -717,13 +758,36 @@ impl Storage {
         Ok(())
     }
 
+    pub(crate) fn prepare_projectless_workspace(&self, task_id: Uuid) -> Result<Workspace> {
+        let path = self.session_root.join(task_id.to_string());
+        fs::create_dir_all(&path).context("创建独立会话目录")?;
+        let workspace = Workspace {
+            id: task_id,
+            project_id: None,
+            task_id: Some(task_id),
+            path: path.canonicalize()?.to_string_lossy().into_owned(),
+            repository: None,
+            kind: WorkspaceKind::Local,
+            managed: true,
+            external: false,
+            base_sha: None,
+            branch: None,
+            merge_target: None,
+            status: WorkspaceStatus::Ready,
+            merge: None,
+            initialization: None,
+        };
+        self.save_workspace(&workspace)?;
+        Ok(workspace)
+    }
+
     pub(crate) fn save_workspace(&self, workspace: &Workspace) -> Result<()> {
         self.connection.execute(
             "INSERT INTO workspaces(id, project_id, record) VALUES(?1, ?2, ?3)
              ON CONFLICT(id) DO UPDATE SET record = excluded.record",
             params![
                 workspace.id.to_string(),
-                workspace.project_id.to_string(),
+                workspace.project_id.map(|id| id.to_string()),
                 serde_json::to_string(workspace)?
             ],
         )?;
@@ -787,6 +851,57 @@ impl Storage {
     }
 }
 
+fn migrate_optional_projects(connection: &mut Connection) -> Result<()> {
+    let required: bool = connection.query_row(
+        "SELECT \"notnull\" FROM pragma_table_info('tasks') WHERE name = 'project_id'",
+        [],
+        |row| row.get(0),
+    )?;
+    if !required {
+        return Ok(());
+    }
+    // SQLite 3.51 cannot drop NOT NULL directly. Rebuild both tables in one
+    // transaction, leaving their names and all inbound foreign keys intact.
+    connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
+    let result = (|| -> Result<()> {
+        let transaction = connection.transaction()?;
+        transaction.execute_batch(
+            "CREATE TABLE tasks_optional_project (
+                 id TEXT PRIMARY KEY,
+                 project_id TEXT REFERENCES projects(id),
+                 title TEXT NOT NULL,
+                 status TEXT NOT NULL,
+                 created_at TEXT NOT NULL,
+                 updated_at TEXT NOT NULL,
+                 archived_at TEXT,
+                 session_id TEXT,
+                 workspace_id TEXT REFERENCES workspaces(id)
+             );
+             INSERT INTO tasks_optional_project
+                 SELECT id, project_id, title, status, created_at, updated_at,
+                        archived_at, session_id, workspace_id FROM tasks;
+             DROP TABLE tasks;
+             ALTER TABLE tasks_optional_project RENAME TO tasks;
+             CREATE TABLE workspaces_optional_project (
+                 id TEXT PRIMARY KEY,
+                 project_id TEXT REFERENCES projects(id),
+                 record TEXT NOT NULL
+             );
+             INSERT INTO workspaces_optional_project SELECT id, project_id, record FROM workspaces;
+             DROP TABLE workspaces;
+             ALTER TABLE workspaces_optional_project RENAME TO workspaces;",
+        )?;
+        let violation = transaction
+            .prepare("PRAGMA foreign_key_check")?
+            .exists([])?;
+        anyhow::ensure!(!violation, "迁移任务项目关联后外键校验失败");
+        transaction.commit()?;
+        Ok(())
+    })();
+    connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+    result
+}
+
 fn table_has_column(connection: &Connection, table: &str, column: &str) -> Result<bool> {
     let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
     let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
@@ -811,7 +926,10 @@ fn project_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
 fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskSummary> {
     Ok(TaskSummary {
         id: parse_uuid(row.get::<_, String>(0)?)?,
-        project_id: parse_uuid(row.get::<_, String>(1)?)?,
+        project_id: row
+            .get::<_, Option<String>>(1)?
+            .map(parse_uuid)
+            .transpose()?,
         title: row.get(2)?,
         status: parse_status(row.get::<_, String>(3)?)?,
         created_at: parse_date(row.get::<_, String>(4)?)?,
@@ -901,7 +1019,7 @@ mod tests {
                 workspace_id: None,
                 permission_mode: PermissionMode::Ask,
                 task_id: None,
-                project_id: project.id,
+                project_id: Some(project.id),
                 title: "Test task",
                 prompt: "hello",
                 harness: HarnessKind::Claude,
@@ -976,7 +1094,7 @@ mod tests {
                 workspace_id: None,
                 permission_mode: nexus_domain::PermissionMode::AutoEdit,
                 task_id: None,
-                project_id: project.id,
+                project_id: Some(project.id),
                 title: "Codex task",
                 prompt: "describe this project",
                 harness: HarnessKind::Codex,
@@ -1099,7 +1217,7 @@ mod tests {
                     workspace_id: None,
                     permission_mode: nexus_domain::PermissionMode::AutoEdit,
                     task_id: None,
-                    project_id: project.id,
+                    project_id: Some(project.id),
                     title,
                     prompt: title,
                     harness: HarnessKind::Claude,
@@ -1168,7 +1286,7 @@ mod tests {
                 .create_task_run(NewTaskRun {
                     task_id: None,
                     workspace_id: None,
-                    project_id,
+                    project_id: Some(project_id),
                     title: "Conversation",
                     prompt: "Saved message",
                     harness: HarnessKind::Claude,
@@ -1340,15 +1458,57 @@ mod tests {
     }
 
     #[test]
-    fn migrates_existing_runs_to_a_claude_harness() {
+    fn migrates_legacy_project_history_and_workspaces_and_allows_projectless_tasks() {
         let directory = tempfile::tempdir().unwrap();
         let database = directory.path().join("nexus.db");
         let connection = Connection::open(&database).unwrap();
+        let project = Project {
+            id: Uuid::new_v4(),
+            display_name: "Legacy project".into(),
+            canonical_path: directory
+                .path()
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            created_at: Utc::now(),
+            last_opened_at: Utc::now(),
+        };
+        let task_id = Uuid::new_v4();
+        let run_id = Uuid::new_v4();
+        let mut workspace = Workspace::local(&project);
+        workspace.id = task_id;
+        workspace.task_id = Some(task_id);
+        workspace.kind = WorkspaceKind::Worktree;
+        workspace.managed = true;
+        workspace.branch = Some("feat/legacy".into());
+        let record = serde_json::to_string(&workspace).unwrap();
         connection
             .execute_batch(
-                "CREATE TABLE runs (
+                "CREATE TABLE projects (
+                    id TEXT PRIMARY KEY, display_name TEXT NOT NULL,
+                    canonical_path TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL,
+                    last_opened_at TEXT NOT NULL
+                );
+                CREATE TABLE workspaces (
+                    id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+                    record TEXT NOT NULL
+                );
+                CREATE TABLE tasks (
+                    id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+                    title TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL, archived_at TEXT, session_id TEXT,
+                    workspace_id TEXT REFERENCES workspaces(id)
+                );
+                CREATE TABLE messages (
+                    id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id),
+                    run_id TEXT NOT NULL REFERENCES runs(id), sequence INTEGER NOT NULL,
+                    role TEXT NOT NULL, kind TEXT NOT NULL, content TEXT NOT NULL,
+                    created_at TEXT NOT NULL, UNIQUE(task_id, sequence)
+                );
+                CREATE TABLE runs (
                     id TEXT PRIMARY KEY,
-                    task_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL REFERENCES tasks(id),
                     status TEXT NOT NULL,
                     model TEXT NOT NULL,
                     effort TEXT NOT NULL,
@@ -1357,22 +1517,94 @@ mod tests {
                     ended_at TEXT,
                     exit_code INTEGER,
                     failure_code TEXT
-                );
-                INSERT INTO runs(id, task_id, status, model, effort, started_at)
-                VALUES('run-1', 'task-1', 'completed', 'sonnet', 'high', '2026-09-03');",
+                );",
             )
             .unwrap();
+        let now = Utc::now().to_rfc3339();
+        connection
+            .execute(
+                "INSERT INTO projects VALUES(?1, ?2, ?3, ?4, ?4)",
+                params![
+                    project.id.to_string(),
+                    project.display_name,
+                    project.canonical_path,
+                    now
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO workspaces VALUES(?1, ?2, ?3)",
+                params![task_id.to_string(), project.id.to_string(), record],
+            )
+            .unwrap();
+        connection.execute("INSERT INTO tasks VALUES(?1, ?2, 'Legacy task', 'completed', ?3, ?3, ?3, 'legacy-session', ?1)",
+            params![task_id.to_string(), project.id.to_string(), now]).unwrap();
+        connection.execute("INSERT INTO runs(id, task_id, status, model, effort, started_at) VALUES(?1, ?2, 'completed', 'sonnet', 'high', ?3)",
+            params![run_id.to_string(), task_id.to_string(), now]).unwrap();
+        connection.execute("INSERT INTO messages VALUES(?1, ?2, ?3, 1, 'assistant', 'text', 'Saved reply', ?4)",
+            params![Uuid::new_v4().to_string(), task_id.to_string(), run_id.to_string(), now]).unwrap();
         drop(connection);
 
-        let storage = Storage::open(&database).unwrap();
-        let harness: String = storage
+        let mut storage = Storage::open(&database).unwrap();
+        assert_eq!(storage.archived_tasks().unwrap()[0].id, task_id);
+        assert_eq!(storage.messages(task_id).unwrap()[0].content, "Saved reply");
+        let config = storage.conversation_config(task_id).unwrap().unwrap();
+        assert_eq!(config.harness, HarnessKind::Claude);
+        assert_eq!(config.session_id.as_deref(), Some("legacy-session"));
+        assert_eq!(config.model, "sonnet");
+        assert_eq!(config.effort, ThinkingEffort::High);
+        assert_eq!(
+            serde_json::to_string(&storage.task_workspace(task_id).unwrap().unwrap()).unwrap(),
+            record
+        );
+        assert!(
+            !storage
+                .connection
+                .prepare("PRAGMA foreign_key_check")
+                .unwrap()
+                .exists([])
+                .unwrap()
+        );
+        let foreign_keys: bool = storage
             .connection
-            .query_row(
-                "SELECT harness_kind FROM runs WHERE id = 'run-1'",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(harness, "claude");
+        assert!(foreign_keys);
+        let chat = storage
+            .prepare_projectless_workspace(Uuid::new_v4())
+            .unwrap();
+        let (chat_id, _) = storage
+            .create_task_run(NewTaskRun {
+                task_id: None,
+                workspace_id: Some(chat.id),
+                project_id: None,
+                title: "Hello",
+                prompt: "Hello",
+                harness: HarnessKind::Claude,
+                executable: "claude",
+                model: None,
+                effort: ThinkingEffort::Default,
+                permission_mode: PermissionMode::Ask,
+                harness_version: None,
+            })
+            .unwrap();
+        storage.restore_task(task_id).unwrap();
+        drop(storage);
+        let storage = Storage::open(&database).unwrap();
+        assert_eq!(storage.tasks(None).unwrap()[0].id, chat_id);
+        assert_eq!(storage.tasks(project.id).unwrap()[0].id, task_id);
+        assert_eq!(
+            storage.task_workspace(chat_id).unwrap().unwrap().path,
+            chat.path
+        );
+        assert!(
+            storage
+                .task_workspace(chat_id)
+                .unwrap()
+                .unwrap()
+                .project_id
+                .is_none()
+        );
     }
 }

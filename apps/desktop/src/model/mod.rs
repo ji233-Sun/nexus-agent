@@ -241,6 +241,7 @@ pub(crate) struct AppModel {
     pub(crate) cli_installation_busy: bool,
     pub(crate) cli_installation_message: Option<LocalizedText>,
     pub(crate) projects: Vec<Project>,
+    pub(crate) projectless_tasks: Vec<TaskSummary>,
     pub(crate) archived_tasks: Vec<TaskSummary>,
     pub(crate) workspace_busy: bool,
     pub(crate) workspace_operation_context: Option<Uuid>,
@@ -444,12 +445,11 @@ impl AppModel {
         let profile_ready = self
             .selected_provider_profile()
             .is_some_and(|profile| profile.credential_configured);
-        self.selected_project.is_some()
-            && self.active_run.is_none()
+        self.active_run.is_none()
             && self.occupied_run_slots() < 2
             && self
                 .working_directory()
-                .is_none_or(|path| !self.workspace_locked(std::path::Path::new(path)))
+                .is_some_and(|path| !self.workspace_locked(std::path::Path::new(path)))
             && self
                 .selected_workspace
                 .as_ref()

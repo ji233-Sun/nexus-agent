@@ -580,7 +580,7 @@ impl NexusView {
                                 .icon(IconName::RotateCw)
                                 .label(locale.text("刷新模型目录"))
                                 .accessibility_label(locale.text("刷新模型目录"))
-                                .disabled(model.selected_project.is_none())
+                                .disabled(model.working_directory().is_none())
                                 .on_click(cx.listener(move |app, _, _, cx| {
                                     app.presenter.refresh_generation_model_catalog(kind);
                                     cx.notify();
@@ -960,9 +960,17 @@ impl NexusView {
                     let project_name = model
                         .projects
                         .iter()
-                        .find(|project| project.id == task.project_id)
+                        .find(|project| Some(project.id) == task.project_id)
                         .map(|project| project.display_name.clone())
-                        .unwrap_or_else(|| locale.text("未知项目").into());
+                        .unwrap_or_else(|| {
+                            locale
+                                .text(if task.project_id.is_none() {
+                                    "未关联项目"
+                                } else {
+                                    "未知项目"
+                                })
+                                .into()
+                        });
                     settings_row(
                         colors,
                         task.title.clone(),

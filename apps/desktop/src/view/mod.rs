@@ -673,10 +673,16 @@ impl NexusView {
     }
 
     fn new_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.presenter.model().selected_project.is_none() {
-            return;
-        }
         self.presenter.new_task();
+        self.settings_open = false;
+        self.expanded_messages.clear();
+        self.focus_prompt(window, cx);
+        self.presenter.notify_remote_changed();
+        cx.notify();
+    }
+
+    fn new_projectless_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.presenter.new_projectless_task();
         self.settings_open = false;
         self.expanded_messages.clear();
         self.focus_prompt(window, cx);
@@ -1628,6 +1634,26 @@ impl NexusView {
                     .flex()
                     .flex_col()
                     .gap_1()
+                    .child(
+                        navigation_row(
+                            colors,
+                            "project-picker-none",
+                            locale.text("未关联项目"),
+                            None,
+                        )
+                        .debug_selector(|| "project-picker-none".into())
+                        .selected(selected.is_none())
+                        .on_click(cx.listener(
+                            move |app, _, window, cx| {
+                                app.project_picker_open = false;
+                                if selected.is_some() {
+                                    app.new_projectless_task(window, cx);
+                                }
+                                app.focus_prompt(window, cx);
+                                cx.notify();
+                            },
+                        )),
+                    )
                     .when(projects.is_empty(), |list| {
                         list.child(
                             div()
@@ -1720,9 +1746,7 @@ impl NexusView {
             .read(cx)
             .focus_handle(cx)
             .is_focused(window);
-        let composer_hint = if model.selected_project.is_none() {
-            locale.text("先选择本地项目，再描述你希望完成的工作。")
-        } else if model.active_run.is_some() {
+        let composer_hint = if model.active_run.is_some() {
             locale.text("Agent 正在执行 · 发送后排队，每轮结束后发送一条")
         } else if !model.can_submit() {
             locale.text("Agent 尚未就绪 · 打开设置检查探测和登录状态")
@@ -1738,16 +1762,14 @@ impl NexusView {
             .selected_project
             .as_ref()
             .map(|project| project.display_name.clone())
-            .unwrap_or_else(|| locale.text("未选择项目").into());
+            .unwrap_or_else(|| locale.text("未关联项目").into());
         let header_project_tooltip = model.selected_project.as_ref().map_or_else(
             || header_project.clone(),
             |project| format!("{}\n{}", project.display_name, project.canonical_path),
         );
-        let header_task = model.selected_project.as_ref().map(|_| {
-            selected_task
-                .map(|task| task.title.clone())
-                .unwrap_or_else(|| locale.text("新建任务").into())
-        });
+        let header_task = selected_task
+            .map(|task| task.title.clone())
+            .unwrap_or_else(|| locale.text("新建任务").into());
         div()
             .debug_selector(|| "workspace-page".into())
             .size_full()
@@ -1810,8 +1832,8 @@ impl NexusView {
                                             })
                                             .child(header_project),
                                     )
-                                    .when_some(header_task, |element, task| {
-                                        let tooltip = task.clone();
+                                    .map(|element| {
+                                        let tooltip = header_task.clone();
                                         element
                                             .child(
                                                 Icon::new(IconName::ChevronRight)
@@ -1832,7 +1854,7 @@ impl NexusView {
                                                         Tooltip::new(tooltip.clone())
                                                             .build(window, cx)
                                                     })
-                                                    .child(task),
+                                                    .child(header_task),
                                             )
                                     }),
                             )
@@ -2126,6 +2148,9 @@ impl Render for NexusView {
 }
 
 fn working_directory_label(model: &AppModel) -> &str {
+    if model.selected_project.is_none() {
+        return model.language.text("未关联项目");
+    }
     match model.working_directory() {
         Some(path) => Path::new(path)
             .file_name()
@@ -3121,7 +3146,7 @@ mod catalog_model_tests {
         ] {
             model.language = language;
             model.selected_project = None;
-            assert_eq!(working_directory_label(&model), no_directory);
+            assert_eq!(working_directory_label(&model), language.text("未关联项目"));
             model.selected_project = presenter.model().selected_project.clone();
             let long_name = "中文 long directory ".repeat(30);
             for name in ["nexus", "含 空格的目录", long_name.as_str()] {
@@ -3228,6 +3253,27 @@ mod catalog_model_tests {
         });
         click_debug(cx, "composer-directory");
         cx.run_until_parked();
+        click_debug(cx, "project-picker-none");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("project-picker-surface").is_none());
+        assert!(cx.debug_bounds("sidebar-projectless").is_some());
+        view.read_with(cx, |view, _| {
+            assert!(view.presenter.model().selected_project.is_none());
+            assert_eq!(
+                working_directory_label(view.presenter.model()),
+                "未关联项目"
+            );
+            assert_ne!(
+                view.presenter.model().working_directory(),
+                Some(first.canonical_path.as_str())
+            );
+        });
+        click_debug(cx, "composer-directory");
+        cx.run_until_parked();
+        click_debug(cx, first_row);
+        cx.run_until_parked();
+        click_debug(cx, "composer-directory");
+        cx.run_until_parked();
         view.update_in(cx, |view, window, cx| {
             view.project_search_input.update(cx, |input, cx| {
                 input.set_value("no such project", window, cx)
@@ -3269,6 +3315,73 @@ mod catalog_model_tests {
         assert!(view.read_with(cx, |view, _| {
             view.presenter.model().selected_project.is_none()
         }));
+    }
+
+    #[gpui::test]
+    fn projectless_composer_sends_and_sidebar_restores_its_context(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (presenter, runner, _directory) = fixture();
+        let project = presenter.model().selected_project.clone().unwrap();
+        let models = presenter.model().model_catalog.models().unwrap().to_vec();
+        let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
+        cx.run_until_parked();
+        click_debug(cx, "sidebar-projectless");
+        cx.run_until_parked();
+        view.update_in(cx, |view, window, cx| {
+            let ModelCatalogState::Loading { request_id, .. } =
+                view.presenter.model().model_catalog
+            else {
+                panic!("expected model discovery in the conversation directory");
+            };
+            runner.emit(nexus_protocol::Event::ModelCatalogLoaded {
+                request_id,
+                harness: HarnessKind::Claude,
+                models,
+            });
+            view.presenter.drain_events();
+            view.prompt_input
+                .update(cx, |input, cx| input.set_value("你好", window, cx));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        click_debug(cx, "composer-submit");
+        cx.run_until_parked();
+        let (task_id, cwd) = view.read_with(cx, |view, cx| {
+            let model = view.presenter.model();
+            assert!(model.selected_project.is_none());
+            assert!(model.active_run.is_some());
+            assert_eq!(model.messages[0].content, "你好");
+            assert_eq!(working_directory_label(model), "未关联项目");
+            assert!(view.prompt_input.read(cx).value().is_empty());
+            (
+                model.selected_task.unwrap(),
+                model.working_directory().unwrap().to_owned(),
+            )
+        });
+        let task_row = format!("sidebar-task-{task_id}").leak();
+        assert!(cx.debug_bounds(task_row).is_some());
+        click_debug(cx, format!("sidebar-project-{}", project.id).leak());
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |view, _| {
+            view.presenter.model().selected_project.is_some()
+        }));
+        click_debug(cx, task_row);
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            let model = view.presenter.model();
+            assert!(model.selected_project.is_none());
+            assert_eq!(model.selected_task, Some(task_id));
+            assert_eq!(model.working_directory(), Some(cwd.as_str()));
+        });
+        view.update_in(cx, |view, window, cx| view.new_task(window, cx));
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            let model = view.presenter.model();
+            assert!(model.selected_project.is_none());
+            assert!(model.selected_task.is_none());
+            assert_ne!(model.working_directory(), Some(cwd.as_str()));
+        });
     }
 
     #[gpui::test]
@@ -3472,7 +3585,7 @@ mod catalog_model_tests {
         assert!(content.groups[0].items[0].title.contains("default-model"));
         assert!(!content.groups[0].items[0].title.contains("explicit-model"));
         for (state, status) in [
-            (ModelCatalogState::Idle, "选择项目"),
+            (ModelCatalogState::Idle, "会话目录尚未就绪"),
             (
                 ModelCatalogState::Loading {
                     request_id: Uuid::new_v4(),

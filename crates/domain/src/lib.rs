@@ -462,7 +462,7 @@ pub struct Project {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskSummary {
     pub id: Uuid,
-    pub project_id: Uuid,
+    pub project_id: Option<Uuid>,
     pub title: String,
     pub status: RunStatus,
     pub created_at: DateTime<Utc>,

@@ -139,7 +139,7 @@ impl CatalogModelSelectContent {
                 .selected_provider_profile()
                 .and_then(|profile| profile.model.as_deref()),
             model.language,
-            model.selected_project.is_some(),
+            model.working_directory().is_some(),
         )
     }
 
@@ -154,7 +154,7 @@ impl CatalogModelSelectContent {
                 .provider_profile_for(settings.harness)
                 .and_then(|profile| profile.model.as_deref()),
             model.language,
-            model.selected_project.is_some(),
+            model.working_directory().is_some(),
         )
     }
 
@@ -165,7 +165,7 @@ impl CatalogModelSelectContent {
         model_name: Option<&str>,
         profile_model: Option<&str>,
         locale: Language,
-        has_project: bool,
+        has_directory: bool,
     ) -> Self {
         let selected = model_id
             .map(|model_id| CatalogModelChoice::Model(model_id.to_owned()))
@@ -205,8 +205,8 @@ impl CatalogModelSelectContent {
         );
 
         let status = match catalog {
-            ModelCatalogState::Idle if !has_project => {
-                Some(locale.text("选择项目后加载模型目录").into())
+            ModelCatalogState::Idle if !has_directory => {
+                Some(locale.text("会话目录尚未就绪").into())
             }
             ModelCatalogState::Idle => Some(locale.text("模型目录尚未加载").into()),
             ModelCatalogState::Loading { .. } => Some(locale.text("正在加载模型目录…").into()),
@@ -676,7 +676,7 @@ impl NexusView {
                                     .icon(IconName::RotateCw)
                                     .tooltip(locale.text("刷新模型目录"))
                                     .accessibility_label(locale.text("刷新模型目录"))
-                                    .disabled(model.selected_project.is_none())
+                                    .disabled(model.working_directory().is_none())
                                     .on_click(cx.listener(Self::refresh_model_catalog)),
                             ),
                     )

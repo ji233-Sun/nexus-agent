@@ -214,7 +214,9 @@ impl NexusView {
                         .text_size(px(14.))
                         .text_color(rgb(colors.muted))
                         .line_height(relative(1.55))
-                        .child(locale.text("先选择本地项目，再描述你希望完成的工作。")),
+                        .child(
+                            locale.text("直接发送消息开始对话；处理项目文件时，可添加本地项目。"),
+                        ),
                 )
             })
             .when(has_project, |element| {
@@ -241,10 +243,10 @@ impl NexusView {
                     Button::new("welcome-choose-project")
                         .debug_selector(|| "welcome-choose-project".into())
                         .mt_5()
-                        .primary()
+                        .outline()
                         .h(px(CONTROL_HEIGHT))
                         .icon(IconName::FolderOpen)
-                        .label(locale.text("选择项目"))
+                        .label(locale.text("添加本地项目"))
                         .on_click(cx.listener(Self::choose_project)),
                 )
             })

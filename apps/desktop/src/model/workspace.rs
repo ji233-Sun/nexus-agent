@@ -22,7 +22,7 @@ pub(crate) enum WorkspaceStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Workspace {
     pub(crate) id: Uuid,
-    pub(crate) project_id: Uuid,
+    pub(crate) project_id: Option<Uuid>,
     pub(crate) task_id: Option<Uuid>,
     pub(crate) path: String,
     pub(crate) repository: Option<String>,
@@ -45,7 +45,7 @@ impl Workspace {
     pub(crate) fn local(project: &nexus_domain::Project) -> Self {
         Self {
             id: project.id,
-            project_id: project.id,
+            project_id: Some(project.id),
             task_id: None,
             path: project.canonical_path.clone(),
             repository: None,

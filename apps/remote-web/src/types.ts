@@ -23,7 +23,7 @@ export interface RemoteProject {
 
 export interface TaskSummary {
   id: string;
-  project_id: string;
+  project_id: string | null;
   title: string;
   status: RunStatus;
   created_at: string;
