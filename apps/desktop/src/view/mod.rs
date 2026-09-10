@@ -2220,6 +2220,38 @@ mod catalog_model_tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("cnb-page").is_some());
         assert!(cx.debug_bounds("cnb-issue-tab").is_some());
+        let assert_breadcrumb = |cx: &mut gpui::VisualTestContext, segment_count| {
+            let breadcrumb = cx.debug_bounds("cnb-breadcrumb").unwrap();
+            let mut previous = cx.debug_bounds("cnb-breadcrumb-root").unwrap();
+            let first_separator = cx.debug_bounds("cnb-breadcrumb-separator-0").unwrap();
+            let gap = first_separator.left() - previous.right();
+            assert!(gap > px(0.));
+            for index in 0..segment_count {
+                let separator = cx
+                    .debug_bounds(format!("cnb-breadcrumb-separator-{index}").leak())
+                    .unwrap();
+                let segment = cx
+                    .debug_bounds(format!("cnb-breadcrumb-segment-{index}").leak())
+                    .unwrap();
+                assert_eq!(separator.size, first_separator.size);
+                assert_eq!(separator.left() - previous.right(), gap);
+                assert_eq!(segment.left() - separator.right(), gap);
+                assert_eq!(segment.center().y, previous.center().y);
+                assert_eq!(segment.center().y, separator.center().y);
+                assert!(segment.size.width > px(0.));
+                assert!(segment.right() <= breadcrumb.right());
+                previous = segment;
+            }
+            let repository_button = cx.debug_bounds("cnb-repository").unwrap();
+            assert!(repository_button.left() >= breadcrumb.right());
+            assert!(repository_button.right() < cx.debug_bounds("cnb-page").unwrap().right());
+        };
+        assert_breadcrumb(cx, 2);
+        click_debug(cx, "cnb-repository");
+        assert_eq!(
+            cx.opened_url().as_deref(),
+            Some("https://cnb.cool/team/project")
+        );
         let icon = cx.debug_bounds("sidebar-cnb-icon").unwrap();
         assert!(icon.left() >= cnb_row.left() && icon.right() < cnb_row.left() + px(34.));
         assert!(cx.debug_bounds("composer-surface").is_none());
@@ -2280,6 +2312,28 @@ mod catalog_model_tests {
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("cnb-empty").is_some());
+        let nested_repository = "organization-with-a-long-name/subgroup/project-with-a-long-name";
+        view.update(cx, |view, cx| {
+            let cli = view.presenter.model().cnb.cli.clone().unwrap();
+            view.presenter.inspect_cnb();
+            finish_cnb_request(
+                &mut view.presenter,
+                Response::Inspection {
+                    repository: Some(nested_repository.into()),
+                    cli: Ok(cli),
+                },
+            );
+            view.presenter.open_cnb();
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(760.), px(720.)));
+        cx.run_until_parked();
+        assert_breadcrumb(cx, 3);
+        click_debug(cx, "cnb-repository");
+        assert_eq!(
+            cx.opened_url(),
+            Some(format!("https://cnb.cool/{nested_repository}"))
+        );
         view.update_in(cx, |view, window, cx| {
             view.new_task(window, cx);
             assert_eq!(view.prompt_input.read(cx).value(), "保留会话草稿");

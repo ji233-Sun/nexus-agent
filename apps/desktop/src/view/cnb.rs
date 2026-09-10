@@ -184,21 +184,50 @@ impl NexusView {
                     .flex()
                     .items_center()
                     .gap_3()
+                    .text_size(px(13.))
                     .child(cnb_icon(22., colors.text))
-                    .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("CNB"))
-                    .child(div().text_color(rgb(colors.muted)).child("/"))
                     .child(
                         div()
+                            .debug_selector(|| "cnb-breadcrumb".into())
                             .flex_1()
                             .min_w_0()
-                            .truncate()
-                            .text_size(px(13.))
-                            .child(repository),
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .debug_selector(|| "cnb-breadcrumb-root".into())
+                                    .flex_none()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child("CNB"),
+                            )
+                            .children(repository.split('/').enumerate().flat_map(
+                                |(index, segment)| {
+                                    [
+                                        div()
+                                            .debug_selector(move || {
+                                                format!("cnb-breadcrumb-separator-{index}")
+                                            })
+                                            .flex_none()
+                                            .text_color(rgb(colors.muted))
+                                            .child("/"),
+                                        div()
+                                            .debug_selector(move || {
+                                                format!("cnb-breadcrumb-segment-{index}")
+                                            })
+                                            .min_w_0()
+                                            .truncate()
+                                            .child(segment.to_owned()),
+                                    ]
+                                },
+                            )),
                     )
                     .child(
                         Button::new("cnb-repository")
+                            .debug_selector(|| "cnb-repository".into())
                             .ghost()
                             .small()
+                            .flex_none()
                             .icon(IconName::ExternalLink)
                             .tooltip(locale.text("在浏览器中打开仓库"))
                             .accessibility_label(locale.text("在浏览器中打开仓库"))
