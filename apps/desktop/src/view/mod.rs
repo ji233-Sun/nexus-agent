@@ -2229,8 +2229,59 @@ mod catalog_model_tests {
         presenter.select_cnb_issue("1".into());
         let mut issue = cnb_issue("1");
         issue.body = "需要实现的功能描述。".into();
+        issue.author.nickname = "用于验证信息卡片不会被长名称撑开的开发者".repeat(6);
+        issue.assignees = vec![issue.author.clone(); 3];
         finish_cnb_request(&mut presenter, Response::Detail(Ok(issue.clone())));
         let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
+        for (width, theme, language) in [
+            (1040., ThemePreference::Light, Language::English),
+            (1280., ThemePreference::Dark, Language::Chinese),
+        ] {
+            cx.simulate_resize(gpui::size(px(width), px(900.)));
+            view.update_in(cx, |view, window, cx| {
+                view.set_appearance(
+                    AppearanceSettings {
+                        theme,
+                        reduced_motion: true,
+                        ..Default::default()
+                    },
+                    window,
+                    cx,
+                );
+                view.set_language(language, window, cx);
+            });
+            cx.run_until_parked();
+            let summary = cx.debug_bounds("cnb-issue-summary").unwrap();
+            let metadata = cx.debug_bounds("cnb-issue-metadata").unwrap();
+            let actions = cx.debug_bounds("cnb-issue-actions").unwrap();
+            let page = cx.debug_bounds("cnb-page").unwrap();
+            assert!(summary.left() > page.left() && summary.right() < page.right());
+            assert!(metadata.bottom() <= actions.top());
+            let mut fields = Vec::new();
+            for index in 0..6 {
+                let field = cx
+                    .debug_bounds(format!("cnb-issue-field-{index}").leak())
+                    .unwrap();
+                let value = cx
+                    .debug_bounds(format!("cnb-issue-field-value-{index}").leak())
+                    .unwrap();
+                assert!(field.left() >= metadata.left() && field.right() <= metadata.right());
+                assert!(field.top() >= metadata.top() && field.bottom() <= metadata.bottom());
+                assert!(value.left() >= field.left() && value.right() <= field.right());
+                assert!(fields.iter().all(|previous| !field.intersects(previous)));
+                fields.push(field);
+            }
+            let mut buttons = Vec::new();
+            for selector in ["cnb-chat", "cnb-assign-self", "cnb-change-state", "cnb-npc"] {
+                let button = cx.debug_bounds(selector).unwrap();
+                assert_eq!(button.size.height, px(CONTROL_HEIGHT));
+                assert!(button.left() >= actions.left() && button.right() <= actions.right());
+                assert!(button.top() >= actions.top() && button.bottom() <= actions.bottom());
+                assert!(buttons.iter().all(|previous| !button.intersects(previous)));
+                buttons.push(button);
+            }
+            assert!(summary.bottom() <= cx.debug_bounds("cnb-issue-body").unwrap().top());
+        }
         cx.simulate_resize(gpui::size(px(1120.), px(900.)));
         view.update_in(cx, |view, window, cx| {
             view.prompt_input

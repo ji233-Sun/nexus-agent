@@ -86,10 +86,23 @@ impl NexusView {
         } else {
             IssueFilter::Closed
         };
+        let action_button = |id| {
+            Button::new(id)
+                .h(px(CONTROL_HEIGHT))
+                .px_3()
+                .rounded(px(CONTROL_RADIUS))
+        };
         div()
+            .debug_selector(|| "cnb-issue-actions".into())
+            .px_5()
+            .py_4()
+            .border_t_1()
+            .border_color(rgb(colors.border))
             .flex()
             .flex_col()
-            .gap_2()
+            .gap_3()
+            .text_size(px(12.))
+            .text_color(rgb(colors.text_secondary))
             .child(
                 div()
                     .flex()
@@ -97,10 +110,9 @@ impl NexusView {
                     .items_center()
                     .gap_2()
                     .child(
-                        Button::new("cnb-chat")
+                        action_button("cnb-chat")
                             .debug_selector(|| "cnb-chat".into())
                             .primary()
-                            .small()
                             .icon(IconName::Bot)
                             .label(locale.text("用 AI 处理"))
                             .tooltip(
@@ -115,10 +127,10 @@ impl NexusView {
                             })),
                     )
                     .child(
-                        Button::new("cnb-assign-self")
+                        action_button("cnb-assign-self")
                             .debug_selector(|| "cnb-assign-self".into())
-                            .outline()
-                            .small()
+                            .ghost()
+                            .icon(IconName::User)
                             .label(locale.text("指派给我"))
                             .disabled(busy)
                             .on_click(cx.listener(|app, _, _, cx| {
@@ -127,10 +139,14 @@ impl NexusView {
                             })),
                     )
                     .child(
-                        Button::new("cnb-change-state")
+                        action_button("cnb-change-state")
                             .debug_selector(|| "cnb-change-state".into())
-                            .outline()
-                            .small()
+                            .ghost()
+                            .icon(if state == IssueFilter::Closed {
+                                IconName::CircleCheck
+                            } else {
+                                IconName::RotateCw
+                            })
                             .label(locale.text(if state == IssueFilter::Closed {
                                 "关闭 Issue"
                             } else {
@@ -143,10 +159,10 @@ impl NexusView {
                             })),
                     )
                     .child(
-                        Button::new("cnb-npc")
+                        action_button("cnb-npc")
                             .debug_selector(|| "cnb-npc".into())
-                            .outline()
-                            .small()
+                            .ghost()
+                            .icon(IconName::Bot)
                             .label("CodeBuddy NPC")
                             .tooltip(
                                 locale.text(
@@ -944,6 +960,67 @@ impl NexusView {
                             })
                             .when_some(cnb.detail.as_ref(), |el, issue| {
                                 let color = issue_color(issue, colors);
+                                let metadata = [
+                                    ("作者", issue.author.name().to_owned()),
+                                    (
+                                        "处理人",
+                                        if issue.assignees.is_empty() {
+                                            locale.text("未分配").into()
+                                        } else {
+                                            issue
+                                                .assignees
+                                                .iter()
+                                                .map(|user| user.name())
+                                                .collect::<Vec<_>>()
+                                                .join(", ")
+                                        },
+                                    ),
+                                    (
+                                        "优先级",
+                                        if issue.priority.is_empty() {
+                                            "—".into()
+                                        } else {
+                                            issue.priority.clone()
+                                        },
+                                    ),
+                                    ("创建时间", issue_date(&issue.created_at)),
+                                    ("更新时间", issue_date(&issue.updated_at)),
+                                    ("评论", issue.comment_count.to_string()),
+                                ]
+                                .into_iter()
+                                .enumerate()
+                                .map(|(index, (label, value))| {
+                                    let tooltip = value.clone();
+                                    div()
+                                        .id(("cnb-issue-field", index))
+                                        .debug_selector(move || format!("cnb-issue-field-{index}"))
+                                        .flex_1()
+                                        .flex_basis(px(180.))
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_2()
+                                        .tooltip(move |window, cx| {
+                                            Tooltip::new(tooltip.clone()).build(window, cx)
+                                        })
+                                        .child(
+                                            div()
+                                                .text_size(px(11.))
+                                                .text_color(rgb(colors.muted))
+                                                .child(locale.text(label)),
+                                        )
+                                        .child(
+                                            div()
+                                                .debug_selector(move || {
+                                                    format!("cnb-issue-field-value-{index}")
+                                                })
+                                                .min_w_0()
+                                                .truncate()
+                                                .text_size(px(13.))
+                                                .font_weight(gpui::FontWeight::MEDIUM)
+                                                .child(value),
+                                        )
+                                });
                                 el.child(
                                     div()
                                         .text_size(px(24.))
@@ -984,61 +1061,26 @@ impl NexusView {
                                 )
                                 .child(
                                     div()
-                                        .p_4()
+                                        .debug_selector(|| "cnb-issue-summary".into())
+                                        .min_w_0()
                                         .rounded(px(CARD_RADIUS))
+                                        .border_1()
+                                        .border_color(rgb(colors.border))
                                         .bg(rgb(colors.surface))
                                         .flex()
-                                        .flex_wrap()
-                                        .gap_5()
-                                        .children(
-                                            [
-                                                ("作者", issue.author.name().to_owned()),
-                                                (
-                                                    "处理人",
-                                                    if issue.assignees.is_empty() {
-                                                        locale.text("未分配").into()
-                                                    } else {
-                                                        issue
-                                                            .assignees
-                                                            .iter()
-                                                            .map(|user| user.name())
-                                                            .collect::<Vec<_>>()
-                                                            .join(", ")
-                                                    },
-                                                ),
-                                                (
-                                                    "优先级",
-                                                    if issue.priority.is_empty() {
-                                                        "—".into()
-                                                    } else {
-                                                        issue.priority.clone()
-                                                    },
-                                                ),
-                                                ("创建时间", issue_date(&issue.created_at)),
-                                                ("更新时间", issue_date(&issue.updated_at)),
-                                                ("评论", issue.comment_count.to_string()),
-                                            ]
-                                            .map(
-                                                |(label, value)| {
-                                                    div()
-                                                        .min_w(px(100.))
-                                                        .flex()
-                                                        .flex_col()
-                                                        .gap_1()
-                                                        .child(
-                                                            div()
-                                                                .text_size(px(11.))
-                                                                .text_color(rgb(colors.muted))
-                                                                .child(locale.text(label)),
-                                                        )
-                                                        .child(
-                                                            div().text_size(px(12.)).child(value),
-                                                        )
-                                                },
-                                            ),
-                                        ),
+                                        .flex_col()
+                                        .child(
+                                            div()
+                                                .debug_selector(|| "cnb-issue-metadata".into())
+                                                .p_5()
+                                                .flex()
+                                                .flex_wrap()
+                                                .gap_x_6()
+                                                .gap_y_4()
+                                                .children(metadata),
+                                        )
+                                        .child(self.render_cnb_actions(issue, cx)),
                                 )
-                                .child(self.render_cnb_actions(issue, cx))
                                 .child(
                                     div()
                                         .debug_selector(|| "cnb-issue-body".into())
