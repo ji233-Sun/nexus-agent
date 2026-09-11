@@ -1,6 +1,6 @@
 use crate::{
     i18n::LocalizedText,
-    model::cnb::{Cli, Issue, IssueFilter, IssuePage, PAGE_SIZE},
+    model::cnb::{Cli, Comment, Issue, IssueAction, IssueFilter, IssuePage, PAGE_SIZE, User},
 };
 use anyhow::{Context as _, Result, ensure};
 use nexus_harness_core::{executable_search_paths, resolve_executable};
@@ -26,6 +26,28 @@ pub(crate) enum Request {
         repository: String,
         number: String,
     },
+    Comments {
+        cli: Cli,
+        repository: String,
+        number: String,
+    },
+    Action {
+        cli: Cli,
+        repository: String,
+        number: String,
+        action: IssueAction,
+    },
+    NpcAction {
+        cli: Cli,
+        repository: String,
+        number: String,
+        comment_id: String,
+    },
+}
+
+pub(crate) enum ActionResult {
+    Updated(Box<Issue>),
+    Npc(Comment),
 }
 
 pub(crate) enum Response {
@@ -35,6 +57,9 @@ pub(crate) enum Response {
     },
     List(Result<IssuePage, LocalizedText>),
     Detail(Result<Issue, LocalizedText>),
+    Comments(Result<Vec<Comment>, LocalizedText>),
+    Action(Result<ActionResult, LocalizedText>),
+    NpcAction(Result<Comment, LocalizedText>),
 }
 
 pub(crate) struct Event {
@@ -131,31 +156,211 @@ impl Client {
                         number,
                     } => {
                         let result = (|| {
-                            ensure!(number.parse::<u64>().is_ok(), "CNB Issue 编号无效。");
-                            let args = vec![
-                                "issues".into(),
-                                "get-issue".into(),
-                                "--repo".into(),
-                                repository,
-                                "--number".into(),
-                                number,
-                                "--verbose".into(),
-                            ];
-                            let output = runtime
+                            runtime
                                 .as_ref()
                                 .map_err(|error| anyhow::anyhow!(error.to_string()))?
-                                .block_on(run(&cli.path, &args, CLI_TIMEOUT))?;
-                            let (issue, _) = parse_response(&output)?;
-                            Ok(issue)
+                                .block_on(issue_request(
+                                    &cli,
+                                    &repository,
+                                    &number,
+                                    "get-issue",
+                                    &[],
+                                ))
                         })()
                         .map_err(localized_error);
                         Response::Detail(result)
+                    }
+                    Request::Comments {
+                        cli,
+                        repository,
+                        number,
+                    } => {
+                        let result = (|| {
+                            runtime
+                                .as_ref()
+                                .map_err(|error| anyhow::anyhow!(error.to_string()))?
+                                .block_on(load_comments(&cli, &repository, &number))
+                        })()
+                        .map_err(localized_error);
+                        Response::Comments(result)
+                    }
+                    Request::Action {
+                        cli,
+                        repository,
+                        number,
+                        action,
+                    } => {
+                        let result = (|| {
+                            runtime
+                                .as_ref()
+                                .map_err(|error| anyhow::anyhow!(error.to_string()))?
+                                .block_on(perform_action(&cli, &repository, &number, action))
+                        })()
+                        .map_err(localized_error);
+                        Response::Action(result)
+                    }
+                    Request::NpcAction {
+                        cli,
+                        repository,
+                        number,
+                        comment_id,
+                    } => {
+                        let result = (|| {
+                            runtime
+                                .as_ref()
+                                .map_err(|error| anyhow::anyhow!(error.to_string()))?
+                                .block_on(load_npc_action(&cli, &repository, &number, &comment_id))
+                        })()
+                        .map_err(localized_error);
+                        Response::NpcAction(result)
                     }
                 };
                 let _ = sender.send(Event { id, response });
             })?;
         Ok(())
     }
+}
+
+fn issue_args(command: &str, repository: &str, number: &str) -> Result<Vec<String>> {
+    ensure!(
+        number.parse::<u64>().is_ok_and(|number| number > 0),
+        "CNB Issue 编号无效。"
+    );
+    Ok(vec![
+        "issues".into(),
+        command.into(),
+        "--repo".into(),
+        repository.into(),
+        "--number".into(),
+        number.into(),
+        "--verbose".into(),
+    ])
+}
+
+async fn issue_request<T: DeserializeOwned>(
+    cli: &Cli,
+    repository: &str,
+    number: &str,
+    command: &str,
+    extra: &[String],
+) -> Result<T> {
+    let mut args = issue_args(command, repository, number)?;
+    args.extend_from_slice(extra);
+    let output = run(&cli.path, &args, CLI_TIMEOUT).await?;
+    Ok(parse_response(&output)?.0)
+}
+
+async fn load_comments(cli: &Cli, repository: &str, number: &str) -> Result<Vec<Comment>> {
+    let mut comments = Vec::new();
+    let mut expected_total = None;
+    for page in 1.. {
+        let mut args = issue_args("list-issue-comments", repository, number)?;
+        args.extend([
+            "--page".into(),
+            page.to_string(),
+            "--page-size".into(),
+            PAGE_SIZE.to_string(),
+            "--sort".into(),
+            "created".into(),
+        ]);
+        let output = run(&cli.path, &args, CLI_TIMEOUT).await?;
+        let (batch, response): (Vec<Comment>, _) = parse_response(&output)?;
+        let count = batch.len();
+        comments.extend(batch);
+        expected_total = page_total(&response).or(expected_total);
+        if let Some(total) = expected_total {
+            if comments.len() >= total {
+                break;
+            }
+            ensure!(count > 0, "CNB 评论分页不完整，请刷新评论后重试。");
+        } else if count < PAGE_SIZE {
+            break;
+        }
+    }
+    Ok(comments)
+}
+
+async fn perform_action(
+    cli: &Cli,
+    repository: &str,
+    number: &str,
+    action: IssueAction,
+) -> Result<ActionResult> {
+    let (command, data) = match action {
+        IssueAction::AssignSelf => {
+            let output = run(
+                &cli.path,
+                &["users".into(), "get-user-info".into(), "--verbose".into()],
+                CLI_TIMEOUT,
+            )
+            .await?;
+            let (user, _): (User, _) = parse_response(&output)?;
+            ensure!(
+                !user.username.trim().is_empty(),
+                "CNB 未返回当前用户名，请运行 cnb login。"
+            );
+            (
+                "post-issue-assignees",
+                serde_json::json!({"assignees": [user.username]}),
+            )
+        }
+        IssueAction::SetState(state) => (
+            "update-issue",
+            serde_json::json!({
+                "state": state.state(),
+                "state_reason": if state == IssueFilter::Closed { "completed" } else { "reopened" },
+            }),
+        ),
+        IssueAction::StartNpc => (
+            "post-issue-comment",
+            serde_json::json!({
+                "body": "@CodeBuddy 请处理这个 Issue，阅读完整描述和全部评论，完成实现与验证，创建 PR 并在此回复结果及 PR 链接。",
+                "work_mode": true,
+            }),
+        ),
+    };
+    let extra = ["--data".into(), data.to_string()];
+    if action == IssueAction::StartNpc {
+        issue_request(cli, repository, number, command, &extra)
+            .await
+            .map(ActionResult::Npc)
+    } else {
+        issue_request(cli, repository, number, command, &extra)
+            .await
+            .map(ActionResult::Updated)
+    }
+}
+
+async fn load_npc_action(
+    cli: &Cli,
+    repository: &str,
+    number: &str,
+    comment_id: &str,
+) -> Result<Comment> {
+    ensure!(
+        comment_id.parse::<u64>().is_ok_and(|id| id > 0),
+        "CNB 评论编号无效。"
+    );
+    // Follow the exact triggering comment. Retrying this read never creates another NPC run.
+    for attempt in 0..5 {
+        let comment: Comment = issue_request(
+            cli,
+            repository,
+            number,
+            "get-issue-comment",
+            &["--comment-id".into(), comment_id.into()],
+        )
+        .await?;
+        ensure!(
+            comment.id == comment_id,
+            "CNB 返回了不同的评论，请刷新状态。"
+        );
+        if comment.action_url().is_some() || comment.npc_failure().is_some() || attempt == 4 {
+            return Ok(comment);
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    unreachable!()
 }
 
 fn localized_error(error: anyhow::Error) -> LocalizedText {
@@ -235,7 +440,7 @@ pub(super) fn parse_response<T: DeserializeOwned>(output: &str) -> Result<(T, Va
         (200..300).contains(&status),
         "HTTP {status} · {}",
         match status {
-            401 | 403 => "请运行 cnb login 并确认拥有仓库 Issue 读取权限。",
+            401 | 403 => "请运行 cnb login 并确认拥有此操作所需的仓库权限。",
             404 => "仓库或 Issue 不存在，或当前账号没有访问权限。",
             _ => "CNB 服务暂不可用，请稍后重试。",
         }
@@ -247,14 +452,16 @@ pub(super) fn parse_response<T: DeserializeOwned>(output: &str) -> Result<(T, Va
 
 fn parse_page(output: &str) -> Result<IssuePage> {
     let (issues, response) = parse_response(output)?;
-    let total = response["total"]
+    let total = page_total(&response).context("CNB CLI 未返回分页总数，请更新 CLI。")?;
+    Ok(IssuePage { issues, total })
+}
+
+fn page_total(response: &Value) -> Option<usize> {
+    response["total"]
         .as_u64()
-        .or_else(|| response["header"]["x-cnb-total"].as_str()?.parse().ok())
-        .context("CNB CLI 未返回分页总数，请更新 CLI。")?;
-    Ok(IssuePage {
-        issues,
-        total: total.try_into()?,
-    })
+        .or_else(|| response["header"]["x-cnb-total"].as_str()?.parse().ok())?
+        .try_into()
+        .ok()
 }
 
 async fn run(path: &std::path::Path, args: &[String], timeout: Duration) -> Result<String> {
@@ -315,6 +522,265 @@ pub(super) async fn run_with_temp_dir(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn cnb_fixture() -> (tempfile::TempDir, Cli) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("fake cnb");
+        std::fs::write(
+            &path,
+            r#"#!/bin/sh
+printf '%s\n' "$@" >> "$0.calls"
+printf '\n' >> "$0.calls"
+directory="$(dirname "$0")"
+operation="$2"
+shift 2
+page=1
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = "--page" ]; then shift; page="$1"; fi
+    shift
+done
+if [ "$operation" = "list-issue-comments" ]; then
+    cat "$directory/comments-$page.json"
+elif [ "$operation" = "get-issue-comment" ] && [ ! -f "$directory/polled" ]; then
+    touch "$directory/polled"
+    cat "$directory/post-issue-comment.json"
+else
+    cat "$directory/$operation.json"
+fi
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        (
+            directory,
+            Cli {
+                path,
+                version: "test".into(),
+            },
+        )
+    }
+
+    #[cfg(unix)]
+    fn cnb_response(directory: &std::path::Path, file: &str, response: Value) {
+        std::fs::write(directory.join(format!("{file}.json")), response.to_string()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cnb_issue_actions_use_current_identity_state_reasons_and_native_npc_comment() {
+        let (directory, cli) = cnb_fixture();
+        let directory = directory.path();
+        let issue = serde_json::json!({"number":"144", "title":"Issue", "state":"open",
+            "assignees":[{"username":"existing"}, {"username":"signed-in-user"}]});
+        for (file, data) in [
+            (
+                "get-user-info",
+                serde_json::json!({"username":"signed-in-user"}),
+            ),
+            ("post-issue-assignees", issue.clone()),
+            ("update-issue", issue),
+            (
+                "post-issue-comment",
+                serde_json::json!({"id":"987", "body":"@CodeBuddy", "statuses":null}),
+            ),
+            (
+                "get-issue-comment",
+                serde_json::json!({"id":"987", "statuses":{"npc":[{"statuses":[
+                    {"target_url":"https://cnb.cool/team/repo/-/build/logs/cnb-123"}
+                ]}]}}),
+            ),
+        ] {
+            cnb_response(
+                directory,
+                file,
+                serde_json::json!({"status":201,"data":data}),
+            );
+        }
+        let assigned = perform_action(&cli, "team/repo", "144", IssueAction::AssignSelf)
+            .await
+            .unwrap();
+        let ActionResult::Updated(assigned) = assigned else {
+            panic!("updated issue")
+        };
+        assert_eq!(assigned.assignees.len(), 2);
+        for state in [IssueFilter::Closed, IssueFilter::Open] {
+            perform_action(&cli, "team/repo", "144", IssueAction::SetState(state))
+                .await
+                .unwrap();
+        }
+        let ActionResult::Npc(comment) =
+            perform_action(&cli, "team/repo", "144", IssueAction::StartNpc)
+                .await
+                .unwrap()
+        else {
+            panic!("NPC triggering comment")
+        };
+        assert_eq!(comment.id, "987");
+        assert!(comment.action_url().is_none());
+        let action = load_npc_action(&cli, "team/repo", "144", &comment.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            action.action_url(),
+            Some("https://cnb.cool/team/repo/-/build/logs/cnb-123")
+        );
+        let calls = std::fs::read_to_string(cli.path.with_extension("calls")).unwrap();
+        let calls = calls
+            .trim()
+            .split("\n\n")
+            .map(|call| call.lines().collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        assert_eq!(calls[0], ["users", "get-user-info", "--verbose"]);
+        assert_eq!(
+            calls[1][..7],
+            [
+                "issues",
+                "post-issue-assignees",
+                "--repo",
+                "team/repo",
+                "--number",
+                "144",
+                "--verbose"
+            ]
+        );
+        let payload = |index: usize| {
+            assert_eq!(calls[index][7], "--data");
+            serde_json::from_str::<Value>(calls[index][8]).unwrap()
+        };
+        for call in &calls[1..] {
+            assert_eq!(
+                call[2..7],
+                ["--repo", "team/repo", "--number", "144", "--verbose"]
+            );
+        }
+        assert_eq!(calls[2][1], "update-issue");
+        assert_eq!(calls[3][1], "update-issue");
+        assert_eq!(
+            payload(1),
+            serde_json::json!({"assignees":["signed-in-user"]})
+        );
+        assert_eq!(
+            payload(2),
+            serde_json::json!({"state":"closed", "state_reason":"completed"})
+        );
+        assert_eq!(
+            payload(3),
+            serde_json::json!({"state":"open", "state_reason":"reopened"})
+        );
+        assert_eq!(calls[4][1], "post-issue-comment");
+        assert_eq!(payload(4)["work_mode"], true);
+        assert!(
+            payload(4)["body"]
+                .as_str()
+                .unwrap()
+                .starts_with("@CodeBuddy ")
+        );
+        assert_eq!(calls.len(), 7);
+        for call in &calls[5..] {
+            assert_eq!(
+                call,
+                &[
+                    "issues",
+                    "get-issue-comment",
+                    "--repo",
+                    "team/repo",
+                    "--number",
+                    "144",
+                    "--verbose",
+                    "--comment-id",
+                    "987"
+                ]
+            );
+        }
+        cnb_response(
+            directory,
+            "get-issue-comment",
+            serde_json::json!({"status":200,"data":{"id":"other"}}),
+        );
+        assert!(
+            load_npc_action(&cli, "team/repo", "144", "987")
+                .await
+                .is_err()
+        );
+        cnb_response(
+            directory,
+            "update-issue",
+            serde_json::json!({"status":403,"data":{}}),
+        );
+        assert!(
+            perform_action(
+                &cli,
+                "team/repo",
+                "144",
+                IssueAction::SetState(IssueFilter::Closed)
+            )
+            .await
+            .is_err()
+        );
+        cnb_response(
+            directory,
+            "get-user-info",
+            serde_json::json!({"status":200,"data":{}}),
+        );
+        assert!(
+            perform_action(&cli, "team/repo", "144", IssueAction::AssignSelf)
+                .await
+                .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cnb_comments_load_every_page_and_reject_partial_results() {
+        let (directory, cli) = cnb_fixture();
+        let directory = directory.path();
+        let comments: Vec<_> = (1..=PAGE_SIZE)
+            .map(|id| serde_json::json!({"id":id.to_string(), "body":"评论"}))
+            .collect();
+        for metadata in [false, true] {
+            let mut first = serde_json::json!({"status":200,"data":comments});
+            if metadata {
+                first["header"] = serde_json::json!({"x-cnb-total":"31"});
+            }
+            cnb_response(directory, "comments-1", first);
+            cnb_response(
+                directory,
+                "comments-2",
+                serde_json::json!({"status":200,"data":[{
+                    "id":"31", "body":"最终验收：**完整上下文**\n\n```rust\nfn main() {}\n```", "author":{"username":"reviewer"}
+                }]}),
+            );
+            let result = load_comments(&cli, "team/repo", "144").await.unwrap();
+            assert_eq!(result.len(), 31);
+            assert_eq!(result[30].author.username, "reviewer");
+            assert!(result[30].body.contains("```rust"));
+            cnb_response(
+                directory,
+                "comments-2",
+                serde_json::json!({"status":403,"data":{}}),
+            );
+            assert!(load_comments(&cli, "team/repo", "144").await.is_err());
+        }
+        cnb_response(
+            directory,
+            "comments-2",
+            serde_json::json!({"status":200,"data":[]}),
+        );
+        assert!(load_comments(&cli, "team/repo", "144").await.is_err());
+        cnb_response(
+            directory,
+            "comments-1",
+            serde_json::json!({"status":200,"data":[],"total":0}),
+        );
+        assert!(
+            load_comments(&cli, "team/repo", "144")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     #[test]
     fn cnb_remotes_recognize_nested_organizations_and_prefer_origin_fetch() {

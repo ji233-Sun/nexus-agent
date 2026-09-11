@@ -1,6 +1,6 @@
 use crate::i18n::LocalizedText;
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::{fmt::Write as _, path::PathBuf};
 use uuid::Uuid;
 
 pub(crate) const PAGE_SIZE: usize = 30;
@@ -81,6 +81,132 @@ pub(crate) struct Issue {
     pub(crate) updated_at: String,
 }
 
+impl Issue {
+    pub(crate) fn chat_prompt(&self, repository: &str, comments: &[Comment]) -> String {
+        let mut prompt = format!(
+            "请处理以下 CNB Issue，并验证结果。\n\n# {}\n\nhttps://cnb.cool/{repository}/-/issues/{}\n\n",
+            self.title, self.number
+        );
+        for (label, value) in [
+            ("仓库", repository.to_owned()),
+            ("状态", self.state.clone()),
+            (
+                "作者",
+                format!("{} (@{})", self.author.name(), self.author.username),
+            ),
+            (
+                "处理人",
+                self.assignees
+                    .iter()
+                    .map(|user| user.username.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+            (
+                "标签",
+                self.labels
+                    .iter()
+                    .map(|label| label.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+            ("优先级", self.priority.clone()),
+            ("创建时间", self.created_at.clone()),
+            ("更新时间", self.updated_at.clone()),
+        ] {
+            let _ = writeln!(prompt, "- {label}：{value}");
+        }
+        let _ = write!(
+            prompt,
+            "\n## 描述\n\n{}\n\n## 评论（{}）\n",
+            self.body,
+            comments.len()
+        );
+        for comment in comments {
+            let _ = write!(
+                prompt,
+                "\n### {} (@{}) · {} · 评论 {}\n\n{}\n",
+                comment.author.name(),
+                comment.author.username,
+                comment.created_at,
+                comment.id,
+                comment.body
+            );
+        }
+        prompt
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct Comment {
+    pub(crate) id: String,
+    #[serde(default)]
+    pub(crate) body: String,
+    #[serde(default)]
+    pub(crate) author: User,
+    #[serde(default)]
+    pub(crate) created_at: String,
+    #[serde(default)]
+    pub(crate) statuses: Option<CommentStatuses>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub(crate) struct CommentStatuses {
+    #[serde(default)]
+    npc: Vec<NpcStatusGroup>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct NpcStatusGroup {
+    #[serde(default)]
+    statuses: Vec<NpcStatus>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct NpcStatus {
+    #[serde(default)]
+    target_url: String,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    description: String,
+}
+
+impl Comment {
+    pub(crate) fn action_url(&self) -> Option<&str> {
+        self.statuses
+            .as_ref()?
+            .npc
+            .iter()
+            .flat_map(|group| &group.statuses)
+            .map(|status| status.target_url.as_str())
+            .find(|url| url.starts_with("https://cnb.cool/"))
+    }
+
+    pub(crate) fn npc_failure(&self) -> Option<&str> {
+        self.statuses
+            .as_ref()?
+            .npc
+            .iter()
+            .flat_map(|group| &group.statuses)
+            .find(|status| matches!(status.state.as_str(), "failure" | "error" | "skipped"))
+            .map(|status| {
+                if status.description.is_empty() {
+                    status.state.as_str()
+                } else {
+                    status.description.as_str()
+                }
+            })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IssueAction {
+    AssignSelf,
+    SetState(IssueFilter),
+    StartNpc,
+}
+
 #[derive(Debug)]
 pub(crate) struct IssuePage {
     pub(crate) issues: Vec<Issue>,
@@ -104,6 +230,16 @@ pub(crate) struct CnbModel {
     pub(crate) detail: Option<Issue>,
     pub(crate) detail_request: Option<Uuid>,
     pub(crate) detail_error: Option<LocalizedText>,
+    pub(crate) comments: Option<Vec<Comment>>,
+    pub(crate) comments_request: Option<Uuid>,
+    pub(crate) comments_error: Option<LocalizedText>,
+    pub(crate) action_request: Option<(Uuid, IssueAction)>,
+    pub(crate) action_error: Option<LocalizedText>,
+    pub(crate) action_success: Option<LocalizedText>,
+    pub(crate) list_dirty: bool,
+    pub(crate) npc_comment: Option<Comment>,
+    pub(crate) npc_request: Option<Uuid>,
+    pub(crate) npc_error: Option<LocalizedText>,
 }
 
 impl Default for CnbModel {
@@ -125,6 +261,34 @@ impl Default for CnbModel {
             detail: None,
             detail_request: None,
             detail_error: None,
+            comments: None,
+            comments_request: None,
+            comments_error: None,
+            action_request: None,
+            action_error: None,
+            action_success: None,
+            list_dirty: false,
+            npc_comment: None,
+            npc_request: None,
+            npc_error: None,
         }
+    }
+}
+
+impl CnbModel {
+    pub(crate) fn clear_detail(&mut self) {
+        self.detail_number = None;
+        self.detail = None;
+        self.detail_request = None;
+        self.detail_error = None;
+        self.comments = None;
+        self.comments_request = None;
+        self.comments_error = None;
+        self.action_request = None;
+        self.action_error = None;
+        self.action_success = None;
+        self.npc_comment = None;
+        self.npc_request = None;
+        self.npc_error = None;
     }
 }
