@@ -1,4 +1,13 @@
 {
+  "打开方式": "Open in",
+  "确定": "OK",
+  "文件管理器": "File manager",
+  "尚未选择工作目录。": "No working directory selected.",
+  "无法打开工作目录": "Unable to open working directory",
+  "工作目录不存在或无法访问：{path}": "The working directory does not exist or cannot be accessed: {path}",
+  "当前平台不支持使用 {app} 打开工作目录。": "Opening a working directory with {app} is not supported on this platform.",
+  "未找到 {app} 的启动程序（{program}）。请先安装应用并确保其在 PATH 中。": "Could not find the launcher for {app} ({program}). Install the application and make sure it is on PATH.",
+  "无法使用 {app} 打开“{path}”。请确认应用已安装且可正常启动。{error}": "Could not open “{path}” in {app}. Make sure the application is installed and can start normally. {error}",
   "未关联项目": "No linked project",
   "直接发送消息开始对话；处理项目文件时，可添加本地项目。": "Send a message to start chatting. Add a local project when you need to work with project files.",
   "会话目录尚未就绪": "The conversation directory is not ready",
