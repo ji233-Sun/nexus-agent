@@ -68,6 +68,95 @@ pub(super) fn navigation_row(
 }
 
 impl NexusView {
+    fn render_task_row(
+        &self,
+        task: &nexus_domain::TaskSummary,
+        cx: &mut Context<Self>,
+    ) -> ListItem {
+        let model = self.presenter.model();
+        let locale = model.language;
+        let colors = palette(cx);
+        let id = task.id;
+        let app = cx.entity().clone();
+        let can_manage = !model.task_running(task.id) && !model.workspace_busy;
+        let reduced_motion = self.reduced_motion;
+        let color = run_status_color(colors, task.status);
+        let active = task.status.is_active();
+        navigation_row(colors, id, task.title.clone(), None)
+            .pr(px(62.))
+            .group("sidebar-task")
+            .debug_selector(move || format!("sidebar-task-{id}"))
+            .selected(model.selected_task == Some(id) && !model.cnb.opened)
+            .suffix(move |_, _| {
+                let archive_app = app.clone();
+                let delete_app = app.clone();
+                div()
+                    .absolute()
+                    .right(px(2.))
+                    .top(px((SIDEBAR_ROW_HEIGHT - COMPACT_CONTROL_HEIGHT) / 2.))
+                    .h(px(COMPACT_CONTROL_HEIGHT))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .when_some(color, |actions, color| {
+                        actions.child(if active {
+                            Spinner::new()
+                                .icon(IconName::LoaderCircle)
+                                .with_size(px(14.))
+                                .color(color)
+                                .into_any_element()
+                        } else {
+                            Icon::new(IconName::CircleX)
+                                .size(px(14.))
+                                .text_color(color)
+                                .into_any_element()
+                        })
+                    })
+                    .child(
+                        AnimatedDropdown::new(
+                            (ElementId::from(id), "actions-menu"),
+                            Button::new((ElementId::from(id), "actions-trigger"))
+                                .debug_selector(move || format!("task-actions-{id}"))
+                                .ghost()
+                                .small()
+                                .size(px(COMPACT_CONTROL_HEIGHT))
+                                .p_0()
+                                .icon(IconName::Ellipsis)
+                                .accessibility_label(locale.text("对话操作"))
+                                .tooltip(locale.text("对话操作"))
+                                .disabled(!can_manage),
+                            reduced_motion,
+                            move |menu, _, _| {
+                                let archive_app = archive_app.clone();
+                                let delete_app = delete_app.clone();
+                                menu.min_w(px(144.))
+                                    .item(
+                                        PopupMenuItem::new(locale.text("归档此对话"))
+                                            .icon(IconName::Inbox)
+                                            .on_click(move |_, window, cx| {
+                                                archive_app.update(cx, |app, cx| {
+                                                    app.archive_task(id, window, cx)
+                                                });
+                                            }),
+                                    )
+                                    .item(PopupMenuItem::separator())
+                                    .item(
+                                        PopupMenuItem::new(locale.text("删除对话"))
+                                            .icon(IconName::Delete)
+                                            .on_click(move |_, window, cx| {
+                                                delete_app.update(cx, |app, cx| {
+                                                    app.confirm_delete_task(id, window, cx)
+                                                });
+                                            }),
+                                    )
+                            },
+                        )
+                        .show_caret(false),
+                    )
+            })
+            .on_click(cx.listener(move |app, _, window, cx| app.select_task(id, window, cx)))
+    }
+
     pub(super) fn render_sidebar(
         &self,
         window: &mut Window,
@@ -101,96 +190,9 @@ impl NexusView {
                 let tasks: Vec<_> = model
                     .tasks
                     .iter()
+                    .filter(|task| task.project_id == Some(project_id))
                     .filter(|task| matches_search(&task.title, &query))
-                    .map(|task| {
-                        let id = task.id;
-                        let app = cx.entity().clone();
-                        let can_manage = !model.task_running(task.id) && !model.workspace_busy;
-                        let reduced_motion = self.reduced_motion;
-                        let color = run_status_color(colors, task.status);
-                        let active = task.status.is_active();
-                        navigation_row(colors, id, task.title.clone(), None)
-                            .pr(px(62.))
-                            .group("sidebar-task")
-                            .debug_selector(move || format!("sidebar-task-{id}"))
-                            .selected(model.selected_task == Some(id) && !model.cnb.opened)
-                            .suffix(move |_, _| {
-                                let archive_app = app.clone();
-                                let delete_app = app.clone();
-                                div()
-                                    .absolute()
-                                    .right(px(2.))
-                                    .top(px((SIDEBAR_ROW_HEIGHT - COMPACT_CONTROL_HEIGHT) / 2.))
-                                    .h(px(COMPACT_CONTROL_HEIGHT))
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .when_some(color, |actions, color| {
-                                        actions.child(if active {
-                                            Spinner::new()
-                                                .icon(IconName::LoaderCircle)
-                                                .with_size(px(14.))
-                                                .color(color)
-                                                .into_any_element()
-                                        } else {
-                                            Icon::new(IconName::CircleX)
-                                                .size(px(14.))
-                                                .text_color(color)
-                                                .into_any_element()
-                                        })
-                                    })
-                                    .child(
-                                        AnimatedDropdown::new(
-                                            (ElementId::from(id), "actions-menu"),
-                                            Button::new((ElementId::from(id), "actions-trigger"))
-                                                .debug_selector(move || {
-                                                    format!("task-actions-{id}")
-                                                })
-                                                .ghost()
-                                                .small()
-                                                .size(px(COMPACT_CONTROL_HEIGHT))
-                                                .p_0()
-                                                .icon(IconName::Ellipsis)
-                                                .accessibility_label(locale.text("对话操作"))
-                                                .tooltip(locale.text("对话操作"))
-                                                .disabled(!can_manage),
-                                            reduced_motion,
-                                            move |menu, _, _| {
-                                                let archive_app = archive_app.clone();
-                                                let delete_app = delete_app.clone();
-                                                menu.min_w(px(144.))
-                                                    .item(
-                                                        PopupMenuItem::new(
-                                                            locale.text("归档此对话"),
-                                                        )
-                                                        .icon(IconName::Inbox)
-                                                        .on_click(move |_, window, cx| {
-                                                            archive_app.update(cx, |app, cx| {
-                                                                app.archive_task(id, window, cx)
-                                                            });
-                                                        }),
-                                                    )
-                                                    .item(PopupMenuItem::separator())
-                                                    .item(
-                                                        PopupMenuItem::new(locale.text("删除对话"))
-                                                            .icon(IconName::Delete)
-                                                            .on_click(move |_, window, cx| {
-                                                                delete_app.update(cx, |app, cx| {
-                                                                    app.confirm_delete_task(
-                                                                        id, window, cx,
-                                                                    )
-                                                                });
-                                                            }),
-                                                    )
-                                            },
-                                        )
-                                        .show_caret(false),
-                                    )
-                            })
-                            .on_click(cx.listener(move |app, _, window, cx| {
-                                app.select_task(id, window, cx)
-                            }))
-                    })
+                    .map(|task| self.render_task_row(task, cx))
                     .collect();
                 gpui_kit::base::Collapsible::new()
                     .open(open)
@@ -460,10 +462,7 @@ impl NexusView {
                                                 }),
                                         ),
                                 )
-                                .tooltip(locale.text("在当前项目中开始新任务"))
-                                .disabled(
-                                    model.selected_project.is_none(),
-                                )
+                                .tooltip(locale.text("新建任务"))
                                 .on_click(
                                     cx.listener(|app, _, window, cx| app.new_task(window, cx)),
                                 ),
@@ -507,6 +506,21 @@ impl NexusView {
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .text_color(rgb(colors.muted))
                                     .child(locale.text("项目空间")),
+                            )
+                            .child(
+                                div()
+                                    .mb_3()
+                                    .child(
+                                        navigation_row(colors, "projectless-tasks", locale.text("未关联项目"), Some(IconName::Plus))
+                                            .debug_selector(|| "sidebar-projectless".into())
+                                            .selected(selected_project_id.is_none() && model.selected_task.is_none())
+                                            .on_click(cx.listener(|app, _, window, cx| {
+                                                app.new_projectless_task(window, cx);
+                                            })),
+                                    )
+                                    .children(model.projectless_tasks.iter()
+                                        .filter(|task| matches_search(&task.title, &query))
+                                        .map(|task| self.render_task_row(task, cx))),
                             )
                             .child(projects)
                             .child(
@@ -693,7 +707,7 @@ mod tests {
                     workspace_id: None,
                     permission_mode: nexus_domain::PermissionMode::AutoEdit,
                     task_id: None,
-                    project_id: project.id,
+                    project_id: Some(project.id),
                     title: if index % 2 == 0 { "Hi" } else { long_title },
                     prompt: &"A long message for scrolling.\n\n".repeat(100),
                     harness: HarnessKind::Claude,
@@ -825,7 +839,7 @@ mod tests {
         });
         assert!(cx.debug_bounds("workspace-empty-no-project").is_some());
         assert!(cx.debug_bounds("workspace-empty-agent-status").is_none());
-        assert!(cx.debug_bounds("workspace-header-task").is_none());
+        assert!(cx.debug_bounds("workspace-header-task").is_some());
         assert!(cx.debug_bounds("workspace-header-settled-status").is_none());
         assert!(cx.debug_bounds("workspace-header-pending-status").is_none());
 

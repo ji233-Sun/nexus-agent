@@ -305,6 +305,8 @@ impl Presenter {
             .ok()
             .flatten()
             .is_none_or(|value| value != "false");
+        presenter.reload_tasks();
+        presenter.refresh_model_catalog();
         presenter
     }
 
@@ -468,14 +470,7 @@ impl Presenter {
             .as_ref()
             .is_some_and(|project| project.id == project_id)
         {
-            self.cancel_voice();
-            self.model.fresh_conversation();
-            self.model.selected_project = None;
-            self.model.tasks.clear();
-            self.model.model_catalog = ModelCatalogState::Idle;
-            self.model.permission_mode =
-                load_permission_mode(&self.storage, self.model.selected_harness);
-            self.reset_cnb_project();
+            self.new_projectless_task();
         }
         self.model.conversations.retain(|_, conversation| {
             conversation
@@ -491,9 +486,6 @@ impl Presenter {
     }
 
     pub(crate) fn new_task(&mut self) {
-        if self.model.selected_project.is_none() {
-            return;
-        }
         self.model.cnb.opened = false;
         self.cancel_voice();
         self.model.fresh_conversation();
@@ -507,12 +499,20 @@ impl Presenter {
         self.refresh_model_catalog();
     }
 
+    pub(crate) fn new_projectless_task(&mut self) {
+        self.select_project_context(None);
+    }
+
     pub(crate) fn select_project(&mut self, project: Project) {
+        self.select_project_context(Some(project));
+    }
+
+    fn select_project_context(&mut self, project: Option<Project>) {
         self.cancel_voice();
         self.model.fresh_conversation();
         self.model.permission_mode =
             load_permission_mode(&self.storage, self.model.selected_harness);
-        self.model.selected_project = Some(project);
+        self.model.selected_project = project;
         self.model.selected_task = None;
         self.reset_workspace_draft();
         self.reload_workspaces();
@@ -565,16 +565,29 @@ impl Presenter {
     }
 
     fn reload_tasks(&mut self) {
+        self.model.projectless_tasks = self.storage.tasks(None).unwrap_or_default();
         self.model.tasks = self
-            .model
-            .selected_project
-            .as_ref()
-            .and_then(|project| self.storage.tasks(project.id).ok())
+            .storage
+            .tasks(
+                self.model
+                    .selected_project
+                    .as_ref()
+                    .map(|project| project.id),
+            )
             .unwrap_or_default();
         self.model.archived_tasks = self.storage.archived_tasks().unwrap_or_default();
     }
 
     pub(crate) fn select_task(&mut self, task_id: Uuid) {
+        let Ok(Some(task)) = self.storage.task(task_id) else {
+            return;
+        };
+        let project_changed = self
+            .model
+            .selected_project
+            .as_ref()
+            .map(|project| project.id)
+            != task.project_id;
         self.model.cnb.opened = false;
         self.cancel_voice();
         if self.model.selected_task != Some(task_id) {
@@ -590,9 +603,16 @@ impl Presenter {
                 self.model.fresh_conversation();
             }
         }
+        // Resolve context from the saved task, never from the previously selected project.
+        self.model.selected_project = task
+            .project_id
+            .and_then(|id| self.storage.project(id).ok().flatten());
         self.model.selected_task = Some(task_id);
         self.model.selected_workspace = self.storage.task_workspace(task_id).ok().flatten();
         self.reload_workspaces();
+        if project_changed {
+            self.reset_cnb_project();
+        }
         self.model.messages = self.storage.messages(task_id).unwrap_or_default();
         self.reload_tasks();
         if self.model.active_run.is_some() {
@@ -940,6 +960,22 @@ impl Presenter {
     pub(crate) fn refresh_model_catalog(&mut self) -> bool {
         if self.model.active_run.is_some() {
             return false;
+        }
+        if self.model.selected_project.is_none()
+            && self.model.selected_task.is_none()
+            && self.model.selected_workspace.is_none()
+        {
+            match self
+                .storage
+                .prepare_projectless_workspace(self.model.workspace_draft.task_id)
+            {
+                Ok(workspace) => self.model.selected_workspace = Some(workspace),
+                Err(error) => {
+                    self.model.model_catalog =
+                        ModelCatalogState::NotReady(error.to_string().into());
+                    return false;
+                }
+            }
         }
         let project_id = self
             .model

@@ -152,7 +152,7 @@ pub(crate) fn planned_workspace(
 ) -> Workspace {
     Workspace {
         id: draft.task_id,
-        project_id: project.id,
+        project_id: Some(project.id),
         task_id: Some(draft.task_id),
         path: root
             .join(project.id.to_string())
@@ -249,13 +249,15 @@ pub(crate) fn validate_workspace(workspace: &Workspace) -> Result<()> {
     if workspace.managed {
         let canonical = path.canonicalize()?;
         ensure!(canonical == path, "任务目录被重定向，拒绝使用");
+    }
+    if workspace.managed && workspace.kind == WorkspaceKind::Worktree {
         let common = repository(path)?;
         ensure!(
             workspace.repository.as_deref() == common.to_str(),
             "任务目录已不属于原仓库"
         );
         ensure!(
-            checkouts(path)?.iter().any(|entry| entry.path == canonical),
+            checkouts(path)?.iter().any(|entry| entry.path == path),
             "任务目录已不在 Git Worktree 列表中"
         );
     }
