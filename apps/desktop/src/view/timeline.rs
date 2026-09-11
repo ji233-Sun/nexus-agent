@@ -190,7 +190,13 @@ impl NexusView {
                             } else {
                                 IconName::ChevronRight
                             })
-                            .label(locale.text("思考过程"))
+                            .child(
+                                div()
+                                    .debug_selector(move || format!("process-label-{first}"))
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(locale.text("思考过程")),
+                            )
                             .on_click(cx.listener(move |app, _, _, cx| {
                                 if !app.expanded_messages.remove(&id) {
                                     app.expanded_messages.insert(id.clone());
@@ -386,6 +392,7 @@ mod tests {
         let tool = presenter.model().messages[2].id;
         let answer = presenter.model().messages.last().unwrap().id;
         let selector: &'static str = format!("process-{first}").leak();
+        let label_selector: &'static str = format!("process-label-{first}").leak();
         let content_selector: &'static str = format!("process-content-{first}").leak();
         let message_selector: &'static str = format!("message-{first}").leak();
         let answer_selector: &'static str = format!("message-{answer}").leak();
@@ -417,6 +424,10 @@ mod tests {
         view.update(cx, |view, cx| view.poll_events(Instant::now(), cx));
         cx.run_until_parked();
         assert!(cx.debug_bounds(selector).is_some());
+        assert!(
+            cx.debug_bounds(label_selector).unwrap().left()
+                <= cx.debug_bounds(selector).unwrap().left() + px(48.)
+        );
         assert!(cx.debug_bounds(content_selector).is_none());
         assert!(cx.debug_bounds(message_selector).is_none());
         assert!(cx.debug_bounds(batch_selector).is_none());
