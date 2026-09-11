@@ -3,7 +3,7 @@ use crate::i18n::probe_status;
 use crate::infrastructure::harness_installation::documentation;
 use crate::model::harness_installation::{InstallMethod, MaintenanceRequest};
 use crate::model::updates::{UpdateChannel, UpdateState, installed_tag};
-use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::scroll::Scrollbar;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SettingsSection {
@@ -241,15 +241,12 @@ impl NexusView {
                     .child(
                         div()
                             .id("settings-scroll")
-                            .flex_1()
-                            .min_h_0()
+                            .size_full()
                             .overflow_y_scroll()
                             .lock_scroll_axis()
                             .track_scroll(&self.settings_scroll)
-                            .pt_8()
-                            .pb_8()
                             .child(
-                                div().min_w_0().px_8().child(
+                                div().min_w_0().p_8().child(
                                     div()
                                         .debug_selector(move || {
                                             format!("settings-content-{}", section.id())
@@ -260,7 +257,16 @@ impl NexusView {
                                         .child(content),
                                 ),
                             )
-                            .vertical_scrollbar(&self.settings_scroll),
+                            .map(|content| {
+                                div()
+                                    .relative()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .overflow_hidden()
+                                    .child(content)
+                                    // Keep the scrollbar fixed outside the scrolled content.
+                                    .child(Scrollbar::vertical(&self.settings_scroll))
+                            }),
                     ),
             )
     }

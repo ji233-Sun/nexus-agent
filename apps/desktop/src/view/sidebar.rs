@@ -624,7 +624,7 @@ impl NexusView {
 mod tests {
     use super::*;
     use crate::infrastructure::storage::{NewTaskRun, Storage};
-    use gpui::{ScrollDelta, ScrollWheelEvent, TestAppContext, point};
+    use gpui::{Bounds, Pixels, ScrollDelta, ScrollWheelEvent, TestAppContext, point};
     use nexus_protocol::Event;
     use std::path::Path;
 
@@ -738,6 +738,26 @@ mod tests {
             let _ = window.draw(cx);
         });
         (view, cx)
+    }
+
+    fn painted_scrollbar_thumbs(
+        cx: &mut gpui::VisualTestContext,
+        viewport: Bounds<Pixels>,
+    ) -> Vec<Bounds<Pixels>> {
+        cx.update(|window, _| {
+            window
+                .painted_quads()
+                .into_iter()
+                .map(|quad| quad.bounds.map(|value| px(value.0 / window.scale_factor())))
+                .filter(|bounds| {
+                    bounds.left() >= viewport.right() - px(16.)
+                        && bounds.right() <= viewport.right()
+                        && bounds.size.width > px(0.)
+                        && bounds.size.width < px(16.)
+                        && bounds.size.height > px(32.)
+                })
+                .collect()
+        })
     }
 
     #[gpui::test]
@@ -1573,22 +1593,8 @@ mod tests {
             max_offset,
             "only navigation content may contribute to the scroll range"
         );
-        let painted_thumbs = |cx: &mut gpui::VisualTestContext| {
-            cx.update(|window, _| {
-                window
-                    .painted_quads()
-                    .into_iter()
-                    .map(|quad| quad.bounds.map(|value| px(value.0 / window.scale_factor())))
-                    .filter(|bounds| {
-                        bounds.left() >= viewport.right() - px(16.)
-                            && bounds.right() <= viewport.right()
-                            && bounds.size.width > px(0.)
-                            && bounds.size.width < px(16.)
-                            && bounds.size.height > px(32.)
-                    })
-                    .collect::<Vec<_>>()
-            })
-        };
+        let painted_thumbs =
+            |cx: &mut gpui::VisualTestContext| painted_scrollbar_thumbs(cx, viewport);
         let thumb_bounds = |cx: &mut gpui::VisualTestContext| {
             let thumbs = painted_thumbs(cx);
             assert_eq!(thumbs.len(), 1, "expected one painted sidebar thumb");
@@ -1710,8 +1716,127 @@ mod tests {
     }
 
     #[gpui::test]
+    fn settings_scrollbar_tracks_scrolling_and_dragging(cx: &mut TestAppContext) {
+        let (view, cx) = scroll_test_view(cx);
+        view.update_in(cx, |view, window, cx| {
+            gpui_kit::component::Theme::set_scrollbar_mode(
+                gpui_kit::component::scroll::ScrollbarMode::Always,
+                cx,
+            );
+            view.toggle_settings(window, cx);
+        });
+        let scroll = view.read_with(cx, |view, _| view.settings_scroll.clone());
+        let device_pixel = cx.update(|window, _| px(1. / window.scale_factor()));
+
+        for size in [
+            gpui::size(px(1040.), px(680.)),
+            gpui::size(px(1280.), px(800.)),
+        ] {
+            cx.simulate_resize(size);
+            for section in [SettingsSection::General, SettingsSection::Providers] {
+                view.update_in(cx, |view, window, cx| {
+                    view.select_settings_section(section, window, cx);
+                });
+                cx.run_until_parked();
+                cx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                });
+                let viewport = scroll.bounds();
+                let max_offset = scroll.max_offset().y;
+                assert!(max_offset > px(80.));
+                let thumb_bounds = |cx: &mut gpui::VisualTestContext| {
+                    let thumbs = painted_scrollbar_thumbs(cx, viewport);
+                    assert_eq!(thumbs.len(), 1, "expected one painted settings thumb");
+                    thumbs[0]
+                };
+                let initial_thumb = thumb_bounds(cx);
+                assert!((initial_thumb.top() - viewport.top()).abs() < px(8.));
+
+                for delta in [
+                    ScrollDelta::Pixels(point(px(0.), px(-80.))),
+                    ScrollDelta::Lines(point(0., -3.)),
+                ] {
+                    let before = thumb_bounds(cx);
+                    cx.simulate_event(ScrollWheelEvent {
+                        position: viewport.center(),
+                        delta,
+                        ..Default::default()
+                    });
+                    cx.update(|window, cx| {
+                        let _ = window.draw(cx);
+                    });
+                    let after = thumb_bounds(cx);
+                    assert!(
+                        after.top() > before.top(),
+                        "settings thumb must follow downward scrolling: before={before:?}, after={after:?}"
+                    );
+                    assert!((after.size.height - initial_thumb.size.height).abs() <= device_pixel);
+                    assert_eq!(scroll.bounds(), viewport);
+                    assert_eq!(scroll.max_offset().y, max_offset);
+                }
+
+                for (destination_y, expected_offset) in [
+                    (viewport.bottom() + px(500.), -max_offset),
+                    (viewport.top() - px(500.), px(0.)),
+                ] {
+                    let thumb = thumb_bounds(cx);
+                    let destination = point(thumb.center().x, destination_y);
+                    cx.simulate_mouse_down(
+                        thumb.center(),
+                        gpui::MouseButton::Left,
+                        Default::default(),
+                    );
+                    // Scrollbar drag updates use a wall-clock 120 Hz throttle.
+                    std::thread::sleep(Duration::from_millis(16));
+                    cx.simulate_mouse_move(
+                        destination,
+                        gpui::MouseButton::Left,
+                        Default::default(),
+                    );
+                    cx.simulate_mouse_up(destination, gpui::MouseButton::Left, Default::default());
+                    cx.update(|window, cx| {
+                        let _ = window.draw(cx);
+                    });
+                    assert_eq!(scroll.offset().y, expected_offset);
+                    assert_eq!(scroll.max_offset().y, max_offset);
+                    let thumb = thumb_bounds(cx);
+                    assert!(thumb.top() >= viewport.top());
+                    assert!(thumb.bottom() <= viewport.bottom());
+                    if expected_offset == -max_offset {
+                        assert!((thumb.bottom() - viewport.bottom()).abs() < px(8.));
+                        assert_eq!(
+                            scroll.bounds_for_item(0).unwrap().bottom() + scroll.offset().y,
+                            viewport.bottom(),
+                            "padded settings content must end at the viewport bottom"
+                        );
+                    } else {
+                        assert!((thumb.top() - viewport.top()).abs() < px(8.));
+                    }
+                }
+            }
+
+            view.update_in(cx, |view, window, cx| {
+                view.select_settings_section(SettingsSection::Archived, window, cx);
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            assert_eq!(scroll.max_offset().y, px(0.));
+            assert_eq!(scroll.offset().y, px(0.));
+            assert!(painted_scrollbar_thumbs(cx, scroll.bounds()).is_empty());
+        }
+    }
+
+    #[gpui::test]
     fn scroll_regions_keep_offsets_and_rendering_independent(cx: &mut TestAppContext) {
         let (view, cx) = scroll_test_view(cx);
+        // Keep the provider form taller than the viewport so it really scrolls.
+        cx.simulate_resize(gpui::size(px(1280.), px(800.)));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
         let scroll = view.read_with(cx, |view, _| view.timeline_scroll.clone());
         assert!(scroll.max_offset().y > px(100.));
         scroll.set_offset(point(px(0.), px(-100.)));
