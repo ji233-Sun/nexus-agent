@@ -2,6 +2,7 @@ pub(crate) mod cli_installation;
 pub(crate) mod cnb;
 pub(crate) mod cnb_media;
 pub(crate) mod credentials;
+pub(crate) mod fonts;
 pub(crate) mod git;
 pub(crate) mod harness_installation;
 pub(crate) mod paths;

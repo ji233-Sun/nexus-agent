@@ -1733,7 +1733,11 @@ mod tests {
             gpui::size(px(1280.), px(800.)),
         ] {
             cx.simulate_resize(size);
-            for section in [SettingsSection::General, SettingsSection::Providers] {
+            for section in [
+                SettingsSection::General,
+                SettingsSection::Providers,
+                SettingsSection::Appearance,
+            ] {
                 view.update_in(cx, |view, window, cx| {
                     view.select_settings_section(section, window, cx);
                 });
@@ -2125,6 +2129,62 @@ mod tests {
                 )
             });
         }
+        view.update_in(cx, |view, _, cx| {
+            view.settings_scroll.scroll_to_bottom();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        for selector in ["font-reading-select", "font-code-select"] {
+            let bounds = cx.debug_bounds(selector).unwrap();
+            cx.simulate_click(bounds.center(), Default::default());
+            cx.run_until_parked();
+            let query = view.read_with(cx, |view, _| {
+                view.presenter.model().language.text("系统界面字体")
+            });
+            cx.simulate_input(query);
+            cx.run_until_parked();
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+        }
+        view.read_with(cx, |view, cx| {
+            assert_eq!(
+                view.presenter.model().fonts.reading.as_deref(),
+                Some(".SystemUIFont")
+            );
+            assert_eq!(
+                view.presenter.model().fonts.code.as_deref(),
+                Some(".SystemUIFont")
+            );
+            assert_eq!(reading_font(cx).family.as_ref(), ".SystemUIFont");
+            assert_eq!(mono_font(cx).as_ref(), ".SystemUIFont");
+            assert_eq!(view.presenter.model().selected_task, task);
+            assert_eq!(view.prompt_input.read(cx).value(), "Keep my draft");
+            assert_eq!(view.timeline_scroll.offset().y, px(-120.));
+        });
+        assert!(cx.debug_bounds("font-preview-reading").is_some());
+        assert!(cx.debug_bounds("font-preview-code").is_some());
+        let preview = cx.debug_bounds("font-preview-code").unwrap();
+        view.read_with(cx, |view, _| {
+            assert!(view.settings_scroll.offset().y < px(0.));
+            assert!(view.settings_scroll.bounds().contains(&preview.center()));
+        });
+        let reset = cx.debug_bounds("font-reset").unwrap().center();
+        cx.simulate_click(reset, Default::default());
+        cx.run_until_parked();
+        view.read_with(cx, |view, cx| {
+            assert_eq!(
+                view.presenter.model().fonts,
+                crate::model::FontSettings::default()
+            );
+            assert!(
+                view.font_controls
+                    .reading
+                    .read(cx)
+                    .selected_value()
+                    .is_none()
+            );
+            assert!(view.font_controls.code.read(cx).selected_value().is_none());
+        });
         let counts = view.read_with(cx, |view, cx| {
             (
                 view.sidebar_pane.read(cx).render_count,

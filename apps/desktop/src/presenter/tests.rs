@@ -1706,7 +1706,7 @@ fn language_translates_probe_summaries_and_default_effort_without_changing_cli_v
 
 #[test]
 fn appearance_preferences_restore_and_accept_missing_or_invalid_settings() {
-    use crate::model::{AppearanceSettings, ThemePreference};
+    use crate::model::{AppearanceSettings, FontSettings, ThemePreference};
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("appearance.sqlite");
     let mut presenter = Presenter::new(
@@ -1715,6 +1715,7 @@ fn appearance_preferences_restore_and_accept_missing_or_invalid_settings() {
         None,
     );
     assert_eq!(presenter.model().appearance, AppearanceSettings::default());
+    assert_eq!(presenter.model().fonts, FontSettings::default());
     for theme in [
         ThemePreference::Dark,
         ThemePreference::Light,
@@ -1753,6 +1754,44 @@ fn appearance_preferences_restore_and_accept_missing_or_invalid_settings() {
             None,
         );
         assert_eq!(presenter.model().appearance, expected);
+    }
+    for fonts in [
+        FontSettings {
+            reading: Some("SimSun".into()),
+            code: Some("Consolas".into()),
+        },
+        FontSettings::default(),
+    ] {
+        let appearance = presenter.model().appearance;
+        presenter.set_fonts(fonts.clone()).unwrap();
+        drop(presenter);
+        presenter = Presenter::new(
+            Storage::open(&path).unwrap(),
+            Err(anyhow::anyhow!("test")),
+            None,
+        );
+        assert_eq!(presenter.model().fonts, fonts);
+        assert_eq!(presenter.model().appearance, appearance);
+    }
+    for (raw, expected) in [
+        (
+            r#"{"reading":"Songti SC"}"#,
+            FontSettings {
+                reading: Some("Songti SC".into()),
+                ..Default::default()
+            },
+        ),
+        ("invalid json", FontSettings::default()),
+        (r#"{"code":42}"#, FontSettings::default()),
+    ] {
+        presenter.storage.set_setting("fonts", raw).unwrap();
+        drop(presenter);
+        presenter = Presenter::new(
+            Storage::open(&path).unwrap(),
+            Err(anyhow::anyhow!("test")),
+            None,
+        );
+        assert_eq!(presenter.model().fonts, expected);
     }
 }
 
@@ -2339,7 +2378,7 @@ fn tool_events_preserve_ids_and_full_payloads_after_reloading_a_task() {
     assert!(!messages[4].tool.as_ref().unwrap().is_error);
     assert_eq!(messages[1].content, format!("Bash\n{long_text}"));
     assert_eq!(messages[4].content, long_text);
-    let items = crate::model::tools::timeline_items(messages);
+    let items = crate::model::tools::timeline_items(messages, &presenter.model().completed_runs);
     let crate::model::tools::TimelineItem::Tools(batch) = &items[1] else {
         panic!("expected one tool batch")
     };
@@ -4755,6 +4794,8 @@ fn runner_events_update_timeline_and_persist_terminal_statuses() {
             run_id,
             text: "answer".into(),
         });
+        presenter.drain_events();
+        assert!(!presenter.model().completed_runs.contains(&run_id));
         if status == RunStatus::Failed {
             runner.emit(Event::RunFailed {
                 run_id,
@@ -4776,16 +4817,40 @@ fn runner_events_update_timeline_and_persist_terminal_statuses() {
         assert!(presenter.model().active_run_elapsed_seconds.is_none());
         assert!(!presenter.refresh_run_elapsed(started + Duration::from_secs(10)));
         assert_eq!(presenter.model().tasks[0].status, status);
+        assert_eq!(
+            presenter.model().completed_runs.contains(&run_id),
+            status == RunStatus::Completed
+        );
+        assert_eq!(
+            presenter
+                .storage
+                .completed_runs(task_id)
+                .unwrap()
+                .contains(&run_id),
+            status == RunStatus::Completed
+        );
         let messages = presenter.storage.messages(task_id).unwrap();
         assert_eq!(messages[1].content, "answer");
         assert_eq!(messages[1].sequence, 2);
         if status == RunStatus::Failed {
             assert_eq!(messages[2].kind, MessageKind::Error);
         }
+        presenter.new_task();
+        presenter.select_task(task_id);
+        assert_eq!(
+            presenter.model().completed_runs.contains(&run_id),
+            status == RunStatus::Completed
+        );
         assert!(presenter.submit("next task", "claude"));
         assert_eq!(presenter.model().selected_task, Some(task_id));
         assert_eq!(presenter.model().tasks.len(), 1);
         assert_eq!(presenter.model().active_run_elapsed_seconds, Some(0));
+        assert!(
+            !presenter
+                .model()
+                .completed_runs
+                .contains(&presenter.model().active_run.unwrap())
+        );
         assert!(presenter.model.active_run_started_at.unwrap() >= started);
     }
 }

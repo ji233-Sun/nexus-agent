@@ -11,7 +11,7 @@ use nexus_domain::{
     ThinkingEffort, UserAskAnswer, UserAskAnswerMode, UserAskAnswerValue, UserAskQuestion,
 };
 use nexus_protocol::{ApprovalRequest, HarnessProbe};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Default)]
@@ -66,6 +66,13 @@ pub(crate) struct AppearanceSettings {
     pub(crate) theme: ThemePreference,
     pub(crate) glass: bool,
     pub(crate) reduced_motion: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub(crate) struct FontSettings {
+    pub(crate) reading: Option<String>,
+    pub(crate) code: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -234,6 +241,7 @@ pub(crate) struct AppModel {
     pub(crate) language: Language,
     pub(crate) voice: voice::VoiceModel,
     pub(crate) appearance: AppearanceSettings,
+    pub(crate) fonts: FontSettings,
     pub(crate) title_generation: GenerationSettings,
     pub(crate) commit_message_generation: GenerationSettings,
     pub(crate) updates: updates::UpdateModel,
@@ -282,6 +290,7 @@ pub(crate) struct ConversationState {
     pub(crate) project_is_git: bool,
     pub(crate) workspace_branch: Option<String>,
     pub(crate) messages: Vec<Message>,
+    pub(crate) completed_runs: HashSet<Uuid>,
     pub(crate) active_run: Option<Uuid>,
     pub(crate) run_cancelling: bool,
     pub(crate) queued_messages: VecDeque<QueuedMessage>,

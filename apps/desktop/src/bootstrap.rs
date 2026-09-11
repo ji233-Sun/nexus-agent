@@ -1,5 +1,5 @@
 use crate::{
-    infrastructure::{runner_client::RunnerClient, storage::Storage, update_installation},
+    infrastructure::{fonts, runner_client::RunnerClient, storage::Storage, update_installation},
     presenter::{Presenter, RunnerPort},
     view::{NexusView, theme},
 };
@@ -134,6 +134,9 @@ pub(crate) fn run() -> anyhow::Result<()> {
         ))
         .run(move |cx: &mut App| {
             gpui_kit::init(cx);
+            let font_errors = fonts::directory()
+                .and_then(|directory| fonts::load(&directory, cx.text_system()))
+                .unwrap_or_else(|error| vec![format!("{error:#}")]);
             theme::configure_theme(cx);
             let window_background = cx.global::<theme::ResolvedAppearance>().window_background();
             let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
@@ -152,6 +155,9 @@ pub(crate) fn run() -> anyhow::Result<()> {
                 };
                 cx.open_window(options, |window, cx| {
                     let mut presenter = create_presenter(update_error);
+                    if !font_errors.is_empty() {
+                        presenter.report_font_load_error(font_errors.join("\n"));
+                    }
                     if let Some(path) = project_path {
                         presenter.open_project(&path);
                     }

@@ -245,7 +245,7 @@ impl NexusView {
                     .paragraph_gap(gpui::rems(1.))
                     .code_block(
                         gpui::StyleRefinement::default()
-                            .font_family(MONO_FONT)
+                            .font_family(mono_font(cx))
                             .text_size(px(12.))
                             .p_4()
                             .bg(rgb(colors.elevated))

@@ -371,7 +371,7 @@ fn render_detail_content(
     };
     let added = lines.iter().filter(|line| line.kind == Some('+')).count();
     let removed = lines.iter().filter(|line| line.kind == Some('-')).count();
-    let number_width = lines
+    let digits = lines
         .iter()
         .flat_map(|line| [line.old, line.new])
         .flatten()
@@ -379,9 +379,26 @@ fn render_detail_content(
         .unwrap_or(1)
         .to_string()
         .len()
-        .max(2) as f32
-        * 8.
-        + 12.;
+        .max(2) as f32;
+    let number_style = gpui::TextStyle {
+        font_family: mono_font(cx),
+        ..Default::default()
+    };
+    let digit_width = ('0'..='9').fold(px(0.), |width, digit| {
+        width.max(
+            window
+                .text_system()
+                .shape_line(
+                    digit.to_string().into(),
+                    px(11.),
+                    &[number_style.to_run(1)],
+                    None,
+                )
+                .width,
+        )
+    });
+    // Retain the gutter's minimum spacing and grow it for wider font digits.
+    let number_width = f32::from(digit_width.max(px(8.))) * digits + 12.;
     let gutter_width = number_width * 2. + 8.;
     let viewport_key = key.clone();
     // Keep one selectable code document; the gutter and full-row washes sit
@@ -394,7 +411,7 @@ fn render_detail_content(
                 .with_dark(dark)
                 .with_code_block({
                     let style = gpui::StyleRefinement::default()
-                        .font_family(MONO_FONT)
+                        .font_family(mono_font(cx))
                         .text_size(px(if is_diff { DIFF_FONT_SIZE } else { 12. }))
                         .line_height(if is_diff {
                             px(DIFF_LINE_HEIGHT).into()
@@ -546,7 +563,7 @@ fn render_detail_content(
                                 .relative()
                                 .when(is_diff, |element| {
                                     let style = gpui::TextStyle {
-                                        font_family: MONO_FONT.into(),
+                                        font_family: mono_font(cx),
                                         ..Default::default()
                                     };
                                     let width = lines.iter().fold(px(0.), |width, line| {
@@ -593,7 +610,7 @@ fn render_detail_content(
                                                         },
                                                     ))
                                                     .flex()
-                                                    .font_family(MONO_FONT)
+                                                    .font_family(mono_font(cx))
                                                     .text_size(px(11.))
                                                     .line_height(px(DIFF_LINE_HEIGHT))
                                                     .text_color(rgb(marker))

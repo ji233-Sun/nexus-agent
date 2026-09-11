@@ -304,6 +304,7 @@ impl NexusView {
     ) -> AnyElement {
         let colors = palette(cx);
         let id = id.into();
+        let selector = format!("message-{id}");
         let animated = !self.reduced_motion;
         let label = self.presenter.model().language.text(match role {
             MessageRole::User => "你",
@@ -318,6 +319,7 @@ impl NexusView {
         );
         let show_label = !is_user && (role != MessageRole::Assistant || is_panel);
         div()
+            .debug_selector(move || selector.clone())
             .w_full()
             .flex()
             .when(is_user, |element| element.justify_end())
@@ -357,39 +359,55 @@ impl NexusView {
                     })
                     .child(if kind == MessageKind::Text {
                         TextView::markdown(id.clone(), content.to_owned())
-                            .text_size(px(15.))
+                            .when(role == MessageRole::Assistant, |text| {
+                                text.font(reading_font(cx))
+                            })
+                            .text_size(px(if is_user { 15. } else { 17. }))
                             .font_weight(gpui::FontWeight::NORMAL)
-                            .line_height(relative(1.7))
+                            .line_height(px(if is_user { 24. } else { 30. }))
                             .style(
                                 TextViewStyle::default()
                                     .paragraph_gap(gpui::rems(1.))
                                     .heading_font_size(|level, _| {
                                         px(match level {
-                                            1 => 22.,
-                                            2 => 20.,
-                                            3 => 18.,
-                                            4 => 17.,
-                                            _ => 16.,
+                                            1 => 26.,
+                                            2 => 23.,
+                                            3 => 20.,
+                                            4 => 18.,
+                                            _ => 17.,
                                         })
+                                    })
+                                    .inline_code(gpui::HighlightStyle {
+                                        background_color: Some(rgb(colors.surface).into()),
+                                        ..Default::default()
                                     })
                                     .code_block(
                                         gpui::StyleRefinement::default()
-                                            .font_family(MONO_FONT)
-                                            .text_size(px(13.))
-                                            .line_height(relative(1.6))
+                                            .font_family(mono_font(cx))
+                                            .text_size(px(14.))
+                                            .line_height(px(22.))
                                             .p(px(16.))
                                             .bg(rgb(colors.elevated))
                                             .border_1()
                                             .border_color(rgb(colors.border))
                                             .rounded(px(CARD_RADIUS)),
                                     )
+                                    .table({
+                                        let mut style = gpui::StyleRefinement::default();
+                                        style.overflow.x = Some(gpui::Overflow::Scroll);
+                                        style
+                                    })
                                     .table_head(
                                         gpui::StyleRefinement::default()
                                             .bg(rgb(colors.surface))
                                             .text_color(rgb(colors.text_secondary)),
                                     )
                                     .table_cell(
-                                        gpui::StyleRefinement::default().px(px(12.)).py(px(8.)),
+                                        gpui::StyleRefinement::default()
+                                            .text_size(px(15.))
+                                            .line_height(px(24.))
+                                            .px(px(12.))
+                                            .py(px(8.)),
                                     ),
                             )
                             .selectable(true)
@@ -406,7 +424,7 @@ impl NexusView {
                             .line_height(relative(1.55))
                             .when(
                                 matches!(kind, MessageKind::ToolCall | MessageKind::ToolResult),
-                                |element| element.font_family(MONO_FONT),
+                                |element| element.font_family(mono_font(cx)),
                             )
                             .child(content.to_owned())
                             .into_any_element()
