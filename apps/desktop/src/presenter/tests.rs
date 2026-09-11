@@ -1706,7 +1706,7 @@ fn language_translates_probe_summaries_and_default_effort_without_changing_cli_v
 
 #[test]
 fn appearance_preferences_restore_and_accept_missing_or_invalid_settings() {
-    use crate::model::{AppearanceSettings, ThemePreference};
+    use crate::model::{AppearanceSettings, FontSettings, ThemePreference};
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("appearance.sqlite");
     let mut presenter = Presenter::new(
@@ -1715,6 +1715,7 @@ fn appearance_preferences_restore_and_accept_missing_or_invalid_settings() {
         None,
     );
     assert_eq!(presenter.model().appearance, AppearanceSettings::default());
+    assert_eq!(presenter.model().fonts, FontSettings::default());
     for theme in [
         ThemePreference::Dark,
         ThemePreference::Light,
@@ -1753,6 +1754,44 @@ fn appearance_preferences_restore_and_accept_missing_or_invalid_settings() {
             None,
         );
         assert_eq!(presenter.model().appearance, expected);
+    }
+    for fonts in [
+        FontSettings {
+            reading: Some("SimSun".into()),
+            code: Some("Consolas".into()),
+        },
+        FontSettings::default(),
+    ] {
+        let appearance = presenter.model().appearance;
+        presenter.set_fonts(fonts.clone()).unwrap();
+        drop(presenter);
+        presenter = Presenter::new(
+            Storage::open(&path).unwrap(),
+            Err(anyhow::anyhow!("test")),
+            None,
+        );
+        assert_eq!(presenter.model().fonts, fonts);
+        assert_eq!(presenter.model().appearance, appearance);
+    }
+    for (raw, expected) in [
+        (
+            r#"{"reading":"Songti SC"}"#,
+            FontSettings {
+                reading: Some("Songti SC".into()),
+                ..Default::default()
+            },
+        ),
+        ("invalid json", FontSettings::default()),
+        (r#"{"code":42}"#, FontSettings::default()),
+    ] {
+        presenter.storage.set_setting("fonts", raw).unwrap();
+        drop(presenter);
+        presenter = Presenter::new(
+            Storage::open(&path).unwrap(),
+            Err(anyhow::anyhow!("test")),
+            None,
+        );
+        assert_eq!(presenter.model().fonts, expected);
     }
 }
 

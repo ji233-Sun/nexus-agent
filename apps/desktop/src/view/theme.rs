@@ -1,9 +1,8 @@
-use crate::model::{AppearanceSettings, ThemePreference};
+use crate::model::{AppearanceSettings, FontSettings, ThemePreference};
 use gpui_kit::component::{Theme, ThemeMode, box_shadow};
 use gpui_kit::{
     App, BoxShadow, Global, Hsla, WindowAppearance, WindowBackgroundAppearance, px, rgb, rgba,
 };
-use std::sync::OnceLock;
 
 // Quiet chrome, a distinct reading canvas and raised controls across both themes.
 #[derive(Clone, Copy)]
@@ -86,42 +85,68 @@ pub(super) const CONTROL_RADIUS: f32 = 8.;
 pub(super) const CARD_RADIUS: f32 = 12.;
 
 pub(super) fn reading_font(cx: &App) -> gpui_kit::Font {
-    static FONT: OnceLock<gpui_kit::Font> = OnceLock::new();
-    FONT.get_or_init(|| {
-        let installed = cx.text_system().all_font_names();
-        let available = |name: &&str| installed.iter().any(|font| font == *name);
-        let family = [
-            "Charter",
-            "Georgia",
-            "Noto Serif",
-            "DejaVu Serif",
-            "Liberation Serif",
-        ]
-        .into_iter()
-        .find(available)
-        .unwrap_or(".SystemUIFont");
-        // Explicit CJK fallbacks keep mixed prose in a consistent serif style.
-        let fallbacks = [
-            "Songti SC",
-            "Songti TC",
-            "Noto Serif CJK SC",
-            "Source Han Serif SC",
-            "SimSun",
-            "NSimSun",
-        ]
-        .into_iter()
-        .filter(available)
-        .map(str::to_owned)
-        .collect();
-        gpui_kit::Font {
-            fallbacks: Some(gpui_kit::FontFallbacks::from_fonts(fallbacks)),
-            ..gpui_kit::font(family)
-        }
-    })
-    .clone()
+    cx.global::<ResolvedFonts>().reading.clone()
 }
 
-pub(super) const MONO_FONT: &str = if cfg!(target_os = "macos") {
+pub(super) fn mono_font(cx: &App) -> gpui_kit::SharedString {
+    cx.global::<ResolvedFonts>().code.clone()
+}
+
+struct ResolvedFonts {
+    reading: gpui_kit::Font,
+    code: gpui_kit::SharedString,
+}
+
+impl Global for ResolvedFonts {}
+
+pub(super) fn configure_fonts(settings: &FontSettings, cx: &mut App) {
+    let installed = cx.text_system().all_font_names();
+    let reading = settings
+        .reading
+        .as_ref()
+        .filter(|name| installed.contains(name))
+        .map(|name| gpui_kit::font(name.clone()))
+        .unwrap_or_else(|| {
+            let available = |name: &&str| installed.iter().any(|font| font == *name);
+            let family = [
+                "Charter",
+                "Georgia",
+                "Noto Serif",
+                "DejaVu Serif",
+                "Liberation Serif",
+            ]
+            .into_iter()
+            .find(available)
+            .unwrap_or(".SystemUIFont");
+            // Explicit CJK fallbacks keep mixed prose in a consistent serif style.
+            let fallbacks = [
+                "Songti SC",
+                "Songti TC",
+                "Noto Serif CJK SC",
+                "Source Han Serif SC",
+                "SimSun",
+                "NSimSun",
+            ]
+            .into_iter()
+            .filter(available)
+            .map(str::to_owned)
+            .collect();
+            gpui_kit::Font {
+                fallbacks: Some(gpui_kit::FontFallbacks::from_fonts(fallbacks)),
+                ..gpui_kit::font(family)
+            }
+        });
+    let code = settings
+        .code
+        .as_ref()
+        .filter(|name| installed.contains(name))
+        .cloned()
+        .unwrap_or_else(|| MONO_FONT.to_owned())
+        .into();
+    cx.set_global(ResolvedFonts { reading, code });
+}
+
+const MONO_FONT: &str = if cfg!(target_os = "macos") {
     "Menlo"
 } else if cfg!(target_os = "windows") {
     "Consolas"
@@ -240,6 +265,7 @@ pub(super) fn contrast_ratio(foreground: gpui_kit::Rgba, background: gpui_kit::R
 }
 
 pub(crate) fn configure_theme(cx: &mut App) {
+    configure_fonts(&FontSettings::default(), cx);
     apply_theme(
         ResolvedAppearance::resolve(
             AppearanceSettings::default(),
@@ -253,7 +279,14 @@ pub(crate) fn configure_theme(cx: &mut App) {
 }
 
 pub(crate) fn apply_theme(appearance: ResolvedAppearance, cx: &mut App) -> bool {
-    if cx.has_global::<ResolvedAppearance>() && *cx.global::<ResolvedAppearance>() == appearance {
+    let code_font = cx
+        .try_global::<ResolvedFonts>()
+        .map(|fonts| fonts.code.clone())
+        .unwrap_or_else(|| MONO_FONT.into());
+    if cx.has_global::<ResolvedAppearance>()
+        && *cx.global::<ResolvedAppearance>() == appearance
+        && Theme::global(cx).mono_font_family == code_font
+    {
         return false;
     }
     cx.set_global(appearance);
@@ -272,7 +305,7 @@ pub(crate) fn apply_theme(appearance: ResolvedAppearance, cx: &mut App) -> bool 
     let theme = Theme::global_mut(cx);
     theme.font_family = ".SystemUIFont".into();
     theme.font_size = px(14.);
-    theme.mono_font_family = MONO_FONT.into();
+    theme.mono_font_family = code_font;
     theme.mono_font_size = px(13.);
     theme.radius = px(CONTROL_RADIUS);
     theme.radius_lg = px(CARD_RADIUS);
@@ -361,6 +394,47 @@ pub(crate) fn system_accessibility() -> SystemAccessibility {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui_kit::test]
+    fn font_changes_refresh_both_themes_and_missing_families_fall_back(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        cx.update(configure_theme);
+        cx.update(|cx| {
+            let default_reading = reading_font(cx);
+            let default_code = mono_font(cx);
+            let mut appearance = *cx.global::<ResolvedAppearance>();
+            let settings = FontSettings {
+                reading: Some(".SystemUIFont".into()),
+                code: Some(".SystemUIFont".into()),
+            };
+            configure_fonts(&settings, cx);
+            assert_eq!(reading_font(cx).family.as_ref(), ".SystemUIFont");
+            for dark in [false, true] {
+                appearance.dark = dark;
+                apply_theme(appearance, cx);
+                assert_eq!(mono_font(cx).as_ref(), ".SystemUIFont");
+                assert_eq!(Theme::global(cx).mono_font_family, mono_font(cx));
+                assert_eq!(
+                    gpui_kit::base::Theme::global(cx).tokens.typography.mono,
+                    mono_font(cx)
+                );
+            }
+            configure_fonts(
+                &FontSettings {
+                    reading: Some("Missing reading font".into()),
+                    code: Some("Missing code font".into()),
+                },
+                cx,
+            );
+            assert_eq!(reading_font(cx), default_reading);
+            assert_eq!(mono_font(cx), default_code);
+            apply_theme(appearance, cx);
+            assert_eq!(Theme::global(cx).mono_font_family, default_code);
+            assert!(!apply_theme(appearance, cx));
+        });
+    }
 
     #[gpui_kit::test]
     fn appearance_follows_system_and_applies_accessibility_without_idle_updates(

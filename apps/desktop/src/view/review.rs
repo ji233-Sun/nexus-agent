@@ -408,7 +408,7 @@ impl NexusView {
                     div()
                         .flex_none()
                         .text_size(px(11.))
-                        .font_family(MONO_FONT)
+                        .font_family(mono_font(cx))
                         .text_color(rgb(match file.status {
                             "A" => colors.success,
                             "D" => colors.danger,
@@ -442,7 +442,7 @@ impl NexusView {
                         .flex()
                         .gap_1()
                         .text_size(px(10.))
-                        .font_family(MONO_FONT)
+                        .font_family(mono_font(cx))
                         .when(file.additions > 0, |element| {
                             element.child(
                                 div()
@@ -569,7 +569,7 @@ impl NexusView {
                         div()
                             .flex_none()
                             .text_size(px(11.))
-                            .font_family(MONO_FONT)
+                            .font_family(mono_font(cx))
                             .text_color(rgb(colors.muted))
                             .child(head),
                     )

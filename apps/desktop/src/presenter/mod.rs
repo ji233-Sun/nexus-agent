@@ -17,8 +17,8 @@ use crate::{
         storage::Storage,
     },
     model::{
-        AppModel, AppearanceSettings, ConversationState, GenerationKind, GenerationSettings,
-        ModelCatalogState,
+        AppModel, AppearanceSettings, ConversationState, FontSettings, GenerationKind,
+        GenerationSettings, ModelCatalogState,
         updates::{UpdateChannel, UpdateModel, UpdateState},
     },
     remote_control::{RemoteCommand, RemoteControl, TOKEN_SETTING_KEY},
@@ -113,6 +113,12 @@ impl Presenter {
             .unwrap_or_default();
         let appearance = storage
             .setting("appearance")
+            .ok()
+            .flatten()
+            .and_then(|value| serde_json::from_str(&value).ok())
+            .unwrap_or_default();
+        let fonts = storage
+            .setting("fonts")
             .ok()
             .flatten()
             .and_then(|value| serde_json::from_str(&value).ok())
@@ -238,6 +244,7 @@ impl Presenter {
             model: AppModel {
                 language,
                 appearance,
+                fonts,
                 title_generation,
                 commit_message_generation,
                 updates,
@@ -393,6 +400,20 @@ impl Presenter {
                 false
             }
         }
+    }
+
+    pub(crate) fn set_fonts(&mut self, fonts: FontSettings) -> Result<()> {
+        self.storage
+            .set_setting("fonts", &serde_json::to_string(&fonts)?)?;
+        self.model.fonts = fonts;
+        Ok(())
+    }
+
+    pub(crate) fn report_font_load_error(&mut self, error: String) {
+        self.model.log_status(LocalizedText::new(
+            "无法加载导入字体：{error}",
+            &[("error", error)],
+        ));
     }
 
     pub(crate) fn drain_events(&mut self) -> bool {

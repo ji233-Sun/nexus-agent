@@ -68,6 +68,13 @@ pub(crate) struct AppearanceSettings {
     pub(crate) reduced_motion: bool,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub(crate) struct FontSettings {
+    pub(crate) reading: Option<String>,
+    pub(crate) code: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub(crate) struct GenerationSettings {
@@ -234,6 +241,7 @@ pub(crate) struct AppModel {
     pub(crate) language: Language,
     pub(crate) voice: voice::VoiceModel,
     pub(crate) appearance: AppearanceSettings,
+    pub(crate) fonts: FontSettings,
     pub(crate) title_generation: GenerationSettings,
     pub(crate) commit_message_generation: GenerationSettings,
     pub(crate) updates: updates::UpdateModel,

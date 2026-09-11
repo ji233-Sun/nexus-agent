@@ -1,6 +1,7 @@
 mod cnb;
 mod cnb_media;
 mod components;
+mod fonts;
 mod model_picker;
 mod pane;
 mod review;
@@ -89,6 +90,7 @@ pub(crate) struct NexusView {
     presenter: Presenter,
     prompt_input: Entity<TextareaState>,
     voice_key_input: Entity<InputState>,
+    font_controls: fonts::FontControls,
     user_ask_inputs: BTreeMap<(Uuid, String), Entity<TextareaState>>,
     catalog_model_select: Entity<ListState<ModelPickerList>>,
     catalog_model_select_content: CatalogModelSelectContent,
@@ -129,6 +131,8 @@ impl NexusView {
     pub(crate) fn new(presenter: Presenter, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let locale = presenter.model().language;
         gpui_kit::component::set_locale(locale.as_str());
+        configure_fonts(&presenter.model().fonts, cx);
+        let font_controls = Self::new_font_controls(&presenter.model().fonts, locale, window, cx);
         cx.set_window_appearance(match presenter.model().appearance.theme {
             ThemePreference::System => None,
             ThemePreference::Light => Some(gpui::WindowAppearance::Light),
@@ -323,6 +327,7 @@ impl NexusView {
                     .placeholder("MiMo API Key")
             }),
             presenter,
+            font_controls,
             prompt_input,
             user_ask_inputs: BTreeMap::new(),
             catalog_model_select,
@@ -401,6 +406,7 @@ impl NexusView {
     fn set_language(&mut self, language: Language, window: &mut Window, cx: &mut Context<Self>) {
         if self.presenter.set_language(language) {
             gpui_kit::component::set_locale(language.as_str());
+            self.sync_font_controls(window, cx);
             self.prompt_input.update(cx, |input, cx| {
                 input.set_placeholder(
                     language.text("描述一个目标，让 Agent 开始工作…"),

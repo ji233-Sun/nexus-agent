@@ -100,7 +100,13 @@ impl NexusView {
         let section = self.settings_section;
         let content = match section {
             SettingsSection::General => self.render_general_settings(cx).into_any_element(),
-            SettingsSection::Appearance => self.render_appearance_settings(cx).into_any_element(),
+            SettingsSection::Appearance => div()
+                .flex()
+                .flex_col()
+                .gap_6()
+                .child(self.render_appearance_settings(cx))
+                .child(self.render_font_settings(cx))
+                .into_any_element(),
             SettingsSection::Agent => self.render_agent_settings(cx).into_any_element(),
             SettingsSection::Providers => self.render_provider_profiles(cx).into_any_element(),
             SettingsSection::SourceControl => self.render_cnb_settings(cx).into_any_element(),
@@ -308,7 +314,7 @@ impl NexusView {
                             .gap_2()
                             .child(
                                 div()
-                                    .font_family(MONO_FONT)
+                                    .font_family(mono_font(cx))
                                     .text_size(px(12.))
                                     .text_color(rgb(colors.muted))
                                     .child(
@@ -1781,7 +1787,7 @@ pub(super) fn settings_group(
         )
 }
 
-fn settings_row(
+pub(super) fn settings_row(
     colors: Palette,
     label: impl Into<SharedString>,
     description: impl Into<SharedString>,

@@ -383,7 +383,7 @@ impl NexusView {
                                     })
                                     .code_block(
                                         gpui::StyleRefinement::default()
-                                            .font_family(MONO_FONT)
+                                            .font_family(mono_font(cx))
                                             .text_size(px(14.))
                                             .line_height(px(22.))
                                             .p(px(16.))
@@ -424,7 +424,7 @@ impl NexusView {
                             .line_height(relative(1.55))
                             .when(
                                 matches!(kind, MessageKind::ToolCall | MessageKind::ToolResult),
-                                |element| element.font_family(MONO_FONT),
+                                |element| element.font_family(mono_font(cx)),
                             )
                             .child(content.to_owned())
                             .into_any_element()

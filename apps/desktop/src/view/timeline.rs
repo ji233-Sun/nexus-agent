@@ -94,9 +94,11 @@ impl NexusView {
                                                             .text_color(rgb(colors.muted))
                                                             .child(locale.text("已运行"))
                                                             .child(
-                                                                div().font_family(MONO_FONT).child(
-                                                                    format_run_elapsed(seconds),
-                                                                ),
+                                                                div()
+                                                                    .font_family(mono_font(cx))
+                                                                    .child(format_run_elapsed(
+                                                                        seconds,
+                                                                    )),
                                                             ),
                                                     )
                                                 },
