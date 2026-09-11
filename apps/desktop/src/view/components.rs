@@ -357,12 +357,13 @@ impl NexusView {
                     })
                     .child(if kind == MessageKind::Text {
                         TextView::markdown(id.clone(), content.to_owned())
-                            .text_size(px(15.))
+                            .text_size(px(16.))
                             .font_weight(gpui::FontWeight::NORMAL)
-                            .line_height(relative(1.7))
+                            // Keep headings on the same baseline rhythm as body text.
+                            .line_height(px(26.))
                             .style(
                                 TextViewStyle::default()
-                                    .paragraph_gap(gpui::rems(1.))
+                                    .paragraph_gap(gpui::rems(0.75))
                                     .heading_font_size(|level, _| {
                                         px(match level {
                                             1 => 22.,
@@ -371,6 +372,10 @@ impl NexusView {
                                             4 => 17.,
                                             _ => 16.,
                                         })
+                                    })
+                                    .inline_code(gpui::HighlightStyle {
+                                        background_color: Some(rgb(colors.surface).into()),
+                                        ..Default::default()
                                     })
                                     .code_block(
                                         gpui::StyleRefinement::default()
@@ -383,13 +388,22 @@ impl NexusView {
                                             .border_color(rgb(colors.border))
                                             .rounded(px(CARD_RADIUS)),
                                     )
+                                    .table({
+                                        let mut style = gpui::StyleRefinement::default();
+                                        style.overflow.x = Some(gpui::Overflow::Scroll);
+                                        style
+                                    })
                                     .table_head(
                                         gpui::StyleRefinement::default()
                                             .bg(rgb(colors.surface))
                                             .text_color(rgb(colors.text_secondary)),
                                     )
                                     .table_cell(
-                                        gpui::StyleRefinement::default().px(px(12.)).py(px(8.)),
+                                        gpui::StyleRefinement::default()
+                                            .text_size(px(14.))
+                                            .line_height(px(22.))
+                                            .px(px(12.))
+                                            .py(px(8.)),
                                     ),
                             )
                             .selectable(true)
