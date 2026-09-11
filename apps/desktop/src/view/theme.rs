@@ -3,6 +3,7 @@ use gpui_kit::component::{Theme, ThemeMode, box_shadow};
 use gpui_kit::{
     App, BoxShadow, Global, Hsla, WindowAppearance, WindowBackgroundAppearance, px, rgb, rgba,
 };
+use std::sync::OnceLock;
 
 // Quiet chrome, a distinct reading canvas and raised controls across both themes.
 #[derive(Clone, Copy)]
@@ -84,8 +85,44 @@ pub(super) const CONTENT_WIDTH: f32 = 800.;
 pub(super) const CONTROL_RADIUS: f32 = 8.;
 pub(super) const CARD_RADIUS: f32 = 12.;
 
+pub(super) fn reading_font(cx: &App) -> gpui_kit::Font {
+    static FONT: OnceLock<gpui_kit::Font> = OnceLock::new();
+    FONT.get_or_init(|| {
+        let installed = cx.text_system().all_font_names();
+        let available = |name: &&str| installed.iter().any(|font| font == *name);
+        let family = [
+            "Charter",
+            "Georgia",
+            "Noto Serif",
+            "DejaVu Serif",
+            "Liberation Serif",
+        ]
+        .into_iter()
+        .find(available)
+        .unwrap_or(".SystemUIFont");
+        // Explicit CJK fallbacks keep mixed prose in a consistent serif style.
+        let fallbacks = [
+            "Songti SC",
+            "Songti TC",
+            "Noto Serif CJK SC",
+            "Source Han Serif SC",
+            "SimSun",
+            "NSimSun",
+        ]
+        .into_iter()
+        .filter(available)
+        .map(str::to_owned)
+        .collect();
+        gpui_kit::Font {
+            fallbacks: Some(gpui_kit::FontFallbacks::from_fonts(fallbacks)),
+            ..gpui_kit::font(family)
+        }
+    })
+    .clone()
+}
+
 pub(super) const MONO_FONT: &str = if cfg!(target_os = "macos") {
-    "SF Mono"
+    "Menlo"
 } else if cfg!(target_os = "windows") {
     "Consolas"
 } else {

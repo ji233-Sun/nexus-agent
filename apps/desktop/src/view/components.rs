@@ -359,20 +359,22 @@ impl NexusView {
                     })
                     .child(if kind == MessageKind::Text {
                         TextView::markdown(id.clone(), content.to_owned())
-                            .text_size(px(16.))
+                            .when(role == MessageRole::Assistant, |text| {
+                                text.font(reading_font(cx))
+                            })
+                            .text_size(px(if is_user { 15. } else { 17. }))
                             .font_weight(gpui::FontWeight::NORMAL)
-                            // Keep headings on the same baseline rhythm as body text.
-                            .line_height(px(26.))
+                            .line_height(px(if is_user { 24. } else { 30. }))
                             .style(
                                 TextViewStyle::default()
-                                    .paragraph_gap(gpui::rems(0.75))
+                                    .paragraph_gap(gpui::rems(1.))
                                     .heading_font_size(|level, _| {
                                         px(match level {
-                                            1 => 22.,
-                                            2 => 20.,
-                                            3 => 18.,
-                                            4 => 17.,
-                                            _ => 16.,
+                                            1 => 26.,
+                                            2 => 23.,
+                                            3 => 20.,
+                                            4 => 18.,
+                                            _ => 17.,
                                         })
                                     })
                                     .inline_code(gpui::HighlightStyle {
@@ -382,8 +384,8 @@ impl NexusView {
                                     .code_block(
                                         gpui::StyleRefinement::default()
                                             .font_family(MONO_FONT)
-                                            .text_size(px(13.))
-                                            .line_height(relative(1.6))
+                                            .text_size(px(14.))
+                                            .line_height(px(22.))
                                             .p(px(16.))
                                             .bg(rgb(colors.elevated))
                                             .border_1()
@@ -402,8 +404,8 @@ impl NexusView {
                                     )
                                     .table_cell(
                                         gpui::StyleRefinement::default()
-                                            .text_size(px(14.))
-                                            .line_height(px(22.))
+                                            .text_size(px(15.))
+                                            .line_height(px(24.))
                                             .px(px(12.))
                                             .py(px(8.)),
                                     ),
