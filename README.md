@@ -78,7 +78,7 @@ nexus-desktop .                 # 打开当前目录
 nexus-desktop "/path/to/project" # 打开指定目录（支持相对路径）
 ```
 
-这是安装包自带的原生命令，无需 Node.js 或 npx。无参数时启动桌面应用，`--help` 显示用法，`--version` 显示版本；每次调用启动一个应用进程。
+这是安装包自带的原生命令，无需 Node.js 或 npx。CLI 打开桌面应用后立即返回终端，关闭终端不影响应用运行。无参数时打开应用，`--help` 显示用法，`--version` 显示版本；每次调用打开一个独立的应用进程。
 
 macOS 也可直接运行 `"/Applications/Nexus Agent.app/Contents/MacOS/nexus-desktop" .`；Windows 使用 `nexus-desktop.exe`。
 

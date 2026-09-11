@@ -38,7 +38,7 @@ struct Replacement {
     backup: PathBuf,
 }
 
-fn bundle_for_executable(executable: &Path) -> Result<&Path> {
+pub(crate) fn bundle_for_executable(executable: &Path) -> Result<&Path> {
     let macos = executable
         .parent()
         .context("Missing executable directory")?;
