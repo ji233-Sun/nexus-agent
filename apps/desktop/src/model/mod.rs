@@ -11,7 +11,7 @@ use nexus_domain::{
     ThinkingEffort, UserAskAnswer, UserAskAnswerMode, UserAskAnswerValue, UserAskQuestion,
 };
 use nexus_protocol::{ApprovalRequest, HarnessProbe};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Default)]
@@ -282,6 +282,7 @@ pub(crate) struct ConversationState {
     pub(crate) project_is_git: bool,
     pub(crate) workspace_branch: Option<String>,
     pub(crate) messages: Vec<Message>,
+    pub(crate) completed_runs: HashSet<Uuid>,
     pub(crate) active_run: Option<Uuid>,
     pub(crate) run_cancelling: bool,
     pub(crate) queued_messages: VecDeque<QueuedMessage>,

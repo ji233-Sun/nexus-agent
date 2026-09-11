@@ -2339,7 +2339,7 @@ fn tool_events_preserve_ids_and_full_payloads_after_reloading_a_task() {
     assert!(!messages[4].tool.as_ref().unwrap().is_error);
     assert_eq!(messages[1].content, format!("Bash\n{long_text}"));
     assert_eq!(messages[4].content, long_text);
-    let items = crate::model::tools::timeline_items(messages);
+    let items = crate::model::tools::timeline_items(messages, &presenter.model().completed_runs);
     let crate::model::tools::TimelineItem::Tools(batch) = &items[1] else {
         panic!("expected one tool batch")
     };
@@ -4755,6 +4755,8 @@ fn runner_events_update_timeline_and_persist_terminal_statuses() {
             run_id,
             text: "answer".into(),
         });
+        presenter.drain_events();
+        assert!(!presenter.model().completed_runs.contains(&run_id));
         if status == RunStatus::Failed {
             runner.emit(Event::RunFailed {
                 run_id,
@@ -4776,16 +4778,40 @@ fn runner_events_update_timeline_and_persist_terminal_statuses() {
         assert!(presenter.model().active_run_elapsed_seconds.is_none());
         assert!(!presenter.refresh_run_elapsed(started + Duration::from_secs(10)));
         assert_eq!(presenter.model().tasks[0].status, status);
+        assert_eq!(
+            presenter.model().completed_runs.contains(&run_id),
+            status == RunStatus::Completed
+        );
+        assert_eq!(
+            presenter
+                .storage
+                .completed_runs(task_id)
+                .unwrap()
+                .contains(&run_id),
+            status == RunStatus::Completed
+        );
         let messages = presenter.storage.messages(task_id).unwrap();
         assert_eq!(messages[1].content, "answer");
         assert_eq!(messages[1].sequence, 2);
         if status == RunStatus::Failed {
             assert_eq!(messages[2].kind, MessageKind::Error);
         }
+        presenter.new_task();
+        presenter.select_task(task_id);
+        assert_eq!(
+            presenter.model().completed_runs.contains(&run_id),
+            status == RunStatus::Completed
+        );
         assert!(presenter.submit("next task", "claude"));
         assert_eq!(presenter.model().selected_task, Some(task_id));
         assert_eq!(presenter.model().tasks.len(), 1);
         assert_eq!(presenter.model().active_run_elapsed_seconds, Some(0));
+        assert!(
+            !presenter
+                .model()
+                .completed_runs
+                .contains(&presenter.model().active_run.unwrap())
+        );
         assert!(presenter.model.active_run_started_at.unwrap() >= started);
     }
 }

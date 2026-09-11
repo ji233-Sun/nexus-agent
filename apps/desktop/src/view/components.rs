@@ -304,6 +304,7 @@ impl NexusView {
     ) -> AnyElement {
         let colors = palette(cx);
         let id = id.into();
+        let selector = format!("message-{id}");
         let animated = !self.reduced_motion;
         let label = self.presenter.model().language.text(match role {
             MessageRole::User => "你",
@@ -318,6 +319,7 @@ impl NexusView {
         );
         let show_label = !is_user && (role != MessageRole::Assistant || is_panel);
         div()
+            .debug_selector(move || selector.clone())
             .w_full()
             .flex()
             .when(is_user, |element| element.justify_end())

@@ -42,16 +42,11 @@ impl NexusView {
                             .when(empty, |element| {
                                 element.child(self.render_welcome(colors, compact, cx))
                             })
-                            .children(timeline_items(&model.messages).iter().map(
-                                |item| match item {
-                                    TimelineItem::Message(message) => {
-                                        self.render_message(message, window, cx)
-                                    }
-                                    TimelineItem::Tools(batch) => {
-                                        self.render_tool_batch(batch, window, cx)
-                                    }
-                                },
-                            ))
+                            .children(
+                                timeline_items(&model.messages, &model.completed_runs)
+                                    .iter()
+                                    .map(|item| self.render_timeline_item(item, window, cx)),
+                            )
                             .when(!model.streaming_text.is_empty(), |element| {
                                 element.child(self.message_card(
                                     "streaming-message",
@@ -151,6 +146,80 @@ impl NexusView {
                     )
                 },
             )
+    }
+
+    fn render_timeline_item(
+        &self,
+        item: &TimelineItem<'_>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        match item {
+            TimelineItem::Message(message) => self.render_message(message, window, cx),
+            TimelineItem::Tools(batch) => self.render_tool_batch(batch, window, cx),
+            TimelineItem::Process { id, items } => {
+                let first = *id;
+                let id: ElementId = (ElementId::from(first), "process").into();
+                let expanded = self.expanded_messages.contains(&id);
+                let locale = self.presenter.model().language;
+                let colors = palette(cx);
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        Button::new(id.clone())
+                            .ghost()
+                            .small()
+                            .h(px(32.))
+                            .w_full()
+                            .justify_start()
+                            .px_2()
+                            .text_color(rgb(colors.text_secondary))
+                            .debug_selector(move || format!("process-{first}"))
+                            .accessibility_label(if expanded {
+                                locale.text("收起思考过程")
+                            } else {
+                                locale.text("展开思考过程")
+                            })
+                            .icon(if expanded {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            })
+                            .label(locale.text("思考过程"))
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                if !app.expanded_messages.remove(&id) {
+                                    app.expanded_messages.insert(id.clone());
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .when(expanded, |element| {
+                        element.child(
+                            div()
+                                .debug_selector(move || format!("process-content-{first}"))
+                                .min_w_0()
+                                .ml_2()
+                                .pl_4()
+                                .border_l_1()
+                                .border_color(rgb(colors.border))
+                                .flex()
+                                .flex_col()
+                                .gap_3()
+                                .children(
+                                    items
+                                        .iter()
+                                        .map(|item| self.render_timeline_item(item, window, cx)),
+                                ),
+                        )
+                    })
+                    .into_any_element()
+            }
+        }
     }
 
     fn render_welcome(
@@ -273,6 +342,153 @@ mod tests {
     use crate::presenter::tests::fixture;
     use gpui::{TestAppContext, point, size};
     use nexus_protocol::Event;
+
+    #[gpui::test]
+    fn completed_process_collapses_without_hiding_the_answer_or_resetting_manual_expansion(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (mut presenter, runner, _directory) = fixture();
+        assert!(presenter.submit("Inspect the project", "claude"));
+        let run_id = presenter.model().active_run.unwrap();
+        let task_id = presenter.model().selected_task.unwrap();
+        for event in [
+            Event::RunMessageCompleted {
+                run_id,
+                text: "I will inspect the files.".into(),
+            },
+            Event::RunToolStarted {
+                run_id,
+                tool_id: "check".into(),
+                name: "Command".into(),
+                summary: "cargo test".into(),
+            },
+            Event::RunToolCompleted {
+                run_id,
+                tool_id: "check".into(),
+                output: "Tests passed.\n".repeat(20),
+                is_error: false,
+            },
+            Event::RunMessageCompleted {
+                run_id,
+                text: "The checks passed; preparing the answer.".into(),
+            },
+            Event::RunMessageCompleted {
+                run_id,
+                text: "## Result\n\nThe project is ready.".into(),
+            },
+        ] {
+            runner.emit(event);
+        }
+        presenter.drain_events();
+        let first = presenter.model().messages[1].id;
+        let tool = presenter.model().messages[2].id;
+        let answer = presenter.model().messages.last().unwrap().id;
+        let selector: &'static str = format!("process-{first}").leak();
+        let content_selector: &'static str = format!("process-content-{first}").leak();
+        let message_selector: &'static str = format!("message-{first}").leak();
+        let answer_selector: &'static str = format!("message-{answer}").leak();
+        let batch_selector: &'static str = format!("tool-batch-{tool}").leak();
+        let row_selector: &'static str = format!("tool-row-{tool}").leak();
+        let detail_selector: &'static str = format!("tool-detail-{tool}-0").leak();
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut view = NexusView::new(presenter, window, cx);
+            view.set_appearance(
+                AppearanceSettings {
+                    reduced_motion: true,
+                    ..view.presenter.model().appearance
+                },
+                window,
+                cx,
+            );
+            view
+        });
+        cx.simulate_resize(size(px(1280.), px(900.)));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(selector).is_none());
+        assert!(cx.debug_bounds(message_selector).is_some());
+
+        runner.emit(Event::RunExited {
+            run_id,
+            status: RunStatus::Completed,
+            exit_code: Some(0),
+        });
+        view.update(cx, |view, cx| view.poll_events(Instant::now(), cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(selector).is_some());
+        assert!(cx.debug_bounds(content_selector).is_none());
+        assert!(cx.debug_bounds(message_selector).is_none());
+        assert!(cx.debug_bounds(batch_selector).is_none());
+        let scroll = view.read_with(cx, |view, _| view.timeline_scroll.clone());
+        assert!(
+            scroll
+                .bounds()
+                .contains(&cx.debug_bounds(answer_selector).unwrap().center())
+        );
+        let before = scroll.offset();
+
+        let trigger = cx.debug_bounds(selector).unwrap().center();
+        cx.simulate_click(trigger, Default::default());
+        cx.run_until_parked();
+        assert_eq!(scroll.offset(), before);
+        assert!(cx.debug_bounds(message_selector).is_some());
+        assert!(cx.debug_bounds(answer_selector).is_some());
+        let trigger = cx.debug_bounds(batch_selector).unwrap().center();
+        cx.simulate_click(trigger, Default::default());
+        cx.run_until_parked();
+        let trigger = cx.debug_bounds(row_selector).unwrap().center();
+        cx.simulate_click(trigger, Default::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(detail_selector).is_some());
+        view.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(content_selector).is_some());
+        assert!(cx.debug_bounds(detail_selector).is_some());
+
+        scroll.set_offset(point(px(0.), px(0.)));
+        view.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        let trigger = cx.debug_bounds(selector).unwrap().center();
+        cx.simulate_click(trigger, Default::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(content_selector).is_none());
+        assert!(cx.debug_bounds(answer_selector).is_some());
+
+        for (width, height, theme) in [
+            (1040., 680., ThemePreference::Dark),
+            (1280., 900., ThemePreference::Light),
+        ] {
+            cx.simulate_resize(size(px(width), px(height)));
+            view.update_in(cx, |view, window, cx| {
+                view.set_appearance(
+                    AppearanceSettings {
+                        theme,
+                        ..view.presenter.model().appearance
+                    },
+                    window,
+                    cx,
+                )
+            });
+            cx.run_until_parked();
+            assert!(cx.debug_bounds(selector).is_some());
+            assert!(cx.debug_bounds(content_selector).is_none());
+            assert!(
+                scroll
+                    .bounds()
+                    .contains(&cx.debug_bounds(answer_selector).unwrap().center())
+            );
+        }
+        view.update(cx, |view, cx| {
+            view.presenter.new_task();
+            view.presenter.select_task(task_id);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(selector).is_some());
+        assert!(cx.debug_bounds(content_selector).is_none());
+        assert!(cx.debug_bounds(answer_selector).is_some());
+    }
 
     #[gpui::test]
     fn run_elapsed_repaints_without_output_or_scroll_jumps_and_clears_on_exit(

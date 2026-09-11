@@ -614,6 +614,7 @@ impl Presenter {
             self.reset_cnb_project();
         }
         self.model.messages = self.storage.messages(task_id).unwrap_or_default();
+        self.model.completed_runs = self.storage.completed_runs(task_id).unwrap_or_default();
         self.reload_tasks();
         if self.model.active_run.is_some() {
             return;

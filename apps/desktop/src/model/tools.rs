@@ -1,5 +1,5 @@
 use crate::i18n::Language;
-use nexus_domain::{Message, MessageKind};
+use nexus_domain::{Message, MessageKind, MessageRole};
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
@@ -10,6 +10,10 @@ use uuid::Uuid;
 pub(crate) enum TimelineItem<'a> {
     Message(&'a Message),
     Tools(Vec<ToolActivity<'a>>),
+    Process {
+        id: Uuid,
+        items: Vec<TimelineItem<'a>>,
+    },
 }
 
 pub(crate) struct ToolActivity<'a> {
@@ -17,9 +21,63 @@ pub(crate) struct ToolActivity<'a> {
     pub(crate) result: Option<&'a Message>,
 }
 
+pub(crate) fn timeline_items<'a>(
+    messages: &'a [Message],
+    completed_runs: &HashSet<Uuid>,
+) -> Vec<TimelineItem<'a>> {
+    let mut timeline = Vec::new();
+    for run in messages.chunk_by(|a, b| a.task_id == b.task_id && a.run_id == b.run_id) {
+        let items = tool_items(run);
+        // Completion is a run boundary, not an individual message boundary.
+        // A trailing tool call or user message means there is no final answer yet.
+        let final_index = completed_runs
+            .contains(&run[0].run_id)
+            .then(|| {
+                items.iter().rposition(|item| {
+                    !matches!(item, TimelineItem::Message(message)
+                    if message.kind == MessageKind::Status || message.content.trim().is_empty())
+                })
+            })
+            .flatten()
+            .filter(|&index| {
+                matches!(&items[index], TimelineItem::Message(message)
+                if message.role == MessageRole::Assistant && message.kind == MessageKind::Text)
+            });
+        let Some(final_index) = final_index else {
+            timeline.extend(items);
+            continue;
+        };
+        let mut process = Vec::new();
+        for (index, item) in items.into_iter().enumerate() {
+            // Keep user steering and errors in place, outside any disclosure.
+            let visible = index >= final_index
+                || matches!(&item, TimelineItem::Message(message)
+                    if message.role == MessageRole::User || message.kind == MessageKind::Error);
+            if visible {
+                if let Some(first) = process.first() {
+                    let id = match first {
+                        TimelineItem::Message(message) => message.id,
+                        TimelineItem::Tools(batch) => batch[0].call.id,
+                        TimelineItem::Process { id, .. } => *id,
+                    };
+                    timeline.push(TimelineItem::Process {
+                        id,
+                        items: std::mem::take(&mut process),
+                    });
+                }
+                timeline.push(item);
+            } else if !matches!(&item, TimelineItem::Message(message) if message.content.trim().is_empty())
+            {
+                process.push(item);
+            }
+        }
+    }
+    timeline
+}
+
 // Pair by run and invocation, never by completion order. Results can arrive
 // after an assistant message; they still belong to their original call.
-pub(crate) fn timeline_items(messages: &[Message]) -> Vec<TimelineItem<'_>> {
+fn tool_items(messages: &[Message]) -> Vec<TimelineItem<'_>> {
     let mut pending = HashMap::new();
     let mut results = HashMap::new();
     let mut paired_results = HashSet::new();
@@ -365,7 +423,11 @@ mod tests {
             task_id: Uuid::nil(),
             run_id,
             sequence: 0,
-            role: MessageRole::Tool,
+            role: if kind == MessageKind::Text {
+                MessageRole::Assistant
+            } else {
+                MessageRole::Tool
+            },
             kind,
             content: content.into(),
             created_at: Utc::now(),
@@ -394,7 +456,7 @@ mod tests {
                 "Legacy output without an id",
             ),
         ];
-        let items = timeline_items(&messages);
+        let items = timeline_items(&messages, &HashSet::new());
         assert_eq!(items.len(), 4);
         let TimelineItem::Tools(first) = &items[0] else {
             panic!("tools")
@@ -418,6 +480,131 @@ mod tests {
                 .text
                 .contains("Legacy output")
         );
+    }
+
+    #[test]
+    fn completed_turns_group_process_and_keep_each_request_and_answer_visible() {
+        let run = Uuid::new_v4();
+        let next = Uuid::new_v4();
+        let messages = vec![
+            Message {
+                role: MessageRole::User,
+                ..message(run, MessageKind::Text, None, "request")
+            },
+            message(run, MessageKind::Text, None, "plan"),
+            message(run, MessageKind::ToolCall, Some("a"), "Read\n{}"),
+            message(run, MessageKind::Text, None, "progress"),
+            message(run, MessageKind::ToolResult, Some("a"), "contents"),
+            message(run, MessageKind::Text, None, "answer"),
+            message(run, MessageKind::Status, None, "finished"),
+            Message {
+                role: MessageRole::User,
+                ..message(next, MessageKind::Text, None, "follow-up")
+            },
+            message(next, MessageKind::Text, None, "follow-up progress"),
+            message(next, MessageKind::Text, None, "follow-up answer"),
+        ];
+        let items = timeline_items(&messages, &HashSet::from([run, next]));
+        assert_eq!(items.len(), 7);
+        for (index, message_index) in [(0, 0), (2, 5), (3, 6), (4, 7), (6, 9)] {
+            assert!(
+                matches!(&items[index], TimelineItem::Message(m) if m.id == messages[message_index].id)
+            );
+        }
+        let TimelineItem::Process { id, items: process } = &items[1] else {
+            panic!("process")
+        };
+        assert_eq!(*id, messages[1].id);
+        assert_eq!(process.len(), 3);
+        assert!(matches!(&process[0], TimelineItem::Message(m) if m.content == "plan"));
+        let TimelineItem::Tools(batch) = &process[1] else {
+            panic!("tools")
+        };
+        assert_eq!(batch[0].result.unwrap().content, "contents");
+        assert!(matches!(&process[2], TimelineItem::Message(m) if m.content == "progress"));
+        assert!(
+            matches!(&items[5], TimelineItem::Process { id, items } if *id == messages[8].id && items.len() == 1)
+        );
+
+        let items = timeline_items(&messages, &HashSet::from([run]));
+        assert!(matches!(&items[5], TimelineItem::Message(m) if m.content == "follow-up progress"));
+    }
+
+    #[test]
+    fn unfinished_runs_missing_answers_and_direct_answers_have_no_process_disclosure() {
+        let run = Uuid::new_v4();
+        let request = Message {
+            role: MessageRole::User,
+            ..message(run, MessageKind::Text, None, "request")
+        };
+        let progress = message(run, MessageKind::Text, None, "progress");
+        let answer = message(run, MessageKind::Text, None, "answer");
+        let completed = HashSet::from([run]);
+        for (messages, runs) in [
+            (
+                vec![request.clone(), progress.clone(), answer.clone()],
+                HashSet::new(),
+            ),
+            (vec![request.clone(), answer.clone()], completed.clone()),
+            (
+                vec![
+                    request.clone(),
+                    message(run, MessageKind::Text, None, " \n"),
+                    answer,
+                ],
+                completed.clone(),
+            ),
+            (
+                vec![
+                    request.clone(),
+                    progress.clone(),
+                    message(run, MessageKind::ToolCall, Some("a"), "Read\n{}"),
+                ],
+                completed.clone(),
+            ),
+            (
+                vec![
+                    request.clone(),
+                    progress.clone(),
+                    message(run, MessageKind::Error, None, "failed"),
+                ],
+                completed.clone(),
+            ),
+            (
+                vec![request, message(run, MessageKind::Text, None, "  \n")],
+                completed,
+            ),
+        ] {
+            assert!(
+                timeline_items(&messages, &runs)
+                    .iter()
+                    .all(|item| !matches!(item, TimelineItem::Process { .. }))
+            );
+        }
+    }
+
+    #[test]
+    fn process_disclosures_preserve_steering_messages_and_errors_in_place() {
+        let run = Uuid::new_v4();
+        let messages = vec![
+            message(run, MessageKind::Text, None, "initial progress"),
+            Message {
+                role: MessageRole::User,
+                ..message(run, MessageKind::Text, None, "steering")
+            },
+            message(run, MessageKind::Text, None, "updated progress"),
+            message(run, MessageKind::Error, None, "diagnostic"),
+            message(run, MessageKind::Text, None, "answer"),
+        ];
+        let items = timeline_items(&messages, &HashSet::from([run]));
+        assert_eq!(items.len(), 5);
+        for index in [1, 3, 4] {
+            assert!(
+                matches!(&items[index], TimelineItem::Message(m) if m.id == messages[index].id)
+            );
+        }
+        assert!(matches!(&items[0], TimelineItem::Process { id, .. } if *id == messages[0].id));
+        assert!(matches!(&items[2], TimelineItem::Process { id, .. } if *id == messages[2].id));
     }
 
     #[test]

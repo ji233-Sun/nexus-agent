@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
     str::FromStr as _,
@@ -709,6 +710,18 @@ impl Storage {
         Ok(message)
     }
 
+    pub fn completed_runs(&self, task_id: Uuid) -> Result<HashSet<Uuid>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id FROM runs WHERE task_id = ?1
+             AND status = 'completed' AND ended_at IS NOT NULL",
+        )?;
+        let rows = statement.query_map([task_id.to_string()], |row| {
+            parse_uuid(row.get::<_, String>(0)?)
+        })?;
+        rows.collect::<rusqlite::Result<HashSet<_>>>()
+            .map_err(Into::into)
+    }
+
     pub fn messages(&self, task_id: Uuid) -> Result<Vec<Message>> {
         let mut statement = self.connection.prepare(
             "SELECT id, task_id, run_id, sequence, role, kind, content, created_at, tool
@@ -1117,6 +1130,7 @@ mod tests {
         storage
             .update_run_status(run_id, RunStatus::Running)
             .unwrap();
+        assert!(storage.completed_runs(task_id).unwrap().is_empty());
         storage
             .finish_run(run_id, RunStatus::Completed, Some(0))
             .unwrap();
@@ -1125,6 +1139,11 @@ mod tests {
         let storage = Storage::open(&database).unwrap();
         let tasks = storage.tasks(project.id).unwrap();
         assert_eq!(tasks[0].status, RunStatus::Completed);
+        assert_eq!(
+            storage.completed_runs(task_id).unwrap(),
+            HashSet::from([run_id])
+        );
+        assert!(storage.completed_runs(Uuid::new_v4()).unwrap().is_empty());
         let messages = storage.messages(task_id).unwrap();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].content, "describe this project");

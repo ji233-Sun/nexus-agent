@@ -524,6 +524,9 @@ impl Presenter {
                     );
                 }
                 let _ = self.storage.finish_run(run_id, status, exit_code);
+                if status == RunStatus::Completed {
+                    self.model.completed_runs.insert(run_id);
+                }
                 self.model.streaming_text.clear();
                 self.model.active_run = None;
                 self.model.active_checkout = None;
@@ -1132,6 +1135,7 @@ impl Presenter {
                 .flatten()
                 .or(Some(workspace));
             self.model.messages = self.storage.messages(task_id).unwrap_or_default();
+            self.model.completed_runs = self.storage.completed_runs(task_id).unwrap_or_default();
             self.model
                 .set_run_status(LocalizedText::translated(|language| {
                     let effort_label = match language {
