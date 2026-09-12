@@ -419,6 +419,7 @@ mod tests {
 
     fn message(run_id: Uuid, kind: MessageKind, id: Option<&str>, content: &str) -> Message {
         Message {
+            attachments: Vec::new(),
             id: Uuid::new_v4(),
             task_id: Uuid::nil(),
             run_id,

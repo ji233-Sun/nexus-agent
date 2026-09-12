@@ -182,6 +182,7 @@ impl Presenter {
         let workspace = git::planned_workspace(root, &project, &self.model.workspace_draft);
         let base = format!("refs/heads/{}", self.model.workspace_draft.base);
         self.model.pending_workspace_start = Some(PendingWorkspaceStart {
+            attachments: Vec::new(),
             context_id: self.model.conversation.id,
             prompt: prompt.trim().to_owned(),
             executable: executable.to_owned(),
@@ -646,11 +647,12 @@ impl Presenter {
             .as_ref()
             .is_some_and(|workspace| workspace.status == WorkspaceStatus::Ready)
         {
-            self.start_run(
+            self.start_run_with_attachments(
                 None,
                 &pending.prompt,
                 &pending.executable,
                 pending.permission,
+                &pending.attachments,
             )
         } else {
             // Failed creation keeps its record visible. A retry uses a new stable ID.
@@ -661,7 +663,12 @@ impl Presenter {
                 ..WorkspaceDraft::default()
             };
             self.model.selected_workspace = None;
-            self.begin_worktree(&pending.prompt, &pending.executable, pending.permission)
+            let started =
+                self.begin_worktree(&pending.prompt, &pending.executable, pending.permission);
+            if started && let Some(next) = &mut self.model.pending_workspace_start {
+                next.attachments = pending.attachments.clone();
+            }
+            started
         };
         if !started {
             self.model.pending_workspace_start = Some(pending);

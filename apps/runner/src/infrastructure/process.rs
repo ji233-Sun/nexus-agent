@@ -881,6 +881,7 @@ mod tests {
     ) -> (StartRun, LaunchSpec) {
         let executable = executable.to_string_lossy().into_owned();
         let request = StartRun {
+            attachments: Vec::new(),
             transport: nexus_domain::HarnessTransport::Acp,
             title_generation: None,
             permission_mode: nexus_domain::PermissionMode::AutoEdit,
@@ -913,6 +914,7 @@ mod tests {
         harness: HarnessKind,
     ) -> (StartRun, LaunchSpec, Box<dyn LineDecoder>) {
         let request = StartRun {
+            attachments: Vec::new(),
             transport: nexus_domain::HarnessTransport::Cli,
             title_generation: None,
             permission_mode: nexus_domain::PermissionMode::AutoEdit,

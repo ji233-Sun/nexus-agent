@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 16;
+pub const PROTOCOL_VERSION: u32 = 17;
 pub const MAX_COMMIT_DIFF_BYTES: usize = 128 * 1024;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -104,6 +104,8 @@ pub struct StartRun {
     pub session_id: Option<String>,
     pub cwd: String,
     pub prompt: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<nexus_domain::ImageAttachment>,
     pub harness: HarnessKind,
     pub executable: String,
     pub model: Option<String>,
@@ -430,6 +432,7 @@ mod tests {
             }],
         };
         let command = CommandEnvelope::new(Command::RunStart(StartRun {
+            attachments: Vec::new(),
             transport: nexus_domain::HarnessTransport::Cli,
             title_generation: Some(title_generation.clone()),
             permission_mode: PermissionMode::Yolo,

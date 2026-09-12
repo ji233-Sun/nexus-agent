@@ -283,14 +283,114 @@ impl NexusView {
         window: &mut Window,
         cx: &mut Context<NexusView>,
     ) -> AnyElement {
-        self.message_card(
-            message.id,
-            message.role,
-            &message.content,
-            message.kind,
-            window,
-            cx,
-        )
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(self.message_card(
+                message.id,
+                message.role,
+                &message.content,
+                message.kind,
+                window,
+                cx,
+            ))
+            .when(!message.attachments.is_empty(), |element| {
+                let images = message.attachments.clone();
+                let prompt = message.content.clone();
+                element
+                    .child(self.render_attachment_images(
+                        &message.attachments,
+                        Some(message.id),
+                        cx,
+                    ))
+                    .child(
+                        Button::new((ElementId::from(message.id), "reuse-images"))
+                            .ghost()
+                            .small()
+                            .self_end()
+                            .label(self.presenter.model().language.text("再次加入聊天"))
+                            .on_click(cx.listener(move |app, _, window, cx| {
+                                if app.presenter.restore_attachments(&images)
+                                    && app.prompt_input.read(cx).value().trim().is_empty()
+                                {
+                                    app.prompt_input.update(cx, |input, cx| {
+                                        input.set_value(prompt.clone(), window, cx)
+                                    });
+                                }
+                                cx.notify();
+                            })),
+                    )
+            })
+            .into_any_element()
+    }
+
+    pub(super) fn render_attachment_images(
+        &self,
+        images: &[nexus_domain::ImageAttachment],
+        message_id: Option<uuid::Uuid>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        use gpui::{ObjectFit, StyledImage as _};
+        let draft = message_id.is_none();
+        let locale = self.presenter.model().language;
+        div()
+            .flex()
+            .flex_wrap()
+            .gap_2()
+            .children(images.iter().enumerate().map(|(index, image)| {
+                let id = ElementId::from(SharedString::from(format!(
+                    "capture-{message_id:?}-{index}-{}",
+                    image.path
+                )));
+                let expanded = self.expanded_messages.contains(&id);
+                div()
+                    .id(id.clone())
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        gpui::img(std::path::PathBuf::from(&image.path))
+                            .w(px(if expanded { 440. } else { 140. }))
+                            .h(px(if expanded { 360. } else { 96. }))
+                            .object_fit(ObjectFit::Contain)
+                            .cursor_pointer()
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                cx.listener(move |app, _, _, cx| {
+                                    if !app.expanded_messages.remove(&id) {
+                                        app.expanded_messages.insert(id.clone());
+                                    }
+                                    cx.notify();
+                                }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .max_w(px(180.))
+                            .text_size(px(11.))
+                            .truncate()
+                            .child(format!(
+                                "{} · {} {}",
+                                image.source_name,
+                                locale.text("页"),
+                                image.page
+                            )),
+                    )
+                    .when(draft, |el| {
+                        el.child(
+                            Button::new(("remove-capture", index))
+                                .ghost()
+                                .small()
+                                .label(locale.text("移除"))
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.presenter.remove_attachment(index);
+                                    cx.notify();
+                                })),
+                        )
+                    })
+            }))
     }
 
     pub(super) fn message_card(
@@ -359,6 +459,7 @@ impl NexusView {
                     })
                     .child(if kind == MessageKind::Text {
                         TextView::markdown(id.clone(), content.to_owned())
+                            .on_link_click(self.pdf_link_handler(cx))
                             .when(role == MessageRole::Assistant, |text| {
                                 text.font(reading_font(cx))
                             })
@@ -531,6 +632,7 @@ mod tests {
         let project = storage.open_project(directory.path()).unwrap();
         let (task_id, run_id) = storage
             .create_task_run(NewTaskRun {
+                attachments: &[],
                 workspace_id: None,
                 permission_mode: nexus_domain::PermissionMode::AutoEdit,
                 task_id: None,

@@ -154,6 +154,7 @@ impl TestRunner {
 
 fn request(directory: &Path, executable: PathBuf, harness: HarnessKind, prompt: &str) -> StartRun {
     StartRun {
+        attachments: Vec::new(),
         transport: nexus_domain::HarnessTransport::Acp,
         title_generation: Some(nexus_protocol::TextGenerationConfig {
             harness,

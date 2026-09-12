@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+base64 = "0.22"
 nexus-domain = { path = "../domain" }
 nexus-harness-core = { path = "../harness-core" }
 nexus-protocol = { path = "../protocol" }

@@ -37,6 +37,7 @@
 | **权限与交互** | 选择执行权限模式，在桌面处理工具审批和 Agent 提问。 |
 | **CNB Issues** | 接入本机 CNB CLI，识别项目仓库，浏览 Issue 列表、标签与 Markdown 正文。[配置指南](docs/usage.md#cnb-issues) |
 | **语音输入** | 使用 MiMo ASR 或 macOS 系统 Speech，将录音转为可编辑、可撤销的消息草稿。 |
+| **PDF 阅读与标注** | 内置预览、文字搜索、页面编辑与标注，整页或框选截图可直接加入聊天，交给 Codex／Claude 看图分析。[使用说明](docs/usage.md#pdf-阅读与标注) |
 | **远程访问** | 通过内置 Remote Web 查看会话、发起任务、接收实时输出和停止运行；审批在桌面处理。 |
 
 ## 下载

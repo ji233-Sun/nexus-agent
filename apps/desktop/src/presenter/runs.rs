@@ -16,6 +16,43 @@ use std::time::Instant;
 use uuid::Uuid;
 
 impl Presenter {
+    pub(crate) fn report_pdf_error(&mut self, error: String) {
+        self.model.attachment_error = Some(error.clone().into());
+        self.model.log_status(error.into());
+    }
+    pub(crate) fn attach_pdf_capture(
+        &mut self,
+        name: &str,
+        page: u32,
+        bytes: &[u8],
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.model.attachments.len() < nexus_domain::ImageAttachment::MAX_COUNT,
+            "每条消息最多包含 8 张截图。"
+        );
+        let image = self.storage.save_pdf_capture(name, page, bytes)?;
+        self.model.attachments.push(image);
+        self.model.attachment_error = None;
+        Ok(())
+    }
+
+    pub(crate) fn remove_attachment(&mut self, index: usize) {
+        if index < self.model.attachments.len() {
+            self.model.attachments.remove(index);
+        }
+        self.model.attachment_error = None;
+    }
+
+    pub(crate) fn restore_attachments(&mut self, images: &[nexus_domain::ImageAttachment]) -> bool {
+        if self.model.attachments.len() + images.len() > nexus_domain::ImageAttachment::MAX_COUNT {
+            self.model.attachment_error = Some("每条消息最多包含 8 张截图。".into());
+            return false;
+        }
+        self.model.attachments.extend_from_slice(images);
+        self.model.attachment_error = None;
+        true
+    }
+
     pub(crate) fn refresh_run_elapsed(&mut self, now: Instant) -> bool {
         let elapsed = self
             .model
@@ -623,6 +660,16 @@ impl Presenter {
     }
 
     pub(crate) fn submit(&mut self, prompt: &str, configured_executable: &str) -> bool {
+        let attachments = self.model.attachments.clone();
+        if !attachments.is_empty()
+            && !nexus_domain::ImageAttachment::supported_by(self.model.selected_harness)
+        {
+            self.model.attachment_error =
+                Some("此 Harness 暂不支持截图输入，请选择 Codex 或 Claude Code。".into());
+            self.model
+                .log_status("此 Harness 暂不支持截图输入，请选择 Codex 或 Claude Code。".into());
+            return false;
+        }
         if self.model.active_run.is_some() {
             if !self.model.can_queue() || prompt.trim().is_empty() {
                 return false;
@@ -634,18 +681,26 @@ impl Presenter {
                     id: Uuid::new_v4(),
                     task_id: self.model.conversation.active_task.unwrap(),
                     prompt: prompt.trim().to_owned(),
+                    attachments,
                     permission_mode: self.model.conversation.permission_mode,
                 });
+            self.model.attachments.clear();
             self.model
                 .log_status("消息已排队，将在当前轮次结束后依次发送。".into());
             return true;
         }
-        self.start_run(
+        let started = self.start_run_with_attachments(
             self.model.selected_task,
             prompt,
             configured_executable,
             self.model.permission_mode,
-        )
+            &attachments,
+        );
+        if started {
+            self.model.attachments.clear();
+            self.model.attachment_error = None;
+        }
+        started
     }
 
     pub(crate) fn send_queued_message(&mut self, message_id: Uuid) -> bool {
@@ -662,11 +717,12 @@ impl Presenter {
             return false;
         }
         let executable = self.model.executable.clone();
-        if !self.start_run(
+        if !self.start_run_with_attachments(
             Some(message.task_id),
             &message.prompt,
             &executable,
             message.permission_mode,
+            &message.attachments,
         ) {
             return false;
         }
@@ -695,6 +751,10 @@ impl Presenter {
             return false;
         };
         let run_id = self.model.active_run.unwrap();
+        if !self.model.queued_messages[index].attachments.is_empty() {
+            self.model.log_status("含截图的消息将在下一轮发送。".into());
+            return false;
+        }
         if self.model.active_permission_mode
             != Some(self.model.queued_messages[index].permission_mode)
         {
@@ -923,6 +983,37 @@ impl Presenter {
         configured_executable: &str,
         permission_mode: PermissionMode,
     ) -> bool {
+        self.start_run_with_attachments(
+            task_id,
+            prompt,
+            configured_executable,
+            permission_mode,
+            &[],
+        )
+    }
+
+    pub(super) fn start_run_with_attachments(
+        &mut self,
+        task_id: Option<Uuid>,
+        prompt: &str,
+        configured_executable: &str,
+        permission_mode: PermissionMode,
+        attachments: &[nexus_domain::ImageAttachment],
+    ) -> bool {
+        if attachments.len() > nexus_domain::ImageAttachment::MAX_COUNT
+            || (!attachments.is_empty()
+                && !nexus_domain::ImageAttachment::supported_by(self.model.selected_harness))
+        {
+            self.model
+                .log_status("截图输入需要 Codex 或 Claude Code，每条消息最多 8 张。".into());
+            return false;
+        }
+        for image in attachments {
+            if let Err(error) = nexus_harness_core::read_image_attachment(image) {
+                self.model.log_status(error.into());
+                return false;
+            }
+        }
         if self.model.updates.state.is_installing() {
             self.model
                 .log_status("正在安装应用更新，重启后可继续任务。".into());
@@ -1027,7 +1118,11 @@ impl Presenter {
             && self.model.selected_workspace.is_none()
             && self.model.workspace_draft.kind == WorkspaceKind::Worktree
         {
-            return self.begin_worktree(&prompt, &configured_executable, permission_mode);
+            let started = self.begin_worktree(&prompt, &configured_executable, permission_mode);
+            if started && let Some(pending) = &mut self.model.pending_workspace_start {
+                pending.attachments = attachments.to_vec();
+            }
+            return started;
         }
         let workspace = if let Some(task_id) = task_id {
             self.storage.task_workspace(task_id)
@@ -1065,6 +1160,7 @@ impl Presenter {
             project_id,
             title: &title,
             prompt: &prompt,
+            attachments,
             harness,
             executable: &executable,
             model: model.as_deref(),
@@ -1103,6 +1199,7 @@ impl Presenter {
             session_id,
             cwd: workspace.path.clone(),
             prompt: run_prompt,
+            attachments: attachments.to_vec(),
             harness,
             executable: executable.clone(),
             model,

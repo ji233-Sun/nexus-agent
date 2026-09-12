@@ -716,6 +716,11 @@ impl EventDecoder {
                     self.thread_id = Some(thread_id.into());
                     let mut params = json!({"threadId": thread_id,
                         "input": [{"type": "text", "text": self.request.prompt}]});
+                    let input = params["input"].as_array_mut().expect("input array");
+                    for image in &self.request.attachments {
+                        input.push(json!({"type": "text", "text": format!("{} · page {}", image.source_name, image.page)}));
+                        input.push(json!({"type": "localImage", "path": image.path}));
+                    }
                     if !self.request.effort.is_default() {
                         params["effort"] = self.request.effort.as_str().into();
                     }
@@ -1249,6 +1254,7 @@ mod tests {
 
     fn request() -> StartRun {
         StartRun {
+            attachments: Vec::new(),
             transport: nexus_domain::HarnessTransport::Acp,
             title_generation: None,
             permission_mode: nexus_domain::PermissionMode::AutoEdit,
@@ -1306,6 +1312,11 @@ mod tests {
         }
         for session_id in [None, Some("existing-thread")] {
             let mut request = request();
+            request.attachments = vec![nexus_domain::ImageAttachment {
+                path: "/tmp/captured page.png".into(),
+                source_name: "报告.pdf".into(),
+                page: 12,
+            }];
             request.session_id = session_id.map(str::to_owned);
             request.model = Some("gpt-test".into());
             request.effort = ThinkingEffort::XHigh;
@@ -1340,6 +1351,11 @@ mod tests {
             let frame = input(&events);
             assert_eq!(frame["method"], "turn/start");
             assert_eq!(frame["params"]["input"][0]["text"], request.prompt);
+            assert_eq!(frame["params"]["input"][1]["text"], "报告.pdf · page 12");
+            assert_eq!(
+                frame["params"]["input"][2],
+                json!({"type":"localImage", "path":"/tmp/captured page.png"})
+            );
             assert_eq!(frame["params"]["effort"], "xhigh");
         }
     }
