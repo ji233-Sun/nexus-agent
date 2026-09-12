@@ -100,6 +100,17 @@ pub(crate) fn prepare(
     request: &StartRun,
     cwd: &Path,
 ) -> Result<(LaunchSpec, Box<dyn LineDecoder>), String> {
+    if !request.attachments.is_empty() {
+        if !nexus_domain::ImageAttachment::supported_by(request.harness) {
+            return Err("此 Harness 暂不支持截图输入，请选择 Codex 或 Claude Code。".into());
+        }
+        if request.attachments.len() > nexus_domain::ImageAttachment::MAX_COUNT {
+            return Err("每条消息最多包含 8 张截图。".into());
+        }
+        for image in &request.attachments {
+            nexus_harness_core::read_image_attachment(image)?;
+        }
+    }
     let (spec, decoder) = prepare_native(request, cwd)?;
     if !configurable(request.harness) {
         return Ok((spec, decoder));
@@ -167,15 +178,7 @@ fn prepare_native(
             (spec, Box::new(decoder) as Box<dyn LineDecoder>)
         }
         HarnessKind::Claude => (
-            claude::build_launch_spec(
-                &request.executable,
-                cwd,
-                &request.prompt,
-                request.model.as_deref(),
-                request.effort,
-                request.session_id.as_deref(),
-                request.permission_mode,
-            ),
+            claude::prepare_run(request, cwd)?,
             Box::new(claude::EventDecoder::default()),
         ),
         HarnessKind::Codex => {
@@ -282,6 +285,45 @@ mod tests {
         serde_json::from_value(json!({"run_id":uuid::Uuid::new_v4(),"task_id":uuid::Uuid::new_v4(),
             "cwd":"/tmp","prompt":"hello","permission_mode":"ask","effort":"default","harness":harness,"executable":harness.default_executable()})).unwrap()
     }
+    #[test]
+    fn captured_images_reach_claude_and_unsupported_harnesses_fail_explicitly() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("capture.png");
+        let png = [
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+            8, 4, 0, 0, 0, 181, 28, 12, 2, 0, 0, 0, 11, 73, 68, 65, 84, 120, 218, 99, 100, 248, 15,
+            0, 1, 5, 1, 1, 39, 24, 227, 102, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+        ];
+        std::fs::write(&path, png).unwrap();
+        let mut request = run(HarnessKind::Claude);
+        request.attachments = vec![nexus_domain::ImageAttachment {
+            path: path.canonicalize().unwrap().to_string_lossy().into_owned(),
+            source_name: "report.pdf".into(),
+            page: 2,
+        }];
+        for session in [None, Some("existing-session".into())] {
+            request.session_id = session;
+            let (spec, _) = prepare(&request, directory.path()).unwrap();
+            let frame: serde_json::Value = serde_json::from_str(&spec.stdin).unwrap();
+            assert_eq!(
+                frame["message"]["content"][2]["source"]["media_type"],
+                "image/png"
+            );
+            assert_eq!(frame["message"]["content"][2]["source"]["type"], "base64");
+            assert!(
+                frame["message"]["content"][2]["source"]["data"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("iVBORw0KGgo")
+            );
+        }
+        request.harness = HarnessKind::Omp;
+        assert!(prepare(&request, directory.path()).is_err());
+        request.harness = HarnessKind::Codex;
+        std::fs::write(path, b"not a screenshot").unwrap();
+        assert!(prepare(&request, directory.path()).is_err());
+    }
+
     #[test]
     fn resume_pins_transport_and_region_and_preserves_legacy_acp() {
         for transport in [HarnessTransport::Cli, HarnessTransport::Acp] {

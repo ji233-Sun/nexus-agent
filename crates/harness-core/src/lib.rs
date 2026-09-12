@@ -8,6 +8,36 @@ use std::{
 use nexus_domain::{UserAskAnswer, UserAskQuestion};
 use serde_json::Value;
 
+pub fn read_image_attachment(image: &nexus_domain::ImageAttachment) -> Result<Vec<u8>, String> {
+    use std::io::Read as _;
+    if !Path::new(&image.path).is_absolute() || image.page == 0 {
+        return Err("图片附件路径或来源页码无效。".into());
+    }
+    let file =
+        std::fs::File::open(&image.path).map_err(|error| format!("无法读取截图：{error}"))?;
+    let mut bytes = Vec::new();
+    file.take(nexus_domain::ImageAttachment::MAX_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    validate_capture(&bytes)?;
+    Ok(bytes)
+}
+
+pub fn validate_capture(bytes: &[u8]) -> Result<(), String> {
+    if bytes.len() > nexus_domain::ImageAttachment::MAX_BYTES {
+        return Err("单张截图不能超过 5 MiB，请缩小截取范围。".into());
+    }
+    if bytes.len() < 33 || !bytes.starts_with(b"\x89PNG\r\n\x1a\n") || &bytes[12..16] != b"IHDR" {
+        return Err("截图不是有效的 PNG 图片。".into());
+    }
+    let width = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
+    let height = u32::from_be_bytes(bytes[20..24].try_into().unwrap());
+    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > 40_000_000 {
+        return Err("截图尺寸无效或过大，请缩小截取范围。".into());
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelCatalogError {
     Cancelled,
