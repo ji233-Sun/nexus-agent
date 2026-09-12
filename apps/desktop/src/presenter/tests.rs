@@ -100,6 +100,50 @@ pub(crate) fn fixture() -> (Presenter, FakeRunner, tempfile::TempDir) {
     (presenter, runner, directory)
 }
 
+#[test]
+fn pdf_captures_survive_send_failure_queue_and_conversation_switch() {
+    use base64::Engine as _;
+    let png = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=").unwrap();
+    let (mut presenter, runner, _directory) = fixture();
+    presenter.attach_pdf_capture("报告.pdf", 12, &png).unwrap();
+    let images = presenter.model.attachments.clone();
+    runner.0.borrow_mut().fail_send = true;
+    assert!(!presenter.submit("解释圈出的部分", "claude"));
+    assert_eq!(presenter.model.attachments, images);
+    runner.0.borrow_mut().fail_send = false;
+    assert!(presenter.submit("解释圈出的部分", "claude"));
+    assert!(presenter.model.attachments.is_empty());
+    assert_eq!(last_start(&runner).attachments, images);
+    let run_id = presenter.model.active_run.unwrap();
+    let task_id = presenter.model.selected_task.unwrap();
+    runner.emit(Event::RunSessionStarted {
+        run_id,
+        session_id: "pdf-session".into(),
+    });
+    presenter.drain_events();
+    presenter.attach_pdf_capture("报告.pdf", 13, &png).unwrap();
+    assert!(presenter.submit("比较下一页", "claude"));
+    let queued = presenter.model.queued_messages[0].clone();
+    assert_eq!(queued.attachments[0].page, 13);
+    assert!(!presenter.steer_queued_message(queued.id));
+    presenter.new_task();
+    assert!(presenter.model.attachments.is_empty());
+    runner.emit(Event::RunExited {
+        run_id,
+        status: RunStatus::Failed,
+        exit_code: Some(1),
+    });
+    presenter.drain_events();
+    presenter.select_task(task_id);
+    assert_eq!(presenter.model.messages[0].attachments, images);
+    assert!(presenter.send_queued_message(queued.id));
+    assert_eq!(last_start(&runner).attachments[0].page, 13);
+    assert_eq!(
+        last_start(&runner).session_id.as_deref(),
+        Some("pdf-session")
+    );
+}
+
 pub(crate) fn cnb_issue(number: &str) -> crate::model::cnb::Issue {
     serde_json::from_value(serde_json::json!({
         "number":number, "title":format!("CNB 集成测试 #{number}"), "state":"open",
@@ -1818,6 +1862,7 @@ fn project_deletion_clears_selected_and_cached_state_and_preserves_worktree_file
         .model
         .queued_messages
         .push_back(crate::model::QueuedMessage {
+            attachments: Vec::new(),
             id: Uuid::new_v4(),
             task_id: start.task_id,
             prompt: "unsent follow-up".into(),
@@ -1943,6 +1988,7 @@ fn project_deletion_waits_for_pending_workspace_start_but_allows_failed_retry() 
     let (mut presenter, _runner, _directory) = fixture();
     let project = presenter.model.selected_project.clone().unwrap();
     presenter.model.pending_workspace_start = Some(PendingWorkspaceStart {
+        attachments: Vec::new(),
         context_id: presenter.model.conversation.id,
         prompt: "pending worktree".into(),
         executable: "claude".into(),
@@ -1970,6 +2016,7 @@ fn conversation_actions_keep_active_and_archived_models_in_sync() {
         presenter
             .storage
             .create_task_run(NewTaskRun {
+                attachments: &[],
                 workspace_id: None,
                 permission_mode: nexus_domain::PermissionMode::AutoEdit,
                 task_id: None,
@@ -1993,6 +2040,7 @@ fn conversation_actions_keep_active_and_archived_models_in_sync() {
             .model
             .queued_messages
             .push_back(crate::model::QueuedMessage {
+                attachments: Vec::new(),
                 permission_mode: nexus_domain::PermissionMode::AutoEdit,
                 id: Uuid::new_v4(),
                 task_id,
@@ -2197,6 +2245,7 @@ fn archived_project_fixture() -> ArchivedProjectFixture {
     let archived_project = storage.open_project(&archived_project_path).unwrap();
     let archived_task = storage
         .create_task_run(NewTaskRun {
+            attachments: &[],
             workspace_id: None,
             permission_mode: nexus_domain::PermissionMode::AutoEdit,
             task_id: None,
@@ -2220,6 +2269,7 @@ fn archived_project_fixture() -> ArchivedProjectFixture {
         if index == 0 {
             let task = storage
                 .create_task_run(NewTaskRun {
+                    attachments: &[],
                     workspace_id: None,
                     permission_mode: nexus_domain::PermissionMode::AutoEdit,
                     task_id: None,

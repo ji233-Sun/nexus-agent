@@ -1479,6 +1479,7 @@ impl NexusView {
                                             .tooltip(locale.text("等待工具执行结束后介入当前对话"))
                                             .disabled(
                                                 !model.can_queue()
+                                                    || !message.attachments.is_empty()
                                                     || model.steering_message.is_some()
                                                     || model.active_permission_mode
                                                         != Some(message.permission_mode),
@@ -1940,6 +1941,18 @@ impl NexusView {
                                     .flex()
                                     .flex_col()
                                     .child(self.render_message_queue(cx))
+                                    .child(self.render_attachment_images(
+                                        &model.attachments,
+                                        true,
+                                        cx,
+                                    ))
+                                    .when_some(model.attachment_error.as_ref(), |element, error| {
+                                        element.child(
+                                            div()
+                                                .text_size(px(12.))
+                                                .child(error.render(locale).to_owned()),
+                                        )
+                                    })
                                     .when(!voice_status.is_empty(), |element| {
                                         element.child(
                                             div()
