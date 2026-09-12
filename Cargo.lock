@@ -4936,6 +4936,7 @@ dependencies = [
  "futures-util",
  "gpui-kit",
  "gpui-pre-reqwest-client",
+ "gtk",
  "keyring",
  "nexus-domain",
  "nexus-harness-core",

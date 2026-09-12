@@ -52,7 +52,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends clang cmake pkg-config \
             libfontconfig1-dev libfreetype6-dev libwayland-dev libx11-xcb-dev \
-            libxkbcommon-x11-dev libssl-dev libvulkan1 libglib2.0-dev libasound2-dev
+            libxkbcommon-x11-dev libssl-dev libvulkan1 libglib2.0-dev libasound2-dev libwebkit2gtk-4.1-dev
+
+      - name: Test and verify bundled PDF viewer
+        if: runner.os == 'Linux'
+        working-directory: apps/pdf-viewer
+        run: |
+          npm ci --ignore-scripts
+          npm test
+          npm run build
+          git diff --exit-code -- dist
 
       - name: Install Rust toolchain
         run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt --component clippy

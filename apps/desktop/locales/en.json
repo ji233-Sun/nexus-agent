@@ -622,5 +622,6 @@
   "每条消息最多包含 8 张截图。": "A message can contain up to 8 captures.",
   "此 Harness 暂不支持截图输入，请选择 Codex 或 Claude Code。": "This harness does not support image input yet. Choose Codex or Claude Code.",
   "含截图的消息将在下一轮发送。": "Messages with captures are sent in the next turn.",
-  "截图输入需要 Codex 或 Claude Code，每条消息最多 8 张。": "Captures require Codex or Claude Code. Up to 8 images per message."
+  "截图输入需要 Codex 或 Claude Code，每条消息最多 8 张。": "Captures require Codex or Claude Code. Up to 8 images per message.",
+  "打开 PDF": "Open PDF"
 }

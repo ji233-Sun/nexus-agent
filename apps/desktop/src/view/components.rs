@@ -454,6 +454,7 @@ impl NexusView {
                     })
                     .child(if kind == MessageKind::Text {
                         TextView::markdown(id.clone(), content.to_owned())
+                            .on_link_click(self.pdf_link_handler(cx))
                             .when(role == MessageRole::Assistant, |text| {
                                 text.font(reading_font(cx))
                             })

@@ -16,6 +16,10 @@ use std::time::Instant;
 use uuid::Uuid;
 
 impl Presenter {
+    pub(crate) fn report_pdf_error(&mut self, error: String) {
+        self.model.attachment_error = Some(error.clone().into());
+        self.model.log_status(error.into());
+    }
     pub(crate) fn attach_pdf_capture(
         &mut self,
         name: &str,

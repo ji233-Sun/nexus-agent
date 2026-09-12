@@ -16,6 +16,7 @@ fn git(arguments: &[&str]) -> Option<String> {
 }
 
 fn main() {
+    embed_pdf_assets();
     #[cfg(target_os = "macos")]
     {
         cc::Build::new()
@@ -74,4 +75,45 @@ fn main() {
         "Invalid NEXUS_RELEASE_TAG"
     );
     println!("cargo::rustc-env=NEXUS_RELEASE_TAG={tag}");
+}
+
+fn embed_pdf_assets() {
+    fn visit(directory: &Path, files: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(directory)
+            .expect("PDF assets: run npm ci && npm run build in apps/pdf-viewer")
+        {
+            let path = entry.expect("PDF asset entry").path();
+            if path.is_dir() {
+                visit(&path, files);
+            } else if path.extension().is_some_and(|ext| ext == "gz") {
+                files.push(path);
+            }
+        }
+    }
+    let root = Path::new("../pdf-viewer/dist")
+        .canonicalize()
+        .expect("bundled PDF viewer assets");
+    println!("cargo::rerun-if-changed={}", root.display());
+    let mut files = Vec::new();
+    visit(&root, &mut files);
+    files.sort();
+    let mut output = String::from("const ASSETS: &[(&str, &[u8])] = &[\n");
+    for file in files {
+        let name = file
+            .strip_prefix(&root)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        output.push_str(&format!(
+            "({:?}, include_bytes!({:?})),\n",
+            name.strip_suffix(".gz").unwrap(),
+            file
+        ));
+    }
+    output.push_str("];\n");
+    std::fs::write(
+        Path::new(&env::var_os("OUT_DIR").unwrap()).join("pdf_assets.rs"),
+        output,
+    )
+    .expect("write PDF asset index");
 }
