@@ -6,8 +6,8 @@ use crate::{
 use anyhow::{Context as _, ensure};
 use gpui_kit::component::Root;
 use gpui_kit::{
-    App, AppContext as _, Bounds, Styled as _, TitlebarOptions, WindowBounds, WindowOptions, point,
-    px, rgba, size,
+    App, AppContext as _, Bounds, QuitMode, Styled as _, TitlebarOptions, WindowBounds,
+    WindowOptions, point, px, rgba, size,
 };
 use std::{
     ffi::OsString,
@@ -188,6 +188,7 @@ pub(crate) fn run() -> anyhow::Result<()> {
     };
 
     gpui_kit::application()
+        .with_quit_mode(QuitMode::LastWindowClosed)
         .with_assets(gpui_kit::assets::Assets)
         .with_http_client(std::sync::Arc::new(
             reqwest_client::ReqwestClient::user_agent(concat!(
