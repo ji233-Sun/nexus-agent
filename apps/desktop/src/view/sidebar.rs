@@ -731,6 +731,10 @@ mod tests {
                 .unwrap();
         }
         let mut presenter = Presenter::new(storage, Err(anyhow::anyhow!("test")), None);
+        // Keep background CLI discovery from changing idle render counts.
+        for provider in IssueProvider::ALL {
+            presenter.set_issues_enabled(provider, false);
+        }
         presenter.select_project(project);
         presenter.select_task(presenter.model().tasks[0].id);
         let (view, cx) = cx.add_window_view(|window, cx| {
