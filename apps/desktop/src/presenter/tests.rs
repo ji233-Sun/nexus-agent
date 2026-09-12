@@ -5538,6 +5538,132 @@ fn all_harnesses_restore_each_profile_and_cli_selection_after_restart() {
 }
 
 #[test]
+fn claude_custom_models_are_restored_per_configuration_and_can_start_runs() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("preferences.db");
+    let credentials = FakeCredentialStore::default();
+    let runner = FakeRunner::default();
+    let mut presenter = Presenter::new_with_credentials(
+        Storage::open(&database).unwrap(),
+        Ok(Box::new(runner.clone())),
+        None,
+        Box::new(credentials.clone()),
+    );
+    presenter.open_project(directory.path());
+    let mut expected = Vec::new();
+    for (name, model_id) in [
+        ("cli", "GLM-5"),
+        ("Kimi", "moonshotai/Kimi-K2.5"),
+        ("GLM", "z-ai/glm-5"),
+    ] {
+        let profile = (name != "cli").then(|| {
+            presenter
+                .save_provider_profile(profile_draft(None, name, "profile-secret"))
+                .unwrap()
+        });
+        presenter.select_catalog_model(Some(model_id.into()));
+        assert_eq!(presenter.model().model_override.as_deref(), Some(model_id));
+        expected.push((profile, model_id));
+    }
+    drop(presenter);
+
+    let mut presenter = Presenter::new_with_credentials(
+        Storage::open(&database).unwrap(),
+        Ok(Box::new(runner.clone())),
+        None,
+        Box::new(credentials),
+    );
+    presenter.open_project(directory.path());
+    presenter
+        .model
+        .harnesses
+        .insert(HarnessKind::Claude, ready_probe(HarnessKind::Claude));
+    for (profile, model_id) in expected.into_iter().rev() {
+        presenter.select_provider_profile(profile);
+        assert_eq!(presenter.model().model_override.as_deref(), Some(model_id));
+        assert!(presenter.model().can_submit());
+        emit_current_catalog(&presenter, &runner, claude_aliases());
+        presenter.drain_events();
+        assert!(presenter.model().selected_catalog_model().is_none());
+        assert!(presenter.model().can_submit());
+        assert_eq!(presenter.remote_state().model.as_deref(), Some(model_id));
+    }
+
+    presenter.select_effort(ThinkingEffort::High);
+    assert_eq!(presenter.model().effort, ThinkingEffort::Default);
+    for models in [vec![], claude_aliases()] {
+        assert!(presenter.refresh_model_catalog());
+        assert!(presenter.model().can_submit());
+        emit_current_catalog(&presenter, &runner, models);
+        presenter.drain_events();
+        assert!(presenter.model().can_submit());
+    }
+    assert!(presenter.refresh_model_catalog());
+    runner.emit(Event::ModelCatalogFailed {
+        request_id: current_catalog_request_id(&presenter),
+        harness: HarnessKind::Claude,
+        message: "catalog unavailable".into(),
+    });
+    presenter.drain_events();
+    assert!(presenter.model().can_submit());
+    assert!(presenter.submit("use custom model", "claude"));
+    let request = last_start(&runner);
+    assert_eq!(request.model.as_deref(), Some("GLM-5"));
+    assert_eq!(request.effort, ThinkingEffort::Default);
+    let config = presenter
+        .storage
+        .conversation_config(request.task_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(config.model, "GLM-5");
+    presenter.select_catalog_model(Some("another-model".into()));
+    assert_eq!(presenter.model().model_override.as_deref(), Some("GLM-5"));
+}
+
+#[test]
+fn custom_model_selection_is_claude_only_and_generation_uses_the_same_rules() {
+    for harness in HarnessKind::ALL {
+        let (mut presenter, _runner, _directory) = fixture();
+        presenter.select_harness(harness, "claude");
+        presenter.select_catalog_model(Some("moonshotai/Kimi-K2.5".into()));
+        assert_eq!(
+            presenter.model().model_override.is_some(),
+            harness == HarnessKind::Claude
+        );
+        for invalid in ["", "  ", "model\0id", "model\nid"] {
+            let previous = presenter.model().model_override.clone();
+            presenter.select_catalog_model(Some(invalid.into()));
+            assert_eq!(presenter.model().model_override, previous);
+        }
+        for kind in GenerationKind::ALL {
+            presenter.select_generation_harness(kind, harness);
+            assert_eq!(
+                presenter.select_generation_model(kind, Some("GLM-5".into())),
+                harness == HarnessKind::Claude
+            );
+            if harness == HarnessKind::Claude {
+                assert!(!presenter.select_generation_effort(kind, ThinkingEffort::High));
+                let config = presenter.generation_configuration(kind).unwrap();
+                assert_eq!(config.model.as_deref(), Some("GLM-5"));
+                assert_eq!(config.effort, ThinkingEffort::Default);
+                let saved: GenerationSettings = serde_json::from_str(
+                    &presenter
+                        .storage
+                        .setting(kind.setting_key())
+                        .unwrap()
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(saved.model, config.model);
+            }
+            for invalid in ["", "  ", "model\0id", "model\nid"] {
+                assert!(!presenter.select_generation_model(kind, Some(invalid.into())));
+            }
+        }
+    }
+}
+
+#[test]
 fn claude_legacy_preferences_migrate_once_without_leaking_to_profiles() {
     let storage = Storage::open(Path::new(":memory:")).unwrap();
     storage.set_setting("claude_model", "opus").unwrap();
@@ -5608,7 +5734,10 @@ fn catalog_context_changes_ignore_late_responses_and_keep_missing_model_names() 
             if *request_id == current && executable == "/new/executable" && Path::new(cwd) == other.canonicalize().unwrap())));
         emit_current_catalog(&presenter, &runner, vec![]);
         presenter.drain_events();
-        assert!(!presenter.model().catalog_selection_is_valid());
+        assert_eq!(
+            presenter.model().catalog_selection_is_valid(),
+            harness == HarnessKind::Claude
+        );
         assert_eq!(
             presenter.model().model_override_name.as_deref(),
             Some("Recognizable name")
