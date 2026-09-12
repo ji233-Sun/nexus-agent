@@ -607,6 +607,7 @@ mod tests {
 
     fn request(cwd: String) -> StartRun {
         StartRun {
+            attachments: Vec::new(),
             transport: nexus_domain::HarnessTransport::Acp,
             title_generation: Some(nexus_protocol::TextGenerationConfig {
                 harness: HarnessKind::Claude,

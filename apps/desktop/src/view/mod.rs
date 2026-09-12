@@ -4,6 +4,7 @@ mod fonts;
 mod issues;
 mod model_picker;
 mod pane;
+mod pdf;
 mod review;
 mod settings;
 mod sidebar;
@@ -87,6 +88,10 @@ struct GenerationPicker {
 }
 
 pub(crate) struct NexusView {
+    pdf_events: (
+        std::sync::mpsc::Sender<crate::infrastructure::pdf::PdfEvent>,
+        std::sync::mpsc::Receiver<crate::infrastructure::pdf::PdfEvent>,
+    ),
     presenter: Presenter,
     prompt_input: Entity<TextareaState>,
     voice_key_input: Entity<InputState>,
@@ -321,6 +326,7 @@ impl NexusView {
             crate::model::updates::UpdateState::Failed(_)
         );
         let mut view = Self {
+            pdf_events: std::sync::mpsc::channel(),
             voice_key_input: cx.new(|cx| {
                 InputState::new(window, cx)
                     .masked(true)
@@ -631,6 +637,7 @@ impl NexusView {
     }
 
     fn poll_events(&mut self, now: Instant, cx: &mut Context<Self>) {
+        self.poll_pdf_events(cx);
         if self.presenter.drain_issue_events() {
             cx.notify();
         }
@@ -1479,6 +1486,7 @@ impl NexusView {
                                             .tooltip(locale.text("等待工具执行结束后介入当前对话"))
                                             .disabled(
                                                 !model.can_queue()
+                                                    || !message.attachments.is_empty()
                                                     || model.steering_message.is_some()
                                                     || model.active_permission_mode
                                                         != Some(message.permission_mode),
@@ -1778,6 +1786,14 @@ impl NexusView {
             .unwrap_or_else(|| locale.text("新建任务").into());
         div()
             .debug_selector(|| "workspace-page".into())
+            .on_drop(cx.listener(|app, paths: &gpui::ExternalPaths, _, cx| {
+                for path in paths.paths().iter().filter(|path| {
+                    path.extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+                }) {
+                    app.open_pdf(path.clone(), cx);
+                }
+            }))
             .size_full()
             .bg(material.chrome)
             .flex()
@@ -1940,6 +1956,18 @@ impl NexusView {
                                     .flex()
                                     .flex_col()
                                     .child(self.render_message_queue(cx))
+                                    .child(self.render_attachment_images(
+                                        &model.attachments,
+                                        None,
+                                        cx,
+                                    ))
+                                    .when_some(model.attachment_error.as_ref(), |element, error| {
+                                        element.child(
+                                            div()
+                                                .text_size(px(12.))
+                                                .child(error.render(locale).to_owned()),
+                                        )
+                                    })
                                     .when(!voice_status.is_empty(), |element| {
                                         element.child(
                                             div()
@@ -1985,6 +2013,17 @@ impl NexusView {
                                                     .items_center()
                                                     .gap_2()
                                                     .child(self.render_voice_controls(cx))
+                                                    .child(
+                                                        Button::new("open-pdf")
+                                                            .ghost()
+                                                            .small()
+                                                            .label("PDF")
+                                                            .debug_selector(|| "open-pdf".into())
+                                                            .tooltip(locale.text("打开 PDF"))
+                                                            .on_click(cx.listener(
+                                                                |app, _, _, cx| app.choose_pdf(cx),
+                                                            )),
+                                                    )
                                                     .when(model.active_run.is_some(), |element| {
                                                         element.child(
                                                             Button::new("composer-cancel")

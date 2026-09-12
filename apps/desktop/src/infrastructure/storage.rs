@@ -36,6 +36,7 @@ pub struct NewTaskRun<'a> {
     pub project_id: Option<Uuid>,
     pub title: &'a str,
     pub prompt: &'a str,
+    pub attachments: &'a [nexus_domain::ImageAttachment],
     pub harness: HarnessKind,
     pub executable: &'a str,
     pub model: Option<&'a str>,
@@ -58,6 +59,32 @@ impl PendingTaskRun<'_> {
 }
 
 impl Storage {
+    pub(crate) fn save_pdf_capture(
+        &self,
+        name: &str,
+        page: u32,
+        bytes: &[u8],
+    ) -> Result<nexus_domain::ImageAttachment> {
+        use std::io::Write as _;
+        nexus_harness_core::validate_capture(bytes).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(page > 0 && !name.trim().is_empty(), "截图来源无效");
+        let directory = self
+            .session_root
+            .parent()
+            .unwrap_or(&self.session_root)
+            .join("captures");
+        fs::create_dir_all(&directory)?;
+        let mut file = tempfile::NamedTempFile::new_in(&directory)?;
+        file.write_all(bytes)?;
+        let path = directory.join(format!("{}.png", Uuid::new_v4()));
+        file.persist_noclobber(&path)?;
+        Ok(nexus_domain::ImageAttachment {
+            path: path.canonicalize()?.to_string_lossy().into_owned(),
+            source_name: name.chars().take(255).collect(),
+            page,
+        })
+    }
+
     pub fn open_default() -> Result<Self> {
         let base = super::paths::data_directory()?;
         fs::create_dir_all(&base).context("创建应用数据目录")?;
@@ -139,6 +166,12 @@ impl Storage {
         if !table_has_column(&connection, "messages", "tool")? {
             connection.execute("ALTER TABLE messages ADD COLUMN tool TEXT", [])?;
         }
+        if !table_has_column(&connection, "messages", "attachments")? {
+            connection.execute(
+                "ALTER TABLE messages ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'",
+                [],
+            )?;
+        }
         if !table_has_column(&connection, "tasks", "session_id")? {
             connection.execute("ALTER TABLE tasks ADD COLUMN session_id TEXT", [])?;
         }
@@ -196,7 +229,7 @@ impl Storage {
              UPDATE runs SET cwd = (SELECT projects.canonical_path FROM tasks
                  JOIN projects ON projects.id = tasks.project_id WHERE tasks.id = runs.task_id)
                  WHERE cwd IS NULL;
-             PRAGMA user_version = 8;",
+             PRAGMA user_version = 9;",
         )?;
         let legacy_tasks = {
             let mut statement = storage
@@ -507,6 +540,7 @@ impl Storage {
             project_id,
             title,
             prompt,
+            attachments,
             harness,
             executable,
             model,
@@ -581,16 +615,17 @@ impl Storage {
             ],
         )?;
         transaction.execute(
-            "INSERT INTO messages(id, task_id, run_id, sequence, role, kind, content, created_at)
+            "INSERT INTO messages(id, task_id, run_id, sequence, role, kind, content, created_at, attachments)
              VALUES(?1, ?2, ?3,
                  (SELECT COALESCE(MAX(sequence), 0) + 1 FROM messages WHERE task_id = ?2),
-                 'user', 'text', ?4, ?5)",
+                 'user', 'text', ?4, ?5, ?6)",
             params![
                 message_id.to_string(),
                 task_id.to_string(),
                 run_id.to_string(),
                 prompt,
-                now
+                now,
+                serde_json::to_string(attachments)?
             ],
         )?;
         Ok(PendingTaskRun {
@@ -689,6 +724,7 @@ impl Storage {
             role,
             kind,
             content: content.to_owned(),
+            attachments: Vec::new(),
             tool,
             created_at: Utc::now(),
         };
@@ -724,7 +760,7 @@ impl Storage {
 
     pub fn messages(&self, task_id: Uuid) -> Result<Vec<Message>> {
         let mut statement = self.connection.prepare(
-            "SELECT id, task_id, run_id, sequence, role, kind, content, created_at, tool
+            "SELECT id, task_id, run_id, sequence, role, kind, content, created_at, tool, attachments
              FROM messages WHERE task_id = ?1 ORDER BY sequence",
         )?;
         let rows = statement.query_map([task_id.to_string()], |row| {
@@ -736,6 +772,8 @@ impl Storage {
                 role: parse_role(row.get::<_, String>(4)?)?,
                 kind: parse_kind(row.get::<_, String>(5)?)?,
                 content: row.get(6)?,
+                attachments: serde_json::from_str(&row.get::<_, String>(9)?)
+                    .map_err(to_sql_error)?,
                 created_at: parse_date(row.get::<_, String>(7)?)?,
                 tool: row
                     .get::<_, Option<String>>(8)?
@@ -1027,8 +1065,12 @@ mod tests {
 
         let mut storage = Storage::open(&database).unwrap();
         let project = storage.open_project(&project_dir).unwrap();
+        use base64::Engine as _;
+        let png = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=").unwrap();
+        let image = storage.save_pdf_capture("报告.pdf", 12, &png).unwrap();
         let (task_id, run_id) = storage
             .create_task_run(NewTaskRun {
+                attachments: std::slice::from_ref(&image),
                 workspace_id: None,
                 permission_mode: PermissionMode::Ask,
                 task_id: None,
@@ -1064,6 +1106,8 @@ mod tests {
         assert_eq!(tasks[0].title, "Generated title");
         let messages = storage.messages(task_id).unwrap();
         assert_eq!(messages[0].content, "hello");
+        assert_eq!(messages[0].attachments, vec![image.clone()]);
+        assert_eq!(std::fs::read(&image.path).unwrap(), png);
         let config = storage.conversation_config(task_id).unwrap().unwrap();
         assert_eq!(config.harness, HarnessKind::Claude);
         assert_eq!(config.session_id.as_deref(), Some("claude-session"));
@@ -1104,6 +1148,7 @@ mod tests {
         let project = storage.open_project(&project_dir).unwrap();
         let (task_id, run_id) = storage
             .create_task_run(NewTaskRun {
+                attachments: &[],
                 workspace_id: None,
                 permission_mode: nexus_domain::PermissionMode::AutoEdit,
                 task_id: None,
@@ -1233,6 +1278,7 @@ mod tests {
         let create_task = |storage: &mut Storage, title: &str| {
             storage
                 .create_task_run(NewTaskRun {
+                    attachments: &[],
                     workspace_id: None,
                     permission_mode: nexus_domain::PermissionMode::AutoEdit,
                     task_id: None,
@@ -1303,6 +1349,7 @@ mod tests {
         let tasks = [project.id, project.id, other.id].map(|project_id| {
             storage
                 .create_task_run(NewTaskRun {
+                    attachments: &[],
                     task_id: None,
                     workspace_id: None,
                     project_id: Some(project_id),
@@ -1595,6 +1642,7 @@ mod tests {
             .unwrap();
         let (chat_id, _) = storage
             .create_task_run(NewTaskRun {
+                attachments: &[],
                 task_id: None,
                 workspace_id: Some(chat.id),
                 project_id: None,

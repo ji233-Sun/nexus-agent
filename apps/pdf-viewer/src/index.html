@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; img-src 'self' blob: data:; font-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-src 'none'">
+  <title>Nexus · PDF</title>
+  <link rel="stylesheet" href="vendor/pdf_viewer.css">
+  <link rel="stylesheet" href="viewer.css">
+</head>
+<body>
+  <header>
+    <div class="titlebar"><strong id="filename">PDF</strong><span id="modified"></span><span class="spacer"></span><button id="saveAs" data-label="另存为">另存为</button><button id="save" data-label="保存">保存</button><button id="close" data-label="关闭">关闭</button></div>
+    <div class="toolbar">
+      <button id="sidebarToggle" data-label="页面与目录">页面与目录</button>
+      <button id="previous" aria-label="上一页">‹</button><input id="pageNumber" type="number" min="1" value="1" aria-label="页码"><span id="pageCount">/ 0</span><button id="next" aria-label="下一页">›</button>
+      <button id="zoomOut" aria-label="缩小">−</button><select id="zoom" aria-label="缩放"><option value="page-width" data-label="适应宽度">适应宽度</option><option value="page-fit" data-label="整页">整页</option><option value="0.5">50%</option><option value="1">100%</option><option value="1.5">150%</option><option value="2">200%</option></select><button id="zoomIn" aria-label="放大">+</button>
+      <input id="find" type="search" placeholder="搜索文档" aria-label="搜索文档"><button id="findNext" data-label="查找下一个">查找下一个</button><span id="matches"></span>
+    </div>
+    <div class="toolbar editbar">
+      <select id="tool" aria-label="工具">
+        <option value="read" data-label="阅读与选择文字">阅读与选择文字</option><option value="select" data-label="选择与移动标注">选择与移动标注</option>
+        <option value="highlight" data-label="高亮">高亮</option><option value="underline" data-label="下划线">下划线</option><option value="pencil" data-label="画笔">画笔</option>
+        <option value="rectangle" data-label="矩形">矩形</option><option value="arrow" data-label="箭头">箭头</option><option value="text" data-label="添加文本">添加文本</option><option value="note" data-label="文字批注">文字批注</option>
+      </select>
+      <input id="color" type="color" value="#e05040" aria-label="标注颜色">
+      <button id="editMark" data-label="编辑标注">编辑标注</button><button id="deleteMark" data-label="删除标注">删除标注</button>
+      <button id="undo" data-label="撤销">撤销</button><button id="redo" data-label="重做">重做</button>
+      <button id="rotate" data-label="旋转页面">旋转页面</button><button id="moveBefore" data-label="前移">前移</button><button id="moveAfter" data-label="后移">后移</button><button id="deletePage" data-label="删除页面">删除页面</button>
+      <span class="spacer"></span><button id="captureRegion" data-label="框选加入聊天">框选加入聊天</button><button id="capturePage" class="primary" data-label="整页加入聊天">整页加入聊天</button>
+    </div>
+  </header>
+  <main><aside id="sidebar"><div id="outline"></div><div id="thumbnails"></div></aside><div id="viewerContainer" tabindex="0"><div id="viewer" class="pdfViewer"></div></div></main>
+  <footer id="status" role="status" aria-live="polite">正在打开 PDF…</footer>
+  <dialog id="dialog" aria-labelledby="dialogTitle" aria-describedby="dialogDescription"><form method="dialog"><h3 id="dialogTitle"></h3><p id="dialogDescription"></p><textarea id="dialogText" maxlength="2000" rows="4"></textarea><input id="dialogPassword" type="password" autocomplete="off"><div class="dialogActions"><button value="cancel" data-label="取消">取消</button><button value="ok" class="primary" data-label="确认">确认</button></div></form></dialog>
+  <script type="module" src="bootstrap.mjs"></script>
+</body>
+</html>

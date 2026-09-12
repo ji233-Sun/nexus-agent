@@ -13,7 +13,7 @@ use nexus_harness_core::{
     resolve_executable, tool_content,
 };
 pub use nexus_harness_core::{DecodedEvent, LaunchSpec};
-use nexus_protocol::{EnvironmentVariable, HarnessProbe};
+use nexus_protocol::{EnvironmentVariable, HarnessProbe, StartRun};
 use serde_json::{Value, json};
 use tokio::process::Command;
 use tokio::sync::watch;
@@ -100,6 +100,34 @@ pub fn build_launch_spec(
         cwd: cwd.to_path_buf(),
         stdin: format!("{}\n", user_input(prompt, None)),
     }
+}
+
+pub fn prepare_run(request: &StartRun, cwd: &Path) -> Result<LaunchSpec, String> {
+    use base64::Engine as _;
+    let mut spec = build_launch_spec(
+        &request.executable,
+        cwd,
+        &request.prompt,
+        request.model.as_deref(),
+        request.effort,
+        request.session_id.as_deref(),
+        request.permission_mode,
+    );
+    if !request.attachments.is_empty() {
+        let mut content = vec![json!({"type": "text", "text": request.prompt})];
+        for image in &request.attachments {
+            let bytes = nexus_harness_core::read_image_attachment(image)?;
+            content.push(json!({"type": "text", "text": format!("{} · page {}", image.source_name, image.page)}));
+            content.push(json!({"type": "image", "source": {
+                "type": "base64", "media_type": "image/png",
+                "data": base64::engine::general_purpose::STANDARD.encode(bytes)
+            }}));
+        }
+        let mut frame = user_input(&request.prompt, None);
+        frame["message"]["content"] = content.into();
+        spec.stdin = format!("{frame}\n");
+    }
+    Ok(spec)
 }
 
 pub fn build_title_launch_spec(

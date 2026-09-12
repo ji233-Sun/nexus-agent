@@ -1,5 +1,6 @@
 /target/
 /apps/remote-web/node_modules/
+/apps/pdf-viewer/node_modules/
 .amp/portals/*
 .DS_Store
 *.log

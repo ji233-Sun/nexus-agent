@@ -23,7 +23,7 @@ Ubuntu / Debian：
 ```sh
 sudo apt-get install -y clang cmake pkg-config \
   libfontconfig1-dev libfreetype6-dev libwayland-dev libx11-xcb-dev \
-  libxkbcommon-x11-dev libssl-dev libvulkan1 libglib2.0-dev libasound2-dev
+  libxkbcommon-x11-dev libssl-dev libvulkan1 libglib2.0-dev libasound2-dev libwebkit2gtk-4.1-dev
 ```
 
 其他 Linux 发行版可参考 [GPUI / Zed 构建说明](https://zed.dev/docs/development/linux)。运行界面需要 Vulkan 驱动与桌面会话，目录选择需要 XDG Desktop Portal 及对应桌面后端。单元测试和内置 Runner 测试不要求显示服务或真实 Harness 登录。
@@ -235,4 +235,8 @@ ACP 模型目录通过无 Prompt 的 `session/new` 获取，CLI 可能保存空�
 
 本次实际验证版本：Pi 0.85.1、Kimi Code 0.42.0、Qoder CLI 1.1.48、CodeBuddy 2.147.0。Kimi Code 使用官方安装器布局（`~/.kimi-code/bin/kimi`），核对 ACP 握手、会话模式/模型配置与 `kimi -p --output-format stream-json` 文本生成；Pi 使用隔离配置和本地模拟模型验证了审批、工具、标题与跨进程续聊；Qoder 验证原生启动参数和未认证错误，国内包 1.1.48 核对命令、Token 环境变量及安装来源；CodeBuddy 验证原生握手及 ACP 模型目录。真实账号模型调用、Windows / Linux 实机运行尚未验证。
 
-标题与提交说明统一通过 `TextGenerationConfig` / `prepare_text_generation` 执行；Kimi Code 通过 `kimi -p --output-format stream-json` 与只读 Markdown Agent（`tools: []`）生成文本，避免工具调用并限制输出为最终消息。Desktop / Runner 协议版本为 16，StartRun 增加默认 CLI 的 transport，HarnessProbe 增加环境配置以支持地区探测。
+标题与提交说明统一通过 `TextGenerationConfig` / `prepare_text_generation` 执行；Kimi Code 通过 `kimi -p --output-format stream-json` 与只读 Markdown Agent（`tools: []`）生成文本，避免工具调用并限制输出为最终消息。StartRun 包含默认 CLI 的 transport，HarnessProbe 包含环境配置以支持地区探测；当前 Desktop / Runner 协议版本为 17。
+
+### 修改 PDF 界面
+
+`apps/pdf-viewer` 使用纯 JavaScript、PDF.js 与 pdf-lib，修改后在该目录运行 `npm ci --ignore-scripts`、`npm test`、`npm run build`，提交源码和压缩后的 `dist/` 资源。Desktop 构建时直接嵌入这些资源，发布包不依赖外部 CDN。详见 [PDF 界面说明](../apps/pdf-viewer/README.md)。图片附件将 Desktop／Runner 配对协议升级至 17，消息存储通过默认空附件列兼容已有聊天记录。
