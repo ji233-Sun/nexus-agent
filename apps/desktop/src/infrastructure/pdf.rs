@@ -276,7 +276,7 @@ async fn asset(RoutePath(name): RoutePath<String>) -> Response {
     };
     let mime = match name.rsplit('.').next().unwrap_or_default() {
         "html" => "text/html; charset=utf-8",
-        "mjs" => "text/javascript; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
         "css" => "text/css; charset=utf-8",
         "json" => "application/json",
         "wasm" => "application/wasm",
@@ -366,6 +366,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/secret/vendor/wasm/jbig2_nowasm_fallback.js")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/javascript; charset=utf-8"
+        );
         let response = router
             .clone()
             .oneshot(

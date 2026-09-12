@@ -106,7 +106,14 @@ fn pdf_captures_survive_send_failure_queue_and_conversation_switch() {
     let png = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=").unwrap();
     let (mut presenter, runner, _directory) = fixture();
     presenter.attach_pdf_capture("报告.pdf", 12, &png).unwrap();
+    presenter.attach_pdf_capture("报告.pdf", 13, &png).unwrap();
+    presenter.attach_pdf_capture("报告.pdf", 14, &png).unwrap();
+    presenter.remove_attachment(1);
     let images = presenter.model.attachments.clone();
+    assert_eq!(
+        images.iter().map(|image| image.page).collect::<Vec<_>>(),
+        vec![12, 14]
+    );
     runner.0.borrow_mut().fail_send = true;
     assert!(!presenter.submit("解释圈出的部分", "claude"));
     assert_eq!(presenter.model.attachments, images);

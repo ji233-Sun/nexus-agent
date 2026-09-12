@@ -300,7 +300,11 @@ impl NexusView {
                 let images = message.attachments.clone();
                 let prompt = message.content.clone();
                 element
-                    .child(self.render_attachment_images(&message.attachments, false, cx))
+                    .child(self.render_attachment_images(
+                        &message.attachments,
+                        Some(message.id),
+                        cx,
+                    ))
                     .child(
                         Button::new((ElementId::from(message.id), "reuse-images"))
                             .ghost()
@@ -325,10 +329,11 @@ impl NexusView {
     pub(super) fn render_attachment_images(
         &self,
         images: &[nexus_domain::ImageAttachment],
-        draft: bool,
+        message_id: Option<uuid::Uuid>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         use gpui::{ObjectFit, StyledImage as _};
+        let draft = message_id.is_none();
         let locale = self.presenter.model().language;
         div()
             .flex()
@@ -336,7 +341,7 @@ impl NexusView {
             .gap_2()
             .children(images.iter().enumerate().map(|(index, image)| {
                 let id = ElementId::from(SharedString::from(format!(
-                    "capture-{}-{draft}",
+                    "capture-{message_id:?}-{index}-{}",
                     image.path
                 )));
                 let expanded = self.expanded_messages.contains(&id);

@@ -1958,7 +1958,7 @@ impl NexusView {
                                     .child(self.render_message_queue(cx))
                                     .child(self.render_attachment_images(
                                         &model.attachments,
-                                        true,
+                                        None,
                                         cx,
                                     ))
                                     .when_some(model.attachment_error.as_ref(), |element, error| {
