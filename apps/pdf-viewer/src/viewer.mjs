@@ -328,7 +328,13 @@ $('save').onclick = () => void perform(() => save(false));
 $('saveAs').onclick = () => void perform(() => save(true));
 $('previous').onclick = () => { if (viewer.currentPageNumber > 1) viewer.currentPageNumber--; };
 $('next').onclick = () => { if (viewer.currentPageNumber < viewer.pagesCount) viewer.currentPageNumber++; };
-$('pageNumber').onchange = () => { const page = Math.trunc(Number($('pageNumber').value)); if (page >= 1 && page <= viewer.pagesCount) viewer.currentPageNumber = page; else $('pageNumber').value = viewer.currentPageNumber; };
+const goToPage = () => {
+  const page = Math.trunc(Number($('pageNumber').value));
+  if (page >= 1 && page <= viewer.pagesCount) viewer.currentPageNumber = page;
+  $('pageNumber').value = viewer.currentPageNumber;
+};
+$('pageNumber').onchange = goToPage;
+$('pageNumber').onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); goToPage(); } };
 $('zoom').onchange = () => { viewer.currentScaleValue = $('zoom').value; };
 $('zoomIn').onclick = () => { viewer.currentScale = Math.min(4, viewer.currentScale * 1.2); };
 $('zoomOut').onclick = () => { viewer.currentScale = Math.max(0.25, viewer.currentScale / 1.2); };
