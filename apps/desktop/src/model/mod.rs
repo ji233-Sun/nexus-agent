@@ -1,5 +1,5 @@
-pub(crate) mod cnb;
 pub(crate) mod harness_installation;
+pub(crate) mod issues;
 pub(crate) mod tools;
 pub(crate) mod updates;
 pub(crate) mod voice;
@@ -132,6 +132,7 @@ pub(crate) struct QueuedMessage {
     pub(crate) id: Uuid,
     pub(crate) task_id: Uuid,
     pub(crate) prompt: String,
+    pub(crate) attachments: Vec<nexus_domain::ImageAttachment>,
     pub(crate) permission_mode: PermissionMode,
 }
 
@@ -237,7 +238,8 @@ pub(crate) struct RuntimeLogEntry {
 pub(crate) struct AppModel {
     // Logs belong to this launch, independent of conversation selection or deletion.
     pub(crate) runtime_log: Vec<RuntimeLogEntry>,
-    pub(crate) cnb: cnb::CnbModel,
+    pub(crate) cnb: issues::IssuesModel,
+    pub(crate) github: issues::IssuesModel,
     pub(crate) language: Language,
     pub(crate) voice: voice::VoiceModel,
     pub(crate) appearance: AppearanceSettings,
@@ -264,6 +266,8 @@ pub(crate) struct AppModel {
 // selected conversation lives here; switching moves it into the keyed collection.
 #[derive(Default)]
 pub(crate) struct ConversationState {
+    pub(crate) attachments: Vec<nexus_domain::ImageAttachment>,
+    pub(crate) attachment_error: Option<LocalizedText>,
     pub(crate) changes_sidebar_open: bool,
     pub(crate) changes_files_expanded: bool,
     pub(crate) commit_editor_open: bool,
@@ -580,5 +584,30 @@ impl AppModel {
             ThinkingEffort::Default
         };
         ResolvedModelSelection { model, effort }
+    }
+}
+
+impl AppModel {
+    pub(crate) fn issues(&self, provider: issues::IssueProvider) -> &issues::IssuesModel {
+        match provider {
+            issues::IssueProvider::Cnb => &self.cnb,
+            issues::IssueProvider::GitHub => &self.github,
+        }
+    }
+
+    pub(crate) fn issues_mut(
+        &mut self,
+        provider: issues::IssueProvider,
+    ) -> &mut issues::IssuesModel {
+        match provider {
+            issues::IssueProvider::Cnb => &mut self.cnb,
+            issues::IssueProvider::GitHub => &mut self.github,
+        }
+    }
+
+    pub(crate) fn opened_issues(&self) -> Option<issues::IssueProvider> {
+        issues::IssueProvider::ALL
+            .into_iter()
+            .find(|provider| self.issues(*provider).opened)
     }
 }

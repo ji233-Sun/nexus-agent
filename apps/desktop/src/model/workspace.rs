@@ -122,6 +122,7 @@ impl Default for WorkspaceDraft {
 }
 
 pub(crate) struct PendingWorkspaceStart {
+    pub(crate) attachments: Vec<nexus_domain::ImageAttachment>,
     pub(crate) context_id: Uuid,
     pub(crate) prompt: String,
     pub(crate) executable: String,

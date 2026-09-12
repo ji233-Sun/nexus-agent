@@ -86,7 +86,7 @@ impl NexusView {
             .pr(px(62.))
             .group("sidebar-task")
             .debug_selector(move || format!("sidebar-task-{id}"))
-            .selected(model.selected_task == Some(id) && !model.cnb.opened)
+            .selected(model.selected_task == Some(id) && model.opened_issues().is_none())
             .suffix(move |_, _| {
                 let archive_app = app.clone();
                 let delete_app = app.clone();
@@ -340,38 +340,50 @@ impl NexusView {
                             .flex()
                             .flex_col()
                             .gap_1()
-                            .when(
-                                selected && model.cnb.enabled && model.cnb.repository.is_some(),
-                                |list| {
-                                    list.child(
+                            .children(
+                                IssueProvider::ALL
+                                    .into_iter()
+                                    .filter(|provider| {
+                                        selected
+                                            && model.issues(*provider).enabled
+                                            && model.issues(*provider).repository.is_some()
+                                    })
+                                    .map(|provider| {
                                         div().relative().ml(-px(24.)).child(
                                             navigation_row(
                                                 colors,
-                                                (ElementId::from(project_id), "cnb"),
-                                                "CNB",
+                                                (ElementId::from(project_id), provider.key()),
+                                                provider.name(),
                                                 None,
                                             )
                                             .pl(px(34.))
                                             .suffix(move |_, _| {
                                                 div()
-                                                    .debug_selector(|| "sidebar-cnb-icon".into())
+                                                    .debug_selector(move || {
+                                                        format!("sidebar-{}-icon", provider.key())
+                                                    })
                                                     .absolute()
                                                     .left(px(10.))
                                                     .top(px(12.))
-                                                    .child(cnb::cnb_icon(16., colors.accent))
+                                                    .child(issues::provider_icon(
+                                                        provider,
+                                                        16.,
+                                                        colors.accent,
+                                                    ))
                                             })
-                                            .debug_selector(|| "sidebar-cnb".into())
-                                            .selected(model.cnb.opened)
+                                            .debug_selector(move || {
+                                                format!("sidebar-{}", provider.key())
+                                            })
+                                            .selected(model.issues(provider).opened)
                                             .on_click(
-                                                cx.listener(|app, _, window, cx| {
-                                                    app.presenter.open_cnb();
+                                                cx.listener(move |app, _, window, cx| {
+                                                    app.presenter.open_issues(provider);
                                                     app.focus_handle.focus(window, cx);
                                                     cx.notify();
                                                 }),
                                             ),
-                                        ),
-                                    )
-                                },
+                                        )
+                                    }),
                             )
                             .when(tasks.is_empty(), |list| {
                                 list.child(
@@ -704,6 +716,7 @@ mod tests {
         for index in 0..30 {
             storage
                 .create_task_run(NewTaskRun {
+                    attachments: &[],
                     workspace_id: None,
                     permission_mode: nexus_domain::PermissionMode::AutoEdit,
                     task_id: None,
@@ -719,6 +732,10 @@ mod tests {
                 .unwrap();
         }
         let mut presenter = Presenter::new(storage, Err(anyhow::anyhow!("test")), None);
+        // Keep background CLI discovery from changing idle render counts.
+        for provider in IssueProvider::ALL {
+            presenter.set_issues_enabled(provider, false);
+        }
         presenter.select_project(project);
         presenter.select_task(presenter.model().tasks[0].id);
         let (view, cx) = cx.add_window_view(|window, cx| {

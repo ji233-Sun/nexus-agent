@@ -1,14 +1,14 @@
 use super::*;
-use crate::{
-    infrastructure::cnb::DOCUMENTATION,
-    model::cnb::{Issue, IssueAction, IssueFilter, Label, PAGE_SIZE},
-};
+use crate::model::issues::{Issue, IssueAction, IssueFilter, Label, PAGE_SIZE};
 use gpui_kit::component::{scroll::ScrollableElement as _, spinner::Spinner};
 
-pub(super) fn cnb_icon(size: f32, color: u32) -> impl IntoElement {
+pub(super) fn provider_icon(provider: IssueProvider, size: f32, color: u32) -> impl IntoElement {
     // GPUI only paints an SVG when the element has an explicit text color.
     gpui::svg()
-        .data(include_bytes!("../../assets/icons/cnb.svg").as_slice())
+        .data(match provider {
+            IssueProvider::Cnb => include_bytes!("../../assets/icons/cnb.svg").as_slice(),
+            IssueProvider::GitHub => include_bytes!("../../assets/icons/github.svg").as_slice(),
+        })
         .size(px(size))
         .flex_none()
         .text_color(rgb(color))
@@ -54,8 +54,13 @@ fn issue_label(label: &Label, colors: Palette) -> impl IntoElement {
 }
 
 impl NexusView {
-    fn send_cnb_issue_to_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(prompt) = self.presenter.prepare_cnb_chat() else {
+    fn send_issue_to_chat(
+        &mut self,
+        provider: IssueProvider,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(prompt) = self.presenter.prepare_issue_chat(provider) else {
             return;
         };
         self.prompt_input.update(cx, |input, cx| {
@@ -76,11 +81,16 @@ impl NexusView {
         cx.notify();
     }
 
-    fn render_cnb_actions(&self, issue: &Issue, cx: &mut Context<Self>) -> impl IntoElement {
-        let cnb = &self.presenter.model().cnb;
+    fn render_issue_actions(
+        &self,
+        provider: IssueProvider,
+        issue: &Issue,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let issues = self.presenter.model().issues(provider);
         let locale = self.presenter.model().language;
         let colors = palette(cx);
-        let busy = cnb.action_request.is_some();
+        let busy = issues.action_request.is_some();
         let state = if issue.state == "closed" {
             IssueFilter::Open
         } else {
@@ -110,8 +120,8 @@ impl NexusView {
                     .items_center()
                     .gap_2()
                     .child(
-                        action_button("cnb-chat")
-                            .debug_selector(|| "cnb-chat".into())
+                        action_button(SharedString::from(format!("{}-chat", provider.key())))
+                            .debug_selector(move || format!("{}-chat", provider.key()))
                             .primary()
                             .icon(IconName::Bot)
                             .label(locale.text("用 AI 处理"))
@@ -120,27 +130,29 @@ impl NexusView {
                                     .text("将完整 Issue 和评论加入聊天草稿，选择 Harness 后发送。"),
                             )
                             .disabled(
-                                busy || cnb.comments.is_none() || cnb.comments_request.is_some(),
+                                busy || issues.comments.is_none()
+                                    || issues.comments_request.is_some(),
                             )
-                            .on_click(cx.listener(|app, _, window, cx| {
-                                app.send_cnb_issue_to_chat(window, cx)
+                            .on_click(cx.listener(move |app, _, window, cx| {
+                                app.send_issue_to_chat(provider, window, cx)
                             })),
                     )
                     .child(
-                        action_button("cnb-assign-self")
-                            .debug_selector(|| "cnb-assign-self".into())
+                        action_button(SharedString::from(format!("{}-assign-self", provider.key())))
+                            .debug_selector(move || format!("{}-assign-self", provider.key()))
                             .ghost()
                             .icon(IconName::User)
                             .label(locale.text("指派给我"))
                             .disabled(busy)
-                            .on_click(cx.listener(|app, _, _, cx| {
-                                app.presenter.act_on_cnb_issue(IssueAction::AssignSelf);
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.presenter
+                                    .act_on_issue(provider, IssueAction::AssignSelf);
                                 cx.notify();
                             })),
                     )
                     .child(
-                        action_button("cnb-change-state")
-                            .debug_selector(|| "cnb-change-state".into())
+                        action_button(SharedString::from(format!("{}-change-state", provider.key())))
+                            .debug_selector(move || format!("{}-change-state", provider.key()))
                             .ghost()
                             .icon(if state == IssueFilter::Closed {
                                 IconName::CircleCheck
@@ -154,27 +166,27 @@ impl NexusView {
                             }))
                             .disabled(busy)
                             .on_click(cx.listener(move |app, _, _, cx| {
-                                app.presenter.act_on_cnb_issue(IssueAction::SetState(state));
+                                app.presenter.act_on_issue(provider, IssueAction::SetState(state));
                                 cx.notify();
                             })),
                     )
-                    .child(
-                        action_button("cnb-npc")
-                            .debug_selector(|| "cnb-npc".into())
-                            .ghost()
-                            .icon(IconName::Bot)
-                            .label("CodeBuddy NPC")
-                            .tooltip(
-                                locale.text(
+                    .when(provider == IssueProvider::Cnb, |row| {
+                        row.child(
+                            action_button(SharedString::from(format!("{}-npc", provider.key())))
+                                .debug_selector(move || format!("{}-npc", provider.key()))
+                                .ghost()
+                                .icon(IconName::Bot)
+                                .label("CodeBuddy NPC")
+                                .tooltip(locale.text(
                                     "向此 Issue 发布评论，委托 CodeBuddy 完成开发并创建 PR。",
-                                ),
-                            )
-                            .disabled(busy || cnb.npc_comment.is_some())
-                            .on_click(cx.listener(|app, _, _, cx| {
-                                app.presenter.act_on_cnb_issue(IssueAction::StartNpc);
-                                cx.notify();
-                            })),
-                    ),
+                                ))
+                                .disabled(busy || issues.npc_comment.is_some())
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.presenter.act_on_issue(provider, IssueAction::StartNpc);
+                                    cx.notify();
+                                })),
+                        )
+                    }),
             )
             .when(busy, |el| {
                 el.child(
@@ -186,26 +198,26 @@ impl NexusView {
                         .child(locale.text("正在执行 Issue 操作…")),
                 )
             })
-            .when_some(cnb.action_error.as_ref(), |el, error| {
+            .when_some(issues.action_error.as_ref(), |el, error| {
                 el.child(
                     div()
                         .text_color(rgb(colors.danger))
                         .child(error.render(locale).to_owned()),
                 )
             })
-            .when_some(cnb.action_success.as_ref(), |el, message| {
+            .when_some(issues.action_success.as_ref(), |el, message| {
                 el.child(
                     div()
                         .text_color(rgb(colors.success))
                         .child(message.render(locale).to_owned()),
                 )
             })
-            .when_some(cnb.npc_comment.as_ref(), |el, comment| {
+            .when_some(issues.npc_comment.as_ref(), |el, comment| {
                 if let Some(url) = comment.action_url() {
                     let url = url.to_owned();
                     el.child(
-                        Button::new("cnb-npc-action")
-                            .debug_selector(|| "cnb-npc-action".into())
+                        Button::new(SharedString::from(format!("{}-npc-action", provider.key())))
+                            .debug_selector(move || format!("{}-npc-action", provider.key()))
                             .outline()
                             .small()
                             .icon(IconName::ExternalLink)
@@ -214,24 +226,27 @@ impl NexusView {
                     )
                 } else {
                     el.child(
-                        Button::new("cnb-npc-refresh")
-                            .debug_selector(|| "cnb-npc-refresh".into())
-                            .outline()
-                            .small()
-                            .label(locale.text(if cnb.npc_request.is_some() {
-                                "正在获取 Action 链接…"
-                            } else {
-                                "刷新 NPC 状态"
-                            }))
-                            .disabled(cnb.npc_request.is_some())
-                            .on_click(cx.listener(|app, _, _, cx| {
-                                app.presenter.refresh_cnb_npc_action();
-                                cx.notify();
-                            })),
+                        Button::new(SharedString::from(format!(
+                            "{}-npc-refresh",
+                            provider.key()
+                        )))
+                        .debug_selector(move || format!("{}-npc-refresh", provider.key()))
+                        .outline()
+                        .small()
+                        .label(locale.text(if issues.npc_request.is_some() {
+                            "正在获取 Action 链接…"
+                        } else {
+                            "刷新 NPC 状态"
+                        }))
+                        .disabled(issues.npc_request.is_some())
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.presenter.refresh_cnb_npc_action();
+                            cx.notify();
+                        })),
                     )
                 }
             })
-            .when_some(cnb.npc_error.as_ref(), |el, error| {
+            .when_some(issues.npc_error.as_ref(), |el, error| {
                 el.child(
                     div()
                         .text_color(rgb(colors.danger))
@@ -240,20 +255,25 @@ impl NexusView {
             })
     }
 
-    fn render_cnb_markdown(
+    fn render_issue_markdown(
         &self,
+        provider: IssueProvider,
         id: String,
         text: String,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let cnb = &self.presenter.model().cnb;
+        let issues = self.presenter.model().issues(provider);
         let colors = palette(cx);
         TextView::markdown(SharedString::from(id), text)
-            .markdown_extensions(super::cnb_media::extensions(
-                cnb.repository.as_deref().unwrap_or_default(),
-                cnb.cli.as_ref().map(|cli| cli.path.as_path()),
-                self.presenter.model().language,
-            ))
+            .markdown_extensions(if provider == IssueProvider::Cnb {
+                super::cnb_media::extensions(
+                    issues.repository.as_deref().unwrap_or_default(),
+                    issues.cli.as_ref().map(|cli| cli.path.as_path()),
+                    self.presenter.model().language,
+                )
+            } else {
+                Default::default()
+            })
             .text_size(px(14.))
             .line_height(relative(1.7))
             .style(
@@ -270,12 +290,16 @@ impl NexusView {
             )
     }
 
-    fn render_cnb_comments(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let cnb = &self.presenter.model().cnb;
+    fn render_issue_comments(
+        &self,
+        provider: IssueProvider,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let issues = self.presenter.model().issues(provider);
         let locale = self.presenter.model().language;
         let colors = palette(cx);
         div()
-            .debug_selector(|| "cnb-comments".into())
+            .debug_selector(move || format!("{}-comments", provider.key()))
             .flex()
             .flex_col()
             .gap_4()
@@ -286,20 +310,23 @@ impl NexusView {
                     .justify_between()
                     .child(locale.text("评论"))
                     .child(
-                        Button::new("cnb-comments-refresh")
-                            .debug_selector(|| "cnb-comments-refresh".into())
-                            .ghost()
-                            .small()
-                            .icon(IconName::RotateCw)
-                            .label(locale.text("刷新评论"))
-                            .disabled(cnb.comments_request.is_some())
-                            .on_click(cx.listener(|app, _, _, cx| {
-                                app.presenter.load_cnb_comments();
-                                cx.notify();
-                            })),
+                        Button::new(SharedString::from(format!(
+                            "{}-comments-refresh",
+                            provider.key()
+                        )))
+                        .debug_selector(move || format!("{}-comments-refresh", provider.key()))
+                        .ghost()
+                        .small()
+                        .icon(IconName::RotateCw)
+                        .label(locale.text("刷新评论"))
+                        .disabled(issues.comments_request.is_some())
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.presenter.load_issue_comments(provider);
+                            cx.notify();
+                        })),
                     ),
             )
-            .when(cnb.comments_request.is_some(), |el| {
+            .when(issues.comments_request.is_some(), |el| {
                 el.child(
                     div()
                         .flex()
@@ -309,19 +336,19 @@ impl NexusView {
                         .child(locale.text("正在读取全部评论…")),
                 )
             })
-            .when_some(cnb.comments_error.as_ref(), |el, error| {
+            .when_some(issues.comments_error.as_ref(), |el, error| {
                 el.child(
                     div()
                         .text_color(rgb(colors.danger))
                         .child(error.render(locale).to_owned()),
                 )
             })
-            .when_some(cnb.comments.as_ref(), |el, comments| {
+            .when_some(issues.comments.as_ref(), |el, comments| {
                 el.when(comments.is_empty(), |el| {
                     el.child(locale.text("此 Issue 暂无评论。"))
                 })
                 .children(comments.iter().map(|comment| {
-                    let selector = format!("cnb-comment-{}", comment.id);
+                    let selector = format!("{}-comment-{}", provider.key(), comment.id);
                     div()
                         .debug_selector(move || selector.clone())
                         .min_w_0()
@@ -344,8 +371,9 @@ impl NexusView {
                                         .child(issue_date(&comment.created_at)),
                                 ),
                         )
-                        .child(self.render_cnb_markdown(
-                            format!("cnb-comment-body-{}", comment.id),
+                        .child(self.render_issue_markdown(
+                            provider,
+                            format!("{}-comment-body-{}", provider.key(), comment.id),
                             comment.body.clone(),
                             cx,
                         ))
@@ -353,7 +381,8 @@ impl NexusView {
                             let url = url.to_owned();
                             el.child(
                                 Button::new(SharedString::from(format!(
-                                    "cnb-comment-action-{}",
+                                    "{}-comment-action-{}",
+                                    provider.key(),
                                     comment.id
                                 )))
                                 .ghost()
@@ -367,58 +396,84 @@ impl NexusView {
             })
     }
 
-    pub(super) fn render_cnb_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_issue_settings(
+        &self,
+        provider: IssueProvider,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let model = self.presenter.model();
-        let cnb = &model.cnb;
+        let issues = model.issues(provider);
         let locale = model.language;
         let colors = palette(cx);
-        let status = if cnb.detection_request.is_some() {
-            locale.text("正在检测 CNB CLI…").to_owned()
-        } else if let Some(error) = &cnb.detection_error {
+        let status = if issues.detection_request.is_some() {
+            locale
+                .format(
+                    "正在检测 {provider} CLI…",
+                    &[("provider", provider.name().into())],
+                )
+                .to_owned()
+        } else if let Some(error) = &issues.detection_error {
             error.render(locale).to_owned()
-        } else if let Some(cli) = &cnb.cli {
-            format!("CNB CLI {} · {}", cli.version, cli.path.display())
+        } else if let Some(cli) = &issues.cli {
+            format!("{} · {}", cli.version, cli.path.display())
         } else {
             locale
-                .text("检测本机 CNB CLI 后即可读取项目 Issues。")
+                .format(
+                    "检测本机 {provider} CLI 后即可读取项目 Issues。",
+                    &[("provider", provider.name().into())],
+                )
                 .to_owned()
         };
         settings::settings_group(
             colors,
-            "CNB",
+            provider.name(),
             [
                 div()
                     .py_5()
                     .flex()
                     .items_center()
                     .gap_4()
-                    .child(cnb_icon(28., colors.text))
+                    .child(provider_icon(provider, 28., colors.text))
                     .child(
                         div()
                             .flex_1()
                             .flex()
                             .flex_col()
                             .gap_2()
-                            .child(locale.text("启用 CNB 集成"))
+                            .child(locale.format(
+                                "启用 {provider} 集成",
+                                &[("provider", provider.name().into())],
+                            ))
                             .child(
                                 div()
                                     .text_size(px(12.))
                                     .text_color(rgb(colors.muted))
-                                    .child(locale.text(
-                                        "自动识别项目的 CNB remote，使用本机 CLI 浏览 Issues。",
-                                    )),
+                                    .child(locale.format(
+                                    "自动识别项目的 {provider} remote，使用本机 CLI 浏览 Issues。",
+                                    &[("provider", provider.name().into())],
+                                )),
                             ),
                     )
                     .child(
-                        div().debug_selector(|| "cnb-enabled".into()).child(
-                            Switch::new("cnb-enabled")
-                                .accessibility_label(locale.text("启用 CNB 集成"))
-                                .checked(cnb.enabled)
-                                .on_click(cx.listener(|app, enabled, _, cx| {
-                                    app.presenter.set_cnb_enabled(*enabled);
-                                    cx.notify();
-                                })),
-                        ),
+                        div()
+                            .debug_selector(move || format!("{}-enabled", provider.key()))
+                            .child(
+                                Switch::new(SharedString::from(format!(
+                                    "{}-enabled",
+                                    provider.key()
+                                )))
+                                .accessibility_label(locale.format(
+                                    "启用 {provider} 集成",
+                                    &[("provider", provider.name().into())],
+                                ))
+                                .checked(issues.enabled)
+                                .on_click(cx.listener(
+                                    move |app, enabled, _, cx| {
+                                        app.presenter.set_issues_enabled(provider, *enabled);
+                                        cx.notify();
+                                    },
+                                )),
+                            ),
                     ),
                 div()
                     .py_5()
@@ -436,24 +491,32 @@ impl NexusView {
                             .flex()
                             .gap_2()
                             .child(
-                                Button::new("cnb-detect")
-                                    .outline()
-                                    .small()
-                                    .icon(IconName::RotateCw)
-                                    .label(locale.text("重新检测"))
-                                    .disabled(cnb.detection_request.is_some())
-                                    .on_click(cx.listener(|app, _, _, cx| {
-                                        app.presenter.inspect_cnb();
+                                Button::new(SharedString::from(format!(
+                                    "{}-detect",
+                                    provider.key()
+                                )))
+                                .outline()
+                                .small()
+                                .icon(IconName::RotateCw)
+                                .label(locale.text("重新检测"))
+                                .disabled(issues.detection_request.is_some())
+                                .on_click(cx.listener(
+                                    move |app, _, _, cx| {
+                                        app.presenter.inspect_issues(provider);
                                         cx.notify();
-                                    })),
+                                    },
+                                )),
                             )
                             .child(
-                                Button::new("cnb-documentation")
-                                    .ghost()
-                                    .small()
-                                    .icon(IconName::ExternalLink)
-                                    .label(locale.text("安装与登录说明"))
-                                    .on_click(|_, _, cx| cx.open_url(DOCUMENTATION)),
+                                Button::new(SharedString::from(format!(
+                                    "{}-documentation",
+                                    provider.key()
+                                )))
+                                .ghost()
+                                .small()
+                                .icon(IconName::ExternalLink)
+                                .label(locale.text("安装与登录说明"))
+                                .on_click(move |_, _, cx| cx.open_url(provider.documentation())),
                             ),
                     )
                     .child(
@@ -461,23 +524,31 @@ impl NexusView {
                             .text_size(px(12.))
                             .text_color(rgb(colors.muted))
                             .line_height(relative(1.6))
-                            .child(locale.text(
-                                "先在终端安装 CNB CLI 并运行 cnb login。登录凭据由 CLI 管理。",
+                            .child(locale.format(
+                                "先在终端安装 {cli} 并运行 {login}。登录凭据由 CLI 管理。",
+                                &[
+                                    ("cli", provider.executable().into()),
+                                    ("login", provider.login_command().into()),
+                                ],
                             )),
                     ),
             ],
         )
     }
 
-    pub(super) fn render_cnb(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_issues(
+        &self,
+        provider: IssueProvider,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let model = self.presenter.model();
-        let cnb = &model.cnb;
+        let issues = model.issues(provider);
         let colors = palette(cx);
         let locale = model.language;
-        let repository = cnb.repository.clone().unwrap_or_default();
-        let repo_url = format!("https://cnb.cool/{repository}");
+        let repository = issues.repository.clone().unwrap_or_default();
+        let repo_url = provider.repository_url(&repository);
         div()
-            .debug_selector(|| "cnb-page".into())
+            .debug_selector(move || format!("{}-page", provider.key()))
             .flex_1()
             .min_w_0()
             .my_2()
@@ -498,10 +569,10 @@ impl NexusView {
                     .items_center()
                     .gap_3()
                     .text_size(px(13.))
-                    .child(cnb_icon(22., colors.text))
+                    .child(provider_icon(provider, 22., colors.text))
                     .child(
                         div()
-                            .debug_selector(|| "cnb-breadcrumb".into())
+                            .debug_selector(move || format!("{}-breadcrumb", provider.key()))
                             .flex_1()
                             .min_w_0()
                             .flex()
@@ -509,24 +580,32 @@ impl NexusView {
                             .gap_3()
                             .child(
                                 div()
-                                    .debug_selector(|| "cnb-breadcrumb-root".into())
+                                    .debug_selector(move || {
+                                        format!("{}-breadcrumb-root", provider.key())
+                                    })
                                     .flex_none()
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child("CNB"),
+                                    .child(provider.name()),
                             )
                             .children(repository.split('/').enumerate().flat_map(
                                 |(index, segment)| {
                                     [
                                         div()
                                             .debug_selector(move || {
-                                                format!("cnb-breadcrumb-separator-{index}")
+                                                format!(
+                                                    "{}-breadcrumb-separator-{index}",
+                                                    provider.key()
+                                                )
                                             })
                                             .flex_none()
                                             .text_color(rgb(colors.muted))
                                             .child("/"),
                                         div()
                                             .debug_selector(move || {
-                                                format!("cnb-breadcrumb-segment-{index}")
+                                                format!(
+                                                    "{}-breadcrumb-segment-{index}",
+                                                    provider.key()
+                                                )
                                             })
                                             .min_w_0()
                                             .truncate()
@@ -536,8 +615,8 @@ impl NexusView {
                             )),
                     )
                     .child(
-                        Button::new("cnb-repository")
-                            .debug_selector(|| "cnb-repository".into())
+                        Button::new(SharedString::from(format!("{}-repository", provider.key())))
+                            .debug_selector(move || format!("{}-repository", provider.key()))
                             .ghost()
                             .small()
                             .flex_none()
@@ -557,7 +636,7 @@ impl NexusView {
                     .bg(rgb(colors.surface))
                     .child(
                         div()
-                            .debug_selector(|| "cnb-issue-tab".into())
+                            .debug_selector(move || format!("{}-issue-tab", provider.key()))
                             .w(px(120.))
                             .px_4()
                             .py_3()
@@ -574,14 +653,17 @@ impl NexusView {
                             .child("Issue"),
                     ),
             )
-            .child(if cnb.cli.is_none() {
+            .child(if issues.cli.is_none() {
                 div()
                     .p_8()
                     .flex()
                     .flex_col()
                     .gap_4()
-                    .child(locale.text("安装并登录 CNB CLI 后即可查看 Issues。"))
-                    .when_some(cnb.detection_error.as_ref(), |el, error| {
+                    .child(locale.format(
+                        "安装并登录 {provider} CLI 后即可查看 Issues。",
+                        &[("provider", provider.name().into())],
+                    ))
+                    .when_some(issues.detection_error.as_ref(), |el, error| {
                         el.child(
                             div()
                                 .text_size(px(12.))
@@ -590,10 +672,14 @@ impl NexusView {
                         )
                     })
                     .child(
-                        Button::new("cnb-open-settings")
-                            .outline()
-                            .label(locale.text("打开 Source Control 设置"))
-                            .on_click(cx.listener(|app, _, window, cx| {
+                        Button::new(SharedString::from(format!(
+                            "{}-open-settings",
+                            provider.key()
+                        )))
+                        .outline()
+                        .label(locale.text("打开 Source Control 设置"))
+                        .on_click(cx.listener(
+                            move |app, _, window, cx| {
                                 app.settings_open = true;
                                 app.select_settings_section(
                                     SettingsSection::SourceControl,
@@ -601,23 +687,28 @@ impl NexusView {
                                     cx,
                                 );
                                 cx.notify();
-                            })),
+                            },
+                        )),
                     )
                     .into_any_element()
-            } else if cnb.detail_number.is_some() {
-                self.render_cnb_detail(cx).into_any_element()
+            } else if issues.detail_number.is_some() {
+                self.render_issue_detail(provider, cx).into_any_element()
             } else {
-                self.render_cnb_list(cx).into_any_element()
+                self.render_issue_list(provider, cx).into_any_element()
             })
     }
 
-    fn render_cnb_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let cnb = &self.presenter.model().cnb;
+    fn render_issue_list(
+        &self,
+        provider: IssueProvider,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let issues = self.presenter.model().issues(provider);
         let colors = palette(cx);
         let locale = self.presenter.model().language;
-        let loading = cnb.list_request.is_some();
-        let page = cnb.page;
-        let filter = cnb.filter;
+        let loading = issues.list_request.is_some();
+        let page = issues.page;
+        let filter = issues.filter;
         div()
             .flex_1()
             .min_h_0()
@@ -636,12 +727,14 @@ impl NexusView {
                             .ghost()
                             .small()
                             .label(locale.text(choice.label()))
-                            .debug_selector(move || format!("cnb-filter-{}", choice.state()))
+                            .debug_selector(move || {
+                                format!("{}-filter-{}", provider.key(), choice.state())
+                            })
                             .selected(filter == choice)
                             .disabled(loading)
                             .on_click(cx.listener(move |app, _, _, cx| {
-                                app.presenter.load_cnb_issues(1, choice);
-                                app.cnb_scroll.set_offset(gpui::point(px(0.), px(0.)));
+                                app.presenter.load_issues(provider, 1, choice);
+                                app.issues_scroll.set_offset(gpui::point(px(0.), px(0.)));
                                 cx.notify();
                             }))
                     }))
@@ -650,15 +743,13 @@ impl NexusView {
                         div()
                             .text_size(px(12.))
                             .text_color(rgb(colors.muted))
-                            .child(
-                                locale.format(
-                                    "{count} 个 Issues",
-                                    &[("count", cnb.total.to_string())],
-                                ),
-                            ),
+                            .child(locale.format(
+                                "{count} 个 Issues",
+                                &[("count", issues.total.to_string())],
+                            )),
                     )
                     .child(
-                        Button::new("cnb-refresh")
+                        Button::new(SharedString::from(format!("{}-refresh", provider.key())))
                             .ghost()
                             .small()
                             .icon(IconName::RotateCw)
@@ -666,12 +757,12 @@ impl NexusView {
                             .accessibility_label(locale.text("刷新 Issues"))
                             .disabled(loading)
                             .on_click(cx.listener(move |app, _, _, cx| {
-                                app.presenter.load_cnb_issues(page, filter);
+                                app.presenter.load_issues(provider, page, filter);
                                 cx.notify();
                             })),
                     ),
             )
-            .when_some(cnb.list_error.as_ref(), |el, error| {
+            .when_some(issues.list_error.as_ref(), |el, error| {
                 el.child(
                     div()
                         .mx_6()
@@ -686,11 +777,14 @@ impl NexusView {
             })
             .child(
                 div()
-                    .id("cnb-list-scroll")
+                    .id(SharedString::from(format!(
+                        "{}-list-scroll",
+                        provider.key()
+                    )))
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .track_scroll(&self.cnb_scroll)
+                    .track_scroll(&self.issues_scroll)
                     .px_6()
                     .pb_4()
                     .when(loading, |el| {
@@ -706,11 +800,11 @@ impl NexusView {
                         )
                     })
                     .when(
-                        !loading && cnb.issues.is_empty() && cnb.list_error.is_none(),
+                        !loading && issues.issues.is_empty() && issues.list_error.is_none(),
                         |el| {
                             el.child(
                                 div()
-                                    .debug_selector(|| "cnb-empty".into())
+                                    .debug_selector(move || format!("{}-empty", provider.key()))
                                     .py_16()
                                     .flex()
                                     .flex_col()
@@ -727,12 +821,17 @@ impl NexusView {
                             .flex()
                             .flex_col()
                             .gap_2()
-                            .children(cnb.issues.iter().map(|issue| {
+                            .children(issues.issues.iter().map(|issue| {
                                 let number = issue.number.clone();
                                 let selector = number.clone();
                                 div()
-                                    .id(SharedString::from(format!("cnb-issue-{number}")))
-                                    .debug_selector(move || format!("cnb-issue-{selector}"))
+                                    .id(SharedString::from(format!(
+                                        "{}-issue-{number}",
+                                        provider.key()
+                                    )))
+                                    .debug_selector(move || {
+                                        format!("{}-issue-{selector}", provider.key())
+                                    })
                                     .p_4()
                                     .rounded(px(CARD_RADIUS))
                                     .bg(rgb(colors.elevated))
@@ -804,14 +903,14 @@ impl NexusView {
                                             .child(issue.comment_count.to_string()),
                                     )
                                     .on_click(cx.listener(move |app, _, _, cx| {
-                                        app.presenter.select_cnb_issue(number.clone());
-                                        app.cnb_detail_scroll
+                                        app.presenter.select_issue(provider, number.clone());
+                                        app.issue_detail_scroll
                                             .set_offset(gpui::point(px(0.), px(0.)));
                                         cx.notify();
                                     }))
                             })),
                     )
-                    .vertical_scrollbar(&self.cnb_scroll),
+                    .vertical_scrollbar(&self.issues_scroll),
             )
             .child(
                 div()
@@ -831,7 +930,10 @@ impl NexusView {
                                 "第 {page} / {pages} 页",
                                 &[
                                     ("page", page.to_string()),
-                                    ("pages", cnb.total.div_ceil(PAGE_SIZE).max(page).to_string()),
+                                    (
+                                        "pages",
+                                        issues.total.div_ceil(PAGE_SIZE).max(page).to_string(),
+                                    ),
                                 ],
                             )),
                     )
@@ -843,25 +945,30 @@ impl NexusView {
                                 .label(locale.text(label))
                                 .debug_selector(move || {
                                     if next {
-                                        "cnb-next".into()
+                                        format!("{}-next", provider.key())
                                     } else {
-                                        "cnb-previous".into()
+                                        format!("{}-previous", provider.key())
                                     }
                                 })
                                 .disabled(
                                     loading
                                         || if next {
-                                            page * PAGE_SIZE >= cnb.total
+                                            page * PAGE_SIZE >= issues.total
+                                                || (provider == IssueProvider::GitHub
+                                                    && !issues
+                                                        .page_cursors
+                                                        .contains_key(&(page + 1)))
                                         } else {
                                             page <= 1
                                         },
                                 )
                                 .on_click(cx.listener(move |app, _, _, cx| {
-                                    app.presenter.load_cnb_issues(
+                                    app.presenter.load_issues(
+                                        provider,
                                         if next { page + 1 } else { page - 1 },
                                         filter,
                                     );
-                                    app.cnb_scroll.set_offset(gpui::point(px(0.), px(0.)));
+                                    app.issues_scroll.set_offset(gpui::point(px(0.), px(0.)));
                                     cx.notify();
                                 }))
                         }),
@@ -869,17 +976,19 @@ impl NexusView {
             )
     }
 
-    fn render_cnb_detail(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let cnb = &self.presenter.model().cnb;
+    fn render_issue_detail(
+        &self,
+        provider: IssueProvider,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let issues = self.presenter.model().issues(provider);
         let colors = palette(cx);
         let locale = self.presenter.model().language;
-        let number = cnb.detail_number.clone().unwrap_or_default();
-        let issue_url = format!(
-            "https://cnb.cool/{}/-/issues/{number}",
-            cnb.repository.as_deref().unwrap_or_default()
-        );
+        let number = issues.detail_number.clone().unwrap_or_default();
+        let issue_url =
+            provider.issue_url(issues.repository.as_deref().unwrap_or_default(), &number);
         div()
-            .debug_selector(|| "cnb-detail".into())
+            .debug_selector(move || format!("{}-detail", provider.key()))
             .flex_1()
             .min_h_0()
             .flex()
@@ -893,34 +1002,40 @@ impl NexusView {
                     .items_center()
                     .justify_between()
                     .child(
-                        Button::new("cnb-back")
-                            .debug_selector(|| "cnb-back".into())
+                        Button::new(SharedString::from(format!("{}-back", provider.key())))
+                            .debug_selector(move || format!("{}-back", provider.key()))
                             .ghost()
                             .small()
                             .icon(IconName::ArrowLeft)
                             .label(locale.text("返回 Issues"))
-                            .disabled(cnb.action_request.is_some())
-                            .on_click(cx.listener(|app, _, _, cx| {
-                                app.presenter.close_cnb_issue();
+                            .disabled(issues.action_request.is_some())
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.presenter.close_issue(provider);
                                 cx.notify();
                             })),
                     )
                     .child(
-                        Button::new("cnb-open-issue")
+                        Button::new(SharedString::from(format!("{}-open-issue", provider.key())))
                             .ghost()
                             .small()
                             .icon(IconName::ExternalLink)
-                            .label(locale.text("在 CNB 中打开"))
+                            .label(locale.format(
+                                "在 {provider} 中打开",
+                                &[("provider", provider.name().into())],
+                            ))
                             .on_click(move |_, _, cx| cx.open_url(&issue_url)),
                     ),
             )
             .child(
                 div()
-                    .id("cnb-detail-scroll")
+                    .id(SharedString::from(format!(
+                        "{}-detail-scroll",
+                        provider.key()
+                    )))
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .track_scroll(&self.cnb_detail_scroll)
+                    .track_scroll(&self.issue_detail_scroll)
                     .px_8()
                     .pb_8()
                     .child(
@@ -930,7 +1045,7 @@ impl NexusView {
                             .flex()
                             .flex_col()
                             .gap_5()
-                            .when(cnb.detail_request.is_some(), |el| {
+                            .when(issues.detail_request.is_some(), |el| {
                                 el.child(
                                     div()
                                         .py_8()
@@ -941,24 +1056,27 @@ impl NexusView {
                                         .child(locale.text("正在读取 Issue 详情…")),
                                 )
                             })
-                            .when_some(cnb.detail_error.as_ref(), |el, error| {
+                            .when_some(issues.detail_error.as_ref(), |el, error| {
                                 el.child(
                                     div()
                                         .text_color(rgb(colors.danger))
                                         .child(error.render(locale).to_owned()),
                                 )
                                 .child(
-                                    Button::new("cnb-detail-retry")
-                                        .outline()
-                                        .small()
-                                        .label(locale.text("重试"))
-                                        .on_click(cx.listener(move |app, _, _, cx| {
-                                            app.presenter.select_cnb_issue(number.clone());
-                                            cx.notify();
-                                        })),
+                                    Button::new(SharedString::from(format!(
+                                        "{}-detail-retry",
+                                        provider.key()
+                                    )))
+                                    .outline()
+                                    .small()
+                                    .label(locale.text("重试"))
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        app.presenter.select_issue(provider, number.clone());
+                                        cx.notify();
+                                    })),
                                 )
                             })
-                            .when_some(cnb.detail.as_ref(), |el, issue| {
+                            .when_some(issues.detail.as_ref(), |el, issue| {
                                 let color = issue_color(issue, colors);
                                 let metadata = [
                                     ("作者", issue.author.name().to_owned()),
@@ -1079,14 +1197,17 @@ impl NexusView {
                                                 .gap_y_4()
                                                 .children(metadata),
                                         )
-                                        .child(self.render_cnb_actions(issue, cx)),
+                                        .child(self.render_issue_actions(provider, issue, cx)),
                                 )
                                 .child(
                                     div()
-                                        .debug_selector(|| "cnb-issue-body".into())
+                                        .debug_selector(move || {
+                                            format!("{}-issue-body", provider.key())
+                                        })
                                         .min_w_0()
-                                        .child(self.render_cnb_markdown(
-                                            format!("cnb-body-{}", issue.number),
+                                        .child(self.render_issue_markdown(
+                                            provider,
+                                            format!("{}-body-{}", provider.key(), issue.number),
                                             if issue.body.trim().is_empty() {
                                                 locale.text("此 Issue 暂无描述。").to_owned()
                                             } else {
@@ -1095,10 +1216,10 @@ impl NexusView {
                                             cx,
                                         )),
                                 )
-                                .child(self.render_cnb_comments(cx))
+                                .child(self.render_issue_comments(provider, cx))
                             }),
                     )
-                    .vertical_scrollbar(&self.cnb_detail_scroll),
+                    .vertical_scrollbar(&self.issue_detail_scroll),
             )
     }
 }

@@ -37,6 +37,7 @@
 | **权限与交互** | 选择执行权限模式，在桌面处理工具审批和 Agent 提问。 |
 | **CNB Issues** | 接入本机 CNB CLI，识别项目仓库，浏览 Issue 列表、标签与 Markdown 正文。[配置指南](docs/usage.md#cnb-issues) |
 | **语音输入** | 使用 MiMo ASR 或 macOS 系统 Speech，将录音转为可编辑、可撤销的消息草稿。 |
+| **PDF 阅读与标注** | 内置预览、文字搜索、页面编辑与标注，整页或框选截图可直接加入聊天，交给 Codex／Claude 看图分析。[使用说明](docs/usage.md#pdf-阅读与标注) |
 | **远程访问** | 通过内置 Remote Web 查看会话、发起任务、接收实时输出和停止运行；审批在桌面处理。 |
 
 ## 下载
@@ -78,7 +79,7 @@ nexus-desktop .                 # 打开当前目录
 nexus-desktop "/path/to/project" # 打开指定目录（支持相对路径）
 ```
 
-这是安装包自带的原生命令，无需 Node.js 或 npx。无参数时启动桌面应用，`--help` 显示用法，`--version` 显示版本；每次调用启动一个应用进程。
+这是安装包自带的原生命令，无需 Node.js 或 npx。CLI 打开桌面应用后立即返回终端，关闭终端不影响应用运行。无参数时打开应用，`--help` 显示用法，`--version` 显示版本；每次调用打开一个独立的应用进程。
 
 macOS 也可直接运行 `"/Applications/Nexus Agent.app/Contents/MacOS/nexus-desktop" .`；Windows 使用 `nexus-desktop.exe`。
 

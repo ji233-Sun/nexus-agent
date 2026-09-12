@@ -5,6 +5,70 @@ use uuid::Uuid;
 
 pub(crate) const PAGE_SIZE: usize = 30;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IssueProvider {
+    Cnb,
+    GitHub,
+}
+
+impl IssueProvider {
+    pub(crate) const ALL: [Self; 2] = [Self::Cnb, Self::GitHub];
+
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            Self::Cnb => "cnb",
+            Self::GitHub => "github",
+        }
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Cnb => "CNB",
+            Self::GitHub => "GitHub",
+        }
+    }
+
+    pub(crate) fn host(self) -> &'static str {
+        match self {
+            Self::Cnb => "cnb.cool",
+            Self::GitHub => "github.com",
+        }
+    }
+
+    pub(crate) fn executable(self) -> &'static str {
+        match self {
+            Self::Cnb => "cnb",
+            Self::GitHub => "gh",
+        }
+    }
+
+    pub(crate) fn login_command(self) -> &'static str {
+        match self {
+            Self::Cnb => "cnb login",
+            Self::GitHub => "gh auth login --hostname github.com",
+        }
+    }
+
+    pub(crate) fn documentation(self) -> &'static str {
+        match self {
+            Self::Cnb => "https://docs.cnb.cool/en/develops/cnb-cli.html",
+            Self::GitHub => "https://cli.github.com/manual/",
+        }
+    }
+
+    pub(crate) fn repository_url(self, repository: &str) -> String {
+        format!("https://{}/{repository}", self.host())
+    }
+
+    pub(crate) fn issue_url(self, repository: &str, number: &str) -> String {
+        let separator = if self == Self::Cnb { "/-" } else { "" };
+        format!(
+            "{}{separator}/issues/{number}",
+            self.repository_url(repository)
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum IssueFilter {
     #[default]
@@ -82,10 +146,17 @@ pub(crate) struct Issue {
 }
 
 impl Issue {
-    pub(crate) fn chat_prompt(&self, repository: &str, comments: &[Comment]) -> String {
+    pub(crate) fn chat_prompt(
+        &self,
+        provider: IssueProvider,
+        repository: &str,
+        comments: &[Comment],
+    ) -> String {
         let mut prompt = format!(
-            "请处理以下 CNB Issue，并验证结果。\n\n# {}\n\nhttps://cnb.cool/{repository}/-/issues/{}\n\n",
-            self.title, self.number
+            "请处理以下 {} Issue，并验证结果。\n\n# {}\n\n{}\n\n",
+            provider.name(),
+            self.title,
+            provider.issue_url(repository, &self.number)
         );
         for (label, value) in [
             ("仓库", repository.to_owned()),
@@ -211,9 +282,10 @@ pub(crate) enum IssueAction {
 pub(crate) struct IssuePage {
     pub(crate) issues: Vec<Issue>,
     pub(crate) total: usize,
+    pub(crate) next_cursor: Option<String>,
 }
 
-pub(crate) struct CnbModel {
+pub(crate) struct IssuesModel {
     pub(crate) enabled: bool,
     pub(crate) opened: bool,
     pub(crate) cli: Option<Cli>,
@@ -222,6 +294,7 @@ pub(crate) struct CnbModel {
     pub(crate) detection_error: Option<LocalizedText>,
     pub(crate) filter: IssueFilter,
     pub(crate) page: usize,
+    pub(crate) page_cursors: std::collections::BTreeMap<usize, String>,
     pub(crate) total: usize,
     pub(crate) issues: Vec<Issue>,
     pub(crate) list_request: Option<Uuid>,
@@ -242,7 +315,7 @@ pub(crate) struct CnbModel {
     pub(crate) npc_error: Option<LocalizedText>,
 }
 
-impl Default for CnbModel {
+impl Default for IssuesModel {
     fn default() -> Self {
         Self {
             enabled: true,
@@ -253,6 +326,7 @@ impl Default for CnbModel {
             detection_error: None,
             filter: IssueFilter::Open,
             page: 1,
+            page_cursors: Default::default(),
             total: 0,
             issues: Vec::new(),
             list_request: None,
@@ -275,7 +349,7 @@ impl Default for CnbModel {
     }
 }
 
-impl CnbModel {
+impl IssuesModel {
     pub(crate) fn clear_detail(&mut self) {
         self.detail_number = None;
         self.detail = None;

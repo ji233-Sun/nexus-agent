@@ -4936,6 +4936,7 @@ dependencies = [
  "futures-util",
  "gpui-kit",
  "gpui-pre-reqwest-client",
+ "gtk",
  "keyring",
  "nexus-domain",
  "nexus-harness-core",
@@ -4984,6 +4985,7 @@ dependencies = [
 name = "nexus-harness-claude"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "base64",
  "nexus-domain",
  "nexus-harness-core",
  "nexus-protocol",

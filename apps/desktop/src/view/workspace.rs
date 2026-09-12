@@ -1,4 +1,5 @@
 use super::*;
+use crate::infrastructure::workspace_opener::{self, OpenTarget};
 use crate::model::workspace::{WorkspaceKind, WorkspaceStatus};
 
 fn environment_row(
@@ -27,6 +28,85 @@ fn environment_row(
 }
 
 impl NexusView {
+    pub(super) fn working_directory_opener(
+        &self,
+        id: &'static str,
+        button: Button,
+        cx: &mut Context<Self>,
+    ) -> AnimatedDropdown {
+        let model = self.presenter.model();
+        let locale = model.language;
+        let directory = model.working_directory();
+        let app = cx.entity();
+        let button = button
+            .accessibility_label(locale.text("打开方式"))
+            .disabled(directory.is_none())
+            .tooltip(match directory {
+                Some(directory) => format!("{}\n{directory}", locale.text("打开方式")),
+                None => locale.text("尚未选择工作目录。").to_owned(),
+            });
+        AnimatedDropdown::new(
+            // Switching conversations must also discard an already-open menu.
+            SharedString::from(format!(
+                "{id}-{}-{}",
+                model.conversation.id,
+                directory.unwrap_or_default()
+            )),
+            button,
+            self.reduced_motion,
+            move |menu, _, _| {
+                OpenTarget::ALL
+                    .into_iter()
+                    .filter(|target| target.supported(std::env::consts::OS))
+                    .fold(menu.min_w(px(180.)), |menu, target| {
+                        let app = app.clone();
+                        menu.item(
+                            PopupMenuItem::new(target.label(locale))
+                                .icon(match target {
+                                    OpenTarget::FileManager => IconName::Folder,
+                                    OpenTarget::VsCode => IconName::FileText,
+                                    OpenTarget::Ghostty => IconName::SquareTerminal,
+                                })
+                                .on_click(move |_, window, cx| {
+                                    app.update(cx, |app, cx| {
+                                        app.open_working_directory(target, window, cx)
+                                    });
+                                }),
+                        )
+                    })
+            },
+        )
+    }
+
+    fn open_working_directory(
+        &mut self,
+        target: OpenTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Resolve at selection time, never from a directory captured by the menu.
+        let directory = self
+            .presenter
+            .model()
+            .working_directory()
+            .map(str::to_owned);
+        cx.spawn_in(window, async move |this, cx| {
+            if let Err(error) = workspace_opener::open(target, directory).await {
+                let _ = this.update_in(cx, |app, window, cx| {
+                    let locale = app.presenter.model().language;
+                    drop(window.prompt(
+                        PromptLevel::Warning,
+                        locale.text("无法打开工作目录"),
+                        Some(error.render(locale)),
+                        &[PromptButton::ok(locale.text("确定"))],
+                        cx,
+                    ));
+                });
+            }
+        })
+        .detach();
+    }
+
     pub(super) fn sync_commit_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let model = self.presenter.model();
         self.commit_inputs.retain(|id, _| {
@@ -86,7 +166,6 @@ impl NexusView {
             .selected_workspace
             .as_ref()
             .map_or(model.workspace_draft.kind, |workspace| workspace.kind);
-        let directory = model.working_directory().unwrap_or_default().to_owned();
         let branch = review
             .and_then(|review| review.branch.as_ref())
             .or(model.workspace_branch.as_ref())
@@ -319,11 +398,9 @@ impl NexusView {
                         .size(px(14.))
                         .text_color(rgb(colors.muted)),
                 )
-                .tooltip(directory.clone())
-                .on_click(move |_, _, cx| {
-                    if !directory.is_empty() {
-                        cx.reveal_path(Path::new(&directory));
-                    }
+                .child(locale.text("打开方式"))
+                .map(|button| {
+                    self.working_directory_opener("environment-open-directory", button, cx)
                 }),
             )
             .child(
