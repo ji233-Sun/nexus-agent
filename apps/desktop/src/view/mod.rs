@@ -1,7 +1,7 @@
-mod cnb;
 mod cnb_media;
 mod components;
 mod fonts;
+mod issues;
 mod model_picker;
 mod pane;
 mod review;
@@ -18,7 +18,7 @@ use crate::{
     i18n::Language,
     model::{
         AppModel, AppearanceSettings, GenerationKind, ModelCatalogState, PendingUserAsk,
-        ThemePreference, UserAskSubmissionState,
+        ThemePreference, UserAskSubmissionState, issues::IssueProvider,
     },
     presenter::{Presenter, ProviderProfileDraft},
 };
@@ -112,8 +112,8 @@ pub(crate) struct NexusView {
     timeline_scroll: ScrollHandle,
     sidebar_scroll: ScrollHandle,
     settings_scroll: ScrollHandle,
-    cnb_scroll: ScrollHandle,
-    cnb_detail_scroll: ScrollHandle,
+    issues_scroll: ScrollHandle,
+    issue_detail_scroll: ScrollHandle,
     sidebar_pane: Entity<WorkspacePane>,
     timeline_pane: Entity<WorkspacePane>,
     settings_pane: Entity<WorkspacePane>,
@@ -350,8 +350,8 @@ impl NexusView {
             timeline_scroll: ScrollHandle::new(),
             sidebar_scroll: ScrollHandle::new(),
             settings_scroll: ScrollHandle::new(),
-            cnb_scroll: ScrollHandle::new(),
-            cnb_detail_scroll: ScrollHandle::new(),
+            issues_scroll: ScrollHandle::new(),
+            issue_detail_scroll: ScrollHandle::new(),
             sidebar_pane,
             timeline_pane,
             settings_pane,
@@ -631,7 +631,7 @@ impl NexusView {
     }
 
     fn poll_events(&mut self, now: Instant, cx: &mut Context<Self>) {
-        if self.presenter.drain_cnb_events() {
+        if self.presenter.drain_issue_events() {
             cx.notify();
         }
         if self.presenter.drain_installation_events() {
@@ -1718,8 +1718,8 @@ impl NexusView {
     }
 
     fn render_workspace(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let page = if self.presenter.model().cnb.opened {
-            Some(self.render_cnb(cx).into_any_element())
+        let page = if let Some(provider) = self.presenter.model().opened_issues() {
+            Some(self.render_issues(provider, cx).into_any_element())
         } else {
             self.review_pages
                 .get(&self.presenter.model().conversation.id)
@@ -2106,7 +2106,7 @@ impl Render for NexusView {
             }))
             .on_action(cx.listener(|app, _: &CloseReview, window, cx| {
                 if !app.settings_open
-                    && !app.presenter.model().cnb.opened
+                    && app.presenter.model().opened_issues().is_none()
                     && app
                         .review_pages
                         .contains_key(&app.presenter.model().conversation.id)
@@ -2213,23 +2213,132 @@ mod catalog_model_tests {
     use nexus_protocol::Event;
 
     #[gpui::test]
+    fn github_issue_page_opens_builtin_ai_with_complete_context_and_harness_selection(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::{
+            infrastructure::issues::{ActionResult, Response},
+            model::issues::{IssueAction, IssueFilter},
+            presenter::tests::{cnb_comment, cnb_issue, finish_issue_request, seed_issues},
+        };
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let provider = IssueProvider::GitHub;
+        let (mut presenter, _, _directory) = fixture();
+        presenter.set_language(Language::English);
+        for provider in IssueProvider::ALL {
+            seed_issues(&mut presenter, provider);
+        }
+        let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
+        cx.simulate_resize(gpui::size(px(1120.), px(900.)));
+        cx.run_until_parked();
+        click_debug(cx, "sidebar-github");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("github-page").is_some());
+        assert!(cx.debug_bounds("composer-surface").is_none());
+        assert!(cx.debug_bounds("cnb-page").is_none());
+        click_debug(cx, "github-repository");
+        assert_eq!(
+            cx.opened_url(),
+            Some("https://github.com/team/project".into())
+        );
+        click_debug(cx, "github-issue-1");
+        view.update(cx, |view, cx| {
+            let mut issue = cnb_issue("1");
+            issue.title = "GitHub issue".into();
+            issue.body = "Issue body **Markdown**.".into();
+            finish_issue_request(&mut view.presenter, provider, Response::Detail(Ok(issue)));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("github-detail").is_some());
+        assert!(cx.debug_bounds("github-npc").is_none());
+        click_debug(cx, "github-chat");
+        view.update(cx, |view, _| assert!(view.presenter.model().github.opened));
+        view.update_in(cx, |view, window, cx| {
+            let mut last = cnb_comment("101");
+            last.body = "Acceptance criteria from the final page.".into();
+            finish_issue_request(
+                &mut view.presenter,
+                provider,
+                Response::Comments(Ok(vec![last])),
+            );
+            view.prompt_input.update(cx, |input, cx| {
+                input.set_value("Existing draft", window, cx)
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        for (selector, action) in [
+            ("github-assign-self", IssueAction::AssignSelf),
+            (
+                "github-change-state",
+                IssueAction::SetState(IssueFilter::Closed),
+            ),
+        ] {
+            click_debug(cx, selector);
+            view.update(cx, |view, cx| {
+                assert_eq!(
+                    view.presenter.model().github.action_request.unwrap().1,
+                    action
+                );
+                let mut issue = view.presenter.model().github.detail.clone().unwrap();
+                if let IssueAction::SetState(state) = action {
+                    issue.state = state.state().into();
+                }
+                finish_issue_request(
+                    &mut view.presenter,
+                    provider,
+                    Response::Action(Ok(ActionResult::Updated(Box::new(issue)))),
+                );
+                cx.notify();
+            });
+            cx.run_until_parked();
+        }
+        click_debug(cx, "github-chat");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("github-page").is_none());
+        assert!(cx.debug_bounds("composer-surface").is_some());
+        assert!(cx.debug_bounds("model-picker-surface").is_some());
+        view.update(cx, |view, cx| {
+            let draft = view.prompt_input.read(cx).value();
+            assert!(draft.starts_with("Existing draft\n\n"));
+            for content in [
+                "GitHub Issue",
+                "https://github.com/team/project/issues/1",
+                "Issue body **Markdown**.",
+                "Acceptance criteria from the final page.",
+            ] {
+                assert!(draft.contains(content), "{content}");
+            }
+            assert!(!draft.contains("cnb.cool"));
+            assert!(view.presenter.model().active_run.is_none());
+            assert!(view.presenter.model().opened_issues().is_none());
+        });
+    }
+
+    #[gpui::test]
     fn cnb_issue_actions_import_complete_context_and_offer_harness_selection(
         cx: &mut gpui::TestAppContext,
     ) {
         use crate::{
-            infrastructure::cnb::{ActionResult, Response},
-            model::cnb::{IssueAction, IssueFilter},
-            presenter::tests::{cnb_comment, cnb_issue, finish_cnb_request, seed_cnb_issues},
+            infrastructure::issues::{ActionResult, Response},
+            model::issues::{IssueAction, IssueFilter},
+            presenter::tests::{cnb_comment, cnb_issue, finish_issue_request, seed_issues},
         };
         cx.update(gpui_kit::init);
         cx.update(theme::configure_theme);
         let (mut presenter, _, _directory) = fixture();
-        seed_cnb_issues(&mut presenter);
-        presenter.open_cnb();
-        presenter.select_cnb_issue("1".into());
+        seed_issues(&mut presenter, IssueProvider::Cnb);
+        presenter.open_issues(IssueProvider::Cnb);
+        presenter.select_issue(IssueProvider::Cnb, "1".into());
         let mut issue = cnb_issue("1");
         issue.body = "需要实现的功能描述。".into();
-        finish_cnb_request(&mut presenter, Response::Detail(Ok(issue.clone())));
+        finish_issue_request(
+            &mut presenter,
+            IssueProvider::Cnb,
+            Response::Detail(Ok(issue.clone())),
+        );
         let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
         cx.simulate_resize(gpui::size(px(1120.), px(900.)));
         view.update_in(cx, |view, window, cx| {
@@ -2242,7 +2351,11 @@ mod catalog_model_tests {
         view.update(cx, |view, cx| {
             let mut comment = cnb_comment("1");
             comment.body = "完整验收条件，包含 **格式**。".into();
-            finish_cnb_request(&mut view.presenter, Response::Comments(Ok(vec![comment])));
+            finish_issue_request(
+                &mut view.presenter,
+                IssueProvider::Cnb,
+                Response::Comments(Ok(vec![comment])),
+            );
             cx.notify();
         });
         cx.run_until_parked();
@@ -2253,8 +2366,9 @@ mod catalog_model_tests {
                 view.presenter.model().cnb.action_request.unwrap().1,
                 IssueAction::AssignSelf
             );
-            finish_cnb_request(
+            finish_issue_request(
                 &mut view.presenter,
+                IssueProvider::Cnb,
                 Response::Action(Ok(ActionResult::Updated(Box::new(issue.clone())))),
             );
             cx.notify();
@@ -2268,8 +2382,9 @@ mod catalog_model_tests {
                     IssueAction::SetState(state)
                 );
                 issue.state = state.state().into();
-                finish_cnb_request(
+                finish_issue_request(
                     &mut view.presenter,
+                    IssueProvider::Cnb,
                     Response::Action(Ok(ActionResult::Updated(Box::new(issue.clone())))),
                 );
                 cx.notify();
@@ -2282,10 +2397,10 @@ mod catalog_model_tests {
             let comment = serde_json::from_value(serde_json::json!({"id":"987", "body":"@CodeBuddy 请处理", "statuses":{
                 "npc":[{"statuses":[{"target_url":"https://cnb.cool/team/project/-/build/logs/cnb-1"}]}]
             }})).unwrap();
-            finish_cnb_request(&mut view.presenter, Response::Action(Ok(ActionResult::Npc(comment))));
+            finish_issue_request(&mut view.presenter, IssueProvider::Cnb, Response::Action(Ok(ActionResult::Npc(comment))));
             let mut comment = cnb_comment("1");
             comment.body = "完整验收条件，包含 **格式**。".into();
-            finish_cnb_request(&mut view.presenter, Response::Comments(Ok(vec![comment, cnb_comment("987")])));
+            finish_issue_request(&mut view.presenter, IssueProvider::Cnb, Response::Comments(Ok(vec![comment, cnb_comment("987")])));
             cx.notify();
         });
         cx.run_until_parked();
@@ -2311,9 +2426,9 @@ mod catalog_model_tests {
         cx: &mut gpui::TestAppContext,
     ) {
         use crate::{
-            infrastructure::cnb::Response,
-            model::cnb::{IssueFilter, IssuePage},
-            presenter::tests::{cnb_issue, finish_cnb_request, seed_cnb_issues},
+            infrastructure::issues::Response,
+            model::issues::{IssueFilter, IssuePage},
+            presenter::tests::{cnb_issue, finish_issue_request, seed_issues},
         };
         // Media loading uses Tokio workers outside GPUI's deterministic test scheduler.
         cx.executor().allow_parking();
@@ -2321,7 +2436,7 @@ mod catalog_model_tests {
         cx.update(theme::configure_theme);
         let (mut presenter, _, _directory) = fixture();
         let project = presenter.model().selected_project.as_ref().unwrap().id;
-        seed_cnb_issues(&mut presenter);
+        seed_issues(&mut presenter, IssueProvider::Cnb);
         let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
         cx.simulate_resize(gpui::size(px(1040.), px(720.)));
         view.update_in(cx, |view, window, cx| {
@@ -2389,7 +2504,7 @@ mod catalog_model_tests {
         view.update(cx, |view, cx| {
             let mut issue = cnb_issue("1");
             issue.body = "截图说明\n\n![截图](https://example.test/screenshot.png)\n\n[录屏.mp4](undefined/team/repo/-/files/issues/1/clip.mp4)\n\nhttps://example.test/sound.mp3\n\n[普通链接](https://example.test/page)\n\n```text\nhttps://example.test/code.mp4\n```".into();
-            finish_cnb_request(&mut view.presenter, Response::Detail(Ok(issue)));
+            finish_issue_request(&mut view.presenter, IssueProvider::Cnb, Response::Detail(Ok(issue)));
             cx.notify();
         });
         cx.run_until_parked();
@@ -2405,9 +2520,11 @@ mod catalog_model_tests {
         click_debug(cx, "cnb-next");
         view.update(cx, |view, cx| {
             assert_eq!(view.presenter.model().cnb.page, 2);
-            finish_cnb_request(
+            finish_issue_request(
                 &mut view.presenter,
+                IssueProvider::Cnb,
                 Response::List(Ok(IssuePage {
+                    next_cursor: None,
                     issues: vec![cnb_issue("31")],
                     total: 61,
                 })),
@@ -2420,9 +2537,11 @@ mod catalog_model_tests {
         view.update_in(cx, |view, window, cx| {
             assert_eq!(view.presenter.model().cnb.filter, IssueFilter::Closed);
             assert_eq!(view.presenter.model().cnb.page, 1);
-            finish_cnb_request(
+            finish_issue_request(
                 &mut view.presenter,
+                IssueProvider::Cnb,
                 Response::List(Ok(IssuePage {
+                    next_cursor: None,
                     issues: vec![],
                     total: 0,
                 })),
@@ -2442,15 +2561,16 @@ mod catalog_model_tests {
         let nested_repository = "organization-with-a-long-name/subgroup/project-with-a-long-name";
         view.update(cx, |view, cx| {
             let cli = view.presenter.model().cnb.cli.clone().unwrap();
-            view.presenter.inspect_cnb();
-            finish_cnb_request(
+            view.presenter.inspect_issues(IssueProvider::Cnb);
+            finish_issue_request(
                 &mut view.presenter,
+                IssueProvider::Cnb,
                 Response::Inspection {
                     repository: Some(nested_repository.into()),
                     cli: Ok(cli),
                 },
             );
-            view.presenter.open_cnb();
+            view.presenter.open_issues(IssueProvider::Cnb);
             cx.notify();
         });
         cx.simulate_resize(gpui::size(px(760.), px(720.)));
@@ -2754,7 +2874,7 @@ mod catalog_model_tests {
     ) {
         use crate::{
             infrastructure::git,
-            presenter::tests::{finish_workspace_operation, seed_cnb_issues, worktree_fixture},
+            presenter::tests::{finish_workspace_operation, seed_issues, worktree_fixture},
         };
         use gpui::{ScrollDelta, ScrollWheelEvent, point};
         cx.update(gpui_kit::init);
@@ -2784,7 +2904,7 @@ mod catalog_model_tests {
         finish_workspace_operation(&mut presenter);
         presenter.select_changed_file("tracked.txt".into(), true);
         presenter.set_commit_message("Reviewed draft".into());
-        seed_cnb_issues(&mut presenter);
+        seed_issues(&mut presenter, IssueProvider::Cnb);
         let original = presenter
             .model()
             .workspace_review

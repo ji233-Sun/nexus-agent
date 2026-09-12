@@ -86,7 +86,9 @@ impl NexusView {
         }
         self.settings_section = section;
         if section == SettingsSection::SourceControl {
-            self.presenter.inspect_cnb();
+            for provider in IssueProvider::ALL {
+                self.presenter.inspect_issues(provider);
+            }
         }
         self.settings_scroll.set_offset(gpui::point(px(0.), px(0.)));
         self.focus_handle.focus(window, cx);
@@ -98,23 +100,31 @@ impl NexusView {
         let colors = palette(cx);
         let material = materials(cx);
         let section = self.settings_section;
-        let content = match section {
-            SettingsSection::General => self.render_general_settings(cx).into_any_element(),
-            SettingsSection::Appearance => div()
-                .flex()
-                .flex_col()
-                .gap_6()
-                .child(self.render_appearance_settings(cx))
-                .child(self.render_font_settings(cx))
-                .into_any_element(),
-            SettingsSection::Agent => self.render_agent_settings(cx).into_any_element(),
-            SettingsSection::Providers => self.render_provider_profiles(cx).into_any_element(),
-            SettingsSection::SourceControl => self.render_cnb_settings(cx).into_any_element(),
-            SettingsSection::Voice => self.render_voice_settings(cx).into_any_element(),
-            SettingsSection::Remote => self.render_remote_settings(cx).into_any_element(),
-            SettingsSection::Archived => self.render_archived_settings(cx).into_any_element(),
-            SettingsSection::RuntimeLog => self.render_runtime_log(cx).into_any_element(),
-        };
+        let content =
+            match section {
+                SettingsSection::General => self.render_general_settings(cx).into_any_element(),
+                SettingsSection::Appearance => div()
+                    .flex()
+                    .flex_col()
+                    .gap_6()
+                    .child(self.render_appearance_settings(cx))
+                    .child(self.render_font_settings(cx))
+                    .into_any_element(),
+                SettingsSection::Agent => self.render_agent_settings(cx).into_any_element(),
+                SettingsSection::Providers => self.render_provider_profiles(cx).into_any_element(),
+                SettingsSection::SourceControl => div()
+                    .flex()
+                    .flex_col()
+                    .gap_6()
+                    .children(IssueProvider::ALL.map(|provider| {
+                        self.render_issue_settings(provider, cx).into_any_element()
+                    }))
+                    .into_any_element(),
+                SettingsSection::Voice => self.render_voice_settings(cx).into_any_element(),
+                SettingsSection::Remote => self.render_remote_settings(cx).into_any_element(),
+                SettingsSection::Archived => self.render_archived_settings(cx).into_any_element(),
+                SettingsSection::RuntimeLog => self.render_runtime_log(cx).into_any_element(),
+            };
         let titlebar_inset = if cfg!(target_os = "macos") { 36. } else { 0. };
 
         div()
