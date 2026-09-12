@@ -1609,7 +1609,26 @@ impl NexusView {
                             .map(|popover| div().min_w_0().child(popover))
                     }),
             )
-            .child(self.render_workspace_controls(cx))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .flex_none()
+                    .gap_2()
+                    .child(
+                        self.working_directory_opener(
+                            "composer-open-directory",
+                            Button::new("composer-open-directory")
+                                .debug_selector(|| "composer-open-directory".into())
+                                .ghost()
+                                .small()
+                                .h(px(COMPACT_CONTROL_HEIGHT))
+                                .label(model.language.text("打开方式")),
+                            cx,
+                        ),
+                    )
+                    .child(self.render_workspace_controls(cx)),
+            )
     }
 
     fn render_project_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3580,6 +3599,119 @@ mod catalog_model_tests {
     }
 
     #[gpui::test]
+    fn workspace_opener_tracks_task_switches_and_reports_missing_directories(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::presenter::tests::{finish_workspace_operation, worktree_fixture};
+        // Path validation uses smol workers outside GPUI's deterministic test scheduler.
+        cx.executor().allow_parking();
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (mut presenter, runner, directory, start) = worktree_fixture("open directory");
+        runner.emit(Event::RunExited {
+            run_id: start.run_id,
+            status: RunStatus::Completed,
+            exit_code: Some(0),
+        });
+        presenter.drain_events();
+        presenter.set_appearance(AppearanceSettings {
+            reduced_motion: true,
+            ..Default::default()
+        });
+        let mut project = presenter.model().selected_project.clone().unwrap();
+        project.canonical_path = directory
+            .path()
+            .join("missing local 目录")
+            .display()
+            .to_string();
+        std::fs::rename(&start.cwd, directory.path().join("moved-worktree")).unwrap();
+        let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
+        cx.run_until_parked();
+        click_debug(cx, "composer-open-directory");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("animated-menu-surface").is_some());
+        view.update(cx, |view, cx| {
+            view.select_project(project.clone());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("animated-menu-surface").is_none());
+
+        for (language, environment, expected) in [
+            (Language::Chinese, false, project.canonical_path.as_str()),
+            (Language::English, true, start.cwd.as_str()),
+        ] {
+            view.update_in(cx, |view, window, cx| {
+                if environment {
+                    view.presenter.select_task(start.task_id);
+                    view.presenter.toggle_changes_sidebar();
+                    finish_workspace_operation(&mut view.presenter);
+                }
+                view.set_language(language, window, cx);
+                cx.notify();
+            });
+            cx.run_until_parked();
+            assert_eq!(
+                view.read_with(cx, |view, _| view
+                    .presenter
+                    .model()
+                    .working_directory()
+                    .map(str::to_owned)),
+                Some(expected.to_owned())
+            );
+            click_debug(
+                cx,
+                if environment {
+                    "environment-directory"
+                } else {
+                    "composer-open-directory"
+                },
+            );
+            cx.run_until_parked();
+            cx.simulate_keystrokes("down enter");
+            // Path validation runs on a real worker, outside GPUI's fake executor.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !cx.has_pending_prompt() {
+                cx.run_until_parked();
+                assert!(
+                    Instant::now() < deadline,
+                    "missing directory error was not shown"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let (title, detail) = cx.pending_prompt().unwrap();
+            assert_eq!(title, language.text("无法打开工作目录"));
+            assert!(detail.contains(expected));
+            assert!(
+                detail.contains(
+                    language
+                        .text("工作目录不存在或无法访问：{path}")
+                        .split("{path}")
+                        .next()
+                        .unwrap()
+                )
+            );
+            cx.simulate_prompt_answer(language.text("确定"));
+            cx.run_until_parked();
+        }
+
+        project.canonical_path.clear();
+        view.update(cx, |view, cx| {
+            view.select_project(project);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |view, _| {
+            view.presenter.model().working_directory().is_none()
+        }));
+        assert!(cx.debug_bounds("animated-menu-surface").is_none());
+        click_debug(cx, "composer-open-directory");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("animated-menu-surface").is_none());
+        assert!(!cx.has_pending_prompt());
+    }
+
+    #[gpui::test]
     fn working_directory_stays_above_composer_without_overlapping_queue_or_controls(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -3617,6 +3749,7 @@ mod catalog_model_tests {
                 cx.run_until_parked();
                 let context = cx.debug_bounds("composer-context").unwrap();
                 let directory = cx.debug_bounds("composer-directory").unwrap();
+                let opener = cx.debug_bounds("composer-open-directory").unwrap();
                 let name = cx.debug_bounds("composer-directory-name").unwrap();
                 let composer = cx.debug_bounds("composer-surface").unwrap();
                 let send = cx.debug_bounds("composer-submit").unwrap();
@@ -3624,6 +3757,8 @@ mod catalog_model_tests {
                 assert_eq!(context.right(), composer.right());
                 assert!(directory.top() > px(HEADER_HEIGHT));
                 assert!(directory.bottom() <= composer.top());
+                assert!(directory.right() <= opener.left());
+                assert!(opener.right() <= context.right());
                 assert!(name.right() <= context.right());
                 assert!(name.size.height <= px(24.));
                 assert!(send.left() >= composer.left() && send.right() <= composer.right());
