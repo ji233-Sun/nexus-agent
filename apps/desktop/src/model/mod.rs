@@ -1,5 +1,5 @@
-pub(crate) mod cnb;
 pub(crate) mod harness_installation;
+pub(crate) mod issues;
 pub(crate) mod tools;
 pub(crate) mod updates;
 pub(crate) mod voice;
@@ -238,7 +238,8 @@ pub(crate) struct RuntimeLogEntry {
 pub(crate) struct AppModel {
     // Logs belong to this launch, independent of conversation selection or deletion.
     pub(crate) runtime_log: Vec<RuntimeLogEntry>,
-    pub(crate) cnb: cnb::CnbModel,
+    pub(crate) cnb: issues::IssuesModel,
+    pub(crate) github: issues::IssuesModel,
     pub(crate) language: Language,
     pub(crate) voice: voice::VoiceModel,
     pub(crate) appearance: AppearanceSettings,
@@ -583,5 +584,30 @@ impl AppModel {
             ThinkingEffort::Default
         };
         ResolvedModelSelection { model, effort }
+    }
+}
+
+impl AppModel {
+    pub(crate) fn issues(&self, provider: issues::IssueProvider) -> &issues::IssuesModel {
+        match provider {
+            issues::IssueProvider::Cnb => &self.cnb,
+            issues::IssueProvider::GitHub => &self.github,
+        }
+    }
+
+    pub(crate) fn issues_mut(
+        &mut self,
+        provider: issues::IssueProvider,
+    ) -> &mut issues::IssuesModel {
+        match provider {
+            issues::IssueProvider::Cnb => &mut self.cnb,
+            issues::IssueProvider::GitHub => &mut self.github,
+        }
+    }
+
+    pub(crate) fn opened_issues(&self) -> Option<issues::IssueProvider> {
+        issues::IssueProvider::ALL
+            .into_iter()
+            .find(|provider| self.issues(*provider).opened)
     }
 }

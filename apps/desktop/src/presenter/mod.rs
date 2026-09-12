@@ -1,6 +1,6 @@
-mod cnb;
 mod generation;
 mod harness_installation;
+mod issues;
 mod remote;
 mod runs;
 mod updates;
@@ -19,6 +19,7 @@ use crate::{
     model::{
         AppModel, AppearanceSettings, ConversationState, FontSettings, GenerationKind,
         GenerationSettings, ModelCatalogState,
+        issues::IssueProvider,
         updates::{UpdateChannel, UpdateModel, UpdateState},
     },
     remote_control::{RemoteCommand, RemoteControl, TOKEN_SETTING_KEY},
@@ -58,7 +59,7 @@ pub(crate) trait RunnerPort {
 }
 
 pub(crate) struct Presenter {
-    cnb_client: crate::infrastructure::cnb::Client,
+    issues_client: crate::infrastructure::issues::Client,
     model: AppModel,
     voice_worker: Option<crate::infrastructure::voice::Worker>,
     storage: Storage,
@@ -237,7 +238,7 @@ impl Presenter {
             Err(error) => (None, Some(error.to_string())),
         };
         let mut presenter = Self {
-            cnb_client: crate::infrastructure::cnb::Client::default(),
+            issues_client: crate::infrastructure::issues::Client::default(),
             voice_worker: None,
             storage,
             runner,
@@ -306,12 +307,14 @@ impl Presenter {
                 .log_status(runner_error.unwrap_or_default().into());
         }
         presenter.load_voice_settings();
-        presenter.model.cnb.enabled = presenter
-            .storage
-            .setting("cnb_enabled")
-            .ok()
-            .flatten()
-            .is_none_or(|value| value != "false");
+        for provider in IssueProvider::ALL {
+            presenter.model.issues_mut(provider).enabled = presenter
+                .storage
+                .setting(&format!("{}_enabled", provider.key()))
+                .ok()
+                .flatten()
+                .is_none_or(|value| value != "false");
+        }
         presenter.reload_tasks();
         presenter.refresh_model_catalog();
         presenter
@@ -507,7 +510,9 @@ impl Presenter {
     }
 
     pub(crate) fn new_task(&mut self) {
-        self.model.cnb.opened = false;
+        for provider in IssueProvider::ALL {
+            self.model.issues_mut(provider).opened = false;
+        }
         self.cancel_voice();
         self.model.fresh_conversation();
         self.model.selected_task = None;
@@ -541,7 +546,7 @@ impl Presenter {
         self.model.streaming_text.clear();
         self.reload_tasks();
         self.refresh_model_catalog();
-        self.reset_cnb_project();
+        self.reset_issues_project();
     }
 
     fn reload_projects(&mut self) {
@@ -609,7 +614,9 @@ impl Presenter {
             .as_ref()
             .map(|project| project.id)
             != task.project_id;
-        self.model.cnb.opened = false;
+        for provider in IssueProvider::ALL {
+            self.model.issues_mut(provider).opened = false;
+        }
         self.cancel_voice();
         if self.model.selected_task != Some(task_id) {
             let existing = self
@@ -632,7 +639,7 @@ impl Presenter {
         self.model.selected_workspace = self.storage.task_workspace(task_id).ok().flatten();
         self.reload_workspaces();
         if project_changed {
-            self.reset_cnb_project();
+            self.reset_issues_project();
         }
         self.model.messages = self.storage.messages(task_id).unwrap_or_default();
         self.model.completed_runs = self.storage.completed_runs(task_id).unwrap_or_default();
