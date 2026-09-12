@@ -2326,6 +2326,8 @@ mod catalog_model_tests {
             model::issues::{IssueAction, IssueFilter},
             presenter::tests::{cnb_comment, cnb_issue, finish_issue_request, seed_issues},
         };
+        // Media loading uses Tokio workers outside GPUI's deterministic test scheduler.
+        cx.executor().allow_parking();
         cx.update(gpui_kit::init);
         cx.update(theme::configure_theme);
         let (mut presenter, _, _directory) = fixture();
