@@ -138,37 +138,44 @@ impl NexusView {
                             })),
                     )
                     .child(
-                        action_button(SharedString::from(format!("{}-assign-self", provider.key())))
-                            .debug_selector(move || format!("{}-assign-self", provider.key()))
-                            .ghost()
-                            .icon(IconName::User)
-                            .label(locale.text("指派给我"))
-                            .disabled(busy)
-                            .on_click(cx.listener(move |app, _, _, cx| {
-                                app.presenter
-                                    .act_on_issue(provider, IssueAction::AssignSelf);
-                                cx.notify();
-                            })),
+                        action_button(SharedString::from(format!(
+                            "{}-assign-self",
+                            provider.key()
+                        )))
+                        .debug_selector(move || format!("{}-assign-self", provider.key()))
+                        .ghost()
+                        .icon(IconName::User)
+                        .label(locale.text("指派给我"))
+                        .disabled(busy)
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.presenter
+                                .act_on_issue(provider, IssueAction::AssignSelf);
+                            cx.notify();
+                        })),
                     )
                     .child(
-                        action_button(SharedString::from(format!("{}-change-state", provider.key())))
-                            .debug_selector(move || format!("{}-change-state", provider.key()))
-                            .ghost()
-                            .icon(if state == IssueFilter::Closed {
-                                IconName::CircleCheck
-                            } else {
-                                IconName::RotateCw
-                            })
-                            .label(locale.text(if state == IssueFilter::Closed {
-                                "关闭 Issue"
-                            } else {
-                                "重新打开 Issue"
-                            }))
-                            .disabled(busy)
-                            .on_click(cx.listener(move |app, _, _, cx| {
-                                app.presenter.act_on_issue(provider, IssueAction::SetState(state));
-                                cx.notify();
-                            })),
+                        action_button(SharedString::from(format!(
+                            "{}-change-state",
+                            provider.key()
+                        )))
+                        .debug_selector(move || format!("{}-change-state", provider.key()))
+                        .ghost()
+                        .icon(if state == IssueFilter::Closed {
+                            IconName::CircleCheck
+                        } else {
+                            IconName::RotateCw
+                        })
+                        .label(locale.text(if state == IssueFilter::Closed {
+                            "关闭 Issue"
+                        } else {
+                            "重新打开 Issue"
+                        }))
+                        .disabled(busy)
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.presenter
+                                .act_on_issue(provider, IssueAction::SetState(state));
+                            cx.notify();
+                        })),
                     )
                     .when(provider == IssueProvider::Cnb, |row| {
                         row.child(
