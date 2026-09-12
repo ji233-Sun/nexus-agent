@@ -12,9 +12,11 @@ use gpui_kit::{
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
+    process::{Command, Stdio},
 };
 
 pub(crate) const RUNNER_MODE_ARG: &str = "--nexus-runner";
+const APP_MODE_ARG: &str = "--nexus-app";
 
 fn project_argument(
     arguments: impl IntoIterator<Item = OsString>,
@@ -40,6 +42,65 @@ fn project_argument(
         .with_context(|| format!("无法打开项目目录：{}", path.display()))?;
     ensure!(canonical.is_dir(), "项目路径不是目录：{}", path.display());
     Ok(Some(canonical))
+}
+
+fn desktop_command(executable: &Path, project_path: Option<&Path>) -> Command {
+    #[cfg(target_os = "macos")]
+    let mut command = if let Ok(bundle) = update_installation::bundle_for_executable(executable) {
+        let mut command = Command::new("/usr/bin/open");
+        command.arg("-n").arg(bundle).arg("--args");
+        command
+    } else {
+        Command::new(executable)
+    };
+    #[cfg(not(target_os = "macos"))]
+    let mut command = Command::new(executable);
+    command.arg(APP_MODE_ARG);
+    if let Some(path) = project_path {
+        command.arg(path);
+    }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        unsafe extern "C" {
+            fn setsid() -> i32;
+        }
+        // Only the async-signal-safe setsid syscall runs between fork and exec.
+        unsafe {
+            command.pre_exec(|| {
+                if setsid() == -1 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt as _;
+        command.creation_flags(0x0000_0008 | 0x0000_0200); // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    }
+    command
+}
+
+fn launch_desktop(executable: &Path, project_path: Option<&Path>) -> anyhow::Result<()> {
+    let mut command = desktop_command(executable, project_path);
+    #[cfg(target_os = "macos")]
+    if command.get_program() == "/usr/bin/open" {
+        // Wait for LaunchServices to accept the request, never for the app to exit.
+        ensure!(
+            command.status().context("打开 Nexus Agent")?.success(),
+            "无法打开 Nexus Agent.app"
+        );
+        return Ok(());
+    }
+    command.spawn().context("打开 Nexus Agent")?;
+    Ok(())
 }
 
 fn create_presenter(update_error: Option<String>) -> Presenter {
@@ -74,10 +135,11 @@ pub(crate) fn run() -> anyhow::Result<()> {
         return update_installation::apply_from_args(arguments);
     }
     #[cfg(target_os = "windows")]
-    if argument
-        .as_ref()
-        .is_some_and(|arg| arg != RUNNER_MODE_ARG && arg != update_installation::UPDATE_ERROR_ARG)
-    {
+    if argument.as_ref().is_none_or(|arg| {
+        arg != RUNNER_MODE_ARG
+            && arg != APP_MODE_ARG
+            && arg != update_installation::UPDATE_ERROR_ARG
+    }) {
         // The GUI subsystem does not inherit a terminal console automatically.
         // Attach only for public CLI invocations; launching from Explorer stays silent.
         #[link(name = "kernel32")]
@@ -103,7 +165,7 @@ pub(crate) fn run() -> anyhow::Result<()> {
         .is_some_and(|arg| arg == "--help" || arg == "-h")
     {
         println!(
-            "用法：nexus-desktop [目录]\n\n  nexus-desktop .       打开当前目录的项目\n  nexus-desktop <目录>  打开指定目录的项目\n  nexus-desktop        启动桌面应用\n\n  --help, -h           显示帮助\n  --version, -V        显示版本\n  -- <目录>           打开以 - 开头的目录"
+            "用法：nexus-desktop [目录]\n\n  nexus-desktop .       打开当前目录的项目\n  nexus-desktop <目录>  打开指定目录的项目\n  nexus-desktop        启动桌面应用\n\n打开应用后立即返回终端，关闭终端不影响应用运行。\n\n  --help, -h           显示帮助\n  --version, -V        显示版本\n  -- <目录>           打开以 - 开头的目录"
         );
         return Ok(());
     }
@@ -117,11 +179,12 @@ pub(crate) fn run() -> anyhow::Result<()> {
                 .map(|error| error.to_string_lossy().into_owned()),
             None,
         )
+    } else if argument.as_ref().is_some_and(|arg| arg == APP_MODE_ARG) {
+        (None, project_argument(arguments)?)
     } else {
-        (
-            None,
-            project_argument(argument.into_iter().chain(arguments))?,
-        )
+        let project_path = project_argument(argument.into_iter().chain(arguments))?;
+        let executable = std::env::current_exe().context("定位 Nexus Agent 可执行文件")?;
+        return launch_desktop(&executable, project_path.as_deref());
     };
 
     gpui_kit::application()
@@ -174,6 +237,89 @@ pub(crate) fn run() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn desktop_command_opens_the_app_bundle_and_forwards_the_project() {
+        let executable = Path::new("/Applications/Nexus Agent.app/Contents/MacOS/nexus-desktop");
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("项目 with spaces");
+        std::fs::create_dir(&project).unwrap();
+        let project = project_argument([project.into_os_string()]).unwrap();
+        for project in [None, project.as_deref()] {
+            let command = desktop_command(executable, project);
+            assert_eq!(command.get_program(), "/usr/bin/open");
+            let mut expected: Vec<OsString> = [
+                "-n",
+                "/Applications/Nexus Agent.app",
+                "--args",
+                APP_MODE_ARG,
+            ]
+            .into_iter()
+            .map(Into::into)
+            .collect();
+            if let Some(project) = project {
+                expected.push(project.as_os_str().to_owned());
+            }
+            assert_eq!(command.get_args().collect::<Vec<_>>(), expected);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn desktop_launch_returns_while_the_app_runs_without_terminal_streams_or_session() {
+        use std::{
+            fs,
+            os::unix::fs::PermissionsExt as _,
+            time::{Duration, Instant},
+        };
+        unsafe extern "C" {
+            fn getsid(pid: i32) -> i32;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("my project's $目录");
+        fs::create_dir(&project).unwrap();
+        for (index, project) in [None, Some(project.as_path())].into_iter().enumerate() {
+            let executable = directory.path().join(format!("fake app {index}"));
+            let arguments = executable.with_extension("args");
+            let pid_file = executable.with_extension("pid");
+            fs::write(
+                &executable,
+                "#!/bin/sh\nset -eu\nfor fd in 0 1 2; do [ \"/dev/fd/$fd\" -ef /dev/null ]; done\nprintf '%s\\n' \"$@\" > \"$0.args\"\nprintf '%s\\n' \"$$\" > \"$0.pid\"\nexec /bin/sleep 5\n",
+            )
+            .unwrap();
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+            launch_desktop(&executable, project).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let pid: i32 = loop {
+                if let Ok(pid) = fs::read_to_string(&pid_file)
+                    && let Ok(pid) = pid.trim().parse()
+                {
+                    break pid;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "App did not start with detached stdio"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            // A live session leader proves the launcher did not wait for app exit.
+            let session = unsafe { getsid(pid) };
+            let _ = Command::new("/bin/kill").arg(pid.to_string()).status();
+            assert_eq!(session, pid, "App must have its own session");
+            let expected = match project {
+                Some(project) => format!("{APP_MODE_ARG}\n{}\n", project.display()),
+                None => format!("{APP_MODE_ARG}\n"),
+            };
+            assert_eq!(fs::read_to_string(&arguments).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn desktop_launch_reports_a_missing_executable() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(launch_desktop(&directory.path().join("missing-app"), None).is_err());
+    }
 
     #[test]
     fn project_arguments_preserve_plain_desktop_launch_and_resolve_current_directory() {
