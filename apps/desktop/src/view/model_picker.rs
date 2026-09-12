@@ -53,6 +53,19 @@ impl CatalogModelItem {
         }
     }
 
+    fn custom(model_id: &str, name: Option<&str>, locale: Language) -> Self {
+        let title = name.unwrap_or(model_id).to_owned();
+        let verification = locale.text("未验证");
+        Self {
+            choice: CatalogModelChoice::Model(model_id.to_owned()),
+            trigger_title: format!("{title} · {verification}"),
+            title,
+            detail: format!("{model_id} · {verification}"),
+            search_text: format!("{} {model_id}", name.unwrap_or_default()),
+            disabled: false,
+        }
+    }
+
     fn unavailable(
         model_id: &str,
         name: Option<&str>,
@@ -125,6 +138,7 @@ pub(super) struct CatalogModelGroup {
 pub(super) struct CatalogModelSelectContent {
     pub(super) groups: Vec<CatalogModelGroup>,
     pub(super) selected: CatalogModelChoice,
+    harness: HarnessKind,
     locale: Language,
 }
 
@@ -181,18 +195,23 @@ impl CatalogModelSelectContent {
         {
             groups.push(CatalogModelGroup {
                 title: locale.text("当前选择").into(),
-                items: vec![CatalogModelItem::unavailable(
-                    model_id, model_name, catalog, locale,
-                )],
+                items: vec![if catalog.can_select_model(harness, model_id) {
+                    CatalogModelItem::custom(model_id, model_name, locale)
+                } else {
+                    CatalogModelItem::unavailable(model_id, model_name, catalog, locale)
+                }],
             });
         }
 
         let mut provider_groups = BTreeMap::<String, Vec<CatalogModelItem>>::new();
         for descriptor in catalog_models {
-            let provider = descriptor
-                .provider
-                .clone()
-                .unwrap_or_else(|| harness.to_string());
+            let provider = descriptor.provider.clone().unwrap_or_else(|| {
+                if harness == HarnessKind::Claude {
+                    locale.text("Claude Code 模型别名").into()
+                } else {
+                    harness.to_string()
+                }
+            });
             provider_groups
                 .entry(provider)
                 .or_default()
@@ -228,8 +247,17 @@ impl CatalogModelSelectContent {
         Self {
             groups,
             selected,
+            harness,
             locale,
         }
+    }
+
+    pub(super) fn search_placeholder(&self) -> &'static str {
+        self.locale.text(if self.harness == HarnessKind::Claude {
+            "搜索或输入服务商提供的模型 ID"
+        } else {
+            "按 Provider、名称或模型 ID 搜索"
+        })
     }
 
     pub(super) fn selected_index(&self) -> Option<IndexPath> {
@@ -371,6 +399,27 @@ impl ModelPickerList {
                 })
             })
             .collect();
+
+        let model_id = self.query.trim();
+        if self.content.harness == HarnessKind::Claude
+            && !model_id.is_empty()
+            && !model_id.chars().any(char::is_control)
+            && !self
+                .content
+                .groups
+                .iter()
+                .flat_map(|group| &group.items)
+                .any(|item| matches!(&item.choice, CatalogModelChoice::Model(id) if id == model_id))
+        {
+            self.groups.push(CatalogModelGroup {
+                title: self.content.locale.text("使用自定义模型").into(),
+                items: vec![CatalogModelItem::custom(
+                    model_id,
+                    None,
+                    self.content.locale,
+                )],
+            });
+        }
     }
 
     pub(super) fn item(&self, index: IndexPath) -> Option<&CatalogModelItem> {
@@ -683,7 +732,9 @@ impl NexusView {
                     .child(
                         div().flex_1().min_h_0().min_w_0().child(
                             List::new(&self.catalog_model_select)
-                                .search_placeholder(locale.text("按 Provider、名称或模型 ID 搜索"))
+                                .search_placeholder(
+                                    self.catalog_model_select_content.search_placeholder(),
+                                )
                                 .size_full(),
                         ),
                     )
@@ -696,6 +747,13 @@ impl NexusView {
                             .border_color(rgb(colors.border))
                             .text_size(px(11.))
                             .text_color(rgb(colors.muted))
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .when(model.selected_harness == HarnessKind::Claude, |footer| {
+                                footer
+                                    .child(locale.text("第三方模型可直接输入服务商提供的模型 ID。"))
+                            })
                             .child(locale.text("↑ ↓ 浏览 · Enter 选择 · Esc 关闭")),
                     ),
             )

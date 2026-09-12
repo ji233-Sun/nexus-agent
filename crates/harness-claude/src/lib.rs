@@ -622,6 +622,24 @@ mod tests {
                 .iter()
                 .any(|arg| arg == "--model" || arg == "--effort")
         );
+        for model_id in ["moonshotai/Kimi-K2.5", "GLM-5"] {
+            let custom = build_launch_spec(
+                "claude",
+                Path::new("."),
+                "test",
+                Some(model_id),
+                ThinkingEffort::Default,
+                None,
+                PermissionMode::AutoEdit,
+            );
+            assert!(
+                custom
+                    .args
+                    .windows(2)
+                    .any(|pair| pair == ["--model", model_id])
+            );
+            assert!(!custom.args.iter().any(|arg| arg == "--effort"));
+        }
         let spec = build_launch_spec(
             "/usr/local/bin/claude",
             Path::new("/tmp/project"),

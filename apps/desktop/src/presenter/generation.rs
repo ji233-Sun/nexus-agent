@@ -31,12 +31,7 @@ impl Presenter {
             !self
                 .model
                 .generation_catalog(kind)
-                .models()
-                .is_some_and(|models| {
-                    models
-                        .iter()
-                        .any(|model| model.id == id && model.availability.is_selectable())
-                })
+                .can_select_model(self.model.generation_settings(kind).harness, id)
         }) {
             return false;
         }

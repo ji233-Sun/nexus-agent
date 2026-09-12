@@ -3790,6 +3790,70 @@ mod catalog_model_tests {
     }
 
     #[gpui::test]
+    fn claude_picker_accepts_custom_ids_and_keeps_them_unverified(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (presenter, _runner, _directory) = fixture();
+        let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
+        cx.simulate_resize(gpui::size(px(1040.), px(680.)));
+        for (language, input) in [
+            (Language::Chinese, "  moonshotai/Kimi-K2.5  "),
+            (Language::English, "GLM-5"),
+        ] {
+            view.update_in(cx, |view, window, cx| {
+                view.set_language(language, window, cx)
+            });
+            cx.run_until_parked();
+            click_debug(cx, "composer-model");
+            cx.simulate_input(input);
+            cx.run_until_parked();
+            view.read_with(cx, |view, cx| {
+                let list = view.catalog_model_select.read(cx).delegate();
+                let item = list.item(IndexPath::new(0)).unwrap();
+                assert_eq!(item.choice, CatalogModelChoice::Model(input.trim().into()));
+                assert!(!item.disabled);
+                assert!(list.item(IndexPath::new(1)).is_none());
+            });
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("model-picker-surface").is_none());
+            view.read_with(cx, |view, _| {
+                let model = view.presenter.model();
+                assert_eq!(model.model_override.as_deref(), Some(input.trim()));
+                assert!(model.can_submit());
+                let content = CatalogModelSelectContent::from_model(model);
+                let index = content.selected_index().unwrap();
+                let selected = &content.groups[index.section].items[index.row];
+                assert!(!selected.disabled);
+                assert!(selected.trigger_title.contains(language.text("未验证")));
+                assert!(!selected.trigger_title.contains(language.text("不可用")));
+            });
+        }
+        click_debug(cx, "composer-model");
+        cx.simulate_input("opus");
+        cx.run_until_parked();
+        view.read_with(cx, |view, cx| {
+            let list = view.catalog_model_select.read(cx).delegate();
+            assert_eq!(list.sections_count(cx), 1);
+            assert_eq!(list.items_count(0, cx), 1);
+        });
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(cx, |view, _| view.presenter.model().model_override.clone()),
+            Some("opus".into())
+        );
+        click_debug(cx, "composer-model");
+        cx.simulate_input("default");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |view, _| {
+            view.presenter.model().model_override.is_none()
+        }));
+    }
+
+    #[gpui::test]
     fn unified_picker_supports_keyboard_focus_and_minimum_window_bounds(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -4057,6 +4121,29 @@ mod catalog_model_tests {
             cx.simulate_keystrokes("escape");
             cx.run_until_parked();
             assert!(cx.debug_bounds(picker_selector).is_none());
+            view.update(cx, |view, cx| {
+                view.presenter
+                    .select_generation_harness(kind, HarnessKind::Claude);
+                cx.notify();
+            });
+            cx.run_until_parked();
+            click_debug(cx, model_selector);
+            cx.simulate_input("GLM-5");
+            cx.run_until_parked();
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+            assert!(cx.debug_bounds(picker_selector).is_none());
+            view.read_with(cx, |view, _| {
+                assert_eq!(
+                    view.presenter
+                        .model()
+                        .generation_settings(kind)
+                        .model
+                        .as_deref(),
+                    Some("GLM-5")
+                );
+                assert!(view.presenter.model().model_override.is_none());
+            });
         }
     }
 
