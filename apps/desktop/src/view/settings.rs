@@ -426,35 +426,24 @@ impl NexusView {
                 )],
             ))
             .when_some(model.selected_project.as_ref(), |element, project| {
-                element
-                    .child(settings_group(
-                        colors,
-                        locale.text("项目空间"),
-                        [
-                            settings_row(
-                                colors,
-                                locale.text("当前项目"),
-                                locale.text("正在使用的本地项目。"),
-                                project.display_name.clone(),
-                            ),
-                            settings_row(
-                                colors,
-                                locale.text("工作目录"),
-                                locale.text("Agent 执行任务时使用的目录。"),
-                                project.canonical_path.clone(),
-                            ),
-                        ],
-                    ))
-                    .when(model.project_dirty, |element| {
-                        element.child(
-                            Alert::warning(
-                                "workspace-dirty",
-                                locale.text("Nexus 不会自动还原或提交。"),
-                            )
-                            .title(locale.text("目录存在未提交修改"))
-                            .small(),
-                        )
-                    })
+                element.child(settings_group(
+                    colors,
+                    locale.text("项目空间"),
+                    [
+                        settings_row(
+                            colors,
+                            locale.text("当前项目"),
+                            locale.text("正在使用的本地项目。"),
+                            project.display_name.clone(),
+                        ),
+                        settings_row(
+                            colors,
+                            locale.text("工作目录"),
+                            locale.text("Agent 执行任务时使用的目录。"),
+                            project.canonical_path.clone(),
+                        ),
+                    ],
+                ))
             })
     }
 

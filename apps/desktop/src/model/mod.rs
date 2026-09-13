@@ -305,7 +305,6 @@ pub(crate) struct ConversationState {
     pub(crate) streaming_text: String,
     pub(crate) run_status: LocalizedText,
     pub(crate) selected_harness: HarnessKind,
-    pub(crate) project_dirty: bool,
     pub(crate) model_override: Option<String>,
     pub(crate) model_override_name: Option<String>,
     pub(crate) model_catalog: ModelCatalogState,
