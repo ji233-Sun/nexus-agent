@@ -12,7 +12,7 @@ members = [
     "crates/harness-cli",
     "crates/protocol",
 ]
-exclude = ["vendor/gpui-kit"]
+exclude = ["vendor/gpui-kit", "vendor/gpui-base"]
 resolver = "2"
 
 [workspace.package]
@@ -56,3 +56,8 @@ debug = 0
 [profile.release]
 lto = "thin"
 strip = "symbols"
+
+# List rendering in Base hardcodes its marker spacing and indentation, so the
+# list layout Nexus needs has no public knob. See vendor/gpui-base/UPSTREAM.md.
+[patch.crates-io]
+gpui-base = { path = "vendor/gpui-base" }
