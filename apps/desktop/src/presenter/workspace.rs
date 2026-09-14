@@ -31,10 +31,8 @@ impl Presenter {
         self.model.pending_workspace_start = None;
         self.model.workspace_retry = false;
         self.model.workspace_draft = WorkspaceDraft::default();
-        self.model.project_dirty = false;
         self.model.project_is_git = false;
         if let Some(project) = self.model.selected_project.clone() {
-            self.model.project_dirty = git::is_git_dirty(Path::new(&project.canonical_path));
             self.model.project_is_git = git::repository(Path::new(&project.canonical_path)).is_ok();
             if self.model.project_is_git {
                 let path = Path::new(&project.canonical_path);
@@ -114,13 +112,11 @@ impl Presenter {
     pub(crate) fn reload_workspaces(&mut self) {
         let Some(project) = self.model.selected_project.clone() else {
             self.model.workspaces.clear();
-            self.model.project_dirty = false;
             self.model.project_is_git = false;
             self.model.workspace_branch = None;
             return;
         };
         self.model.project_is_git = git::repository(Path::new(&project.canonical_path)).is_ok();
-        self.model.project_dirty = git::is_git_dirty(Path::new(&project.canonical_path));
         self.model.workspaces = self
             .storage
             .workspaces(project.id)

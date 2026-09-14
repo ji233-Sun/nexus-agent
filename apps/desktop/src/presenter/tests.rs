@@ -819,7 +819,6 @@ fn failed_worktree_creation_retries_with_a_new_branch_and_keeps_the_selected_bas
     presenter.worktree_root = Ok(directory.path().canonicalize().unwrap().join("worktrees"));
     presenter.open_project(project_path);
     presenter.new_task();
-    assert!(presenter.model.project_dirty);
     presenter.select_workspace_kind(WorkspaceKind::Worktree);
     let planned = git::planned_workspace(
         presenter.worktree_root.as_ref().unwrap(),
@@ -6447,7 +6446,6 @@ fn working_directory_follows_project_and_task_selection_during_background_runs()
         let path = directory.path().join(parent).join("同名目录 nexus");
         fs::create_dir_all(&path).unwrap();
         presenter.open_project(&path);
-        assert!(!presenter.model().project_dirty);
         assert_eq!(
             presenter.model().working_directory(),
             path.canonicalize().unwrap().to_str()

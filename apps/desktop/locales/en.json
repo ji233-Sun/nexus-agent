@@ -174,8 +174,6 @@
   "正在使用的本地项目。": "The local project currently in use.",
   "工作目录": "Working directory",
   "Agent 执行任务时使用的目录。": "The directory where the agent runs tasks.",
-  "Nexus 不会自动还原或提交。": "Nexus does not automatically revert or commit changes.",
-  "目录存在未提交修改": "Uncommitted changes in this directory",
   "暂无归档对话": "No archived conversations",
   "从工作区侧栏的对话菜单中可以归档对话。": "Archive conversations from their menu in the workspace sidebar.",
   "空": "Empty",
