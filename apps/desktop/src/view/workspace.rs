@@ -309,8 +309,13 @@ impl NexusView {
                     files = files.child(
                         div()
                             .id(SharedString::from(format!("change-row-{path}")))
+                            .debug_selector({
+                                let path = path.clone();
+                                move || format!("change-row-{path}")
+                            })
                             .min_w_0()
                             .w_full()
+                            .flex_none()
                             .overflow_hidden()
                             .py_1()
                             .text_size(px(12.))
@@ -348,6 +353,7 @@ impl NexusView {
                         .debug_selector(|| "show-workspace-diff".into())
                         .ghost()
                         .small()
+                        .flex_none()
                         .mt_1()
                         .label(locale.text("查看完整差异"))
                         .icon(IconName::ArrowRight)

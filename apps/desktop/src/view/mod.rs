@@ -3464,6 +3464,84 @@ mod catalog_model_tests {
     }
 
     #[gpui::test]
+    fn changes_sidebar_scrolls_many_files_without_squeezing_rows(cx: &mut gpui::TestAppContext) {
+        use crate::presenter::tests::{finish_workspace_operation, worktree_fixture};
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (mut presenter, runner, _directory, start) = worktree_fixture("many changes");
+        presenter.set_appearance(AppearanceSettings {
+            reduced_motion: true,
+            ..Default::default()
+        });
+        runner.emit(Event::RunExited {
+            run_id: start.run_id,
+            status: RunStatus::Completed,
+            exit_code: Some(0),
+        });
+        presenter.drain_events();
+        let cwd = Path::new(&start.cwd);
+        let write_file = |name: &str| {
+            let full = cwd.join(name);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, "fn changed() {}\n").unwrap();
+        };
+        write_file("first.rs");
+        presenter.toggle_changes_sidebar();
+        finish_workspace_operation(&mut presenter);
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| NexusView::new(presenter, window, cx));
+            gpui_kit::component::Root::new(view, window, cx)
+        });
+        let view = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<NexusView>().unwrap()
+        });
+        cx.simulate_resize(gpui::size(px(1040.), px(680.)));
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                let _ = window.draw(cx);
+            });
+        };
+        draw(cx);
+        click_debug(cx, "environment-changes");
+        draw(cx);
+        let baseline = cx.debug_bounds("change-row-first.rs").unwrap().size.height;
+        assert!(baseline > px(0.));
+        // More rows than the capped list can show at once must scroll, not shrink.
+        let paths: Vec<String> = (0..24).map(|index| format!("f{index:02}.rs")).collect();
+        for path in &paths {
+            write_file(path);
+        }
+        click_debug(cx, "refresh-conversation-changes");
+        view.update(cx, |view, cx| {
+            finish_workspace_operation(&mut view.presenter);
+            cx.notify();
+        });
+        draw(cx);
+        let list = cx.debug_bounds("conversation-changed-files").unwrap();
+        for path in paths
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once("first.rs"))
+        {
+            let selector: &'static str = format!("change-row-{path}").leak();
+            let row = cx.debug_bounds(selector).unwrap();
+            assert!(
+                row.size.height >= baseline,
+                "changed-file row was squeezed: {path} {row:?}"
+            );
+        }
+        let last = cx
+            .debug_bounds(format!("change-row-{}", paths.last().unwrap()).leak())
+            .unwrap();
+        assert!(
+            last.bottom() > list.bottom(),
+            "the file list must scroll instead of squeezing rows"
+        );
+    }
+
+    #[gpui::test]
     fn cli_installation_settings_show_the_action_and_completion_feedback(
         cx: &mut gpui::TestAppContext,
     ) {
