@@ -114,6 +114,8 @@ pub(crate) struct NexusView {
     search_input: Entity<InputState>,
     project_search_input: Entity<InputState>,
     project_picker_open: bool,
+    issue_launch: Option<issues::IssueLaunch>,
+    issue_launch_input: Entity<TextareaState>,
     focus_handle: FocusHandle,
     timeline_scroll: ScrollHandle,
     sidebar_scroll: ScrollHandle,
@@ -205,6 +207,16 @@ impl NexusView {
         let project_search_input = cx.new(|cx| InputState::new(window, cx));
         cx.subscribe(&project_search_input, |_, _, _: &InputEvent, cx| {
             cx.notify()
+        })
+        .detach();
+        let issue_launch_input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(4, 10));
+        cx.subscribe(&issue_launch_input, |_, _, event: &InputEvent, cx| {
+            if matches!(
+                event,
+                InputEvent::Change | InputEvent::Focus | InputEvent::Blur
+            ) {
+                cx.notify();
+            }
         })
         .detach();
         let catalog_model_select_content = CatalogModelSelectContent::from_model(presenter.model());
@@ -353,6 +365,8 @@ impl NexusView {
             search_input,
             project_search_input,
             project_picker_open: false,
+            issue_launch: None,
+            issue_launch_input,
             focus_handle: cx.focus_handle(),
             timeline_scroll: ScrollHandle::new(),
             sidebar_scroll: ScrollHandle::new(),
@@ -2166,6 +2180,9 @@ impl Render for NexusView {
         }
         self.sync_catalog_model_select(window, cx);
         let colors = palette(cx);
+        let issue_launch = self
+            .issue_launch
+            .map(|_| self.render_issue_launch(window, cx));
         div()
             .key_context("Nexus")
             .track_focus(&self.focus_handle)
@@ -2227,6 +2244,7 @@ impl Render for NexusView {
                 )
             })
             .child(self.dialog_layer.clone())
+            .when_some(issue_launch, |element, overlay| element.child(overlay))
     }
 }
 
@@ -2385,7 +2403,8 @@ mod catalog_model_tests {
         assert!(cx.debug_bounds("github-npc").is_none());
         click_debug(cx, "github-chat");
         view.update(cx, |view, _| assert!(view.presenter.model().github.opened));
-        view.update_in(cx, |view, window, cx| {
+        assert!(cx.debug_bounds("issue-launch-surface").is_none());
+        view.update_in(cx, |view, _window, cx| {
             let mut last = cnb_comment("101");
             last.body = "Acceptance criteria from the final page.".into();
             finish_issue_request(
@@ -2393,9 +2412,6 @@ mod catalog_model_tests {
                 provider,
                 Response::Comments(Ok(vec![last])),
             );
-            view.prompt_input.update(cx, |input, cx| {
-                input.set_value("Existing draft", window, cx)
-            });
             cx.notify();
         });
         cx.run_until_parked();
@@ -2427,22 +2443,50 @@ mod catalog_model_tests {
         }
         click_debug(cx, "github-chat");
         cx.run_until_parked();
+        let surface = cx.debug_bounds("issue-launch-surface").unwrap();
+        let card = cx.debug_bounds("issue-launch-card").unwrap();
+        assert!(cx.debug_bounds("github-page").is_some());
+        assert!(cx.debug_bounds("composer-surface").is_none());
+        assert!(card.left() >= surface.left() && card.right() <= surface.right());
+        assert!(card.top() >= surface.top() && card.bottom() <= surface.bottom());
+        assert!(card.center().x >= surface.center().x - px(1.));
+        assert!(card.center().x <= surface.center().x + px(1.));
+        assert!(card.center().y >= surface.center().y - px(1.));
+        assert!(card.center().y <= surface.center().y + px(1.));
+        let start = cx.debug_bounds("issue-launch-start").unwrap();
+        assert!(start.left() >= card.left() && start.right() <= card.right());
+        assert!(start.top() >= card.top() && start.bottom() <= card.bottom());
+        view.update_in(cx, |view, window, cx| {
+            view.issue_launch_input
+                .update(cx, |input, cx| input.set_value("补充说明", window, cx));
+        });
+        cx.run_until_parked();
+        click_debug(cx, "issue-launch-start");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("issue-launch-surface").is_none());
         assert!(cx.debug_bounds("github-page").is_none());
         assert!(cx.debug_bounds("composer-surface").is_some());
-        assert!(cx.debug_bounds("model-picker-surface").is_some());
-        view.update(cx, |view, cx| {
-            let draft = view.prompt_input.read(cx).value();
-            assert!(draft.starts_with("Existing draft\n\n"));
+        view.update(cx, |view, _| {
+            let prompt = view
+                .presenter
+                .model()
+                .messages
+                .iter()
+                .find(|message| message.role == MessageRole::User)
+                .map(|message| message.content.clone())
+                .expect("user prompt");
             for content in [
                 "GitHub Issue",
                 "https://github.com/team/project/issues/1",
                 "Issue body **Markdown**.",
                 "Acceptance criteria from the final page.",
+                "## 补充信息",
+                "补充说明",
             ] {
-                assert!(draft.contains(content), "{content}");
+                assert!(prompt.contains(content), "{content}");
             }
-            assert!(!draft.contains("cnb.cool"));
-            assert!(view.presenter.model().active_run.is_none());
+            assert!(!prompt.contains("cnb.cool"));
+            assert!(view.presenter.model().active_run.is_some());
             assert!(view.presenter.model().opened_issues().is_none());
         });
     }
@@ -2524,13 +2568,9 @@ mod catalog_model_tests {
             assert!(summary.bottom() <= cx.debug_bounds("cnb-issue-body").unwrap().top());
         }
         cx.simulate_resize(gpui::size(px(1120.), px(900.)));
-        view.update_in(cx, |view, window, cx| {
-            view.prompt_input
-                .update(cx, |input, cx| input.set_value("保留已有草稿", window, cx));
-        });
-        cx.run_until_parked();
         click_debug(cx, "cnb-chat");
         view.update(cx, |view, _| assert!(view.presenter.model().cnb.opened));
+        assert!(cx.debug_bounds("issue-launch-surface").is_none());
         view.update(cx, |view, cx| {
             let mut comment = cnb_comment("1");
             comment.body = "完整验收条件，包含 **格式**。".into();
@@ -2590,17 +2630,39 @@ mod catalog_model_tests {
         assert!(cx.debug_bounds("cnb-npc-action").is_some());
         click_debug(cx, "cnb-chat");
         cx.run_until_parked();
+        assert!(cx.debug_bounds("issue-launch-surface").is_some());
+        assert!(cx.debug_bounds("cnb-page").is_some());
+        assert!(cx.debug_bounds("composer-surface").is_none());
+        view.update_in(cx, |view, window, cx| {
+            view.issue_launch_input
+                .update(cx, |input, cx| input.set_value("补充上下文", window, cx));
+        });
+        cx.run_until_parked();
+        click_debug(cx, "issue-launch-start");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("issue-launch-surface").is_none());
         assert!(cx.debug_bounds("cnb-page").is_none());
         assert!(cx.debug_bounds("composer-surface").is_some());
-        assert!(cx.debug_bounds("model-picker-surface").is_some());
-        view.update(cx, |view, cx| {
-            let draft = view.prompt_input.read(cx).value();
-            assert!(draft.starts_with("保留已有草稿\n\n"));
-            assert!(draft.contains("https://cnb.cool/team/project/-/issues/1"));
-            assert!(draft.contains("需要实现的功能描述。"));
-            assert!(draft.contains("完整验收条件，包含 **格式**。"));
-            assert!(view.presenter.model().selected_task.is_none());
-            assert!(view.presenter.model().active_run.is_none());
+        view.update(cx, |view, _| {
+            let prompt = view
+                .presenter
+                .model()
+                .messages
+                .iter()
+                .find(|message| message.role == MessageRole::User)
+                .map(|message| message.content.clone())
+                .expect("user prompt");
+            for content in [
+                "https://cnb.cool/team/project/-/issues/1",
+                "需要实现的功能描述。",
+                "完整验收条件，包含 **格式**。",
+                "## 补充信息",
+                "补充上下文",
+            ] {
+                assert!(prompt.contains(content), "{content}");
+            }
+            assert!(view.presenter.model().active_run.is_some());
+            assert!(view.presenter.model().opened_issues().is_none());
         });
     }
 

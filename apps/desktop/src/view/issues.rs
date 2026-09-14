@@ -1,6 +1,14 @@
 use super::*;
-use crate::model::issues::{Issue, IssueAction, IssueFilter, Label, PAGE_SIZE};
+use crate::model::issues::{Issue, IssueAction, IssueFilter, IssueLaunchKind, Label, PAGE_SIZE};
 use gpui_kit::component::{scroll::ScrollableElement as _, spinner::Spinner};
+
+// A pending "quick issue" launch started from the issue page. The harness runs
+// with the composer's current Harness/model/effort/permission selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct IssueLaunch {
+    pub(super) provider: IssueProvider,
+    pub(super) kind: IssueLaunchKind,
+}
 
 pub(super) fn provider_icon(provider: IssueProvider, size: f32, color: u32) -> impl IntoElement {
     // GPUI only paints an SVG when the element has an explicit text color.
@@ -54,31 +62,235 @@ fn issue_label(label: &Label, colors: Palette) -> impl IntoElement {
 }
 
 impl NexusView {
-    fn send_issue_to_chat(
+    pub(super) fn open_issue_launch(
         &mut self,
         provider: IssueProvider,
+        kind: IssueLaunchKind,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(prompt) = self.presenter.prepare_issue_chat(provider) else {
+        let model = self.presenter.model();
+        let issues = model.issues(provider);
+        if model.active_run.is_some()
+            || model.occupied_run_slots() >= 2
+            || !issues.enabled
+            || issues.repository.is_none()
+            || issues.detail_request.is_some()
+            || issues.comments_request.is_some()
+            || issues.action_request.is_some()
+            || (kind == IssueLaunchKind::Process
+                && (issues.detail.is_none() || issues.comments.is_none()))
+        {
+            return;
+        }
+        let placeholder = match kind {
+            IssueLaunchKind::Create => model
+                .language
+                .text("描述要提交的 Issue，例如现象、期望结果和复现步骤。"),
+            IssueLaunchKind::Process => model.language.text("补充信息（选填）"),
+        };
+        self.issue_launch_input.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+            input.set_placeholder(placeholder, window, cx);
+            input.focus(window, cx);
+        });
+        self.issue_launch = Some(IssueLaunch { provider, kind });
+        self.model_picker_open = false;
+        cx.notify();
+    }
+
+    fn close_issue_launch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.issue_launch.take().is_none() {
+            return;
+        }
+        self.issue_launch_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        cx.notify();
+    }
+
+    fn launch_issue(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(launch) = self.issue_launch else {
             return;
         };
-        self.prompt_input.update(cx, |input, cx| {
-            let draft = input.value();
-            let text = if draft.is_empty() {
-                prompt
-            } else {
-                format!("{draft}\n\n{prompt}")
-            };
-            input.replace_all(text, window, cx);
-        });
-        self.settings_open = false;
+        let content = self.issue_launch_input.read(cx).value().to_string();
+        let executable = self.presenter.model().executable.clone();
+        if !self
+            .presenter
+            .start_issue_run(launch.provider, launch.kind, &content, &executable)
+        {
+            return;
+        }
+        self.issue_launch = None;
+        self.issue_launch_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
         self.expanded_messages.clear();
         self.timeline_scroll.scroll_to_bottom();
-        self.model_picker_open = true;
-        self.focus_prompt(window, cx);
         self.presenter.notify_remote_changed();
         cx.notify();
+    }
+
+    pub(super) fn render_issue_launch(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(launch) = self.issue_launch else {
+            return div().into_any_element();
+        };
+        let model = self.presenter.model();
+        let locale = model.language;
+        let colors = palette(cx);
+        let material = materials(cx);
+        let issues = model.issues(launch.provider);
+        let repository = issues.repository.clone().unwrap_or_default();
+        let content = self.issue_launch_input.read(cx).value();
+        let can_launch = model.can_submit()
+            && (launch.kind == IssueLaunchKind::Process || !content.trim().is_empty());
+        let (title, label, action) = match launch.kind {
+            IssueLaunchKind::Create => (
+                locale.text("快捷提 Issue"),
+                locale.text("需要提的 Issue"),
+                locale.text("启动 Harness"),
+            ),
+            IssueLaunchKind::Process => (
+                locale.text("用 AI 处理 Issue"),
+                locale.text("补充信息（选填）"),
+                locale.text("启动处理"),
+            ),
+        };
+        let target = match launch.kind {
+            IssueLaunchKind::Create => format!("{} · {repository}", launch.provider.name()),
+            IssueLaunchKind::Process => issues
+                .detail
+                .as_ref()
+                .map(|issue| format!("#{} {}", issue.number, issue.title))
+                .unwrap_or_default(),
+        };
+        let mut start = Button::new("issue-launch-start")
+            .debug_selector(|| "issue-launch-start".into())
+            .primary()
+            .label(action)
+            .disabled(!can_launch);
+        if !can_launch {
+            start = start.opacity(0.42);
+        }
+        div()
+            .id("issue-launch-surface")
+            .debug_selector(|| "issue-launch-surface".into())
+            .absolute()
+            .inset_0()
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x00000080))
+            .on_click(cx.listener(|app, _, window, cx| app.close_issue_launch(window, cx)))
+            .child(
+                div()
+                    .id("issue-launch-card")
+                    .debug_selector(|| "issue-launch-card".into())
+                    .occlude()
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .w(px(560.))
+                    .max_w(relative(0.92))
+                    .max_h(relative(0.9))
+                    .rounded(px(CARD_RADIUS))
+                    .bg(material.floating)
+                    .border_1()
+                    .border_color(material.edge)
+                    .shadow(material.shadow())
+                    .p_5()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(16.))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child(title),
+                            )
+                            .child(
+                                Button::new("issue-launch-close")
+                                    .debug_selector(|| "issue-launch-close".into())
+                                    .ghost()
+                                    .small()
+                                    .icon(IconName::Close)
+                                    .accessibility_label(locale.text("关闭对话框"))
+                                    .on_click(cx.listener(|app, _, window, cx| {
+                                        app.close_issue_launch(window, cx)
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(rgb(colors.muted))
+                            .child(target),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(colors.text_secondary))
+                                    .child(label),
+                            )
+                            .child(
+                                div()
+                                    .rounded(px(CONTROL_RADIUS))
+                                    .border_1()
+                                    .border_color(rgb(colors.input_border).opacity(0.45))
+                                    .bg(rgb(colors.surface))
+                                    .p_3()
+                                    .child(
+                                        Textarea::new(&self.issue_launch_input)
+                                            .appearance(false)
+                                            .bordered(false)
+                                            .text_size(px(13.))
+                                            .line_height(relative(1.6))
+                                            .aria_label(label),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_2()
+                            .child(self.model_selector(window, cx))
+                            .child(self.effort_selector(cx))
+                            .child(self.permission_selector(cx)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                Button::new("issue-launch-cancel")
+                                    .debug_selector(|| "issue-launch-cancel".into())
+                                    .ghost()
+                                    .label(locale.text("取消"))
+                                    .on_click(cx.listener(|app, _, window, cx| {
+                                        app.close_issue_launch(window, cx)
+                                    })),
+                            )
+                            .child(start.on_click(
+                                cx.listener(|app, _, window, cx| app.launch_issue(window, cx)),
+                            )),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn render_issue_actions(
@@ -126,15 +338,19 @@ impl NexusView {
                             .icon(IconName::Bot)
                             .label(locale.text("用 AI 处理"))
                             .tooltip(
-                                locale
-                                    .text("将完整 Issue 和评论加入聊天草稿，选择 Harness 后发送。"),
+                                locale.text("选择 Harness、模型与权限，直接启动处理此 Issue。"),
                             )
                             .disabled(
                                 busy || issues.comments.is_none()
                                     || issues.comments_request.is_some(),
                             )
                             .on_click(cx.listener(move |app, _, window, cx| {
-                                app.send_issue_to_chat(provider, window, cx)
+                                app.open_issue_launch(
+                                    provider,
+                                    IssueLaunchKind::Process,
+                                    window,
+                                    cx,
+                                )
                             })),
                     )
                     .child(
@@ -754,6 +970,19 @@ impl NexusView {
                                 "{count} 个 Issues",
                                 &[("count", issues.total.to_string())],
                             )),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("{}-new-issue", provider.key())))
+                            .debug_selector(move || format!("{}-new-issue", provider.key()))
+                            .outline()
+                            .small()
+                            .icon(IconName::Plus)
+                            .label(locale.text("快捷提 Issue"))
+                            .tooltip(locale.text("选择 Harness、模型与权限，直接启动创建 Issue。"))
+                            .disabled(self.presenter.model().active_run.is_some())
+                            .on_click(cx.listener(move |app, _, window, cx| {
+                                app.open_issue_launch(provider, IssueLaunchKind::Create, window, cx)
+                            })),
                     )
                     .child(
                         Button::new(SharedString::from(format!("{}-refresh", provider.key())))
