@@ -4923,7 +4923,7 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "nexus-desktop"
-version = "0.1.0-alpha.1"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -4960,7 +4960,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-domain"
-version = "0.1.0-alpha.1"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "serde",
@@ -4969,7 +4969,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-harness-acp"
-version = "0.1.0-alpha.1"
+version = "1.0.0"
 dependencies = [
  "nexus-domain",
  "nexus-harness-core",
@@ -4981,7 +4981,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-harness-claude"
-version = "0.1.0-alpha.1"
+version = "1.0.0"
 dependencies = [
  "base64",
  "nexus-domain",
@@ -4993,7 +4993,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-harness-cli"
-version = "0.1.0-alpha.1"
+version = "1.0.0"
 dependencies = [
  "nexus-domain",
  "nexus-harness-claude",
@@ -5005,7 +5005,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-harness-codex"
-version = "0.1.0-alpha.1"
+version = "1.0.0"
 dependencies = [
  "nexus-domain",
  "nexus-harness-core",
@@ -5016,7 +5016,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-harness-core"
-version = "0.1.0-alpha.1"
+version = "1.0.0"
 dependencies = [
  "nexus-domain",
  "serde_json",
@@ -5025,7 +5025,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-harness-omp"
-version = "0.1.0-alpha.1"
+version = "1.0.0"
 dependencies = [
  "nexus-domain",
  "nexus-harness-core",
@@ -5036,7 +5036,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-harness-pi"
-version = "0.1.0-alpha.1"
+version = "1.0.0"
 dependencies = [
  "nexus-domain",
  "nexus-harness-core",
@@ -5048,7 +5048,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-protocol"
-version = "0.1.0-alpha.1"
+version = "1.0.0"
 dependencies = [
  "nexus-domain",
  "serde",
@@ -5058,7 +5058,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-runner"
-version = "0.1.0-alpha.1"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "nexus-domain",
