@@ -100,18 +100,13 @@ pub(crate) fn prepare(
     request: &StartRun,
     cwd: &Path,
 ) -> Result<(LaunchSpec, Box<dyn LineDecoder>), String> {
-    if !request.attachments.is_empty() {
-        if !nexus_domain::ImageAttachment::supported_by(request.harness) {
-            return Err("此 Harness 暂不支持截图输入，请选择 Codex 或 Claude Code。".into());
-        }
-        if request.attachments.len() > nexus_domain::ImageAttachment::MAX_COUNT {
-            return Err("每条消息最多包含 8 张截图。".into());
-        }
-        for image in &request.attachments {
-            nexus_harness_core::read_image_attachment(image)?;
-        }
-    }
-    let (spec, decoder) = prepare_native(request, cwd)?;
+    nexus_harness_core::validate_attachments(&request.attachments, request.harness)?;
+    let mut request = request.clone();
+    request.prompt = nexus_harness_core::prompt_with_files(&request.prompt, &request.attachments);
+    request
+        .attachments
+        .retain(nexus_domain::Attachment::is_image);
+    let (spec, decoder) = prepare_native(&request, cwd)?;
     if !configurable(request.harness) {
         return Ok((spec, decoder));
     }
@@ -286,6 +281,53 @@ mod tests {
             "cwd":"/tmp","prompt":"hello","permission_mode":"ask","effort":"default","harness":harness,"executable":harness.default_executable()})).unwrap()
     }
     #[test]
+    fn file_attachments_reach_text_harnesses_and_codex_without_becoming_images() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("用户 notes.txt");
+        std::fs::write(&path, "file contents must not be inlined").unwrap();
+        let file = nexus_domain::Attachment {
+            path: path.canonicalize().unwrap().to_string_lossy().into_owned(),
+            source_name: "用户 notes.txt".into(),
+            page: None,
+            kind: nexus_domain::AttachmentKind::File,
+        };
+        for harness in [
+            HarnessKind::Claude,
+            HarnessKind::Omp,
+            HarnessKind::Pi,
+            HarnessKind::Codex,
+        ] {
+            let mut request = run(harness);
+            request.attachments.push(file.clone());
+            let (spec, mut decoder) = prepare(&request, directory.path()).unwrap();
+            let input = if matches!(harness, HarnessKind::Codex | HarnessKind::Pi) {
+                let response = if harness == HarnessKind::Codex {
+                    r#"{"id":2,"result":{"thread":{"id":"thread-1"}}}"#
+                } else {
+                    decoder.decode_line(r#"{"type":"extension_ui_request","method":"notify","message":"nexus-permissions-ready"}"#).unwrap();
+                    r#"{"type":"response","id":"nexus-session","success":true,"data":{"sessionFile":"/tmp/session.jsonl"}}"#
+                };
+                let events = decoder.decode_line(response).unwrap();
+                events
+                    .into_iter()
+                    .find_map(|event| match event {
+                        DecodedEvent::WriteStdin(input) => Some(input.0.to_string()),
+                        _ => None,
+                    })
+                    .unwrap()
+            } else {
+                spec.stdin
+            };
+            assert!(input.contains("用户 notes.txt"), "{harness}: {input}");
+            assert!(input.contains("Attached local files"), "{harness}: {input}");
+            assert!(!input.contains("file contents must not be inlined"));
+            assert!(!input.contains("localImage"));
+            assert_eq!(request.prompt, "hello");
+            assert!(!spec.args.iter().any(|arg| arg.contains("用户 notes.txt")));
+        }
+    }
+
+    #[test]
     fn captured_images_reach_claude_and_unsupported_harnesses_fail_explicitly() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("capture.png");
@@ -296,10 +338,11 @@ mod tests {
         ];
         std::fs::write(&path, png).unwrap();
         let mut request = run(HarnessKind::Claude);
-        request.attachments = vec![nexus_domain::ImageAttachment {
+        request.attachments = vec![nexus_domain::Attachment {
             path: path.canonicalize().unwrap().to_string_lossy().into_owned(),
             source_name: "report.pdf".into(),
-            page: 2,
+            page: Some(2),
+            kind: nexus_domain::AttachmentKind::Image,
         }];
         for session in [None, Some("existing-session".into())] {
             request.session_id = session;
@@ -322,6 +365,43 @@ mod tests {
         request.harness = HarnessKind::Codex;
         std::fs::write(path, b"not a screenshot").unwrap();
         assert!(prepare(&request, directory.path()).is_err());
+    }
+
+    #[test]
+    fn claude_sends_non_png_images_with_their_detected_mime_type() {
+        let directory = tempfile::tempdir().unwrap();
+        // Format identification is based on bytes, independent of the source name.
+        for (bytes, media_type) in [
+            (
+                [b"\xff\xd8\xff".as_slice(), &[0; 30]].concat(),
+                "image/jpeg",
+            ),
+            (
+                [b"GIF89a\x01\0\x01\0".as_slice(), &[0; 30]].concat(),
+                "image/gif",
+            ),
+            (
+                [b"RIFF\x16\0\0\0WEBPVP8 ".as_slice(), &[0; 30]].concat(),
+                "image/webp",
+            ),
+        ] {
+            let path = directory.path().join("image");
+            std::fs::write(&path, &bytes).unwrap();
+            let mut request = run(HarnessKind::Claude);
+            request.attachments.push(nexus_domain::Attachment {
+                path: path.canonicalize().unwrap().to_string_lossy().into_owned(),
+                source_name: "photo".into(),
+                page: None,
+                kind: nexus_domain::AttachmentKind::Image,
+            });
+            let (spec, _) = prepare(&request, directory.path()).unwrap();
+            let frame: serde_json::Value = serde_json::from_str(&spec.stdin).unwrap();
+            assert_eq!(frame["message"]["content"][1]["text"], "photo");
+            assert_eq!(
+                frame["message"]["content"][2]["source"]["media_type"],
+                media_type
+            );
+        }
     }
 
     #[test]

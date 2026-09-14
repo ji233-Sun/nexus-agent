@@ -132,7 +132,7 @@ pub(crate) struct QueuedMessage {
     pub(crate) id: Uuid,
     pub(crate) task_id: Uuid,
     pub(crate) prompt: String,
-    pub(crate) attachments: Vec<nexus_domain::ImageAttachment>,
+    pub(crate) attachments: Vec<nexus_domain::Attachment>,
     pub(crate) permission_mode: PermissionMode,
 }
 
@@ -266,8 +266,9 @@ pub(crate) struct AppModel {
 // selected conversation lives here; switching moves it into the keyed collection.
 #[derive(Default)]
 pub(crate) struct ConversationState {
-    pub(crate) attachments: Vec<nexus_domain::ImageAttachment>,
+    pub(crate) attachments: Vec<nexus_domain::Attachment>,
     pub(crate) attachment_error: Option<LocalizedText>,
+    pub(crate) attachments_loading: bool,
     pub(crate) changes_sidebar_open: bool,
     pub(crate) changes_files_expanded: bool,
     pub(crate) commit_editor_open: bool,

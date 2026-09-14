@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 17;
+pub const PROTOCOL_VERSION: u32 = 18;
 pub const MAX_COMMIT_DIFF_BYTES: usize = 128 * 1024;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -105,7 +105,7 @@ pub struct StartRun {
     pub cwd: String,
     pub prompt: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub attachments: Vec<nexus_domain::ImageAttachment>,
+    pub attachments: Vec<nexus_domain::Attachment>,
     pub harness: HarnessKind,
     pub executable: String,
     pub model: Option<String>,
@@ -330,6 +330,30 @@ pub enum ErrorCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_captures_and_new_files_round_trip() {
+        use nexus_domain::Attachment;
+        let capture: Attachment = serde_json::from_value(serde_json::json!({
+            "path": "/captures/page.png", "source_name": "report.pdf", "page": 12
+        }))
+        .unwrap();
+        assert!(capture.is_image());
+        assert_eq!(capture.page, Some(12));
+        assert_eq!(capture.label(), "report.pdf · page 12");
+        assert!(!capture.supported_by(HarnessKind::Omp));
+        let file: Attachment = serde_json::from_value(serde_json::json!({
+            "path": "/attachments/report.pdf", "source_name": "report.pdf", "kind": "file"
+        }))
+        .unwrap();
+        assert!(!file.is_image());
+        assert_eq!(file.label(), "report.pdf");
+        assert!(file.supported_by(HarnessKind::Omp));
+        assert_eq!(
+            file,
+            serde_json::from_str::<Attachment>(&serde_json::to_string(&file).unwrap()).unwrap()
+        );
+    }
 
     #[test]
     fn steer_round_trip_preserves_run_and_message_identity() {

@@ -1,3 +1,4 @@
+mod attachments;
 mod cnb_media;
 mod components;
 mod fonts;
@@ -1959,6 +1960,11 @@ impl NexusView {
                             .child(
                                 div()
                                     .debug_selector(|| "composer-surface".into())
+                                    .capture_action(cx.listener(Self::paste_attachments))
+                                    .on_drop(cx.listener(|app, paths: &gpui::ExternalPaths, _, cx| {
+                                        cx.stop_propagation();
+                                        app.import_attachments(paths.paths().to_vec(), Vec::new(), cx);
+                                    }))
                                     .relative()
                                     .w_full()
                                     .max_w(px(CONTENT_WIDTH))
@@ -1975,11 +1981,14 @@ impl NexusView {
                                     .flex()
                                     .flex_col()
                                     .child(self.render_message_queue(cx))
-                                    .child(self.render_attachment_images(
+                                    .child(self.render_attachments(
                                         &model.attachments,
                                         None,
                                         cx,
                                     ))
+                                    .when(model.attachments_loading, |element| {
+                                        element.child(div().text_size(px(12.)).child(locale.text("正在添加附件，请稍候。")))
+                                    })
                                     .when_some(model.attachment_error.as_ref(), |element, error| {
                                         element.child(
                                             div()
@@ -2032,6 +2041,16 @@ impl NexusView {
                                                     .items_center()
                                                     .gap_2()
                                                     .child(self.render_voice_controls(cx))
+                                                    .child(
+                                                        Button::new("attach-files")
+                                                            .ghost()
+                                                            .small()
+                                                            .label(locale.text("附件"))
+                                                            .debug_selector(|| "attach-files".into())
+                                                            .tooltip(locale.text("添加图片或文件，也可拖入或粘贴到输入框"))
+                                                            .disabled(model.attachments_loading)
+                                                            .on_click(cx.listener(|app, _, _, cx| app.choose_attachments(cx))),
+                                                    )
                                                     .child(
                                                         Button::new("open-pdf")
                                                             .ghost()
@@ -2269,6 +2288,59 @@ mod catalog_model_tests {
     use crate::presenter::tests::fixture;
     use nexus_domain::{ModelReasoningEffort, UserAskOption, UserAskQuestion};
     use nexus_protocol::Event;
+
+    #[gpui::test]
+    async fn composer_pastes_attachments_without_replacing_prompt_text(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use base64::Engine as _;
+        cx.executor().allow_parking();
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (presenter, _, _directory) = fixture();
+        let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
+        view.update_in(cx, |view, window, cx| {
+            view.prompt_input
+                .update(cx, |input, cx| input.set_value("保留问题", window, cx));
+            view.focus_prompt(window, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("attach-files").is_some());
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-a"
+        } else {
+            "ctrl-a"
+        });
+        let bytes = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=").unwrap();
+        cx.update(|_, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_image(&gpui::Image::from_bytes(
+                gpui::ImageFormat::Png,
+                bytes,
+            )))
+        });
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-v"
+        } else {
+            "ctrl-v"
+        });
+        cx.condition(&view, |view, _| !view.presenter.model().attachments_loading)
+            .await;
+        view.read_with(cx, |view, cx| {
+            assert_eq!(view.prompt_input.read(cx).value(), "保留问题");
+            assert_eq!(view.presenter.model().attachments.len(), 1);
+            assert!(view.presenter.model().attachments[0].is_image());
+        });
+        cx.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("替换文字".into())));
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-v"
+        } else {
+            "ctrl-v"
+        });
+        view.read_with(cx, |view, cx| {
+            assert_eq!(view.prompt_input.read(cx).value(), "替换文字");
+            assert_eq!(view.presenter.model().attachments.len(), 1);
+        });
+    }
 
     #[gpui::test]
     fn github_issue_page_opens_builtin_ai_with_complete_context_and_harness_selection(

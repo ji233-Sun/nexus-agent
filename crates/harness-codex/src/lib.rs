@@ -718,7 +718,7 @@ impl EventDecoder {
                         "input": [{"type": "text", "text": self.request.prompt}]});
                     let input = params["input"].as_array_mut().expect("input array");
                     for image in &self.request.attachments {
-                        input.push(json!({"type": "text", "text": format!("{} · page {}", image.source_name, image.page)}));
+                        input.push(json!({"type": "text", "text": image.label()}));
                         input.push(json!({"type": "localImage", "path": image.path}));
                     }
                     if !self.request.effort.is_default() {
@@ -1312,10 +1312,11 @@ mod tests {
         }
         for session_id in [None, Some("existing-thread")] {
             let mut request = request();
-            request.attachments = vec![nexus_domain::ImageAttachment {
+            request.attachments = vec![nexus_domain::Attachment {
                 path: "/tmp/captured page.png".into(),
                 source_name: "报告.pdf".into(),
-                page: 12,
+                page: Some(12),
+                kind: nexus_domain::AttachmentKind::Image,
             }];
             request.session_id = session_id.map(str::to_owned);
             request.model = Some("gpt-test".into());

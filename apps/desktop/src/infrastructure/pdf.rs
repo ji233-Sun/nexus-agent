@@ -138,7 +138,7 @@ fn document_router(prefix: &str, document: &Path, state: DocumentState) -> Route
             .route(
                 "/capture/{page}",
                 post(capture).layer(DefaultBodyLimit::max(
-                    nexus_domain::ImageAttachment::MAX_BYTES,
+                    nexus_domain::Attachment::MAX_IMAGE_BYTES,
                 )),
             )
             .route(
