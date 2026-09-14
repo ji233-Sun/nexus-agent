@@ -657,8 +657,13 @@ mod tests {
             cx.notify();
         });
         cx.run_until_parked();
-        let channel_button = cx.debug_bounds("update-channel-nightly").unwrap().center();
-        cx.simulate_click(channel_button, Default::default());
+        // The installed channel follows the compiled release tag, so switch explicitly
+        // instead of relying on the ambient default to already be Nightly.
+        view.update_in(cx, |view, _, cx| {
+            assert!(view.presenter.set_update_channel(UpdateChannel::Nightly));
+            cx.notify();
+        });
+        cx.run_until_parked();
         assert_eq!(
             view.read_with(cx, |view, _| view.presenter.model().updates.channel),
             UpdateChannel::Nightly
