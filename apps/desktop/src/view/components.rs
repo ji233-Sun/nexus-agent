@@ -399,13 +399,14 @@ impl NexusView {
         role: MessageRole,
         content: &str,
         kind: MessageKind,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<NexusView>,
     ) -> AnyElement {
         let colors = palette(cx);
-        let compact = window.viewport_size().width < px(1000.);
-        let body_size = if compact { 14. } else { 15. };
-        let line_height = if compact { 23. } else { 24. };
+        // Codex desktop defaults: 14px body at 1.625 leading, and every block
+        // size derived from the body size so the prose keeps one rhythm.
+        let body_size = 14.;
+        let line_height = 23.;
         let id = id.into();
         let selector = format!("message-{id}");
         let animated = !self.reduced_motion;
@@ -445,7 +446,10 @@ impl NexusView {
                             .border_color(rgb(colors.border))
                             .p_3()
                     })
-                    .when(!is_user && !is_panel, |element| element.px_1().py_2())
+                    // Vertical rhythm belongs to the timeline's item gap alone;
+                    // per-card padding would double the space before a markdown
+                    // block that follows a tool row (24px instead of 16px).
+                    .when(!is_user && !is_panel, |element| element.px_1())
                     .when(show_label, |element| {
                         element.child(
                             div()
@@ -471,15 +475,16 @@ impl NexusView {
                             .line_height(px(line_height))
                             .style(
                                 TextViewStyle::default()
-                                    .paragraph_gap(gpui::rems(1.))
+                                    // Codex sizes the paragraph gap from the
+                                    // body font itself (space x 4 = 14px).
+                                    .paragraph_gap(gpui::rems(14. / 16.))
                                     .heading_font_size(move |level, _| {
                                         px(body_size
-                                            + match level {
-                                                1 => 6.,
-                                                2 => 4.,
-                                                3 => 2.,
-                                                4 => 1.,
-                                                _ => 0.,
+                                            * match level {
+                                                1 => 1.5,
+                                                2 => 1.25,
+                                                3 => 1.125,
+                                                _ => 1.,
                                             })
                                     })
                                     .inline_code(gpui::HighlightStyle {
@@ -489,8 +494,8 @@ impl NexusView {
                                     .code_block(
                                         gpui::StyleRefinement::default()
                                             .font_family(mono_font(cx))
-                                            .text_size(px(13.))
-                                            .line_height(px(21.))
+                                            .text_size(px(12.))
+                                            .line_height(px(20.))
                                             .p(px(16.))
                                             .bg(rgb(colors.elevated))
                                             .border_1()
@@ -509,8 +514,8 @@ impl NexusView {
                                     )
                                     .table_cell(
                                         gpui::StyleRefinement::default()
-                                            .text_size(px(body_size))
-                                            .line_height(px(line_height))
+                                            .text_size(px(13.))
+                                            .line_height(px(20.))
                                             .px(px(12.))
                                             .py(px(8.)),
                                     ),
