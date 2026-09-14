@@ -393,11 +393,13 @@ mod tests {
         presenter.drain_events();
         let first = presenter.model().messages[1].id;
         let tool = presenter.model().messages[2].id;
+        let after_tools = presenter.model().messages[4].id;
         let answer = presenter.model().messages.last().unwrap().id;
         let selector: &'static str = format!("process-{first}").leak();
         let label_selector: &'static str = format!("process-label-{first}").leak();
         let content_selector: &'static str = format!("process-content-{first}").leak();
         let message_selector: &'static str = format!("message-{first}").leak();
+        let after_tools_selector: &'static str = format!("message-{after_tools}").leak();
         let answer_selector: &'static str = format!("message-{answer}").leak();
         let batch_selector: &'static str = format!("tool-batch-{tool}").leak();
         let row_selector: &'static str = format!("tool-row-{tool}").leak();
@@ -418,6 +420,11 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds(selector).is_none());
         assert!(cx.debug_bounds(message_selector).is_some());
+        // Codex separates a tool row from the markdown after it by one 16px
+        // conversation gap; the message card must not add padding of its own.
+        let batch = cx.debug_bounds(batch_selector).unwrap();
+        let after_tools = cx.debug_bounds(after_tools_selector).unwrap();
+        assert_eq!(after_tools.top() - batch.bottom(), px(16.));
 
         runner.emit(Event::RunExited {
             run_id,
