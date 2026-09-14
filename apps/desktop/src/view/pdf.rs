@@ -30,7 +30,7 @@ impl NexusView {
             let _ = view.update(cx, |view, cx| {
                 match result {
                     Ok(server) => open_window(server, cx),
-                    Err(error) => view.presenter.report_pdf_error(error.to_string()),
+                    Err(error) => view.presenter.report_attachment_error(error.to_string()),
                 }
                 cx.notify();
             });
@@ -55,11 +55,11 @@ impl NexusView {
                         .attach_pdf_capture(&name, page, &bytes)
                         .map_err(|error| error.to_string());
                     if let Err(error) = &result {
-                        self.presenter.report_pdf_error(error.clone());
+                        self.presenter.report_attachment_error(error.clone());
                     }
                     let _ = reply.send(result);
                 }
-                PdfEvent::Error(error) => self.presenter.report_pdf_error(error),
+                PdfEvent::Error(error) => self.presenter.report_attachment_error(error),
             }
             cx.notify();
         }

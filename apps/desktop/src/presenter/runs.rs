@@ -16,7 +16,50 @@ use std::time::Instant;
 use uuid::Uuid;
 
 impl Presenter {
-    pub(crate) fn report_pdf_error(&mut self, error: String) {
+    pub(crate) fn begin_attachment_import(
+        &mut self,
+        count: usize,
+    ) -> Option<(Uuid, std::path::PathBuf)> {
+        if self.model.attachments_loading || count == 0 {
+            return None;
+        }
+        if self.model.attachments.len() + count > nexus_domain::Attachment::MAX_COUNT {
+            self.report_attachment_error("每条消息最多包含 8 个附件。".into());
+            return None;
+        }
+        self.model.attachments_loading = true;
+        self.model.attachment_error = None;
+        Some((
+            self.model.conversation.id,
+            self.storage.attachment_directory(),
+        ))
+    }
+
+    pub(crate) fn finish_attachment_import(
+        &mut self,
+        conversation_id: Uuid,
+        results: Vec<Result<nexus_domain::Attachment, String>>,
+    ) {
+        let conversation = if self.model.conversation.id == conversation_id {
+            Some(&mut self.model.conversation)
+        } else {
+            self.model.conversations.get_mut(&conversation_id)
+        };
+        let Some(conversation) = conversation else {
+            return;
+        };
+        conversation.attachments_loading = false;
+        let mut errors = Vec::new();
+        for result in results {
+            match result {
+                Ok(attachment) => conversation.attachments.push(attachment),
+                Err(error) => errors.push(error),
+            }
+        }
+        conversation.attachment_error = (!errors.is_empty()).then(|| errors.join("\n").into());
+    }
+
+    pub(crate) fn report_attachment_error(&mut self, error: String) {
         self.model.attachment_error = Some(error.clone().into());
         self.model.log_status(error.into());
     }
@@ -26,9 +69,10 @@ impl Presenter {
         page: u32,
         bytes: &[u8],
     ) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.model.attachments_loading, "正在添加附件，请稍候。");
         anyhow::ensure!(
-            self.model.attachments.len() < nexus_domain::ImageAttachment::MAX_COUNT,
-            "每条消息最多包含 8 张截图。"
+            self.model.attachments.len() < nexus_domain::Attachment::MAX_COUNT,
+            "每条消息最多包含 8 个附件。"
         );
         let image = self.storage.save_pdf_capture(name, page, bytes)?;
         self.model.attachments.push(image);
@@ -43,9 +87,12 @@ impl Presenter {
         self.model.attachment_error = None;
     }
 
-    pub(crate) fn restore_attachments(&mut self, images: &[nexus_domain::ImageAttachment]) -> bool {
-        if self.model.attachments.len() + images.len() > nexus_domain::ImageAttachment::MAX_COUNT {
-            self.model.attachment_error = Some("每条消息最多包含 8 张截图。".into());
+    pub(crate) fn restore_attachments(&mut self, images: &[nexus_domain::Attachment]) -> bool {
+        if self.model.attachments_loading {
+            return false;
+        }
+        if self.model.attachments.len() + images.len() > nexus_domain::Attachment::MAX_COUNT {
+            self.model.attachment_error = Some("每条消息最多包含 8 个附件。".into());
             return false;
         }
         self.model.attachments.extend_from_slice(images);
@@ -661,15 +708,20 @@ impl Presenter {
 
     pub(crate) fn submit(&mut self, prompt: &str, configured_executable: &str) -> bool {
         let attachments = self.model.attachments.clone();
-        if !attachments.is_empty()
-            && !nexus_domain::ImageAttachment::supported_by(self.model.selected_harness)
-        {
-            self.model.attachment_error =
-                Some("此 Harness 暂不支持截图输入，请选择 Codex 或 Claude Code。".into());
-            self.model
-                .log_status("此 Harness 暂不支持截图输入，请选择 Codex 或 Claude Code。".into());
+        if self.model.attachments_loading {
             return false;
         }
+        if let Err(error) =
+            nexus_harness_core::validate_attachments(&attachments, self.model.selected_harness)
+        {
+            self.report_attachment_error(error);
+            return false;
+        }
+        let prompt = if prompt.trim().is_empty() && !attachments.is_empty() {
+            self.model.language.text("请查看所附文件。")
+        } else {
+            prompt
+        };
         if self.model.active_run.is_some() {
             if !self.model.can_queue() || prompt.trim().is_empty() {
                 return false;
@@ -752,7 +804,7 @@ impl Presenter {
         };
         let run_id = self.model.active_run.unwrap();
         if !self.model.queued_messages[index].attachments.is_empty() {
-            self.model.log_status("含截图的消息将在下一轮发送。".into());
+            self.model.log_status("含附件的消息将在下一轮发送。".into());
             return false;
         }
         if self.model.active_permission_mode
@@ -998,21 +1050,13 @@ impl Presenter {
         prompt: &str,
         configured_executable: &str,
         permission_mode: PermissionMode,
-        attachments: &[nexus_domain::ImageAttachment],
+        attachments: &[nexus_domain::Attachment],
     ) -> bool {
-        if attachments.len() > nexus_domain::ImageAttachment::MAX_COUNT
-            || (!attachments.is_empty()
-                && !nexus_domain::ImageAttachment::supported_by(self.model.selected_harness))
+        if let Err(error) =
+            nexus_harness_core::validate_attachments(attachments, self.model.selected_harness)
         {
-            self.model
-                .log_status("截图输入需要 Codex 或 Claude Code，每条消息最多 8 张。".into());
+            self.report_attachment_error(error);
             return false;
-        }
-        for image in attachments {
-            if let Err(error) = nexus_harness_core::read_image_attachment(image) {
-                self.model.log_status(error.into());
-                return false;
-            }
         }
         if self.model.updates.state.is_installing() {
             self.model

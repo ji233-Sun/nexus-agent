@@ -509,20 +509,43 @@ pub enum MessageKind {
     Error,
 }
 
-/// A captured PDF page or region, stored independently of the source document.
+/// A managed local copy of a user attachment. Legacy captures default to images.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ImageAttachment {
+pub struct Attachment {
     pub path: String,
     pub source_name: String,
-    pub page: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<u32>,
+    #[serde(default)]
+    pub kind: AttachmentKind,
 }
 
-impl ImageAttachment {
-    pub const MAX_BYTES: usize = 5 * 1024 * 1024;
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentKind {
+    #[default]
+    Image,
+    File,
+}
+
+impl Attachment {
+    pub const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+    pub const MAX_FILE_BYTES: usize = 100 * 1024 * 1024;
     pub const MAX_COUNT: usize = 8;
 
-    pub fn supported_by(harness: HarnessKind) -> bool {
-        matches!(harness, HarnessKind::Codex | HarnessKind::Claude)
+    pub fn is_image(&self) -> bool {
+        self.kind == AttachmentKind::Image
+    }
+
+    pub fn supported_by(&self, harness: HarnessKind) -> bool {
+        !self.is_image() || matches!(harness, HarnessKind::Codex | HarnessKind::Claude)
+    }
+
+    pub fn label(&self) -> String {
+        match self.page {
+            Some(page) => format!("{} · page {page}", self.source_name),
+            None => self.source_name.clone(),
+        }
     }
 }
 
@@ -536,7 +559,7 @@ pub struct Message {
     pub kind: MessageKind,
     pub content: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub attachments: Vec<ImageAttachment>,
+    pub attachments: Vec<Attachment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool: Option<ToolMetadata>,
     pub created_at: DateTime<Utc>,

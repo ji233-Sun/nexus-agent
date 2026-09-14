@@ -273,7 +273,9 @@ pub(super) fn matches_search(text: &str, query: &str) -> bool {
 }
 
 pub(super) fn can_send_prompt(model: &crate::model::AppModel, prompt: &str) -> bool {
-    (model.can_submit() || model.can_queue()) && !prompt.trim().is_empty()
+    (model.can_submit() || model.can_queue())
+        && !model.attachments_loading
+        && (!prompt.trim().is_empty() || !model.attachments.is_empty())
 }
 
 impl NexusView {
@@ -300,11 +302,7 @@ impl NexusView {
                 let images = message.attachments.clone();
                 let prompt = message.content.clone();
                 element
-                    .child(self.render_attachment_images(
-                        &message.attachments,
-                        Some(message.id),
-                        cx,
-                    ))
+                    .child(self.render_attachments(&message.attachments, Some(message.id), cx))
                     .child(
                         Button::new((ElementId::from(message.id), "reuse-images"))
                             .ghost()
@@ -326,9 +324,9 @@ impl NexusView {
             .into_any_element()
     }
 
-    pub(super) fn render_attachment_images(
+    pub(super) fn render_attachments(
         &self,
-        images: &[nexus_domain::ImageAttachment],
+        attachments: &[nexus_domain::Attachment],
         message_id: Option<uuid::Uuid>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -339,10 +337,10 @@ impl NexusView {
             .flex()
             .flex_wrap()
             .gap_2()
-            .children(images.iter().enumerate().map(|(index, image)| {
+            .children(attachments.iter().enumerate().map(|(index, attachment)| {
                 let id = ElementId::from(SharedString::from(format!(
-                    "capture-{message_id:?}-{index}-{}",
-                    image.path
+                    "attachment-{message_id:?}-{index}-{}",
+                    attachment.path
                 )));
                 let expanded = self.expanded_messages.contains(&id);
                 div()
@@ -350,37 +348,46 @@ impl NexusView {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(
-                        gpui::img(std::path::PathBuf::from(&image.path))
-                            .w(px(if expanded { 440. } else { 140. }))
-                            .h(px(if expanded { 360. } else { 96. }))
-                            .object_fit(ObjectFit::Contain)
-                            .cursor_pointer()
-                            .on_mouse_down(
-                                gpui::MouseButton::Left,
-                                cx.listener(move |app, _, _, cx| {
-                                    if !app.expanded_messages.remove(&id) {
-                                        app.expanded_messages.insert(id.clone());
-                                    }
-                                    cx.notify();
-                                }),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .max_w(px(180.))
-                            .text_size(px(11.))
-                            .truncate()
-                            .child(format!(
-                                "{} · {} {}",
-                                image.source_name,
-                                locale.text("页"),
-                                image.page
-                            )),
-                    )
+                    .when(attachment.is_image(), |element| {
+                        element.child(
+                            gpui::img(std::path::PathBuf::from(&attachment.path))
+                                .w(px(if expanded { 440. } else { 140. }))
+                                .h(px(if expanded { 360. } else { 96. }))
+                                .object_fit(ObjectFit::Contain)
+                                .cursor_pointer()
+                                .on_mouse_down(
+                                    gpui::MouseButton::Left,
+                                    cx.listener(move |app, _, _, cx| {
+                                        if !app.expanded_messages.remove(&id) {
+                                            app.expanded_messages.insert(id.clone());
+                                        }
+                                        cx.notify();
+                                    }),
+                                ),
+                        )
+                    })
+                    .when(!attachment.is_image(), |element| {
+                        let path = std::path::PathBuf::from(&attachment.path);
+                        element.child(
+                            Button::new(("attachment-file", index))
+                                .ghost()
+                                .icon(IconName::File)
+                                .label(locale.text("文件"))
+                                .tooltip(attachment.source_name.clone())
+                                .on_click(move |_, _, cx| cx.reveal_path(&path)),
+                        )
+                    })
+                    .child(div().max_w(px(180.)).text_size(px(11.)).truncate().child(
+                        match attachment.page {
+                            Some(page) => {
+                                format!("{} · {} {page}", attachment.source_name, locale.text("页"))
+                            }
+                            None => attachment.source_name.clone(),
+                        },
+                    ))
                     .when(draft, |el| {
                         el.child(
-                            Button::new(("remove-capture", index))
+                            Button::new(("remove-attachment", index))
                                 .ghost()
                                 .small()
                                 .label(locale.text("移除"))
@@ -1004,6 +1011,21 @@ mod tests {
         for prompt in ["", "  ", "\n\t", "\u{3000}"] {
             assert!(!can_send_prompt(&model, prompt));
         }
+        model.attachments.push(nexus_domain::Attachment {
+            path: directory
+                .path()
+                .join("notes.txt")
+                .to_string_lossy()
+                .into_owned(),
+            source_name: "notes.txt".into(),
+            page: None,
+            kind: nexus_domain::AttachmentKind::File,
+        });
+        assert!(can_send_prompt(&model, ""));
+        model.attachments_loading = true;
+        assert!(!can_send_prompt(&model, ""));
+        assert!(!can_send_prompt(&model, "wait"));
+        model.attachments_loading = false;
         model.active_run = Some(Uuid::new_v4());
         assert!(!can_send_prompt(&model, "检查当前项目"));
         model.active_task = Some(Uuid::new_v4());

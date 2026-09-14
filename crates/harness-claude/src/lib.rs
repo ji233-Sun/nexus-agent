@@ -117,9 +117,9 @@ pub fn prepare_run(request: &StartRun, cwd: &Path) -> Result<LaunchSpec, String>
         let mut content = vec![json!({"type": "text", "text": request.prompt})];
         for image in &request.attachments {
             let bytes = nexus_harness_core::read_image_attachment(image)?;
-            content.push(json!({"type": "text", "text": format!("{} · page {}", image.source_name, image.page)}));
+            content.push(json!({"type": "text", "text": image.label()}));
             content.push(json!({"type": "image", "source": {
-                "type": "base64", "media_type": "image/png",
+                "type": "base64", "media_type": nexus_harness_core::image_media_type(&bytes).expect("validated image"),
                 "data": base64::engine::general_purpose::STANDARD.encode(bytes)
             }}));
         }
