@@ -18,6 +18,7 @@ packages=(
   libvulkan1
   libglib2.0-dev
   libasound2-dev
+  libwebkit2gtk-4.1-dev
 )
 missing_packages=()
 for package in "${packages[@]}"; do
