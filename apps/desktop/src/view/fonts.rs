@@ -276,12 +276,12 @@ impl NexusView {
                     )
                     .child(
                         div().debug_selector(|| "font-preview-reading".into())
-                            .font(reading_font(cx)).text_size(px(17.)).line_height(px(30.))
+                            .font(reading_font(cx)).text_size(px(15.)).line_height(px(24.))
                             .child(locale.text("清晰的文字，让思路自然展开。The quick brown fox · 0123456789")),
                     )
                     .child(
                         div().debug_selector(|| "font-preview-code".into())
-                            .font_family(mono_font(cx)).text_size(px(14.)).line_height(px(22.))
+                            .font_family(mono_font(cx)).text_size(px(13.)).line_height(px(21.))
                             .px_3().py_2().rounded(px(CONTROL_RADIUS)).bg(rgb(colors.surface))
                             .child("fn main() { println!(\"Hello, 世界!\"); }"),
                     ),

@@ -399,10 +399,13 @@ impl NexusView {
         role: MessageRole,
         content: &str,
         kind: MessageKind,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<NexusView>,
     ) -> AnyElement {
         let colors = palette(cx);
+        let compact = window.viewport_size().width < px(1000.);
+        let body_size = if compact { 14. } else { 15. };
+        let line_height = if compact { 23. } else { 24. };
         let id = id.into();
         let selector = format!("message-{id}");
         let animated = !self.reduced_motion;
@@ -463,20 +466,21 @@ impl NexusView {
                             .when(role == MessageRole::Assistant, |text| {
                                 text.font(reading_font(cx))
                             })
-                            .text_size(px(if is_user { 15. } else { 17. }))
+                            .text_size(px(body_size))
                             .font_weight(gpui::FontWeight::NORMAL)
-                            .line_height(px(if is_user { 24. } else { 30. }))
+                            .line_height(px(line_height))
                             .style(
                                 TextViewStyle::default()
                                     .paragraph_gap(gpui::rems(1.))
-                                    .heading_font_size(|level, _| {
-                                        px(match level {
-                                            1 => 26.,
-                                            2 => 23.,
-                                            3 => 20.,
-                                            4 => 18.,
-                                            _ => 17.,
-                                        })
+                                    .heading_font_size(move |level, _| {
+                                        px(body_size
+                                            + match level {
+                                                1 => 6.,
+                                                2 => 4.,
+                                                3 => 2.,
+                                                4 => 1.,
+                                                _ => 0.,
+                                            })
                                     })
                                     .inline_code(gpui::HighlightStyle {
                                         background_color: Some(rgb(colors.surface).into()),
@@ -485,8 +489,8 @@ impl NexusView {
                                     .code_block(
                                         gpui::StyleRefinement::default()
                                             .font_family(mono_font(cx))
-                                            .text_size(px(14.))
-                                            .line_height(px(22.))
+                                            .text_size(px(13.))
+                                            .line_height(px(21.))
                                             .p(px(16.))
                                             .bg(rgb(colors.elevated))
                                             .border_1()
@@ -505,8 +509,8 @@ impl NexusView {
                                     )
                                     .table_cell(
                                         gpui::StyleRefinement::default()
-                                            .text_size(px(15.))
-                                            .line_height(px(24.))
+                                            .text_size(px(body_size))
+                                            .line_height(px(line_height))
                                             .px(px(12.))
                                             .py(px(8.)),
                                     ),

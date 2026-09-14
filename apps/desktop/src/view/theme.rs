@@ -106,36 +106,7 @@ pub(super) fn configure_fonts(settings: &FontSettings, cx: &mut App) {
         .as_ref()
         .filter(|name| installed.contains(name))
         .map(|name| gpui_kit::font(name.clone()))
-        .unwrap_or_else(|| {
-            let available = |name: &&str| installed.iter().any(|font| font == *name);
-            let family = [
-                "Charter",
-                "Georgia",
-                "Noto Serif",
-                "DejaVu Serif",
-                "Liberation Serif",
-            ]
-            .into_iter()
-            .find(available)
-            .unwrap_or(".SystemUIFont");
-            // Explicit CJK fallbacks keep mixed prose in a consistent serif style.
-            let fallbacks = [
-                "Songti SC",
-                "Songti TC",
-                "Noto Serif CJK SC",
-                "Source Han Serif SC",
-                "SimSun",
-                "NSimSun",
-            ]
-            .into_iter()
-            .filter(available)
-            .map(str::to_owned)
-            .collect();
-            gpui_kit::Font {
-                fallbacks: Some(gpui_kit::FontFallbacks::from_fonts(fallbacks)),
-                ..gpui_kit::font(family)
-            }
-        });
+        .unwrap_or_else(|| gpui_kit::font(".SystemUIFont"));
     let code = settings
         .code
         .as_ref()
@@ -404,6 +375,7 @@ mod tests {
         cx.update(|cx| {
             let default_reading = reading_font(cx);
             let default_code = mono_font(cx);
+            assert_eq!(default_reading, gpui_kit::font(".SystemUIFont"));
             let mut appearance = *cx.global::<ResolvedAppearance>();
             let settings = FontSettings {
                 reading: Some(".SystemUIFont".into()),
