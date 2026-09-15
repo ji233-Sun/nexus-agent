@@ -18,7 +18,7 @@
 
 ---
 
-**Nexus Agent** 是一个原生桌面工作区，将 **Claude Code、Codex CLI、Oh My Pi（OMP）、Pi、Kimi Code、Qoder（国际/国内版）和 CodeBuddy** 汇集在同一界面。从选择项目、发起任务，到跟进执行、审查代码变更和继续会话，都可以在这里完成。
+**Nexus Agent** 是一个原生桌面工作区，将 **Claude Code、Codex CLI、Oh My Pi（OMP）、Pi、Kimi Code、Qoder（国际/国内版）、CodeBuddy 和 OpenCode** 汇集在同一界面。从选择项目、发起任务，到跟进执行、审查代码变更和继续会话，都可以在这里完成。
 
 基于 Rust 与 GPUI 构建，支持 macOS、Linux 和 Windows，提供简体中文与 English 界面。
 

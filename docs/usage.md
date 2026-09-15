@@ -213,9 +213,9 @@ Pi 使用官方 `@earendil-works/pi-coding-agent`（`pi`）的 RPC 模式，模�
 
 Ask 模式允许内置只读工具，其余工具通过审批；Auto Edit 额外允许 write/edit；YOLO 放行工具。审批由随进程加载的扩展实现，扩展未就绪时不会发送任务。后台标题生成禁用工具、扩展并关闭会话保存。Pi 的原生选择和文本提问复用 RPC User Ask 面板。
 
-### Kimi Code、Qoder 与 CodeBuddy
+### Kimi Code、Qoder、CodeBuddy 与 OpenCode
 
-Kimi Code 只支持 ACP，新会话固定使用 ACP 接入。Qoder / Qoder CN / CodeBuddy 新会话默认使用原生 stream-json，设置中的「接入方式」可以切换到 ACP，均支持流式回答、工具结果、审批和原生会话续聊。先在各自 CLI 完成登录：`kimi login`、`qoder login`、`qodercn login`、`codebuddy login`。
+Kimi Code 和 OpenCode 只支持 ACP，新会话固定使用 ACP 接入。Qoder / Qoder CN / CodeBuddy 新会话默认使用原生 stream-json，设置中的「接入方式」可以切换到 ACP，均支持流式回答、工具结果、审批和原生会话续聊。先在各自 CLI 完成登录：`kimi login`、`qoder login`、`qodercn login`、`codebuddy login`、`opencode auth login`。
 
 | 引擎 | 本次核对的 CLI | 安装与配置 |
 | --- | --- | --- |
@@ -223,15 +223,16 @@ Kimi Code 只支持 ACP，新会话固定使用 ACP 接入。Qoder / Qoder CN / 
 | Qoder 国际版 | `@qoder-ai/qodercli` 1.1.48，命令 `qoder` | Provider Token 使用 `QODER_PERSONAL_ACCESS_TOKEN` |
 | Qoder 国内版 | `@qodercn-ai/qoderclicn` 1.1.48，命令 `qodercn` | 独立安装和配置；Provider Token 使用 `QODERCN_PERSONAL_ACCESS_TOKEN` |
 | CodeBuddy | `@tencent-ai/codebuddy-code` 2.147.0 | 国内/国际共用安装包；支持 `CODEBUDDY_API_KEY` / `CODEBUDDY_BASE_URL` |
+| OpenCode | `opencode-ai` 1.18.31，命令 `opencode` | 安装菜单在 macOS / Linux 提供[官方安装脚本](https://opencode.ai/docs/)（`~/.opencode/bin`，用 `opencode upgrade` 更新），Windows 回退到 npm / Scoop；模型标识为 `provider/model`，Provider 与 API Key 在 `opencode auth login` 配置 |
 
 CodeBuddy 设置提供「跟随 CLI」「国内」「国际」。选择地区时仅向子进程传入 `CODEBUDDY_INTERNET_ENVIRONMENT=internal|external`，用于探测、模型目录、任务和后台文本生成，不修改 CLI 全局配置。账号须在相应地区具备访问权限。
 
 Ask 显示 CLI 请求的审批；Auto Edit 自动批准编辑请求，其余继续询问；YOLO 批准 CLI 交出的工具审批，仍保留 User Ask 问答，不绕过 CLI 强制策略。CLI 自己允许的只读或已配置操作不会额外弹窗。原生模式支持结构化选择及自定义回答。CodeBuddy 支持运行中补充消息的原生接收回执；Kimi、Qoder 和 ACP 的补充消息在下一轮发送。
 
-模型和思考层级仍通过 ACP 从当前 CLI 获取。Kimi Code 需要原生登录状态，仅填写 Provider API Key 不能替代探测的登录检查；探测与刷新目录不会调用模型，但 CLI 可能保存空会话。
+模型和思考层级仍通过 ACP 从当前 CLI 获取。Kimi Code 和 OpenCode 需要原生登录状态，仅填写 Provider API Key 不能替代探测的登录检查；探测与刷新目录不会调用模型，但 CLI 可能保存空会话。OpenCode 的模型目录沿用 CLI 的 `provider/model` 标识；由于 ACP 会话新建时默认落在 `build` 模式，Nexus 会显式恢复该模式，OpenCode 没有其他引擎使用的 `default` 模式。
 
-接入方式设置影响新会话；已有会话沿用创建时的协议，旧版本的未标记会话继续使用 ACP。Kimi Code 只使用 ACP，旧版 `kimi-cli` Wire 会话无法恢复，需升级到 kimi-code 后重新开始会话。CodeBuddy 新会话同时记录显式选择的地区，续聊时恢复该地区。原生 Session 必须仍然存在。ACP v1 的厂商私有 User Ask 扩展尚未接入。
+接入方式设置影响新会话；已有会话沿用创建时的协议，旧版本的未标记会话继续使用 ACP。Kimi Code 只使用 ACP，旧版 `kimi-cli` Wire 会话无法恢复，需升级到 kimi-code 后重新开始会话；OpenCode 同样只使用 ACP。CodeBuddy 新会话同时记录显式选择的地区，续聊时恢复该地区。原生 Session 必须仍然存在。ACP v1 的厂商私有 User Ask 扩展尚未接入。
 
-后台标题中 Qoder / CodeBuddy 禁用工具与 MCP，并关闭会话保存；Kimi Code 使用 `kimi -p --output-format stream-json` 与无工具的临时 Markdown Agent。Kimi Code 没有禁用 MCP 或 hooks 的启动参数，标题会话仍会加载用户 MCP 声明、触发已配置的 hooks，并在自己的数据目录保留会话，但不续用任务会话。
+后台标题中 Qoder / CodeBuddy 禁用工具与 MCP，并关闭会话保存；Kimi Code 使用 `kimi -p --output-format stream-json` 与无工具的临时 Markdown Agent；OpenCode 使用 `opencode run --format json` 与通过 `OPENCODE_CONFIG_CONTENT` 内联注册的无工具 Agent，不写入用户的 opencode 配置目录。Kimi Code 没有禁用 MCP 或 hooks 的启动参数，标题会话仍会加载用户 MCP 声明、触发已配置的 hooks，并在自己的数据目录保留会话，但不续用任务会话。
 
-四个新增引擎也可用于侧栏的提交说明生成，复用无工具的后台文本生成配置。提交说明保留主题与正文的换行，不会作为会话消息发送。
+上述引擎也可用于侧栏的提交说明生成，复用无工具的后台文本生成配置。提交说明保留主题与正文的换行，不会作为会话消息发送。

@@ -2860,6 +2860,7 @@ fn emit_current_catalog(
             HarnessKind::Qoder => nexus_domain::ModelSource::QoderAcp,
             HarnessKind::QoderCn => nexus_domain::ModelSource::QoderCnAcp,
             HarnessKind::Codebuddy => nexus_domain::ModelSource::CodebuddyAcp,
+            HarnessKind::Opencode => nexus_domain::ModelSource::OpencodeAcp,
         };
     }
     runner.emit(Event::ModelCatalogLoaded {

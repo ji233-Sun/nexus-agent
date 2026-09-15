@@ -30,6 +30,10 @@ pub(super) fn harness_icon(harness: HarnessKind, colors: Palette, size: f32) -> 
             include_bytes!("../../assets/harness/codebuddy.svg"),
             rgb(colors.text),
         ),
+        HarnessKind::Opencode => (
+            include_bytes!("../../assets/harness/opencode.svg"),
+            rgb(colors.text),
+        ),
         HarnessKind::Claude => (
             include_bytes!("../../assets/harness/claude.svg"),
             rgb(0xd97757),

@@ -36,6 +36,8 @@ fn main() {
     }
     if args.iter().any(|arg| matches!(arg.as_str(), "acp" | "--acp")) { run_acp(&args); return; }
     let kimi_title = args.iter().any(|arg| arg == "--agent-file");
+    // OpenCode 的后台文本生成使用 `run --format json`。
+    let opencode_title = args.first().map(String::as_str) == Some("run");
     let harness = if matches!(
         args.first().map(String::as_str),
         Some("app-server" | "exec")
@@ -46,7 +48,7 @@ fn main() {
     } else {
         Harness::Claude
     };
-    let title = match harness {
+    let title = opencode_title || match harness {
         Harness::Codex => args
             .windows(2)
             .any(|pair| pair == ["--sandbox", "read-only"]),
@@ -112,6 +114,10 @@ fn main() {
         };
         if kimi_title {
             println!(r#"{{"role":"assistant","content":{text:?}}}"#);
+            return;
+        }
+        if opencode_title {
+            println!(r#"{{"type":"text","timestamp":0,"sessionID":"session-title","part":{{"id":"part-1","type":"text","text":{text:?}}}}}"#);
             return;
         }
         match harness {

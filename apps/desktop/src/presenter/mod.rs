@@ -1328,7 +1328,7 @@ impl Presenter {
     }
 
     pub(crate) fn harness_transport(&self, harness: HarnessKind) -> nexus_domain::HarnessTransport {
-        if harness == HarnessKind::Kimi
+        if matches!(harness, HarnessKind::Kimi | HarnessKind::Opencode)
             || self
                 .storage
                 .setting(&format!("harness_transport.{}", harness.as_str()))
@@ -1523,6 +1523,7 @@ fn executable_setting_key(harness: HarnessKind) -> &'static str {
         HarnessKind::Qoder => "qoder_executable",
         HarnessKind::QoderCn => "qodercn_executable",
         HarnessKind::Codebuddy => "codebuddy_executable",
+        HarnessKind::Opencode => "opencode_executable",
     }
 }
 

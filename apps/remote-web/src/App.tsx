@@ -15,6 +15,18 @@ const SESSION_ENDPOINT_KEY = "nexus.remote.endpoint";
 const SESSION_TOKEN_KEY = "nexus.remote.token";
 const REFRESH_DELAY_MS = 100;
 
+const HARNESS_LABELS: Record<RemoteState["harness"], string> = {
+  claude: "Claude Code",
+  codex: "Codex CLI",
+  omp: "Oh My Pi",
+  pi: "Pi",
+  kimi: "Kimi Code",
+  qoder: "Qoder",
+  qodercn: "Qoder CN",
+  codebuddy: "CodeBuddy",
+  opencode: "OpenCode",
+};
+
 function initialConnection(): ConnectionConfig | null {
   const fragment = new URLSearchParams(window.location.hash.slice(1));
   const fragmentToken = fragment.get("token")?.trim();
@@ -357,21 +369,7 @@ function RemoteWorkspace({
           </div>
           <div className="runtime-status">
             <span className={state?.harness_ready ? "ready" : "not-ready"}>
-              {state?.harness === "codex"
-                ? "Codex CLI"
-                : state?.harness === "pi"
-                  ? "Pi"
-                  : state?.harness === "kimi"
-                  ? "Kimi Code"
-                  : state?.harness === "qodercn"
-                  ? "Qoder CN"
-                  : state?.harness === "qoder"
-                  ? "Qoder"
-                  : state?.harness === "codebuddy"
-                  ? "CodeBuddy"
-                : state?.harness === "omp"
-                  ? "Oh My Pi"
-                  : "Claude Code"}
+              {state ? HARNESS_LABELS[state.harness] : "Claude Code"}
             </span>
             <span>{state?.effort ?? "—"}</span>
           </div>

@@ -32,10 +32,18 @@ fn initialize() -> InputFrame {
     )
 }
 fn args(harness: HarnessKind) -> Vec<String> {
-    if harness == HarnessKind::Kimi {
+    if matches!(harness, HarnessKind::Kimi | HarnessKind::Opencode) {
         vec!["acp".into()]
     } else {
         vec!["--acp".into(), "--permission-mode".into(), "default".into()]
+    }
+}
+// OpenCode 的原生默认模式是 build，没有 ACP 约定的 default 模式。
+fn default_mode(harness: HarnessKind) -> &'static str {
+    if harness == HarnessKind::Opencode {
+        "build"
+    } else {
+        "default"
     }
 }
 fn source(harness: HarnessKind) -> ModelSource {
@@ -44,6 +52,7 @@ fn source(harness: HarnessKind) -> ModelSource {
         HarnessKind::Qoder => ModelSource::QoderAcp,
         HarnessKind::QoderCn => ModelSource::QoderCnAcp,
         HarnessKind::Codebuddy => ModelSource::CodebuddyAcp,
+        HarnessKind::Opencode => ModelSource::OpencodeAcp,
         _ => unreachable!(),
     }
 }
@@ -131,7 +140,7 @@ impl EventDecoder {
         self.pending.push_back(request(
             "mode",
             "session/set_mode",
-            json!({"sessionId":self.session,"modeId":"default"}),
+            json!({"sessionId":self.session,"modeId":default_mode(self.harness)}),
         ));
         if let Some(model) = &self.model {
             let frame = if let Some(config) = config_option(&self.config, "model") {
@@ -663,6 +672,82 @@ impl LineDecoder for KimiTextDecoder {
     }
 }
 
+const OPENCODE_TEXT_AGENT: &str = "nexus-text";
+
+// 内联配置只为本次子进程注册一个无工具 Agent，不写入用户的 opencode 配置目录。
+fn opencode_text_config() -> String {
+    json!({"agent": {OPENCODE_TEXT_AGENT: {
+        "mode": "primary",
+        "description": "Nexus background text generation",
+        "prompt": "Follow the requested output format. Return only the requested text.",
+        "permission": {"*": "deny"},
+    }}})
+    .to_string()
+}
+
+pub fn prepare_opencode_text_generation(
+    run: &mut TextGenerationConfig,
+    prompt: &str,
+    cwd: &Path,
+) -> (LaunchSpec, OpencodeTextDecoder) {
+    run.environment.push(EnvironmentVariable {
+        name: "OPENCODE_CONFIG_CONTENT".into(),
+        value: opencode_text_config(),
+    });
+    let mut args: Vec<String> = ["run", "--format", "json", "--agent", OPENCODE_TEXT_AGENT]
+        .map(Into::into)
+        .to_vec();
+    if let Some(model) = &run.model {
+        args.extend(["--model".into(), model.clone()]);
+    }
+    (
+        LaunchSpec {
+            executable: run.executable.clone().into(),
+            args,
+            cwd: cwd.into(),
+            stdin: prompt.into(),
+        },
+        OpencodeTextDecoder::default(),
+    )
+}
+
+/// `opencode run --format json` 逐 Part 上报；同一 Part 会在流式更新中重复出现。
+#[derive(Default)]
+pub struct OpencodeTextDecoder {
+    text: String,
+    part: Option<String>,
+    offset: usize,
+}
+
+impl LineDecoder for OpencodeTextDecoder {
+    fn decode_line(&mut self, line: &str) -> Result<Vec<DecodedEvent>, serde_json::Error> {
+        let frame: Value = serde_json::from_str(line)?;
+        match frame["type"].as_str().unwrap_or("") {
+            "text" => {
+                let part = &frame["part"];
+                let (Some(id), Some(chunk)) = (part["id"].as_str(), part["text"].as_str()) else {
+                    return Ok(vec![]);
+                };
+                if self.part.as_deref() != Some(id) {
+                    self.part = Some(id.into());
+                    self.offset = self.text.len();
+                }
+                self.text.truncate(self.offset);
+                self.text.push_str(chunk);
+                Ok(vec![DecodedEvent::MessageCompleted(self.text.clone())])
+            }
+            "error" => Ok(vec![DecodedEvent::Error(
+                "OpenCode 文本生成失败，请检查 CLI 登录与模型配置。".into(),
+            )]),
+            _ => Ok(vec![]),
+        }
+    }
+
+    fn steer(&mut self, _: &str, _: &str) -> Option<InputFrame> {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -726,6 +811,62 @@ mod tests {
                 matches!(&events[0],DecodedEvent::WriteStdin(f) if f.0["method"]=="session/prompt")
             );
         }
+    }
+    #[test]
+    fn opencode_restores_its_native_build_mode_before_the_first_prompt() {
+        let mut run = run(HarnessKind::Opencode);
+        run.session_id = Some("ses-1".into());
+        let (_, mut decoder) = prepare_run(&run, Path::new("/project"));
+        let events = decode(
+            &mut decoder,
+            response("session", json!({"sessionId":"ses-1"})),
+        );
+        // OpenCode 没有 `default` 模式，传错会直接让 session/set_mode 报 -32602。
+        assert!(
+            matches!(&events[1],DecodedEvent::WriteStdin(f) if f.0["method"]=="session/set_mode" && f.0["params"]["modeId"]=="build")
+        );
+    }
+    #[test]
+    fn opencode_text_generation_registers_a_tool_free_agent_and_replaces_streamed_parts() {
+        let mut config = TextGenerationConfig {
+            harness: HarnessKind::Opencode,
+            executable: "opencode".into(),
+            model: Some("anthropic/claude-haiku-4-5".into()),
+            effort: ThinkingEffort::Default,
+            environment: vec![],
+        };
+        let (spec, mut decoder) =
+            prepare_opencode_text_generation(&mut config, "title prompt", Path::new("/project"));
+        assert_eq!(spec.stdin, "title prompt");
+        assert!(spec.args.windows(2).any(|a| a == ["--agent", "nexus-text"]));
+        assert!(spec.args.windows(2).any(|a| a == ["--format", "json"]));
+        assert!(
+            spec.args
+                .windows(2)
+                .any(|a| a == ["--model", "anthropic/claude-haiku-4-5"])
+        );
+        assert!(!spec.args.contains(&"--session".into()));
+        let agent = config.environment.last().unwrap();
+        assert_eq!(agent.name, "OPENCODE_CONFIG_CONTENT");
+        let inline: Value = serde_json::from_str(&agent.value).unwrap();
+        assert_eq!(
+            inline["agent"][OPENCODE_TEXT_AGENT]["permission"]["*"],
+            "deny"
+        );
+        assert_eq!(inline["agent"][OPENCODE_TEXT_AGENT]["mode"], "primary");
+        let part = |text: &str| {
+            json!({"type":"text","timestamp":1,"sessionID":"ses-1",
+                   "part":{"id":"part-1","type":"text","text":text}})
+        };
+        let events = decoder.decode_line(&part("Fix").to_string()).unwrap();
+        assert!(matches!(&events[0],DecodedEvent::MessageCompleted(t) if t=="Fix"));
+        // 同一个 Part 的后续流式更新覆盖已收集的文本，而不是重复追加。
+        let events = decoder.decode_line(&part("Fix login").to_string()).unwrap();
+        assert!(matches!(&events[0],DecodedEvent::MessageCompleted(t) if t=="Fix login"));
+        let events = decoder
+            .decode_line(r#"{"type":"error","error":{"data":{"message":"token=private"}}}"#)
+            .unwrap();
+        assert!(matches!(&events[0],DecodedEvent::Error(message) if !message.contains("private")));
     }
     #[test]
     fn permissions_preserve_native_ids_and_auto_edit_only_approves_edits() {
@@ -814,6 +955,25 @@ mod tests {
                 .supported_reasoning_efforts
                 .len(),
             2
+        );
+        // OpenCode 的 session/new 只回 model / mode 两组扁平选项，没有思考层级。
+        let models = catalog(
+            HarnessKind::Opencode,
+            &json!({"sessionId":"ses-1","configOptions":[
+                {"id":"model","category":"model","type":"select","currentValue":"opencode/big-pickle",
+                 "options":[{"value":"anthropic/claude-opus-5","name":"Anthropic/Claude Opus 5"},
+                            {"value":"opencode/big-pickle","name":"OpenCode/Big Pickle"}]},
+                {"id":"mode","category":"mode","type":"select","currentValue":"build",
+                 "options":[{"value":"build","name":"build"},{"value":"plan","name":"plan"}]}]}),
+        )
+        .unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "anthropic/claude-opus-5");
+        assert!(models[1].is_default);
+        assert!(
+            models
+                .iter()
+                .all(|model| model.supported_reasoning_efforts.is_empty())
         );
         let mut run = run(HarnessKind::Codebuddy);
         run.model = Some("custom".into());

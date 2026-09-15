@@ -246,13 +246,13 @@ pub(crate) async fn generate_commit_message(
 }
 
 async fn generate_text(
-    request: nexus_protocol::TextGenerationConfig,
+    mut request: nexus_protocol::TextGenerationConfig,
     cwd: std::path::PathBuf,
     prompt: String,
     mut cancel: watch::Receiver<bool>,
 ) -> Option<String> {
     let (mut spec, decoder) =
-        super::harness::prepare_text_generation(&request, &cwd, &prompt).ok()?;
+        super::harness::prepare_text_generation(&mut request, &cwd, &prompt).ok()?;
     spec.executable = nexus_harness_core::resolve_executable(&request.executable)?;
     let mut child = process_command(&spec, &request.environment).spawn().ok()?;
     let pid = child.id().unwrap_or_default();
@@ -1237,7 +1237,9 @@ mod tests {
                         }}
                     })
                 ),
-                HarnessKind::Omp | HarnessKind::Pi | HarnessKind::Kimi => unreachable!(),
+                HarnessKind::Omp | HarnessKind::Pi | HarnessKind::Kimi | HarnessKind::Opencode => {
+                    unreachable!()
+                }
             }
         }
     }
