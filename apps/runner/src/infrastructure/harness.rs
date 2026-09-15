@@ -20,9 +20,11 @@ pub(crate) async fn probe(
         HarnessKind::Codex => codex::probe(executable).await,
         HarnessKind::Omp => omp::probe(executable).await,
         HarnessKind::Pi => pi::probe(executable).await,
-        HarnessKind::Kimi | HarnessKind::Qoder | HarnessKind::QoderCn | HarnessKind::Codebuddy => {
-            acp::probe(harness, executable, environment).await
-        }
+        HarnessKind::Kimi
+        | HarnessKind::Qoder
+        | HarnessKind::QoderCn
+        | HarnessKind::Codebuddy
+        | HarnessKind::Opencode => acp::probe(harness, executable, environment).await,
     }
 }
 
@@ -37,7 +39,11 @@ pub(crate) async fn discover_models(
         HarnessKind::Codex => codex::discover_models(executable, cwd, environment, cancel).await,
         HarnessKind::Omp => omp::discover_models(executable, cwd, environment, cancel).await,
         HarnessKind::Pi => pi::discover_models(executable, cwd, environment, cancel).await,
-        HarnessKind::Kimi | HarnessKind::Qoder | HarnessKind::QoderCn | HarnessKind::Codebuddy => {
+        HarnessKind::Kimi
+        | HarnessKind::Qoder
+        | HarnessKind::QoderCn
+        | HarnessKind::Codebuddy
+        | HarnessKind::Opencode => {
             acp::discover_models(harness, executable, cwd, environment, cancel).await
         }
         HarnessKind::Claude => claude::discover_models(executable, cwd, environment, cancel).await,
@@ -155,8 +161,9 @@ fn prepare_native(
     cwd: &Path,
 ) -> Result<(LaunchSpec, Box<dyn LineDecoder>), String> {
     Ok(match request.harness {
-        // Kimi Code no longer ships the Wire protocol; ACP is its only transport.
-        HarnessKind::Kimi => {
+        // Kimi Code no longer ships the Wire protocol, and OpenCode's `run` output
+        // is not stream-json compatible; ACP is the only transport for both.
+        HarnessKind::Kimi | HarnessKind::Opencode => {
             let (spec, decoder) = acp::prepare_run(request, cwd);
             (spec, Box::new(decoder) as Box<dyn LineDecoder>)
         }
@@ -196,13 +203,17 @@ fn prepare_native(
 }
 
 pub(crate) fn prepare_text_generation(
-    request: &TextGenerationConfig,
+    request: &mut TextGenerationConfig,
     cwd: &Path,
     prompt: &str,
 ) -> Result<(LaunchSpec, Box<dyn LineDecoder>), String> {
     Ok(match request.harness {
         HarnessKind::Kimi => {
             let (spec, decoder) = acp::prepare_kimi_text_generation(request, prompt, cwd)?;
+            (spec, Box::new(decoder) as Box<dyn LineDecoder>)
+        }
+        HarnessKind::Opencode => {
+            let (spec, decoder) = acp::prepare_opencode_text_generation(request, prompt, cwd);
             (spec, Box::new(decoder) as Box<dyn LineDecoder>)
         }
         HarnessKind::Qoder | HarnessKind::QoderCn | HarnessKind::Codebuddy => {

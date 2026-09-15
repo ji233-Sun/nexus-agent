@@ -124,7 +124,7 @@ flowchart TB
 - `crates/harness-omp`：Oh My Pi 探测、受控写入模式和 JSON 事件解码。
 - `crates/harness-pi`：Pi RPC、临时审批扩展、原生 Session 文件与模型目录。
 - `crates/harness-cli`：复用 Claude 事件解码的 Qoder / Qoder CN / CodeBuddy stream-json 接入。
-- `crates/harness-acp`：Kimi Code / Qoder / CodeBuddy 共用的 ACP v1 握手、会话、模型配置、审批和事件适配。
+- `crates/harness-acp`：Kimi Code / Qoder / CodeBuddy / OpenCode 共用的 ACP v1 握手、会话、模型配置、审批和事件适配。
 - `apps/runner/src/transport.rs`：JSONL 命令读取、协议版本校验和事件写出。
 - `apps/runner/src/application`：命令调度、双任务并发、任务与 checkout 互斥、取消和统一事件转换。
 - `apps/runner/src/infrastructure`：Harness 适配器选择、子进程执行和平台相关的进程树清理。

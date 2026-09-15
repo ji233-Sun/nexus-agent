@@ -78,6 +78,7 @@ pub(crate) fn documentation(harness: HarnessKind) -> &'static str {
         HarnessKind::Qoder => "https://docs.qoder.com/cli/quick-start",
         HarnessKind::QoderCn => "https://docs.qoder.cn/cli/what-is-qoder-cli-cn",
         HarnessKind::Codebuddy => "https://www.codebuddy.ai/docs/cli/overview",
+        HarnessKind::Opencode => "https://opencode.ai/docs/",
     }
 }
 
@@ -91,6 +92,7 @@ fn package(harness: HarnessKind) -> &'static str {
         HarnessKind::Qoder => "@qoder-ai/qodercli",
         HarnessKind::QoderCn => "@qodercn-ai/qoderclicn",
         HarnessKind::Codebuddy => "@tencent-ai/codebuddy-code",
+        HarnessKind::Opencode => "opencode-ai",
     }
 }
 
@@ -570,6 +572,9 @@ fn manager_command(
 
 fn native_install(harness: HarnessKind, environment: &Environment) -> Option<MaintenanceCommand> {
     let (unix, windows) = match harness {
+        // OpenCode 官方只提供 Unix 安装脚本，Windows 走 npm / Scoop / Chocolatey。
+        HarnessKind::Opencode if environment.os == "windows" => return None,
+        HarnessKind::Opencode => ("curl -fsSL https://opencode.ai/install | bash", ""),
         HarnessKind::Pi | HarnessKind::Qoder | HarnessKind::QoderCn | HarnessKind::Codebuddy => {
             return None;
         }
@@ -641,6 +646,7 @@ fn install_options(
             HarnessKind::Claude => vec!["install", "--cask", "claude-code"],
             HarnessKind::Codex => vec!["install", "--cask", "codex"],
             HarnessKind::Omp => vec!["install", "can1357/tap/omp"],
+            HarnessKind::Opencode => vec!["install", "opencode"],
             HarnessKind::Pi
             | HarnessKind::Kimi
             | HarnessKind::Qoder
@@ -651,8 +657,9 @@ fn install_options(
         },
     ) && matches!(
         harness,
-        HarnessKind::Claude | HarnessKind::Codex | HarnessKind::Omp
-    ) && (environment.os == "macos" || harness == HarnessKind::Omp)
+        HarnessKind::Claude | HarnessKind::Codex | HarnessKind::Omp | HarnessKind::Opencode
+    ) && (environment.os == "macos"
+        || matches!(harness, HarnessKind::Omp | HarnessKind::Opencode))
     {
         options.push(InstallOption {
             method: InstallMethod::Homebrew,
@@ -692,7 +699,8 @@ fn winget_id(harness: HarnessKind) -> Option<&'static str> {
         | HarnessKind::Kimi
         | HarnessKind::Qoder
         | HarnessKind::QoderCn
-        | HarnessKind::Codebuddy => None,
+        | HarnessKind::Codebuddy
+        | HarnessKind::Opencode => None,
     }
 }
 
@@ -717,6 +725,7 @@ fn homebrew_owner(real: &Path, harness: HarnessKind) -> Option<(PathBuf, String,
         HarnessKind::Claude => "claude-code",
         HarnessKind::Codex => "codex",
         HarnessKind::Omp => "omp",
+        HarnessKind::Opencode => "opencode",
     };
     (name == expected
         || name == format!("{expected}@latest")
@@ -901,10 +910,11 @@ async fn ownership(
         HarnessKind::Qoder => "qoder",
         HarnessKind::QoderCn => "qodercn",
         HarnessKind::Codebuddy => "codebuddy",
+        HarnessKind::Opencode => "opencode",
     };
     if matches!(
         harness,
-        HarnessKind::Claude | HarnessKind::Codex | HarnessKind::Omp
+        HarnessKind::Claude | HarnessKind::Codex | HarnessKind::Omp | HarnessKind::Opencode
     ) && inside(real, &scoop.join("apps").join(scoop_name))
     {
         return (
@@ -940,6 +950,7 @@ async fn ownership(
                 .home_for("CODEX_HOME", ".codex")
                 .join("packages/standalone"),
         ),
+        HarnessKind::Opencode => inside(real, &environment.home.join(".opencode").join("bin")),
         HarnessKind::Omp => {
             let default = if environment.os == "windows" {
                 environment
@@ -984,8 +995,8 @@ async fn ownership(
                         )
                 })
             }
-        } else if harness == HarnessKind::Kimi {
-            // `kimi upgrade` resolves the native install source and updates in place.
+        } else if matches!(harness, HarnessKind::Kimi | HarnessKind::Opencode) {
+            // `upgrade` resolves the native install source and updates in place.
             Some(MaintenanceCommand::new(executable, ["upgrade"]))
         } else {
             Some(MaintenanceCommand::new(executable, ["update"]))
@@ -1443,6 +1454,7 @@ mod tests {
             ("codex-cli 0.110.0", "0.110.0"),
             ("omp/18.1.11\n", "18.1.11"),
             ("v3.20.1", "3.20.1"),
+            ("1.18.29\n", "1.18.29"),
         ] {
             assert_eq!(installed_version(output).as_deref(), Some(version));
         }
@@ -1480,6 +1492,38 @@ mod tests {
         }));
     }
 
+    #[test]
+    fn opencode_uses_its_unix_installer_and_the_npm_package_on_windows() {
+        let (_directory, _cancel, mut environment) = fixture();
+        environment.tools.insert("bash".into(), "/bin/bash".into());
+        let npm = manager(&environment, InstallMethod::Npm, "npm", "bin", "prefix");
+        let options = install_options(
+            HarnessKind::Opencode,
+            &environment,
+            std::slice::from_ref(&npm),
+        );
+        let native = options
+            .iter()
+            .find(|option| option.method == InstallMethod::Native);
+        match native {
+            // OpenCode 只有 Unix 安装脚本，Windows 上必须回退到包管理器。
+            None => assert_eq!(env::consts::OS, "windows"),
+            Some(option) => assert!(
+                option
+                    .command
+                    .args
+                    .last()
+                    .unwrap()
+                    .contains("opencode.ai/install")
+            ),
+        }
+        assert!(
+            options
+                .iter()
+                .any(|option| option.command.args.contains(&"opencode-ai@latest".into()))
+        );
+    }
+
     #[tokio::test]
     async fn latest_version_reads_the_latest_tag_for_each_harness() {
         let (_cancel, cancellation) = watch::channel(false);
@@ -1501,6 +1545,7 @@ mod tests {
                 "/@tencent-ai%2Fcodebuddy-code/latest",
                 "2.147.0",
             ),
+            (HarnessKind::Opencode, "/opencode-ai/latest", "1.18.31"),
             (HarnessKind::Kimi, "/kimi-code/latest", "0.42.0"),
             (
                 HarnessKind::Pi,
@@ -1950,6 +1995,11 @@ mod tests {
                 ".kimi-code/bin/kimi",
                 ".kimi-code/bin/kimi",
             ),
+            (
+                HarnessKind::Opencode,
+                ".opencode/bin/opencode",
+                ".opencode/bin/opencode",
+            ),
         ] {
             let (owner, command) = ownership(
                 harness,
@@ -1967,7 +2017,7 @@ mod tests {
                     environment.home.join(".local/bin").display().to_string()
                 );
                 assert_eq!(command.environment["CODEX_NON_INTERACTIVE"], "1");
-            } else if harness == HarnessKind::Kimi {
+            } else if matches!(harness, HarnessKind::Kimi | HarnessKind::Opencode) {
                 assert_eq!(command.args, ["upgrade"]);
             } else {
                 assert_eq!(command.args, ["update"]);

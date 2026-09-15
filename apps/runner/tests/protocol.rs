@@ -385,7 +385,8 @@ async fn approval_round_trip_for_each_harness_rejects_invalid_and_duplicate_resp
                 | HarnessKind::Kimi
                 | HarnessKind::Qoder
                 | HarnessKind::QoderCn
-                | HarnessKind::Codebuddy => {
+                | HarnessKind::Codebuddy
+                | HarnessKind::Opencode => {
                     assert_eq!(response["result"]["outcome"]["outcome"], "selected")
                 }
             }
@@ -596,7 +597,8 @@ async fn runner_resumes_each_harness_session_across_processes() {
             | HarnessKind::Kimi
             | HarnessKind::Qoder
             | HarnessKind::QoderCn
-            | HarnessKind::Codebuddy => "acp-args.txt",
+            | HarnessKind::Codebuddy
+            | HarnessKind::Opencode => "acp-args.txt",
         };
         let args = fs::read_to_string(directory.path().join(args_file)).unwrap();
         if harness == HarnessKind::Codex {
@@ -606,6 +608,14 @@ async fn runner_resumes_each_harness_session_across_processes() {
             .unwrap();
             assert_eq!(frame["method"], "thread/resume");
             assert_eq!(frame["params"]["threadId"], session_id);
+        } else if harness == HarnessKind::Opencode {
+            // OpenCode 只走 ACP，会话 ID 原样保存，不带 transport / 地区前缀。
+            let frame: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(directory.path().join("acp-session.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(frame["method"], "session/resume");
+            assert_eq!(frame["params"]["sessionId"], session_id);
         } else if transport == nexus_domain::HarnessTransport::Acp
             && matches!(
                 harness,
@@ -1218,6 +1228,7 @@ async fn commit_messages_use_each_harness_configuration_without_starting_a_run()
             HarnessKind::Omp | HarnessKind::Pi => "--no-tools",
             HarnessKind::Kimi => "--agent-file",
             HarnessKind::Qoder | HarnessKind::QoderCn | HarnessKind::Codebuddy => "--tools\n\n",
+            HarnessKind::Opencode => "--agent\nnexus-text",
         }));
         let prompt = fs::read_to_string(directory.path().join("title-prompt.txt")).unwrap();
         assert!(prompt.contains("selected change"));
@@ -1280,7 +1291,9 @@ async fn runner_generates_titles_with_each_harness_in_a_safe_background_process(
     for (harness, effort) in HarnessKind::ALL.into_iter().flat_map(|harness| {
         [ThinkingEffort::Default, ThinkingEffort::Low]
             .into_iter()
-            .filter(move |effort| harness != HarnessKind::Kimi || effort.is_default())
+            .filter(move |effort| {
+                !matches!(harness, HarnessKind::Kimi | HarnessKind::Opencode) || effort.is_default()
+            })
             .map(move |effort| (harness, effort))
     }) {
         let directory = tempfile::tempdir().unwrap();
@@ -1343,7 +1356,7 @@ async fn runner_generates_titles_with_each_harness_in_a_safe_background_process(
                 HarnessKind::Claude | HarnessKind::Codebuddy => "--effort\nlow",
                 HarnessKind::Qoder => "--reasoning-effort\nlow",
                 HarnessKind::QoderCn => "--reasoning-effort\nlow",
-                HarnessKind::Kimi => unreachable!(),
+                HarnessKind::Kimi | HarnessKind::Opencode => unreachable!(),
                 HarnessKind::Codex => "--config\nmodel_reasoning_effort=\"low\"",
                 HarnessKind::Omp | HarnessKind::Pi => "--thinking\nlow",
             }));
@@ -1389,6 +1402,11 @@ async fn runner_generates_titles_with_each_harness_in_a_safe_background_process(
                 assert!(args.contains("--no-tools"));
                 assert!(args.contains("--no-extensions"));
                 assert!(args.contains("--no-rules"));
+            }
+            HarnessKind::Opencode => {
+                assert!(args.contains("--format\njson"));
+                assert!(args.contains("--agent\nnexus-text"));
+                assert!(!args.contains("--session"));
             }
         }
         assert!(
@@ -1529,7 +1547,8 @@ async fn steer_waits_for_all_tools_and_uses_native_receipts_in_the_same_run() {
                 HarnessKind::Kimi
                 | HarnessKind::Qoder
                 | HarnessKind::QoderCn
-                | HarnessKind::Codebuddy => unreachable!(),
+                | HarnessKind::Codebuddy
+                | HarnessKind::Opencode => unreachable!(),
                 HarnessKind::Claude => assert_eq!(frame["message"]["content"], prompt),
                 HarnessKind::Omp | HarnessKind::Pi => {
                     assert_eq!(frame["type"], "steer");
