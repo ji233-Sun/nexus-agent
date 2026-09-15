@@ -67,6 +67,34 @@ impl IssueProvider {
             self.repository_url(repository)
         )
     }
+
+    pub(crate) fn create_prompt(self, repository: &str, content: &str) -> String {
+        let command = match self {
+            Self::Cnb => format!(
+                "cnb issues create-issue --repo {repository} --title \"<标题>\" --body \"<正文>\""
+            ),
+            Self::GitHub => {
+                format!("gh issue create --repo {repository} --title \"<标题>\" --body \"<正文>\"")
+            }
+        };
+        format!(
+            "请为本项目创建一个 {name} Issue，并验证创建结果。\n\n\
+             仓库：{repository}\n\n\
+             ## 需要提的 Issue\n\n{content}\n\n\
+             ## 要求\n\n\
+             - 先阅读仓库中的相关代码与文档，把上面的内容整理成清晰、可执行的 Issue 标题和正文，包含背景、期望行为与验收标准。\n\
+             - 使用本机已登录的 {cli} CLI 在 {repository} 创建 Issue，例如：{command}\n\
+             - 创建完成后输出 Issue 链接。不要修改其他 Issue 或仓库文件。\n",
+            name = self.name(),
+            cli = self.executable(),
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IssueLaunchKind {
+    Create,
+    Process,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -151,6 +179,7 @@ impl Issue {
         provider: IssueProvider,
         repository: &str,
         comments: &[Comment],
+        extra: &str,
     ) -> String {
         let mut prompt = format!(
             "请处理以下 {} Issue，并验证结果。\n\n# {}\n\n{}\n\n",
@@ -203,6 +232,10 @@ impl Issue {
                 comment.id,
                 comment.body
             );
+        }
+        let extra = extra.trim();
+        if !extra.is_empty() {
+            let _ = write!(prompt, "\n## 补充信息\n\n{extra}\n");
         }
         prompt
     }

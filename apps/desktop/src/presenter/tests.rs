@@ -411,9 +411,9 @@ fn cnb_navigation_preserves_conversation_and_ignores_obsolete_project_and_detail
 }
 
 #[test]
-fn issues_chat_requires_complete_comments_and_preserves_issue_context_without_starting_a_run() {
+fn issues_launch_requires_complete_comments_and_starts_a_run_with_issue_context() {
     for provider in IssueProvider::ALL {
-        use crate::infrastructure::issues::Response;
+        use crate::{infrastructure::issues::Response, model::issues::IssueLaunchKind};
         let (mut presenter, runner, _directory) = fixture();
         seed_issues(&mut presenter, provider);
         presenter.open_issues(provider);
@@ -423,16 +423,27 @@ fn issues_chat_requires_complete_comments_and_preserves_issue_context_without_st
             provider,
             Response::Detail(Ok(cnb_issue("1"))),
         );
-        let conversation = presenter.model.conversation.id;
         let harness = presenter.model.selected_harness;
-        assert!(presenter.prepare_issue_chat(provider).is_none());
+        assert!(!presenter.start_issue_run(
+            provider,
+            IssueLaunchKind::Process,
+            "补充要求",
+            "claude"
+        ));
         finish_issue_request(
             &mut presenter,
             provider,
             Response::Comments(Err("无法读取评论".into())),
         );
-        assert!(presenter.prepare_issue_chat(provider).is_none());
-        assert_eq!(presenter.model.conversation.id, conversation);
+        assert!(!presenter.start_issue_run(provider, IssueLaunchKind::Process, "", "claude"));
+        assert!(
+            !runner
+                .0
+                .borrow()
+                .commands
+                .iter()
+                .any(|command| matches!(command.command, Command::RunStart(_)))
+        );
         presenter.load_issue_comments(provider);
         finish_issue_request(
             &mut presenter,
@@ -441,7 +452,13 @@ fn issues_chat_requires_complete_comments_and_preserves_issue_context_without_st
                 .map(|id| cnb_comment(&id.to_string()))
                 .collect())),
         );
-        let prompt = presenter.prepare_issue_chat(provider).unwrap();
+        assert!(presenter.start_issue_run(
+            provider,
+            IssueLaunchKind::Process,
+            "补充要求",
+            "claude"
+        ));
+        let start = last_start(&runner);
         for content in [
             "CNB 集成测试 #1",
             &provider.issue_url("team/project", "1"),
@@ -457,21 +474,46 @@ fn issues_chat_requires_complete_comments_and_preserves_issue_context_without_st
             "验收条件 31",
             "评审者 (@reviewer)",
             "![截图](https://example.test/comment.png)",
+            "## 补充信息",
+            "补充要求",
         ] {
-            assert!(prompt.contains(content), "{content}");
+            assert!(start.prompt.contains(content), "{content}");
         }
         assert!(!presenter.model.issues(provider).opened);
-        assert_ne!(presenter.model.conversation.id, conversation);
         assert_eq!(presenter.model.selected_harness, harness);
-        assert!(presenter.model.selected_task.is_none());
-        assert!(
-            !runner
-                .0
-                .borrow()
-                .commands
-                .iter()
-                .any(|command| matches!(command.command, Command::RunStart(_)))
-        );
+        assert!(presenter.model.selected_task.is_some());
+        assert_eq!(presenter.model.active_run, Some(start.run_id));
+    }
+}
+
+#[test]
+fn creating_an_issue_starts_a_run_with_the_filed_content_and_current_selection() {
+    use crate::model::issues::IssueLaunchKind;
+    for provider in IssueProvider::ALL {
+        let (mut presenter, runner, _directory) = fixture();
+        seed_issues(&mut presenter, provider);
+        presenter.select_permission_mode(PermissionMode::Yolo);
+        let harness = presenter.model.selected_harness;
+        let executable = presenter.model.executable.clone();
+        assert!(presenter.start_issue_run(
+            provider,
+            IssueLaunchKind::Create,
+            "导出 PDF 时崩溃",
+            &executable
+        ));
+        let start = last_start(&runner);
+        for content in [
+            "导出 PDF 时崩溃",
+            "team/project",
+            provider.executable(),
+            "需要提的 Issue",
+        ] {
+            assert!(start.prompt.contains(content), "{content}");
+        }
+        assert_eq!(start.harness, harness);
+        assert_eq!(start.permission_mode, PermissionMode::Yolo);
+        assert!(presenter.model.selected_task.is_some());
+        assert_eq!(presenter.model.active_run, Some(start.run_id));
     }
 }
 

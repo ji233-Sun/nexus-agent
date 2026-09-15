@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     infrastructure::issues::{ActionResult, Event, Request, Response},
-    model::issues::{IssueAction, IssueFilter, IssuesModel, PAGE_SIZE},
+    model::issues::{IssueAction, IssueFilter, IssueLaunchKind, IssuesModel, PAGE_SIZE},
 };
 
 impl Presenter {
@@ -193,25 +193,59 @@ impl Presenter {
         }
     }
 
-    pub(crate) fn prepare_issue_chat(&mut self, provider: IssueProvider) -> Option<String> {
-        let issues = self.model.issues(provider);
-        if !issues.enabled
-            || self.model.selected_project.is_none()
-            || issues.detail_request.is_some()
-            || issues.comments_request.is_some()
-            || issues.action_request.is_some()
-        {
-            return None;
-        }
-        let prompt = issues.detail.as_ref()?.chat_prompt(
-            provider,
-            issues.repository.as_deref()?,
-            issues.comments.as_deref()?,
-        );
+    pub(crate) fn start_issue_run(
+        &mut self,
+        provider: IssueProvider,
+        kind: IssueLaunchKind,
+        extra: &str,
+        configured_executable: &str,
+    ) -> bool {
+        let prompt = {
+            let issues = self.model.issues(provider);
+            if !issues.enabled
+                || self.model.selected_project.is_none()
+                || issues.detail_request.is_some()
+                || issues.comments_request.is_some()
+                || issues.action_request.is_some()
+            {
+                return false;
+            }
+            match kind {
+                IssueLaunchKind::Create => {
+                    let Some(repository) = issues.repository.as_deref() else {
+                        return false;
+                    };
+                    provider.create_prompt(repository, extra)
+                }
+                IssueLaunchKind::Process => {
+                    let (Some(issue), Some(repository), Some(comments)) = (
+                        issues.detail.as_ref(),
+                        issues.repository.as_deref(),
+                        issues.comments.as_deref(),
+                    ) else {
+                        return false;
+                    };
+                    issue.chat_prompt(provider, repository, comments, extra)
+                }
+            }
+        };
         self.new_task();
-        self.model
-            .log_status("Issue 已加入聊天草稿，请选择 Harness 后发送。".into());
-        Some(prompt)
+        let started = self.start_run(
+            None,
+            &prompt,
+            configured_executable,
+            self.model.permission_mode,
+        );
+        if started {
+            self.model.log_status(
+                match kind {
+                    IssueLaunchKind::Create => "已启动 Harness 创建 Issue。",
+                    IssueLaunchKind::Process => "已启动 Harness 处理 Issue。",
+                }
+                .into(),
+            );
+        }
+        started
     }
 
     pub(crate) fn act_on_issue(&mut self, provider: IssueProvider, action: IssueAction) {
