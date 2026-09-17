@@ -10,6 +10,7 @@ pub(crate) mod issues;
 pub(crate) mod paths;
 pub(crate) mod pdf;
 pub(crate) mod runner_client;
+pub(crate) mod sound;
 pub(crate) mod storage;
 pub(crate) mod update_installation;
 pub(crate) mod updates;

@@ -2143,6 +2143,43 @@ fn appearance_preferences_restore_and_accept_missing_or_invalid_settings() {
 }
 
 #[test]
+fn sound_settings_default_on_and_restore_across_restart() {
+    use crate::model::SoundSettings;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sound.sqlite");
+    let mut presenter = Presenter::new(
+        Storage::open(&path).unwrap(),
+        Err(anyhow::anyhow!("test")),
+        None,
+    );
+    assert!(presenter.model().sound.task_complete);
+    assert!(presenter.set_sound(SoundSettings {
+        task_complete: false
+    }));
+    drop(presenter);
+    presenter = Presenter::new(
+        Storage::open(&path).unwrap(),
+        Err(anyhow::anyhow!("test")),
+        None,
+    );
+    assert!(!presenter.model().sound.task_complete);
+    for (raw, expected) in [
+        (r#"{"task_complete":true}"#, true),
+        ("invalid json", true),
+        (r#"{"task_complete":"yes"}"#, true),
+    ] {
+        presenter.storage.set_setting("sound", raw).unwrap();
+        drop(presenter);
+        presenter = Presenter::new(
+            Storage::open(&path).unwrap(),
+            Err(anyhow::anyhow!("test")),
+            None,
+        );
+        assert_eq!(presenter.model().sound.task_complete, expected);
+    }
+}
+
+#[test]
 fn project_deletion_clears_selected_and_cached_state_and_preserves_worktree_files() {
     use crate::infrastructure::git;
     let (mut presenter, runner, _directory, start) = worktree_fixture("Keep my worktree");

@@ -18,7 +18,7 @@ use crate::{
     },
     model::{
         AppModel, AppearanceSettings, ConversationState, FontSettings, GenerationKind,
-        GenerationSettings, ModelCatalogState,
+        GenerationSettings, ModelCatalogState, SoundSettings,
         issues::IssueProvider,
         updates::{UpdateChannel, UpdateModel, UpdateState},
     },
@@ -120,6 +120,12 @@ impl Presenter {
             .unwrap_or_default();
         let fonts = storage
             .setting("fonts")
+            .ok()
+            .flatten()
+            .and_then(|value| serde_json::from_str(&value).ok())
+            .unwrap_or_default();
+        let sound = storage
+            .setting("sound")
             .ok()
             .flatten()
             .and_then(|value| serde_json::from_str(&value).ok())
@@ -246,6 +252,7 @@ impl Presenter {
                 language,
                 appearance,
                 fonts,
+                sound,
                 title_generation,
                 commit_message_generation,
                 updates,
@@ -410,6 +417,25 @@ impl Presenter {
             .set_setting("fonts", &serde_json::to_string(&fonts)?)?;
         self.model.fonts = fonts;
         Ok(())
+    }
+
+    pub(crate) fn set_sound(&mut self, sound: SoundSettings) -> bool {
+        let result = serde_json::to_string(&sound)
+            .map_err(anyhow::Error::from)
+            .and_then(|value| self.storage.set_setting("sound", &value));
+        match result {
+            Ok(()) => {
+                self.model.sound = sound;
+                true
+            }
+            Err(error) => {
+                self.model.log_status(LocalizedText::new(
+                    "无法保存提示音设置：{error}",
+                    &[("error", (error).to_string())],
+                ));
+                false
+            }
+        }
     }
 
     pub(crate) fn report_font_load_error(&mut self, error: String) {
