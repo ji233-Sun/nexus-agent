@@ -119,7 +119,7 @@ flowchart TB
 - `crates/domain`：领域状态、模型和思考层级。
 - `crates/protocol`：Desktop 与 Runner 的版本化 JSONL 协议。
 - `crates/harness-core`：Harness 共用的启动规格、事件和可执行文件解析。
-- `crates/harness-claude`：Claude Code 探测、启动参数和事件解码。
+- `crates/harness-claude`：Claude Code 探测、启动参数、事件解码与 Anthropic 兼容 `/v1/models` 模型目录发现。
 - `crates/harness-codex`：Codex CLI 探测、App Server 启动配置和事件适配。
 - `crates/harness-omp`：Oh My Pi 探测、受控写入模式和 JSON 事件解码。
 - `crates/harness-pi`：Pi RPC、临时审批扩展、原生 Session 文件与模型目录。

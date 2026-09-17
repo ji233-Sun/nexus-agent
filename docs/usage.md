@@ -82,6 +82,8 @@ Nexus 从当前 Harness 的模型目录读取可选模型、默认模型和支�
 
 模型及思考层级按 Harness 与 Provider Profile 记忆。切换模型后，如果原思考层级不再受支持，会恢复为模型默认。运行期间锁定本轮的模型配置。
 
+Claude Code 无法从 CLI 枚举第三方 API 的模型，Nexus 会直接询问当前配置的 Anthropic 兼容 API 的 `/v1/models` 目录：凭证与地址依次取自 Provider Profile 环境变量、Claude Code settings 文件（项目 `.claude/settings.local.json`、`.claude/settings.json` 与用户级 `CLAUDE_CONFIG_DIR`/`~/.claude/settings.json`）和进程环境。API 目录不可用时回退到 Claude Code 的 CLI 模型别名（sonnet/opus/haiku）。
+
 在 **设置 → 通用 → Git 提交说明** 中，独立选择生成说明所用的引擎、模型和思考档位；对话标题有单独的设置，两者均不改变会话模型。生成时使用对应引擎当前选中的 Provider Profile 或 CLI 登录配置，所选差异通过该引擎发送给模型。生成失败时保留原草稿，可重试或手动填写。
 
 在设置中创建多个 **Provider Profile**，为每个 Harness 配置名称、API Key、Base URL、环境变量名和默认模型，再从任务输入区切换。

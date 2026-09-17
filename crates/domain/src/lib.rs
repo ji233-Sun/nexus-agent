@@ -397,6 +397,7 @@ pub struct ModelReasoningEffort {
 #[serde(rename_all = "snake_case")]
 pub enum ModelSource {
     ClaudeAliases,
+    ClaudeApi,
     CodexAppServer,
     OmpCli,
     PiRpc,
@@ -411,6 +412,7 @@ impl ModelSource {
     pub fn harness(&self) -> HarnessKind {
         match self {
             Self::ClaudeAliases => HarnessKind::Claude,
+            Self::ClaudeApi => HarnessKind::Claude,
             Self::CodexAppServer => HarnessKind::Codex,
             Self::OmpCli => HarnessKind::Omp,
             Self::PiRpc => HarnessKind::Pi,

@@ -4987,7 +4987,9 @@ dependencies = [
  "nexus-domain",
  "nexus-harness-core",
  "nexus-protocol",
+ "reqwest",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 
