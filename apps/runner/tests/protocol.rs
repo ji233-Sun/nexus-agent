@@ -653,6 +653,90 @@ async fn runner_resumes_each_harness_session_across_processes() {
 }
 
 #[tokio::test]
+async fn resumed_attachments_wait_for_reply_after_background_notification() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut request = request(
+        directory.path(),
+        fake_harness(directory.path()),
+        HarnessKind::Claude,
+        "remember this",
+    );
+    request.title_generation = None;
+    let mut runner = TestRunner::spawn();
+    runner.send(Command::RunStart(request.clone())).await;
+    let events = runner
+        .collect_run(request.run_id, RunStatus::Completed)
+        .await;
+    let session_id = events
+        .iter()
+        .find_map(|event| match event {
+            Event::RunSessionStarted { session_id, .. } => Some(session_id.clone()),
+            _ => None,
+        })
+        .unwrap();
+    runner.shutdown().await;
+
+    let image = directory.path().join("capture.png");
+    let png = [
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 4,
+        0, 0, 0, 181, 28, 12, 2, 0, 0, 0, 11, 73, 68, 65, 84, 120, 218, 99, 100, 248, 15, 0, 1, 5,
+        1, 1, 39, 24, 227, 102, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ];
+    fs::write(&image, png).unwrap();
+    let file = directory.path().join("notes.txt");
+    fs::write(&file, "reference notes").unwrap();
+    request.attachments = vec![
+        nexus_domain::Attachment {
+            path: image.canonicalize().unwrap().to_string_lossy().into_owned(),
+            source_name: "capture.png".into(),
+            page: None,
+            kind: nexus_domain::AttachmentKind::Image,
+        },
+        nexus_domain::Attachment {
+            path: file.canonicalize().unwrap().to_string_lossy().into_owned(),
+            source_name: "notes.txt".into(),
+            page: None,
+            kind: nexus_domain::AttachmentKind::File,
+        },
+    ];
+    request.run_id = Uuid::new_v4();
+    request.prompt = "follow-up with attachments".into();
+    request.session_id = Some(session_id.clone());
+    request.environment.push(EnvironmentVariable {
+        name: "TEST_RESUME_NOTIFICATION".into(),
+        value: "1".into(),
+    });
+    let mut runner = TestRunner::spawn();
+    runner.send(Command::RunStart(request.clone())).await;
+    let events = runner
+        .collect_run(request.run_id, RunStatus::Completed)
+        .await;
+    runner.shutdown().await;
+
+    assert!(events.iter().any(|event| matches!(event,
+        Event::RunSessionStarted { session_id: id, .. } if id == &session_id)));
+    assert!(
+        events.iter().any(|event| matches!(event,
+        Event::RunMessageCompleted { text, .. } if text == "remember this")),
+        "the background notification must not end the resumed user turn: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::RunFailed { .. }))
+    );
+    let frame: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(directory.path().join("user-input.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(frame["uuid"], request.run_id.to_string());
+    let content = frame["message"]["content"].as_array().unwrap();
+    assert!(content[0]["text"].as_str().unwrap().contains("notes.txt"));
+    assert_eq!(content[1]["text"], "capture.png");
+    assert_eq!(content[2]["source"]["media_type"], "image/png");
+}
+
+#[tokio::test]
 async fn runner_streams_fake_claude_and_forwards_model_configuration() {
     let directory = tempfile::tempdir().unwrap();
     let mut request = request(

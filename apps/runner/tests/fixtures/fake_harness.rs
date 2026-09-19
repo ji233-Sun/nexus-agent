@@ -207,6 +207,10 @@ fn main() {
             } else {
                 println!(r#"{{"type":"system","subtype":"init","session_id":{session:?}}}"#);
             }
+            if harness == Harness::Claude && resumed && env::var_os("TEST_RESUME_NOTIFICATION").is_some() {
+                fs::write("user-input.json", &line).unwrap();
+                println!(r#"{{"type":"result","subtype":"success","is_error":false,"num_turns":0,"result":"","origin":{{"kind":"task-notification"}}}}"#);
+            }
             run_turn(harness, &prompt, &session, resumed, &input);
         }
         io::stdout().flush().unwrap();

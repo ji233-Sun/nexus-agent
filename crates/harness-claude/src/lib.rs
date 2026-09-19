@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -367,6 +367,7 @@ pub fn prepare_run(request: &StartRun, cwd: &Path) -> Result<LaunchSpec, String>
         request.session_id.as_deref(),
         request.permission_mode,
     );
+    let mut frame = user_input(&request.prompt, Some(&request.run_id.to_string()));
     if !request.attachments.is_empty() {
         let mut content = vec![json!({"type": "text", "text": request.prompt})];
         for image in &request.attachments {
@@ -377,10 +378,9 @@ pub fn prepare_run(request: &StartRun, cwd: &Path) -> Result<LaunchSpec, String>
                 "data": base64::engine::general_purpose::STANDARD.encode(bytes)
             }}));
         }
-        let mut frame = user_input(&request.prompt, None);
         frame["message"]["content"] = content.into();
-        spec.stdin = format!("{frame}\n");
     }
+    spec.stdin = format!("{frame}\n");
     Ok(spec)
 }
 
@@ -482,6 +482,7 @@ pub async fn probe(configured_executable: &str) -> HarnessProbe {
 pub struct EventDecoder {
     harness: HarnessKind,
     pending_user_asks: HashMap<String, Value>,
+    user_message_ids: HashSet<String>,
 }
 
 impl Default for EventDecoder {
@@ -495,7 +496,14 @@ impl EventDecoder {
         Self {
             harness,
             pending_user_asks: HashMap::new(),
+            user_message_ids: HashSet::new(),
         }
+    }
+
+    pub fn for_run(request: &StartRun) -> Self {
+        let mut decoder = Self::for_harness(request.harness);
+        decoder.user_message_ids.insert(request.run_id.to_string());
+        decoder
     }
 }
 
@@ -520,12 +528,37 @@ impl LineDecoder for EventDecoder {
             }]);
         }
         if frame.get("type").and_then(Value::as_str) == Some("result") {
+            let mut message_ids = frame
+                .get("user_message_uuid")
+                .and_then(Value::as_str)
+                .into_iter()
+                .chain(
+                    frame
+                        .get("user_message_uuids")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str),
+                );
+            let has_message_id = message_ids.clone().next().is_some();
+            let answers_user = message_ids.any(|id| self.user_message_ids.contains(id));
+            // Resume can finish a background notification before consuming the
+            // prompt. A synthetic turn may also fold in our prompt or Steer.
+            if !self.user_message_ids.is_empty()
+                && !answers_user
+                && (frame.pointer("/origin/kind").and_then(Value::as_str)
+                    == Some("task-notification")
+                    || has_message_id)
+            {
+                return Ok(Vec::new());
+            }
             self.pending_user_asks.clear();
         }
         Ok(decode_frame(&frame, self.harness))
     }
 
     fn steer(&mut self, message_id: &str, prompt: &str) -> Option<InputFrame> {
+        self.user_message_ids.insert(message_id.to_owned());
         Some(InputFrame(user_input(prompt, Some(message_id))))
     }
 
@@ -1516,6 +1549,87 @@ mod tests {
                 .unwrap(),
             vec![DecodedEvent::TurnCompleted]
         );
+    }
+
+    #[test]
+    fn unrelated_results_keep_the_user_turn_and_pending_question_open() {
+        let mut decoder = EventDecoder::default();
+        decoder
+            .steer("user-message", "continue with this image")
+            .unwrap();
+        let ask = json!({"type":"control_request","request_id":"ask","request":{
+            "subtype":"can_use_tool","tool_name":"AskUserQuestion",
+            "input":{"questions":[{"question":"Continue?"}]}
+        }});
+        assert!(matches!(
+            decoder.decode_line(&ask.to_string()).unwrap().as_slice(),
+            [DecodedEvent::UserAskRequested(_)]
+        ));
+        for result in [
+            json!({"type":"result","subtype":"success","is_error":false,"result":"",
+                "origin":{"kind":"task-notification"}}),
+            json!({"type":"result","subtype":"error_during_execution","is_error":true,
+                "errors":["background task stopped"],"origin":{"kind":"task-notification"}}),
+            json!({"type":"result","is_error":false,"user_message_uuid":"previous-message"}),
+        ] {
+            assert!(decoder.decode_line(&result.to_string()).unwrap().is_empty());
+        }
+        assert!(
+            decoder
+                .answer_user_ask(
+                    "ask",
+                    &[UserAskAnswer {
+                        question_id: "Continue?".into(),
+                        value: UserAskAnswerValue::Text("yes".into()),
+                    }]
+                )
+                .is_some()
+        );
+        assert_eq!(
+            decoder
+                .decode_line(
+                    r#"{"type":"result","is_error":false,"user_message_uuid":"user-message"}"#
+                )
+                .unwrap(),
+            vec![DecodedEvent::TurnCompleted]
+        );
+    }
+
+    #[test]
+    fn background_results_finish_when_they_answer_our_prompt_or_steer() {
+        for echoed_ids in [
+            json!({"user_message_uuid":"user-message"}),
+            json!({"user_message_uuid":"steer-message"}),
+            json!({"user_message_uuid":"another-message", "user_message_uuids":["user-message","another-message"]}),
+            json!({"user_message_uuid":"another-message", "user_message_uuids":["steer-message","another-message"]}),
+        ] {
+            let mut decoder = EventDecoder::default();
+            decoder
+                .steer("user-message", "continue with this image")
+                .unwrap();
+            decoder
+                .steer("steer-message", "also inspect the text")
+                .unwrap();
+            let mut result = json!({"type":"result","subtype":"success","is_error":false,
+                "result":"done","origin":{"kind":"task-notification"}});
+            result
+                .as_object_mut()
+                .unwrap()
+                .extend(echoed_ids.as_object().unwrap().clone());
+            assert_eq!(
+                decoder.decode_line(&result.to_string()).unwrap(),
+                vec![DecodedEvent::TurnCompleted]
+            );
+            result["is_error"] = true.into();
+            result["errors"] = json!(["user turn failed"]);
+            assert_eq!(
+                decoder.decode_line(&result.to_string()).unwrap(),
+                vec![
+                    DecodedEvent::Error("[\"user turn failed\"]".into()),
+                    DecodedEvent::TurnCompleted,
+                ]
+            );
+        }
     }
 
     #[test]
