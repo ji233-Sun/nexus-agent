@@ -993,10 +993,13 @@ mod tests {
         assert_eq!(models[0].id, "kimi-k2-turbo-preview");
     }
 
+    // 与会清除进程环境的目录测试串行，避免配置读取与环境修改并发。
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn catalog_cancellation_interrupts_stalled_headers_and_body() {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         for send_headers in [false, true] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let executable = std::env::current_exe().unwrap();
