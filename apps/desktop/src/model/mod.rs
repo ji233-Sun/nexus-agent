@@ -41,6 +41,20 @@ impl ModelCatalogState {
         }
     }
 
+    pub(crate) fn can_select_model(&self, harness: HarnessKind, id: &str) -> bool {
+        self.models()
+            .and_then(|models| models.iter().find(|model| model.id == id))
+            .map_or_else(
+                // Claude exposes aliases, not a complete catalog of third-party models.
+                || {
+                    harness == HarnessKind::Claude
+                        && !id.trim().is_empty()
+                        && !id.chars().any(char::is_control)
+                },
+                |model| model.availability.is_selectable(),
+            )
+    }
+
     pub(crate) fn accepts(&self, request_id: Uuid) -> bool {
         matches!(self, Self::Loading { request_id: current, .. } if *current == request_id)
     }
@@ -73,6 +87,20 @@ pub(crate) struct AppearanceSettings {
 pub(crate) struct FontSettings {
     pub(crate) reading: Option<String>,
     pub(crate) code: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub(crate) struct SoundSettings {
+    pub(crate) task_complete: bool,
+}
+
+impl Default for SoundSettings {
+    fn default() -> Self {
+        Self {
+            task_complete: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -250,6 +278,7 @@ pub(crate) struct AppModel {
     pub(crate) harness_manager: harness_installation::HarnessManager,
     pub(crate) cli_installation_busy: bool,
     pub(crate) cli_installation_message: Option<LocalizedText>,
+    pub(crate) sound: SoundSettings,
     pub(crate) projects: Vec<Project>,
     pub(crate) projectless_tasks: Vec<TaskSummary>,
     pub(crate) archived_tasks: Vec<TaskSummary>,
@@ -550,10 +579,11 @@ impl AppModel {
     }
 
     pub(crate) fn model_override_is_unavailable(&self) -> bool {
-        self.model_override.is_some()
-            && self
-                .selected_catalog_model()
-                .is_none_or(|model| !model.availability.is_selectable())
+        self.model_override.as_deref().is_some_and(|id| {
+            !self
+                .model_catalog
+                .can_select_model(self.selected_harness, id)
+        })
     }
 
     pub(crate) fn catalog_selection_is_valid(&self) -> bool {
