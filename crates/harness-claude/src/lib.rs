@@ -204,6 +204,7 @@ async fn fetch_claude_models(
     endpoint: &AnthropicEndpoint,
     cancel: &watch::Receiver<bool>,
 ) -> Result<Vec<ModelDescriptor>, ModelCatalogError> {
+    let mut cancel = cancel.clone();
     let base_url = endpoint
         .base_url
         .as_deref()
@@ -235,18 +236,27 @@ async fn fetch_claude_models(
         if let Some(key) = &endpoint.api_key {
             request = request.header("x-api-key", key);
         }
-        let response = request.send().await.map_err(|_| {
-            ModelCatalogError::Failed(format!("无法连接 {provider} 的模型目录接口。"))
-        })?;
-        if !response.status().is_success() {
-            return Err(ModelCatalogError::Failed(format!(
-                "{provider} 的模型目录接口返回了 {}。",
-                response.status().as_u16()
-            )));
-        }
-        let value: Value = response.json().await.map_err(|_| {
-            ModelCatalogError::Failed(format!("{provider} 的模型目录返回了无效 JSON。"))
-        })?;
+        let value: Value = tokio::select! {
+            biased;
+            // 同时就绪时优先取消；未发出取消信号的关闭通道不影响请求。
+            Ok(_) = cancel.wait_for(|cancelled| *cancelled) => {
+                return Err(ModelCatalogError::Cancelled);
+            }
+            result = async {
+                let response = request.send().await.map_err(|_| {
+                    ModelCatalogError::Failed(format!("无法连接 {provider} 的模型目录接口。"))
+                })?;
+                if !response.status().is_success() {
+                    return Err(ModelCatalogError::Failed(format!(
+                        "{provider} 的模型目录接口返回了 {}。",
+                        response.status().as_u16()
+                    )));
+                }
+                response.json().await.map_err(|_| {
+                    ModelCatalogError::Failed(format!("{provider} 的模型目录返回了无效 JSON。"))
+                })
+            } => result?,
+        };
         models.extend(parse_claude_model_page(&value, &provider));
         match value.get("has_more").and_then(Value::as_bool) {
             Some(true) => {}
@@ -981,6 +991,75 @@ mod tests {
         );
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "kimi-k2-turbo-preview");
+    }
+
+    #[tokio::test]
+    async fn catalog_cancellation_interrupts_stalled_headers_and_body() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        for send_headers in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let executable = std::env::current_exe().unwrap();
+            let directory = tempfile::tempdir().unwrap();
+            let environment = [
+                EnvironmentVariable {
+                    name: "ANTHROPIC_BASE_URL".into(),
+                    value: format!("http://{}", listener.local_addr().unwrap()),
+                },
+                EnvironmentVariable {
+                    name: "ANTHROPIC_API_KEY".into(),
+                    value: "test-key".into(),
+                },
+                EnvironmentVariable {
+                    name: "ANTHROPIC_AUTH_TOKEN".into(),
+                    value: "test-token".into(),
+                },
+            ];
+            let (cancel, receiver) = watch::channel(false);
+            let discovery = discover_models_in(
+                executable.to_str().unwrap(),
+                directory.path(),
+                &environment,
+                receiver,
+                Some(directory.path()),
+            );
+            tokio::pin!(discovery);
+            let gateway = async {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = BufReader::new(socket);
+                loop {
+                    let mut line = String::new();
+                    assert!(socket.read_line(&mut line).await.unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                if send_headers {
+                    socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n")
+                        .await
+                        .unwrap();
+                }
+                socket
+            };
+            let socket = tokio::select! {
+                result = &mut discovery => panic!("catalog returned before cancellation: {result:?}"),
+                socket = tokio::time::timeout(Duration::from_secs(5), gateway) => socket.unwrap(),
+            };
+            // 继续轮询请求以消费已发送的响应头，同时保持响应体未完成。
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), &mut discovery)
+                    .await
+                    .is_err()
+            );
+            cancel.send_replace(true);
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(1), &mut discovery).await,
+                Ok(Err(ModelCatalogError::Cancelled)),
+                "cancellation must interrupt the request (headers sent: {send_headers})"
+            );
+            drop(socket);
+        }
     }
 
     #[test]
