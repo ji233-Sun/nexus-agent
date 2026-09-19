@@ -632,6 +632,9 @@ impl Presenter {
                         &[("status", (status).to_string())],
                     ),
                 });
+                if status == RunStatus::Completed && !cancelled && self.model.sound.task_complete {
+                    crate::infrastructure::sound::play_task_complete();
+                }
                 self.reload_tasks();
                 self.reload_workspaces();
                 if self.model.selected_task != task_id

@@ -89,6 +89,20 @@ pub(crate) struct FontSettings {
     pub(crate) code: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub(crate) struct SoundSettings {
+    pub(crate) task_complete: bool,
+}
+
+impl Default for SoundSettings {
+    fn default() -> Self {
+        Self {
+            task_complete: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub(crate) struct GenerationSettings {
@@ -264,6 +278,7 @@ pub(crate) struct AppModel {
     pub(crate) harness_manager: harness_installation::HarnessManager,
     pub(crate) cli_installation_busy: bool,
     pub(crate) cli_installation_message: Option<LocalizedText>,
+    pub(crate) sound: SoundSettings,
     pub(crate) projects: Vec<Project>,
     pub(crate) projectless_tasks: Vec<TaskSummary>,
     pub(crate) archived_tasks: Vec<TaskSummary>,

@@ -386,6 +386,27 @@ impl NexusView {
             .child(self.render_update_settings(cx))
             .child(settings_group(
                 colors,
+                locale.text("提示音"),
+                [settings_row(
+                    colors,
+                    locale.text("任务完成提示音"),
+                    locale.text("任务完成后播放一次提示音。"),
+                    div().debug_selector(|| "task-complete-sound".into()).child(
+                        Switch::new("task-complete-sound")
+                            .accessibility_label(locale.text("任务完成提示音"))
+                            .small()
+                            .checked(model.sound.task_complete)
+                            .on_click(cx.listener(|app, checked, _, cx| {
+                                app.presenter.set_sound(crate::model::SoundSettings {
+                                    task_complete: *checked,
+                                });
+                                cx.notify();
+                            })),
+                    ),
+                )],
+            ))
+            .child(settings_group(
+                colors,
                 locale.text("命令行"),
                 [settings_row(
                     colors,
