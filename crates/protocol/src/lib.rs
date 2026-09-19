@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 18;
+pub const PROTOCOL_VERSION: u32 = 19;
 pub const MAX_COMMIT_DIFF_BYTES: usize = 128 * 1024;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -582,44 +582,53 @@ mod tests {
 
     #[test]
     fn protocol_round_trip_preserves_model_provider_metadata() {
-        let request_id = Uuid::new_v4();
-        let event = EventEnvelope {
-            protocol_version: PROTOCOL_VERSION,
-            id: Uuid::new_v4(),
-            sequence: 1,
-            event: Event::ModelCatalogLoaded {
-                request_id,
-                harness: HarnessKind::Omp,
-                models: vec![ModelDescriptor {
-                    id: "provider/model".into(),
-                    display_name: "Model".into(),
-                    source: nexus_domain::ModelSource::OmpCli,
-                    availability: nexus_domain::ModelAvailability::Unavailable {
-                        reason: "Provider disabled".into(),
-                    },
-                    provider: Some("provider".into()),
-                    is_default: false,
-                    supported_reasoning_efforts: Vec::new(),
-                    default_reasoning_effort: None,
-                }],
-            },
-        };
+        for source in [
+            nexus_domain::ModelSource::OmpCli,
+            nexus_domain::ModelSource::ClaudeApi,
+        ] {
+            let request_id = Uuid::new_v4();
+            let event = EventEnvelope {
+                protocol_version: PROTOCOL_VERSION,
+                id: Uuid::new_v4(),
+                sequence: 1,
+                event: Event::ModelCatalogLoaded {
+                    request_id,
+                    harness: source.harness(),
+                    models: vec![ModelDescriptor {
+                        id: "provider/model".into(),
+                        display_name: "Model".into(),
+                        source: source.clone(),
+                        availability: nexus_domain::ModelAvailability::Unavailable {
+                            reason: "Provider disabled".into(),
+                        },
+                        provider: Some("provider".into()),
+                        is_default: false,
+                        supported_reasoning_efforts: Vec::new(),
+                        default_reasoning_effort: None,
+                    }],
+                },
+            };
 
-        let json = serde_json::to_string(&event).unwrap();
-        let decoded: EventEnvelope = serde_json::from_str(&json).unwrap();
-        let Event::ModelCatalogLoaded { models, .. } = decoded.event else {
-            panic!("expected model catalog")
-        };
-        assert_eq!(models[0].provider.as_deref(), Some("provider"));
-        assert_eq!(models[0].id, "provider/model");
-        assert_eq!(models[0].source.harness(), HarnessKind::Omp);
-        assert_eq!(
-            models[0].availability,
-            nexus_domain::ModelAvailability::Unavailable {
-                reason: "Provider disabled".into()
-            }
-        );
-        assert!(!models[0].availability.is_selectable());
+            let json = serde_json::to_string(&event).unwrap();
+            let decoded: EventEnvelope = serde_json::from_str(&json).unwrap();
+            let Event::ModelCatalogLoaded {
+                harness, models, ..
+            } = decoded.event
+            else {
+                panic!("expected model catalog")
+            };
+            assert_eq!(models[0].provider.as_deref(), Some("provider"));
+            assert_eq!(models[0].id, "provider/model");
+            assert_eq!(models[0].source, source);
+            assert_eq!(models[0].source.harness(), harness);
+            assert_eq!(
+                models[0].availability,
+                nexus_domain::ModelAvailability::Unavailable {
+                    reason: "Provider disabled".into()
+                }
+            );
+            assert!(!models[0].availability.is_selectable());
+        }
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use nexus_domain::{
@@ -17,24 +18,68 @@ use nexus_protocol::{EnvironmentVariable, HarnessProbe, StartRun};
 use serde_json::{Value, json};
 use tokio::process::Command;
 use tokio::sync::watch;
+/// Anthropic 兼容 API 接入点。第三方网关（Kimi、GLM 等）与官方 API 共用同一套
+/// 模型目录端点 `{base_url}/v1/models`。
+#[derive(Debug, Default, PartialEq, Eq)]
+struct AnthropicEndpoint {
+    base_url: Option<String>,
+    api_key: Option<String>,
+    auth_token: Option<String>,
+}
+
+const ANTHROPIC_DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
+const MODEL_PAGE_LIMIT: u32 = 1000;
+const MODEL_MAX_PAGES: usize = 5;
+const MODEL_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub async fn discover_models(
     executable: &str,
-    _cwd: &Path,
-    _environment: &[EnvironmentVariable],
+    cwd: &Path,
+    environment: &[EnvironmentVariable],
     cancel: watch::Receiver<bool>,
+) -> Result<Vec<ModelDescriptor>, ModelCatalogError> {
+    discover_models_in(
+        executable,
+        cwd,
+        environment,
+        cancel,
+        user_claude_config_dir().as_deref(),
+    )
+    .await
+}
+
+async fn discover_models_in(
+    executable: &str,
+    cwd: &Path,
+    environment: &[EnvironmentVariable],
+    cancel: watch::Receiver<bool>,
+    user_config_dir: Option<&Path>,
 ) -> Result<Vec<ModelDescriptor>, ModelCatalogError> {
     if *cancel.borrow() {
         return Err(ModelCatalogError::Cancelled);
     }
     if resolve_executable(executable).is_none() {
         return Err(ModelCatalogError::Failed(
-            "未找到 Claude Code，无法加载模型别名。".into(),
+            "未找到 Claude Code，无法加载模型目录。".into(),
         ));
     }
+    // Claude Code 自身无法枚举第三方 API 的模型，目录改为直接询问该 API；
+    // 任何失败（未配置凭证、网关不支持、网络异常）都回退到 CLI 别名。
+    if let Some(endpoint) = resolve_anthropic_endpoint(environment, cwd, user_config_dir) {
+        match fetch_claude_models(&endpoint, &cancel).await {
+            Ok(models) if !models.is_empty() => return Ok(models),
+            Ok(_) | Err(ModelCatalogError::Failed(_)) => {}
+            Err(error @ ModelCatalogError::Cancelled) => return Err(error),
+        }
+    }
+    Ok(claude_alias_models())
+}
+
+/// CLI 别名目录：官方登录等无法枚举 API 目录的场景仍然可用。
+fn claude_alias_models() -> Vec<ModelDescriptor> {
     // These are CLI aliases, not a discovered account catalog. Version-specific
     // model capabilities are deliberately left unknown until the adapter reports them.
-    Ok(ClaudeModel::ALL
+    ClaudeModel::ALL
         .into_iter()
         .filter_map(|model| {
             Some(ModelDescriptor {
@@ -48,7 +93,216 @@ pub async fn discover_models(
                 default_reasoning_effort: None,
             })
         })
-        .collect())
+        .collect()
+}
+
+/// Claude Code 读取的用户级配置目录：`CLAUDE_CONFIG_DIR` 优先，默认 `~/.claude`。
+fn user_claude_config_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        return Some(PathBuf::from(dir));
+    }
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|home| PathBuf::from(home).join(".claude"))
+}
+
+fn claude_settings_paths(cwd: &Path, user_config_dir: Option<&Path>) -> Vec<PathBuf> {
+    let mut paths = vec![
+        cwd.join(".claude/settings.local.json"),
+        cwd.join(".claude/settings.json"),
+    ];
+    if let Some(dir) = user_config_dir {
+        paths.push(dir.join("settings.json"));
+    }
+    paths
+}
+
+/// 解析模型目录端点。优先级与 Claude Code 启动时的生效顺序一致：
+/// Provider Profile 注入的环境变量 → Claude Code settings 文件 → 进程环境。
+fn resolve_anthropic_endpoint(
+    environment: &[EnvironmentVariable],
+    cwd: &Path,
+    user_config_dir: Option<&Path>,
+) -> Option<AnthropicEndpoint> {
+    resolve_endpoint_with(environment, cwd, user_config_dir, |name| {
+        std::env::var(name).ok()
+    })
+}
+
+fn resolve_endpoint_with(
+    environment: &[EnvironmentVariable],
+    cwd: &Path,
+    user_config_dir: Option<&Path>,
+    process_env: impl Fn(&str) -> Option<String>,
+) -> Option<AnthropicEndpoint> {
+    let mut endpoint = AnthropicEndpoint::default();
+    for variable in environment {
+        apply_endpoint_variable(&mut endpoint, &variable.name, &variable.value);
+    }
+    for path in claude_settings_paths(cwd, user_config_dir) {
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(settings) = serde_json::from_str::<Value>(&content) else {
+            continue;
+        };
+        if let Some(env) = settings.get("env").and_then(Value::as_object) {
+            for (name, value) in env {
+                if let Some(value) = value.as_str() {
+                    apply_endpoint_variable(&mut endpoint, name, value);
+                }
+            }
+        }
+    }
+    for name in [
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+    ] {
+        if let Some(value) = process_env(name) {
+            apply_endpoint_variable(&mut endpoint, name, &value);
+        }
+    }
+    if endpoint.api_key.is_none() && endpoint.auth_token.is_none() {
+        return None;
+    }
+    Some(AnthropicEndpoint {
+        base_url: Some(
+            endpoint
+                .base_url
+                .unwrap_or_else(|| ANTHROPIC_DEFAULT_BASE_URL.into()),
+        ),
+        api_key: endpoint.api_key,
+        auth_token: endpoint.auth_token,
+    })
+}
+
+/// 每个变量只接受首个非空来源，保证高优先级配置不被低优先级覆盖。
+fn apply_endpoint_variable(endpoint: &mut AnthropicEndpoint, name: &str, value: &str) {
+    let value = value.trim();
+    if value.is_empty() {
+        return;
+    }
+    match name {
+        "ANTHROPIC_BASE_URL" => {
+            let base = value.trim_end_matches('/');
+            if !base.is_empty() {
+                endpoint.base_url.get_or_insert(base.to_owned());
+            }
+        }
+        "ANTHROPIC_API_KEY" => {
+            endpoint.api_key.get_or_insert(value.to_owned());
+        }
+        "ANTHROPIC_AUTH_TOKEN" => {
+            endpoint.auth_token.get_or_insert(value.to_owned());
+        }
+        _ => {}
+    }
+}
+
+async fn fetch_claude_models(
+    endpoint: &AnthropicEndpoint,
+    cancel: &watch::Receiver<bool>,
+) -> Result<Vec<ModelDescriptor>, ModelCatalogError> {
+    let mut cancel = cancel.clone();
+    let base_url = endpoint
+        .base_url
+        .as_deref()
+        .unwrap_or(ANTHROPIC_DEFAULT_BASE_URL)
+        .trim_end_matches('/');
+    let client = reqwest::Client::builder()
+        .timeout(MODEL_REQUEST_TIMEOUT)
+        .build()
+        .map_err(|_| ModelCatalogError::Failed("无法初始化模型目录 HTTP 客户端。".into()))?;
+    let provider = reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .unwrap_or_else(|| "anthropic".into());
+    let mut after_id: Option<String> = None;
+    let mut models = Vec::new();
+    for _ in 0..MODEL_MAX_PAGES {
+        if *cancel.borrow() {
+            return Err(ModelCatalogError::Cancelled);
+        }
+        let mut url = format!("{base_url}/v1/models?limit={MODEL_PAGE_LIMIT}");
+        if let Some(after) = &after_id {
+            url.push_str("&after_id=");
+            url.push_str(after);
+        }
+        let mut request = client.get(url).header("anthropic-version", "2023-06-01");
+        if let Some(token) = &endpoint.auth_token {
+            request = request.bearer_auth(token);
+        }
+        if let Some(key) = &endpoint.api_key {
+            request = request.header("x-api-key", key);
+        }
+        let value: Value = tokio::select! {
+            biased;
+            // 同时就绪时优先取消；未发出取消信号的关闭通道不影响请求。
+            Ok(_) = cancel.wait_for(|cancelled| *cancelled) => {
+                return Err(ModelCatalogError::Cancelled);
+            }
+            result = async {
+                let response = request.send().await.map_err(|_| {
+                    ModelCatalogError::Failed(format!("无法连接 {provider} 的模型目录接口。"))
+                })?;
+                if !response.status().is_success() {
+                    return Err(ModelCatalogError::Failed(format!(
+                        "{provider} 的模型目录接口返回了 {}。",
+                        response.status().as_u16()
+                    )));
+                }
+                response.json().await.map_err(|_| {
+                    ModelCatalogError::Failed(format!("{provider} 的模型目录返回了无效 JSON。"))
+                })
+            } => result?,
+        };
+        models.extend(parse_claude_model_page(&value, &provider));
+        match value.get("has_more").and_then(Value::as_bool) {
+            Some(true) => {}
+            _ => return Ok(models),
+        }
+        after_id = value
+            .get("last_id")
+            .and_then(Value::as_str)
+            .filter(|last| !last.is_empty())
+            .map(str::to_owned);
+        if after_id.is_none() {
+            return Ok(models);
+        }
+    }
+    Ok(models)
+}
+
+fn parse_claude_model_page(value: &Value, provider: &str) -> Vec<ModelDescriptor> {
+    value
+        .get("data")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let id = item.get("id")?.as_str()?.trim();
+            if id.is_empty() {
+                return None;
+            }
+            let display_name = item
+                .get("display_name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .unwrap_or(id);
+            Some(ModelDescriptor {
+                id: id.to_owned(),
+                display_name: display_name.to_owned(),
+                source: ModelSource::ClaudeApi,
+                availability: ModelAvailability::Available,
+                provider: Some(provider.to_owned()),
+                is_default: false,
+                supported_reasoning_efforts: Vec::new(),
+                default_reasoning_effort: None,
+            })
+        })
+        .collect()
 }
 
 pub fn build_launch_spec(
@@ -560,15 +814,72 @@ fn decode_tool_results(frame: &Value) -> Vec<DecodedEvent> {
 mod tests {
     use super::*;
 
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 清除进程中的 Anthropic 环境变量，保证目录测试不依赖开发机配置。
+    fn scrub_anthropic_env() {
+        for name in [
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+        ] {
+            // SAFETY: 持有 ENV_LOCK 期间独占修改进程环境，测试结束后恢复。
+            unsafe { std::env::remove_var(name) };
+        }
+    }
+
+    async fn serve_model_catalog(body: &'static str) -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 4096];
+            loop {
+                let read = socket.read(&mut buffer).await.unwrap();
+                request.extend_from_slice(&buffer[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        (format!("http://{address}/"), server)
+    }
+
+    // 环境变量必须在整个异步用例期间保持已清除，锁只能跨 await 持有。
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
-    async fn catalog_exposes_aliases_without_claiming_unknown_capabilities() {
+    async fn catalog_prefers_api_discovery_and_falls_back_to_aliases() {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        scrub_anthropic_env();
         let executable = std::env::current_exe().unwrap();
-        let (cancel, receiver) = watch::channel(false);
-        let models = discover_models(
+        let cwd = tempfile::tempdir().unwrap();
+        let user_config = tempfile::tempdir().unwrap();
+        let endpoint = vec![
+            EnvironmentVariable {
+                name: "ANTHROPIC_BASE_URL".into(),
+                value: "https://gateway.invalid/anthropic".into(),
+            },
+            EnvironmentVariable {
+                name: "ANTHROPIC_AUTH_TOKEN".into(),
+                value: "gateway-token".into(),
+            },
+        ];
+
+        // 网关不可达或未实现 /v1/models 时回退 CLI 别名，官方登录用户不受影响。
+        let models = discover_models_in(
             executable.to_str().unwrap(),
-            Path::new("."),
-            &[],
-            receiver.clone(),
+            cwd.path(),
+            &endpoint,
+            watch::channel(false).1,
+            Some(user_config.path()),
         )
         .await
         .unwrap();
@@ -579,27 +890,282 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["sonnet", "opus", "haiku"]
         );
-        for model in models {
-            assert_eq!(model.source.harness(), HarnessKind::Claude);
+        for model in &models {
+            assert_eq!(model.source, ModelSource::ClaudeAliases);
             assert_eq!(model.availability, ModelAvailability::Unknown);
             assert!(model.supported_reasoning_efforts.is_empty());
             assert!(model.default_reasoning_effort.is_none());
         }
+
+        // 网关返回目录时直接采用 API 模型，不再混合别名。
+        let (base_url, server) = serve_model_catalog(
+            r#"{"data":[{"type":"model","id":"glm-4.6","display_name":"GLM-4.6"}],"has_more":false}"#,
+        )
+        .await;
+        let mut endpoint = endpoint;
+        endpoint[0].value = base_url;
+        let models = discover_models_in(
+            executable.to_str().unwrap(),
+            cwd.path(),
+            &endpoint,
+            watch::channel(false).1,
+            Some(user_config.path()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "glm-4.6");
+        assert_eq!(models[0].source, ModelSource::ClaudeApi);
+        assert_eq!(models[0].availability, ModelAvailability::Available);
+        assert!(server.await.unwrap().contains("GET /v1/models?limit=1000 "));
+
+        // 未配置任何凭证时完全不发起请求，直接回退别名。
+        let models = discover_models_in(
+            executable.to_str().unwrap(),
+            cwd.path(),
+            &[],
+            watch::channel(false).1,
+            Some(user_config.path()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(models[0].id, "sonnet");
+
+        // 取消与缺失可执行文件的语义保持不变。
+        let (cancel, receiver) = watch::channel(false);
         cancel.send_replace(true);
         assert_eq!(
-            discover_models("unused", Path::new("."), &[], receiver).await,
+            discover_models_in(
+                "unused",
+                cwd.path(),
+                &[],
+                receiver,
+                Some(user_config.path())
+            )
+            .await,
             Err(ModelCatalogError::Cancelled)
         );
         assert!(matches!(
-            discover_models(
+            discover_models_in(
                 "nexus-missing-claude",
-                Path::new("."),
+                cwd.path(),
                 &[],
-                watch::channel(false).1
+                watch::channel(false).1,
+                Some(user_config.path())
             )
             .await,
             Err(ModelCatalogError::Failed(_))
         ));
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn fetch_claude_models_sends_gateway_credentials() {
+        let (base_url, server) = serve_model_catalog(
+            r#"{"data":[{"id":"kimi-k2-turbo-preview","display_name":"K2 Turbo"}],"has_more":false}"#,
+        )
+        .await;
+        let endpoint = AnthropicEndpoint {
+            base_url: Some(base_url),
+            api_key: Some("sk-key".into()),
+            auth_token: Some("bearer-token".into()),
+        };
+        let models = fetch_claude_models(&endpoint, &watch::channel(false).1)
+            .await
+            .unwrap();
+        let request = server.await.unwrap();
+        assert!(
+            request.contains("GET /v1/models?limit=1000 HTTP/1.1"),
+            "actual request: {request}"
+        );
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer bearer-token")
+        );
+        assert!(request.to_ascii_lowercase().contains("x-api-key: sk-key"));
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("anthropic-version: 2023-06-01")
+        );
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "kimi-k2-turbo-preview");
+    }
+
+    // 与会清除进程环境的目录测试串行，避免配置读取与环境修改并发。
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn catalog_cancellation_interrupts_stalled_headers_and_body() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        for send_headers in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let executable = std::env::current_exe().unwrap();
+            let directory = tempfile::tempdir().unwrap();
+            let environment = [
+                EnvironmentVariable {
+                    name: "ANTHROPIC_BASE_URL".into(),
+                    value: format!("http://{}", listener.local_addr().unwrap()),
+                },
+                EnvironmentVariable {
+                    name: "ANTHROPIC_API_KEY".into(),
+                    value: "test-key".into(),
+                },
+                EnvironmentVariable {
+                    name: "ANTHROPIC_AUTH_TOKEN".into(),
+                    value: "test-token".into(),
+                },
+            ];
+            let (cancel, receiver) = watch::channel(false);
+            let discovery = discover_models_in(
+                executable.to_str().unwrap(),
+                directory.path(),
+                &environment,
+                receiver,
+                Some(directory.path()),
+            );
+            tokio::pin!(discovery);
+            let gateway = async {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = BufReader::new(socket);
+                loop {
+                    let mut line = String::new();
+                    assert!(socket.read_line(&mut line).await.unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                if send_headers {
+                    socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n")
+                        .await
+                        .unwrap();
+                }
+                socket
+            };
+            let socket = tokio::select! {
+                result = &mut discovery => panic!("catalog returned before cancellation: {result:?}"),
+                socket = tokio::time::timeout(Duration::from_secs(5), gateway) => socket.unwrap(),
+            };
+            // 继续轮询请求以消费已发送的响应头，同时保持响应体未完成。
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), &mut discovery)
+                    .await
+                    .is_err()
+            );
+            cancel.send_replace(true);
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(1), &mut discovery).await,
+                Ok(Err(ModelCatalogError::Cancelled)),
+                "cancellation must interrupt the request (headers sent: {send_headers})"
+            );
+            drop(socket);
+        }
+    }
+
+    #[test]
+    fn endpoint_resolution_follows_profile_settings_then_process_env() {
+        let project = tempfile::tempdir().unwrap();
+        let user_config = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join(".claude")).unwrap();
+        std::fs::write(
+            project.path().join(".claude/settings.json"),
+            r#"{"env":{"ANTHROPIC_BASE_URL":"https://project.example/anthropic"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project.path().join(".claude/settings.local.json"),
+            r#"{"env":{"ANTHROPIC_BASE_URL":"https://local.example/","ANTHROPIC_AUTH_TOKEN":"local-token"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            user_config.path().join("settings.json"),
+            r#"{"env":{"ANTHROPIC_AUTH_TOKEN":"user-token","ANTHROPIC_API_KEY":""}}"#,
+        )
+        .unwrap();
+        let no_process_env = |name: &str| -> Option<String> {
+            let _ = name;
+            None
+        };
+
+        // 项目 local > 项目 > 用户级；空值被跳过；无凭证时返回 None。
+        let resolved = resolve_endpoint_with(
+            &[],
+            project.path(),
+            Some(user_config.path()),
+            no_process_env,
+        )
+        .unwrap();
+        assert_eq!(resolved.base_url.as_deref(), Some("https://local.example"));
+        assert_eq!(resolved.auth_token.as_deref(), Some("local-token"));
+        assert!(resolved.api_key.is_none());
+
+        // Provider Profile 显式环境变量优先于 settings 文件。
+        let profile = vec![
+            EnvironmentVariable {
+                name: "ANTHROPIC_BASE_URL".into(),
+                value: "https://profile.example/".into(),
+            },
+            EnvironmentVariable {
+                name: "ANTHROPIC_API_KEY".into(),
+                value: "profile-key".into(),
+            },
+        ];
+        let resolved = resolve_endpoint_with(
+            &profile,
+            project.path(),
+            Some(user_config.path()),
+            no_process_env,
+        )
+        .unwrap();
+        assert_eq!(
+            resolved.base_url.as_deref(),
+            Some("https://profile.example")
+        );
+        assert_eq!(resolved.api_key.as_deref(), Some("profile-key"));
+        assert_eq!(resolved.auth_token.as_deref(), Some("local-token"));
+
+        // 进程环境只填补缺口；仅有凭证、无 base URL 时使用官方默认地址。
+        let bare_project = tempfile::tempdir().unwrap();
+        let resolved = resolve_endpoint_with(&[], bare_project.path(), None, |name| {
+            (name == "ANTHROPIC_AUTH_TOKEN").then(|| "process-token".into())
+        })
+        .unwrap();
+        assert_eq!(
+            resolved.base_url.as_deref(),
+            Some("https://api.anthropic.com")
+        );
+        assert_eq!(resolved.auth_token.as_deref(), Some("process-token"));
+    }
+
+    #[test]
+    fn claude_model_page_maps_api_catalog() {
+        let models = parse_claude_model_page(
+            &serde_json::json!({
+                "data": [
+                    {"type": "model", "id": "claude-sonnet-4-5", "display_name": "Claude Sonnet 4.5"},
+                    {"id": "kimi-k2-turbo-preview"},
+                    {"id": "  "},
+                    {"display_name": "missing id"}
+                ],
+                "has_more": false
+            }),
+            "api.moonshot.ai",
+        );
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "claude-sonnet-4-5");
+        assert_eq!(models[0].display_name, "Claude Sonnet 4.5");
+        assert_eq!(models[1].id, "kimi-k2-turbo-preview");
+        assert_eq!(models[1].display_name, "kimi-k2-turbo-preview");
+        for model in &models {
+            assert_eq!(model.source, ModelSource::ClaudeApi);
+            assert_eq!(model.source.harness(), HarnessKind::Claude);
+            assert_eq!(model.availability, ModelAvailability::Available);
+            assert_eq!(model.provider.as_deref(), Some("api.moonshot.ai"));
+            assert!(!model.is_default);
+        }
     }
 
     #[test]
