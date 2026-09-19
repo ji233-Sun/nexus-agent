@@ -181,7 +181,7 @@ fn prepare_native(
         }
         HarnessKind::Claude => (
             claude::prepare_run(request, cwd)?,
-            Box::new(claude::EventDecoder::default()),
+            Box::new(claude::EventDecoder::for_run(request)),
         ),
         HarnessKind::Codex => {
             let (spec, decoder) = codex::prepare_run(request, cwd);
@@ -357,8 +357,9 @@ mod tests {
         }];
         for session in [None, Some("existing-session".into())] {
             request.session_id = session;
-            let (spec, _) = prepare(&request, directory.path()).unwrap();
+            let (spec, mut decoder) = prepare(&request, directory.path()).unwrap();
             let frame: serde_json::Value = serde_json::from_str(&spec.stdin).unwrap();
+            assert_eq!(frame["uuid"], request.run_id.to_string());
             assert_eq!(
                 frame["message"]["content"][2]["source"]["media_type"],
                 "image/png"
@@ -369,6 +370,12 @@ mod tests {
                     .as_str()
                     .unwrap()
                     .starts_with("iVBORw0KGgo")
+            );
+            let result = json!({"type":"result","is_error":false,
+                "origin":{"kind":"task-notification"}, "user_message_uuid":request.run_id});
+            assert_eq!(
+                decoder.decode_line(&result.to_string()).unwrap(),
+                vec![DecodedEvent::TurnCompleted]
             );
         }
         request.harness = HarnessKind::Omp;
