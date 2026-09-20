@@ -327,7 +327,7 @@ impl NexusView {
             },
         )
         .detach();
-        let mut keys = vec![
+        let keys = vec![
             KeyBinding::new("secondary-k", SearchSessions, Some("Nexus")),
             KeyBinding::new("secondary-n", NewTask, Some("Nexus")),
             KeyBinding::new("secondary-,", ToggleSettings, Some("Nexus")),
@@ -336,7 +336,7 @@ impl NexusView {
         // ⌘W hides the window and ⌘Q quits the application; both are macOS
         // conventions the platform expects to find in the menu bar.
         #[cfg(target_os = "macos")]
-        keys.extend([
+        let keys = keys.into_iter().chain([
             KeyBinding::new("secondary-w", HideWindow, Some("Nexus")),
             KeyBinding::new("secondary-q", QuitApp, Some("Nexus")),
         ]);
@@ -2240,6 +2240,9 @@ impl Render for NexusView {
                     cx.stop_propagation();
                 }
             }))
+            .on_action(cx.listener(|app, _: &QuitApp, window, cx| {
+                app.quit_application(window, cx);
+            }))
             .capture_action(cx.listener(|app, action: &Enter, window, cx| {
                 if !app.settings_open
                     && action.secondary
@@ -2276,16 +2279,13 @@ impl Render for NexusView {
             })
             .child(self.dialog_layer.clone())
             .when_some(issue_launch, |element, overlay| element.child(overlay));
-        // The status item, the menu bar, and ⌘W/⌘Q reach the window here, so
-        // every path shares one hidden/quit implementation.
+        // The status item and the menu bar reach the window here, so ⌘W and the
+        // toggle share one hidden/restore implementation.
         #[cfg(target_os = "macos")]
         let element = element
             .on_action(cx.listener(|app, _: &HideWindow, _, cx| app.hide_window(cx)))
             .on_action(
                 cx.listener(|app, _: &ToggleWindow, window, cx| app.toggle_window(window, cx)),
-            )
-            .on_action(
-                cx.listener(|app, _: &QuitApp, window, cx| app.quit_application(window, cx)),
             );
         element
     }
