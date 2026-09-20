@@ -25,6 +25,14 @@ pub(super) enum WorkspaceEvent {
     Merged(Result<Workspace>),
 }
 
+// Default source branch: prefer the checked-out branch, then the first local branch.
+fn pick_base(current: Option<String>, branches: &[String]) -> String {
+    current
+        .filter(|branch| branches.contains(branch))
+        .or_else(|| branches.first().cloned())
+        .unwrap_or_default()
+}
+
 impl Presenter {
     pub(super) fn reset_workspace_draft(&mut self) {
         self.model.selected_workspace = None;
@@ -37,10 +45,7 @@ impl Presenter {
             if self.model.project_is_git {
                 let path = Path::new(&project.canonical_path);
                 let branches = git::local_branches(path).unwrap_or_default();
-                self.model.workspace_draft.base = git::current_branch(path)
-                    .filter(|branch| branches.contains(branch))
-                    .or_else(|| branches.into_iter().next())
-                    .unwrap_or_default();
+                self.model.workspace_draft.base = pick_base(git::current_branch(path), &branches);
             }
             if self.model.project_is_git
                 && self
@@ -150,6 +155,28 @@ impl Presenter {
             .model
             .working_directory()
             .and_then(|path| git::current_branch(Path::new(path)));
+    }
+
+    // Manual refresh entry: re-reads branch state from disk so external switches
+    // (e.g. done in VSCode) show up without re-selecting the project.
+    pub(crate) fn refresh_workspace_branches(&mut self) {
+        let Some(project) = self.model.selected_project.clone() else {
+            return;
+        };
+        let path = Path::new(&project.canonical_path);
+        self.model.project_is_git = git::repository(path).is_ok();
+        if self.model.workspace_draft.kind == WorkspaceKind::Worktree
+            && self.model.selected_task.is_none()
+            && !self.model.workspace_busy
+            && self.model.project_is_git
+        {
+            let branches = git::local_branches(path).unwrap_or_default();
+            // Keep a base the user picked while it still exists; otherwise re-pick.
+            if !branches.contains(&self.model.workspace_draft.base) {
+                self.model.workspace_draft.base = pick_base(git::current_branch(path), &branches);
+            }
+        }
+        self.refresh_workspace_branch();
     }
 
     pub(super) fn begin_worktree(

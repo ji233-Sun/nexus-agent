@@ -1031,6 +1031,61 @@ fn worktree_source_selection_handles_non_git_empty_and_detached_projects() {
 }
 
 #[test]
+fn workspace_branch_refresh_syncs_external_switches_while_a_task_runs() {
+    use crate::infrastructure::git;
+    let (_directory, project) = git::tests::repository_fixture();
+    let path = Path::new(&project.canonical_path);
+    let (mut presenter, _runner, _fixture) = fixture();
+    presenter.open_project(path);
+    assert!(presenter.submit("local task", "claude"));
+    let run_id = presenter.model.active_run.unwrap();
+    presenter.refresh_workspace_branches();
+    assert_eq!(presenter.model.workspace_branch.as_deref(), Some("main"));
+    // Switch branches outside the app (e.g. from VSCode), then refresh.
+    git::git(path, &["switch", "-c", "feature"]).unwrap();
+    presenter.refresh_workspace_branches();
+    assert_eq!(presenter.model.workspace_branch.as_deref(), Some("feature"));
+    git::git(path, &["switch", "main"]).unwrap();
+    presenter.refresh_workspace_branches();
+    assert_eq!(presenter.model.workspace_branch.as_deref(), Some("main"));
+    // Refresh is read-only: the running task is untouched.
+    assert_eq!(presenter.model.active_run, Some(run_id));
+    assert!(!presenter.model.workspace_busy);
+}
+
+#[test]
+fn workspace_branch_refresh_revalidates_the_worktree_base_branch() {
+    use crate::{infrastructure::git, model::workspace::WorkspaceKind};
+    let (_directory, project) = git::tests::repository_fixture();
+    let path = Path::new(&project.canonical_path);
+    git::git(path, &["branch", "release"]).unwrap();
+    let (mut presenter, _runner, _fixture) = fixture();
+    presenter.open_project(path);
+    presenter.select_workspace_kind(WorkspaceKind::Worktree);
+    presenter.select_workspace_base("release".into());
+    presenter.refresh_workspace_branches();
+    assert_eq!(presenter.model.workspace_draft.base, "release");
+    assert!(
+        presenter
+            .workspace_base_branches()
+            .unwrap()
+            .contains(&"release".to_owned())
+    );
+    // A branch deleted externally falls back to the checked-out branch.
+    git::git(path, &["branch", "-D", "release"]).unwrap();
+    presenter.refresh_workspace_branches();
+    assert_eq!(presenter.model.workspace_draft.base, "main");
+}
+
+#[test]
+fn workspace_branch_refresh_degrades_without_git() {
+    let (mut presenter, _runner, _directory) = fixture();
+    presenter.refresh_workspace_branches();
+    assert!(!presenter.model.project_is_git);
+    assert_eq!(presenter.model.workspace_branch, None);
+}
+
+#[test]
 fn concurrent_worktree_tasks_isolate_output_approvals_queue_and_cancellation() {
     let (mut presenter, runner, _directory, first) = worktree_fixture("first");
     assert!(presenter.submit("first follow-up", "claude"));

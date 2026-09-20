@@ -561,6 +561,7 @@
   "Worktree 已创建，正在读取任务目录的模型配置…": "Worktree created. Loading models from the task directory…",
   "查看变更": "View changes",
   "刷新变更": "Refresh changes",
+  "刷新分支": "Refresh branches",
   "提交说明": "Commit message",
   "完成任务成果": "Complete task work",
   "提交所选文件": "Commit selected files",
