@@ -102,8 +102,9 @@ impl Presenter {
         true
     }
 
-    pub(crate) fn shutdown_for_update(&mut self) {
-        // Release the embedded Runner and server before the installer restarts the app.
+    /// Releases the embedded Runner, the remote server, and background workers
+    /// before the process exits, either for an update or for a plain quit.
+    pub(crate) fn shutdown(&mut self) {
         self.runner.take();
         self.remote_control.take();
         self.installation_worker.take();

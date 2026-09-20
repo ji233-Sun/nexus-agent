@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="92 92 328 328" fill="none" role="img" aria-labelledby="title description">
+  <title id="title">Nexus Agent menu bar mark</title>
+  <desc id="description">The N of the Nexus Agent icon, alone on a transparent background for the macOS menu bar template image.</desc>
+  <g stroke="#000000" stroke-width="64" stroke-linejoin="round">
+    <path d="M148 364V148L218 218"/>
+    <path d="M230 230L282 282"/>
+    <path d="M364 148V364L294 294"/>
+  </g>
+</svg>

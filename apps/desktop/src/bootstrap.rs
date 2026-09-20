@@ -188,7 +188,13 @@ pub(crate) fn run() -> anyhow::Result<()> {
     };
 
     gpui_kit::application()
-        .with_quit_mode(QuitMode::LastWindowClosed)
+        // macOS keeps running behind the status item after ⌘W, so only an
+        // explicit quit — ⌘Q, the menu bar, or the status item — ends it.
+        .with_quit_mode(if cfg!(target_os = "macos") {
+            QuitMode::Explicit
+        } else {
+            QuitMode::LastWindowClosed
+        })
         .with_assets(gpui_kit::assets::Assets)
         .with_http_client(std::sync::Arc::new(
             reqwest_client::ReqwestClient::user_agent(concat!(
@@ -225,7 +231,26 @@ pub(crate) fn run() -> anyhow::Result<()> {
                     if let Some(path) = project_path {
                         presenter.open_project(&path);
                     }
+                    #[cfg(target_os = "macos")]
+                    let language = presenter.model().language;
                     let view = cx.new(|cx| NexusView::new(presenter, window, cx));
+                    // The main window owns every task, so closing it is a
+                    // lifecycle decision: macOS hides the application and
+                    // Windows confirms before stopping running tasks.
+                    #[cfg(any(target_os = "macos", target_os = "windows"))]
+                    window.on_window_should_close(cx, {
+                        let view = view.downgrade();
+                        move |window, cx| {
+                            view.update(cx, |view, cx| view.should_close_window(window, cx))
+                                .unwrap_or(true)
+                        }
+                    });
+                    #[cfg(target_os = "macos")]
+                    crate::infrastructure::status_item::install(
+                        cx.to_async(),
+                        window.window_handle(),
+                        language,
+                    );
                     cx.new(|cx| Root::new(view, window, cx).bg(rgba(0x00000000)))
                 })?;
                 Ok::<_, anyhow::Error>(())

@@ -3,6 +3,7 @@ mod cnb_media;
 mod components;
 mod fonts;
 mod issues;
+mod lifecycle;
 mod model_picker;
 mod pane;
 mod pdf;
@@ -67,7 +68,15 @@ use uuid::Uuid;
 
 gpui::actions!(
     nexus_view,
-    [SearchSessions, NewTask, ToggleSettings, CloseReview]
+    [
+        SearchSessions,
+        NewTask,
+        ToggleSettings,
+        CloseReview,
+        HideWindow,
+        ToggleWindow,
+        QuitApp
+    ]
 );
 
 // Render outside NexusView's update so dialog builders can read its current model.
@@ -318,12 +327,24 @@ impl NexusView {
             },
         )
         .detach();
-        cx.bind_keys([
+        let mut keys = vec![
             KeyBinding::new("secondary-k", SearchSessions, Some("Nexus")),
             KeyBinding::new("secondary-n", NewTask, Some("Nexus")),
             KeyBinding::new("secondary-,", ToggleSettings, Some("Nexus")),
             KeyBinding::new("escape", CloseReview, Some("Nexus")),
+        ];
+        // ⌘W hides the window and ⌘Q quits the application; both are macOS
+        // conventions the platform expects to find in the menu bar.
+        #[cfg(target_os = "macos")]
+        keys.extend([
+            KeyBinding::new("secondary-w", HideWindow, Some("Nexus")),
+            KeyBinding::new("secondary-q", QuitApp, Some("Nexus")),
         ]);
+        cx.bind_keys(keys);
+        // Must follow `bind_keys`: the platform derives each menu item's key
+        // equivalent from the binding registered for its action.
+        #[cfg(target_os = "macos")]
+        cx.set_menus(lifecycle::menu_bar(locale));
         let owner = cx.weak_entity();
         let sidebar_pane = cx.new(|cx| WorkspacePane::new(owner.clone(), PaneKind::Sidebar, cx));
         let timeline_pane = cx.new(|cx| WorkspacePane::new(owner.clone(), PaneKind::Timeline, cx));
@@ -464,6 +485,13 @@ impl NexusView {
                 });
             }
             self.sync_catalog_model_select(window, cx);
+            // The menu bar and the status item are native and keep their own
+            // copies of every label.
+            #[cfg(target_os = "macos")]
+            {
+                cx.set_menus(lifecycle::menu_bar(language));
+                crate::infrastructure::status_item::sync_titles(language);
+            }
             window.refresh();
         }
         cx.notify();
@@ -681,7 +709,7 @@ impl NexusView {
             self.presenter.model().updates.state,
             crate::model::updates::UpdateState::Restarting(_)
         ) {
-            self.presenter.shutdown_for_update();
+            self.presenter.shutdown();
             cx.quit();
         }
     }
@@ -701,6 +729,9 @@ impl NexusView {
     }
 
     fn new_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The status item can start a task while the window is hidden.
+        #[cfg(target_os = "macos")]
+        self.show_window_if_hidden(window, cx);
         self.presenter.new_task();
         self.settings_open = false;
         self.expanded_messages.clear();
@@ -2183,7 +2214,7 @@ impl Render for NexusView {
         let issue_launch = self
             .issue_launch
             .map(|_| self.render_issue_launch(window, cx));
-        div()
+        let element = div()
             .key_context("Nexus")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|app, _: &SearchSessions, window, cx| {
@@ -2244,7 +2275,19 @@ impl Render for NexusView {
                 )
             })
             .child(self.dialog_layer.clone())
-            .when_some(issue_launch, |element, overlay| element.child(overlay))
+            .when_some(issue_launch, |element, overlay| element.child(overlay));
+        // The status item, the menu bar, and ⌘W/⌘Q reach the window here, so
+        // every path shares one hidden/quit implementation.
+        #[cfg(target_os = "macos")]
+        let element = element
+            .on_action(cx.listener(|app, _: &HideWindow, _, cx| app.hide_window(cx)))
+            .on_action(
+                cx.listener(|app, _: &ToggleWindow, window, cx| app.toggle_window(window, cx)),
+            )
+            .on_action(
+                cx.listener(|app, _: &QuitApp, window, cx| app.quit_application(window, cx)),
+            );
+        element
     }
 }
 
