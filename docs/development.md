@@ -124,7 +124,7 @@ flowchart TB
 - `crates/harness-omp`：Oh My Pi 探测、受控写入模式和 JSON 事件解码。
 - `crates/harness-pi`：Pi RPC、临时审批扩展、原生 Session 文件与模型目录。
 - `crates/harness-cli`：复用 Claude 事件解码的 Qoder / Qoder CN / CodeBuddy stream-json 接入。
-- `crates/harness-acp`：Kimi Code / Qoder / CodeBuddy / OpenCode 共用的 ACP v1 握手、会话、模型配置、审批和事件适配。
+- `crates/harness-acp`：Kimi Code / Qoder / CodeBuddy / OpenCode / DeepSeek Harness 共用的 ACP v1 握手、会话、模型配置、审批和事件适配。
 - `apps/runner/src/transport.rs`：JSONL 命令读取、协议版本校验和事件写出。
 - `apps/runner/src/application`：命令调度、双任务并发、任务与 checkout 互斥、取消和统一事件转换。
 - `apps/runner/src/infrastructure`：Harness 适配器选择、子进程执行和平台相关的进程树清理。
@@ -228,6 +228,8 @@ Pi 的适配位于 `crates/harness-pi`，与 OMP 共享 `harness-core::rpc` 事�
 默认 `HarnessTransport::Cli`：Qoder / Qoder CN / CodeBuddy 使用 stream-json 控制请求，初始化成功后发送用户输入。Qoder / CodeBuddy 共用 Claude 事件与问答编解码。Qoder 不传不支持的 `--verbose`，且暂不发送无接收回执保证的 steer。
 
 Kimi Code 只支持 ACP，新会话固定使用 `kimi acp`（`HarnessTransport::Cli` 对 Kimi 不再生效）。旧版 `kimi-cli` 的 Wire 原生会话无法在 kimi-code 中恢复，续聊会按 CLI 返回的错误结束轮次；旧版 CLI 需升级到 kimi-code 后重新开始会话。Qoder / Qoder CN / CodeBuddy 可在「接入方式」中切换 `--acp`。初始化不声明文件系统与终端代理能力，工具在原 CLI 中运行。续聊优先使用服务端声明的 `session/resume`，否则使用 `session/load`；准备阶段过滤历史回放，再设置原生 `default` 权限、模型和支持的思考层级，最后发送 `session/prompt`。致命错误同时结束轮次，未知服务端请求返回 method-not-found。
+
+DeepSeek Harness（`dsh`）只支持 ACP，固定以 `dsh --profile acp` 启动。其 ACP 实现不声明 modes，`session/set_mode` 会被拒绝，Nexus 对它跳过模式恢复；续聊使用 `sessionCapabilities.resume` 声明的 `session/resume`，会话 ID 原样保存。模型目录来自 `session/new` 返回的 `configOptions`，模型值是不透明的 `["provider","model"]` JSON 组合，思考层级挂在 `thought_level` 类别下（`off / low / high / max`）。后台文本生成使用 `dsh --profile headless <task>`，任务作为位置参数传入，stdout 的纯文本即最终答案（0.1.x 不支持 stdin 任务与 `--json`）。
 
 ACP 模型目录通过无 Prompt 的 `session/new` 获取，CLI 可能保存空会话。模型 ID 与配置项 ID 原样保留。ACP v1 无标准 Steer 或通用 User Ask；厂商私有交互扩展不在本适配范围内。CodeBuddy 子成员事件不会混入主回答。
 

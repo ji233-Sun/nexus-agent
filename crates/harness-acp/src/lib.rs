@@ -32,18 +32,20 @@ fn initialize() -> InputFrame {
     )
 }
 fn args(harness: HarnessKind) -> Vec<String> {
-    if matches!(harness, HarnessKind::Kimi | HarnessKind::Opencode) {
-        vec!["acp".into()]
-    } else {
-        vec!["--acp".into(), "--permission-mode".into(), "default".into()]
+    match harness {
+        HarnessKind::Kimi | HarnessKind::Opencode => vec!["acp".into()],
+        // dsh 的 ACP 由 `--profile acp` 启动，加载器只解析自己的参数。
+        HarnessKind::Deepseek => vec!["--profile".into(), "acp".into()],
+        _ => vec!["--acp".into(), "--permission-mode".into(), "default".into()],
     }
 }
-// OpenCode 的原生默认模式是 build，没有 ACP 约定的 default 模式。
-fn default_mode(harness: HarnessKind) -> &'static str {
-    if harness == HarnessKind::Opencode {
-        "build"
-    } else {
-        "default"
+// OpenCode 的原生默认模式是 build；dsh 不支持 session/set_mode，恢复会话时
+// 必须跳过模式设置，否则请求直接报错。
+fn default_mode(harness: HarnessKind) -> Option<&'static str> {
+    match harness {
+        HarnessKind::Opencode => Some("build"),
+        HarnessKind::Deepseek => None,
+        _ => Some("default"),
     }
 }
 fn source(harness: HarnessKind) -> ModelSource {
@@ -53,6 +55,7 @@ fn source(harness: HarnessKind) -> ModelSource {
         HarnessKind::QoderCn => ModelSource::QoderCnAcp,
         HarnessKind::Codebuddy => ModelSource::CodebuddyAcp,
         HarnessKind::Opencode => ModelSource::OpencodeAcp,
+        HarnessKind::Deepseek => ModelSource::DeepseekAcp,
         _ => unreachable!(),
     }
 }
@@ -137,11 +140,13 @@ impl EventDecoder {
             self.config = result["configOptions"].clone();
         }
         // Restored sessions must return to native default permissions before receiving a prompt.
-        self.pending.push_back(request(
-            "mode",
-            "session/set_mode",
-            json!({"sessionId":self.session,"modeId":default_mode(self.harness)}),
-        ));
+        if let Some(mode) = default_mode(self.harness) {
+            self.pending.push_back(request(
+                "mode",
+                "session/set_mode",
+                json!({"sessionId":self.session,"modeId":mode}),
+            ));
+        }
         if let Some(model) = &self.model {
             let frame = if let Some(config) = config_option(&self.config, "model") {
                 request(
@@ -748,6 +753,44 @@ impl LineDecoder for OpencodeTextDecoder {
     }
 }
 
+/// `dsh --profile headless <task>`（0.1.x）：任务作为位置参数传入，stdout 只输出
+/// 最终答案的纯文本，思考过程走 stderr，退出码 0 表示任务完成。
+pub fn prepare_deepseek_text_generation(
+    run: &TextGenerationConfig,
+    prompt: &str,
+    cwd: &Path,
+) -> (LaunchSpec, DeepseekTextDecoder) {
+    (
+        LaunchSpec {
+            executable: run.executable.clone().into(),
+            args: vec!["--profile".into(), "headless".into(), prompt.into()],
+            cwd: cwd.into(),
+            stdin: String::new(),
+        },
+        DeepseekTextDecoder::default(),
+    )
+}
+
+/// headless 模式的 stdout 只有最终答案；逐行累积并重复上报，最终一次为准。
+#[derive(Default)]
+pub struct DeepseekTextDecoder {
+    text: String,
+}
+
+impl LineDecoder for DeepseekTextDecoder {
+    fn decode_line(&mut self, line: &str) -> Result<Vec<DecodedEvent>, serde_json::Error> {
+        if !self.text.is_empty() {
+            self.text.push('\n');
+        }
+        self.text.push_str(line);
+        Ok(vec![DecodedEvent::MessageCompleted(self.text.clone())])
+    }
+
+    fn steer(&mut self, _: &str, _: &str) -> Option<InputFrame> {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1036,6 +1079,109 @@ mod tests {
                 .decode_line(r#"{"role":"meta","type":"session.resume_hint"}"#)
                 .unwrap()
                 .is_empty()
+        );
+    }
+    #[test]
+    fn deepseek_skips_mode_restore_and_prompts_directly() {
+        let mut run = run(HarnessKind::Deepseek);
+        run.session_id = Some("ses-1".into());
+        let (spec, mut decoder) = prepare_run(&run, Path::new("/project"));
+        assert_eq!(spec.args, vec!["--profile".to_owned(), "acp".to_owned()]);
+        let events = decode(
+            &mut decoder,
+            response(
+                "initialize",
+                json!({"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"resume":{}}}}),
+            ),
+        );
+        assert!(
+            matches!(&events[0],DecodedEvent::WriteStdin(f) if f.0["method"]=="session/resume" && f.0["params"]["sessionId"]=="ses-1")
+        );
+        let events = decode(
+            &mut decoder,
+            response("session", json!({"sessionId":"ses-1","configOptions":[]})),
+        );
+        // dsh 的 ACP 不提供 session/set_mode，模式请求会直接报错，必须跳过。
+        assert!(
+            matches!(&events[1],DecodedEvent::WriteStdin(f) if f.0["method"]=="session/prompt")
+        );
+    }
+    #[test]
+    fn deepseek_catalog_reads_provider_grouped_models_and_efforts() {
+        let value = |provider: &str, model: &str| json!(format!("[{provider:?},{model:?}]"));
+        let config = json!([
+            {"id":"model","category":"model","type":"select",
+             "currentValue":value("deepseek-official","deepseek-flash"),
+             "options":[{"group":"deepseek-official","name":"DeepSeek","options":[
+                {"value":value("deepseek-official","deepseek-flash"),"name":"DeepSeek-V4.1-Flash"},
+                {"value":value("deepseek-official","deepseek-v4-pro"),"name":"DeepSeek-V4-Pro"}]}]},
+            {"id":"reasoning_effort","category":"thought_level","type":"select","currentValue":"high",
+             "options":[{"value":"off","name":"Off"},{"value":"low","name":"Low"},
+                        {"value":"high","name":"High"},{"value":"max","name":"Max"}]}
+        ]);
+        let models = catalog(HarnessKind::Deepseek, &json!({"configOptions":config})).unwrap();
+        assert_eq!(models.len(), 2);
+        assert!(models[0].is_default);
+        assert_eq!(models[0].supported_reasoning_efforts.len(), 4);
+        assert_eq!(models[1].supported_reasoning_efforts.len(), 4);
+        // 选中的模型以不透明的 provider/model 组合值回传给 session/set_config_option。
+        let mut run = run(HarnessKind::Deepseek);
+        run.model = Some(
+            value("deepseek-official", "deepseek-v4-pro")
+                .as_str()
+                .unwrap()
+                .into(),
+        );
+        run.effort = ThinkingEffort::Max;
+        let (_, mut decoder) = prepare_run(&run, Path::new("/project"));
+        let events = decode(
+            &mut decoder,
+            response(
+                "session",
+                json!({"sessionId":"ses-1","configOptions":config}),
+            ),
+        );
+        assert!(matches!(&events[0], DecodedEvent::SessionStarted(_)));
+        assert!(
+            matches!(&events[1],DecodedEvent::WriteStdin(f) if f.0["method"]=="session/set_config_option" && f.0["params"]["configId"]=="model")
+        );
+        let events = decode(&mut decoder, response("model", json!({})));
+        assert!(
+            matches!(&events[0],DecodedEvent::WriteStdin(f) if f.0["method"]=="session/set_config_option" && f.0["params"]["configId"]=="reasoning_effort" && f.0["params"]["value"]=="max")
+        );
+        let events = decode(&mut decoder, response("effort", json!({})));
+        assert!(
+            matches!(&events[0],DecodedEvent::WriteStdin(f) if f.0["method"]=="session/prompt")
+        );
+    }
+    #[test]
+    fn deepseek_title_takes_the_task_positionally_and_emits_the_final_stdout() {
+        let config = TextGenerationConfig {
+            harness: HarnessKind::Deepseek,
+            executable: "dsh".into(),
+            model: Some("commit-model".into()),
+            effort: ThinkingEffort::Default,
+            environment: vec![],
+        };
+        let (spec, mut decoder) =
+            prepare_deepseek_text_generation(&config, "title prompt", Path::new("/project"));
+        assert_eq!(
+            spec.args,
+            vec![
+                "--profile".to_owned(),
+                "headless".to_owned(),
+                "title prompt".to_owned()
+            ]
+        );
+        assert!(spec.stdin.is_empty());
+        let events = decoder.decode_line("**Fix authentication").unwrap();
+        assert!(
+            matches!(&events[0],DecodedEvent::MessageCompleted(t) if t=="**Fix authentication")
+        );
+        // 多行答案按行累积，最终一次携带完整文本。
+        let events = decoder.decode_line("flow.**").unwrap();
+        assert!(
+            matches!(&events[0],DecodedEvent::MessageCompleted(t) if t=="**Fix authentication\nflow.**")
         );
     }
 }

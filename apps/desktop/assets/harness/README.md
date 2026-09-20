@@ -1,6 +1,6 @@
 # Harness 图标来源
 
-Claude、Codex、Kimi、Qoder、CodeBuddy 和 OpenCode 图标来自 [LobeHub Icons](https://github.com/lobehub/lobe-icons)，遵循本目录的 `LICENSE`（MIT）。Qoder 国际版和国内版共用 Qoder 品牌图标。
+Claude、Codex、Kimi、Qoder、CodeBuddy、OpenCode 和 DeepSeek 图标来自 [LobeHub Icons](https://github.com/lobehub/lobe-icons)，遵循本目录的 `LICENSE`（MIT）。Qoder 国际版和国内版共用 Qoder 品牌图标。
 
 本次新增资源使用上游的单色 SVG，颜色由应用主题指定：
 
@@ -8,5 +8,6 @@ Claude、Codex、Kimi、Qoder、CodeBuddy 和 OpenCode 图标来自 [LobeHub Ico
 - [qoder.svg](https://github.com/lobehub/lobe-icons/blob/master/packages/static-svg/icons/qoder.svg)
 - [codebuddy.svg](https://github.com/lobehub/lobe-icons/blob/master/packages/static-svg/icons/codebuddy.svg)
 - [opencode.svg](https://github.com/lobehub/lobe-icons/blob/master/packages/static-svg/icons/opencode.svg)
+- [deepseek.svg](https://github.com/lobehub/lobe-icons/blob/master/packages/static-svg/icons/deepseek.svg)
 
 OMP 图标许可见 `OMP_LICENSE`。

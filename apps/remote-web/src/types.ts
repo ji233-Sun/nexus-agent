@@ -58,7 +58,8 @@ export interface RemoteState {
     | "qoder"
     | "qodercn"
     | "codebuddy"
-    | "opencode";
+    | "opencode"
+    | "deepseek";
   model: string | null;
   effort: "low" | "medium" | "high" | "xhigh" | "max";
   harness_ready: boolean;
