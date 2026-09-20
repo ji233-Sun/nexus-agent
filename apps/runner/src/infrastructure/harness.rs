@@ -24,7 +24,8 @@ pub(crate) async fn probe(
         | HarnessKind::Qoder
         | HarnessKind::QoderCn
         | HarnessKind::Codebuddy
-        | HarnessKind::Opencode => acp::probe(harness, executable, environment).await,
+        | HarnessKind::Opencode
+        | HarnessKind::Deepseek => acp::probe(harness, executable, environment).await,
     }
 }
 
@@ -43,7 +44,8 @@ pub(crate) async fn discover_models(
         | HarnessKind::Qoder
         | HarnessKind::QoderCn
         | HarnessKind::Codebuddy
-        | HarnessKind::Opencode => {
+        | HarnessKind::Opencode
+        | HarnessKind::Deepseek => {
             acp::discover_models(harness, executable, cwd, environment, cancel).await
         }
         HarnessKind::Claude => claude::discover_models(executable, cwd, environment, cancel).await,
@@ -161,9 +163,9 @@ fn prepare_native(
     cwd: &Path,
 ) -> Result<(LaunchSpec, Box<dyn LineDecoder>), String> {
     Ok(match request.harness {
-        // Kimi Code no longer ships the Wire protocol, and OpenCode's `run` output
-        // is not stream-json compatible; ACP is the only transport for both.
-        HarnessKind::Kimi | HarnessKind::Opencode => {
+        // Kimi Code no longer ships the Wire protocol, and OpenCode / DeepSeek
+        // Harness only automate over ACP; it is their only transport.
+        HarnessKind::Kimi | HarnessKind::Opencode | HarnessKind::Deepseek => {
             let (spec, decoder) = acp::prepare_run(request, cwd);
             (spec, Box::new(decoder) as Box<dyn LineDecoder>)
         }
@@ -214,6 +216,10 @@ pub(crate) fn prepare_text_generation(
         }
         HarnessKind::Opencode => {
             let (spec, decoder) = acp::prepare_opencode_text_generation(request, prompt, cwd);
+            (spec, Box::new(decoder) as Box<dyn LineDecoder>)
+        }
+        HarnessKind::Deepseek => {
+            let (spec, decoder) = acp::prepare_deepseek_text_generation(request, prompt, cwd);
             (spec, Box::new(decoder) as Box<dyn LineDecoder>)
         }
         HarnessKind::Qoder | HarnessKind::QoderCn | HarnessKind::Codebuddy => {

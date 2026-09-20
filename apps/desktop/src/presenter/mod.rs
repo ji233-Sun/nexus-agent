@@ -1353,14 +1353,16 @@ impl Presenter {
     }
 
     pub(crate) fn harness_transport(&self, harness: HarnessKind) -> nexus_domain::HarnessTransport {
-        if matches!(harness, HarnessKind::Kimi | HarnessKind::Opencode)
-            || self
-                .storage
-                .setting(&format!("harness_transport.{}", harness.as_str()))
-                .ok()
-                .flatten()
-                .as_deref()
-                == Some("acp")
+        if matches!(
+            harness,
+            HarnessKind::Kimi | HarnessKind::Opencode | HarnessKind::Deepseek
+        ) || self
+            .storage
+            .setting(&format!("harness_transport.{}", harness.as_str()))
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some("acp")
         {
             nexus_domain::HarnessTransport::Acp
         } else {
@@ -1549,6 +1551,7 @@ fn executable_setting_key(harness: HarnessKind) -> &'static str {
         HarnessKind::QoderCn => "qodercn_executable",
         HarnessKind::Codebuddy => "codebuddy_executable",
         HarnessKind::Opencode => "opencode_executable",
+        HarnessKind::Deepseek => "deepseek_executable",
     }
 }
 

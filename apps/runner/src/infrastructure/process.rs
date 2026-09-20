@@ -1237,7 +1237,11 @@ mod tests {
                         }}
                     })
                 ),
-                HarnessKind::Omp | HarnessKind::Pi | HarnessKind::Kimi | HarnessKind::Opencode => {
+                HarnessKind::Omp
+                | HarnessKind::Pi
+                | HarnessKind::Kimi
+                | HarnessKind::Opencode
+                | HarnessKind::Deepseek => {
                     unreachable!()
                 }
             }

@@ -79,6 +79,7 @@ pub(crate) fn documentation(harness: HarnessKind) -> &'static str {
         HarnessKind::QoderCn => "https://docs.qoder.cn/cli/what-is-qoder-cli-cn",
         HarnessKind::Codebuddy => "https://www.codebuddy.ai/docs/cli/overview",
         HarnessKind::Opencode => "https://opencode.ai/docs/",
+        HarnessKind::Deepseek => "https://deepseek-harness.github.io/deepseek-harness/en/",
     }
 }
 
@@ -93,6 +94,7 @@ fn package(harness: HarnessKind) -> &'static str {
         HarnessKind::QoderCn => "@qodercn-ai/qoderclicn",
         HarnessKind::Codebuddy => "@tencent-ai/codebuddy-code",
         HarnessKind::Opencode => "opencode-ai",
+        HarnessKind::Deepseek => "@deepseek-ai/dsh",
     }
 }
 
@@ -575,7 +577,12 @@ fn native_install(harness: HarnessKind, environment: &Environment) -> Option<Mai
         // OpenCode 官方只提供 Unix 安装脚本，Windows 走 npm / Scoop / Chocolatey。
         HarnessKind::Opencode if environment.os == "windows" => return None,
         HarnessKind::Opencode => ("curl -fsSL https://opencode.ai/install | bash", ""),
-        HarnessKind::Pi | HarnessKind::Qoder | HarnessKind::QoderCn | HarnessKind::Codebuddy => {
+        HarnessKind::Pi
+        | HarnessKind::Qoder
+        | HarnessKind::QoderCn
+        | HarnessKind::Codebuddy
+        // dsh 只有 npm 分发，没有官方安装脚本。
+        | HarnessKind::Deepseek => {
             return None;
         }
         HarnessKind::Kimi => (
@@ -651,7 +658,8 @@ fn install_options(
             | HarnessKind::Kimi
             | HarnessKind::Qoder
             | HarnessKind::QoderCn
-            | HarnessKind::Codebuddy => {
+            | HarnessKind::Codebuddy
+            | HarnessKind::Deepseek => {
                 vec![]
             }
         },
@@ -700,7 +708,8 @@ fn winget_id(harness: HarnessKind) -> Option<&'static str> {
         | HarnessKind::Qoder
         | HarnessKind::QoderCn
         | HarnessKind::Codebuddy
-        | HarnessKind::Opencode => None,
+        | HarnessKind::Opencode
+        | HarnessKind::Deepseek => None,
     }
 }
 
@@ -719,7 +728,8 @@ fn homebrew_owner(real: &Path, harness: HarnessKind) -> Option<(PathBuf, String,
         | HarnessKind::Kimi
         | HarnessKind::Qoder
         | HarnessKind::QoderCn
-        | HarnessKind::Codebuddy => {
+        | HarnessKind::Codebuddy
+        | HarnessKind::Deepseek => {
             return None;
         }
         HarnessKind::Claude => "claude-code",
@@ -911,6 +921,7 @@ async fn ownership(
         HarnessKind::QoderCn => "qodercn",
         HarnessKind::Codebuddy => "codebuddy",
         HarnessKind::Opencode => "opencode",
+        HarnessKind::Deepseek => "deepseek",
     };
     if matches!(
         harness,
@@ -930,9 +941,11 @@ async fn ownership(
         );
     }
     let native = match harness {
-        HarnessKind::Pi | HarnessKind::Qoder | HarnessKind::QoderCn | HarnessKind::Codebuddy => {
-            false
-        }
+        HarnessKind::Pi
+        | HarnessKind::Qoder
+        | HarnessKind::QoderCn
+        | HarnessKind::Codebuddy
+        | HarnessKind::Deepseek => false,
         HarnessKind::Kimi => inside(
             real,
             &environment

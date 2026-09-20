@@ -386,7 +386,8 @@ async fn approval_round_trip_for_each_harness_rejects_invalid_and_duplicate_resp
                 | HarnessKind::Qoder
                 | HarnessKind::QoderCn
                 | HarnessKind::Codebuddy
-                | HarnessKind::Opencode => {
+                | HarnessKind::Opencode
+                | HarnessKind::Deepseek => {
                     assert_eq!(response["result"]["outcome"]["outcome"], "selected")
                 }
             }
@@ -598,7 +599,8 @@ async fn runner_resumes_each_harness_session_across_processes() {
             | HarnessKind::Qoder
             | HarnessKind::QoderCn
             | HarnessKind::Codebuddy
-            | HarnessKind::Opencode => "acp-args.txt",
+            | HarnessKind::Opencode
+            | HarnessKind::Deepseek => "acp-args.txt",
         };
         let args = fs::read_to_string(directory.path().join(args_file)).unwrap();
         if harness == HarnessKind::Codex {
@@ -608,7 +610,7 @@ async fn runner_resumes_each_harness_session_across_processes() {
             .unwrap();
             assert_eq!(frame["method"], "thread/resume");
             assert_eq!(frame["params"]["threadId"], session_id);
-        } else if harness == HarnessKind::Opencode {
+        } else if matches!(harness, HarnessKind::Opencode | HarnessKind::Deepseek) {
             // OpenCode 只走 ACP，会话 ID 原样保存，不带 transport / 地区前缀。
             let frame: serde_json::Value = serde_json::from_str(
                 &fs::read_to_string(directory.path().join("acp-session.json")).unwrap(),
@@ -1302,8 +1304,11 @@ async fn commit_messages_use_each_harness_configuration_without_starting_a_run()
             }
         }
         let args = fs::read_to_string(directory.path().join("title-args.txt")).unwrap();
-        assert!(args.contains("--model\ncommit-model"));
-        if harness != HarnessKind::Kimi {
+        // dsh 的 headless 模式没有模型参数，目录使用部署默认模型。
+        if harness != HarnessKind::Deepseek {
+            assert!(args.contains("--model\ncommit-model"));
+        }
+        if !matches!(harness, HarnessKind::Kimi | HarnessKind::Deepseek) {
             assert!(!args.contains("selected change"));
         }
         assert!(args.contains(match harness {
@@ -1313,6 +1318,7 @@ async fn commit_messages_use_each_harness_configuration_without_starting_a_run()
             HarnessKind::Kimi => "--agent-file",
             HarnessKind::Qoder | HarnessKind::QoderCn | HarnessKind::Codebuddy => "--tools\n\n",
             HarnessKind::Opencode => "--agent\nnexus-text",
+            HarnessKind::Deepseek => "--profile\nheadless",
         }));
         let prompt = fs::read_to_string(directory.path().join("title-prompt.txt")).unwrap();
         assert!(prompt.contains("selected change"));
@@ -1376,7 +1382,10 @@ async fn runner_generates_titles_with_each_harness_in_a_safe_background_process(
         [ThinkingEffort::Default, ThinkingEffort::Low]
             .into_iter()
             .filter(move |effort| {
-                !matches!(harness, HarnessKind::Kimi | HarnessKind::Opencode) || effort.is_default()
+                !matches!(
+                    harness,
+                    HarnessKind::Kimi | HarnessKind::Opencode | HarnessKind::Deepseek
+                ) || effort.is_default()
             })
             .map(move |effort| (harness, effort))
     }) {
@@ -1423,12 +1432,16 @@ async fn runner_generates_titles_with_each_harness_in_a_safe_background_process(
 
         assert_eq!(title, "Fix authentication flow");
         let args = fs::read_to_string(directory.path().join("title-args.txt")).unwrap();
-        // Kimi Code receives the title prompt as an argument; every other
-        // harness keeps the user message out of the process arguments.
-        if harness != HarnessKind::Kimi {
+        // Kimi Code and DeepSeek Harness receive the title prompt as an
+        // argument; every other harness keeps the user message out of the
+        // process arguments.
+        if !matches!(harness, HarnessKind::Kimi | HarnessKind::Deepseek) {
             assert!(!args.contains("Please fix the authentication flow"));
         }
-        assert!(args.contains("--model\ntitle-model"));
+        // dsh 的 headless 模式没有模型参数，标题使用部署默认模型。
+        if harness != HarnessKind::Deepseek {
+            assert!(args.contains("--model\ntitle-model"));
+        }
         assert!(!args.contains("conversation-model"));
         assert!(!args.contains("high"));
         if effort.is_default() {
@@ -1440,7 +1453,7 @@ async fn runner_generates_titles_with_each_harness_in_a_safe_background_process(
                 HarnessKind::Claude | HarnessKind::Codebuddy => "--effort\nlow",
                 HarnessKind::Qoder => "--reasoning-effort\nlow",
                 HarnessKind::QoderCn => "--reasoning-effort\nlow",
-                HarnessKind::Kimi | HarnessKind::Opencode => unreachable!(),
+                HarnessKind::Kimi | HarnessKind::Opencode | HarnessKind::Deepseek => unreachable!(),
                 HarnessKind::Codex => "--config\nmodel_reasoning_effort=\"low\"",
                 HarnessKind::Omp | HarnessKind::Pi => "--thinking\nlow",
             }));
@@ -1491,6 +1504,11 @@ async fn runner_generates_titles_with_each_harness_in_a_safe_background_process(
                 assert!(args.contains("--format\njson"));
                 assert!(args.contains("--agent\nnexus-text"));
                 assert!(!args.contains("--session"));
+            }
+            HarnessKind::Deepseek => {
+                assert!(args.contains("--profile\nheadless"));
+                // 任务作为位置参数传入，位于 launcher 参数之后。
+                assert!(args.contains("headless\nGenerate a concise title"));
             }
         }
         assert!(
@@ -1632,7 +1650,8 @@ async fn steer_waits_for_all_tools_and_uses_native_receipts_in_the_same_run() {
                 | HarnessKind::Qoder
                 | HarnessKind::QoderCn
                 | HarnessKind::Codebuddy
-                | HarnessKind::Opencode => unreachable!(),
+                | HarnessKind::Opencode
+                | HarnessKind::Deepseek => unreachable!(),
                 HarnessKind::Claude => assert_eq!(frame["message"]["content"], prompt),
                 HarnessKind::Omp | HarnessKind::Pi => {
                     assert_eq!(frame["type"], "steer");

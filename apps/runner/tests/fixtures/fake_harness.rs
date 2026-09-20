@@ -38,6 +38,9 @@ fn main() {
     let kimi_title = args.iter().any(|arg| arg == "--agent-file");
     // OpenCode 的后台文本生成使用 `run --format json`。
     let opencode_title = args.first().map(String::as_str) == Some("run");
+    // DeepSeek Harness 的后台文本生成使用 `--profile headless --json`。
+    let deepseek_title = args.first().map(String::as_str) == Some("--profile")
+        && args.get(1).map(String::as_str) == Some("headless");
     let harness = if matches!(
         args.first().map(String::as_str),
         Some("app-server" | "exec")
@@ -48,7 +51,7 @@ fn main() {
     } else {
         Harness::Claude
     };
-    let title = opencode_title || match harness {
+    let title = opencode_title || deepseek_title || match harness {
         Harness::Codex => args
             .windows(2)
             .any(|pair| pair == ["--sandbox", "read-only"]),
@@ -93,6 +96,9 @@ fn main() {
             if let Some(index) = args.iter().position(|arg| arg == "-p") {
                 prompt = args.get(index + 1).cloned().unwrap_or_default();
             }
+        } else if deepseek_title {
+            // dsh headless 只接受位置参数任务（0.1.x 不读 stdin）。
+            prompt = args.iter().skip(2).cloned().collect::<Vec<_>>().join(" ");
         } else {
             io::stdin().read_to_string(&mut prompt).unwrap();
         }
@@ -118,6 +124,11 @@ fn main() {
         }
         if opencode_title {
             println!(r#"{{"type":"text","timestamp":0,"sessionID":"session-title","part":{{"id":"part-1","type":"text","text":{text:?}}}}}"#);
+            return;
+        }
+        if deepseek_title {
+            // headless 模式的 stdout 就是最终答案的纯文本。
+            println!("{text}");
             return;
         }
         match harness {

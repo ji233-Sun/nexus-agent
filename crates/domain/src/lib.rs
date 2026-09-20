@@ -17,10 +17,11 @@ pub enum HarnessKind {
     QoderCn,
     Codebuddy,
     Opencode,
+    Deepseek,
 }
 
 impl HarnessKind {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Claude,
         Self::Codex,
         Self::Omp,
@@ -30,6 +31,7 @@ impl HarnessKind {
         Self::QoderCn,
         Self::Codebuddy,
         Self::Opencode,
+        Self::Deepseek,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -43,6 +45,7 @@ impl HarnessKind {
             Self::QoderCn => "qodercn",
             Self::Codebuddy => "codebuddy",
             Self::Opencode => "opencode",
+            Self::Deepseek => "deepseek",
         }
     }
 
@@ -56,7 +59,8 @@ impl HarnessKind {
             Self::Qoder => Self::QoderCn,
             Self::QoderCn => Self::Codebuddy,
             Self::Codebuddy => Self::Opencode,
-            Self::Opencode => Self::Claude,
+            Self::Opencode => Self::Deepseek,
+            Self::Deepseek => Self::Claude,
         }
     }
 
@@ -71,6 +75,7 @@ impl HarnessKind {
             Self::QoderCn => "qodercn",
             Self::Codebuddy => "codebuddy",
             Self::Opencode => "opencode",
+            Self::Deepseek => "dsh",
         }
     }
 }
@@ -87,6 +92,7 @@ impl fmt::Display for HarnessKind {
             Self::QoderCn => "Qoder CN",
             Self::Codebuddy => "CodeBuddy",
             Self::Opencode => "OpenCode",
+            Self::Deepseek => "DeepSeek Harness",
         })
     }
 }
@@ -105,6 +111,7 @@ impl FromStr for HarnessKind {
             "qodercn" => Ok(Self::QoderCn),
             "codebuddy" => Ok(Self::Codebuddy),
             "opencode" => Ok(Self::Opencode),
+            "deepseek" => Ok(Self::Deepseek),
             _ => Err(format!("unknown harness: {value}")),
         }
     }
@@ -406,6 +413,7 @@ pub enum ModelSource {
     QoderCnAcp,
     CodebuddyAcp,
     OpencodeAcp,
+    DeepseekAcp,
 }
 
 impl ModelSource {
@@ -421,6 +429,7 @@ impl ModelSource {
             Self::QoderCnAcp => HarnessKind::QoderCn,
             Self::CodebuddyAcp => HarnessKind::Codebuddy,
             Self::OpencodeAcp => HarnessKind::Opencode,
+            Self::DeepseekAcp => HarnessKind::Deepseek,
         }
     }
 }
@@ -651,7 +660,8 @@ mod tests {
         assert_eq!(HarnessKind::Qoder.next(), HarnessKind::QoderCn);
         assert_eq!(HarnessKind::QoderCn.next(), HarnessKind::Codebuddy);
         assert_eq!(HarnessKind::Codebuddy.next(), HarnessKind::Opencode);
-        assert_eq!(HarnessKind::Opencode.next(), HarnessKind::Claude);
+        assert_eq!(HarnessKind::Opencode.next(), HarnessKind::Deepseek);
+        assert_eq!(HarnessKind::Deepseek.next(), HarnessKind::Claude);
         assert_eq!(HarnessKind::Codex.default_executable(), "codex");
         assert_eq!(ClaudeModel::Haiku.next(), ClaudeModel::Default);
         assert_eq!(ThinkingEffort::Max.next(), ThinkingEffort::Low);
