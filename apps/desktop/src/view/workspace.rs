@@ -825,6 +825,24 @@ impl NexusView {
                     })),
             );
         }
+        if model.project_is_git
+            && (model.selected_task.is_some() || draft.kind == WorkspaceKind::Worktree)
+        {
+            row = row.child(
+                Button::new("workspace-refresh-branch")
+                    .debug_selector(|| "workspace-refresh-branch".into())
+                    .ghost()
+                    .small()
+                    .size(px(COMPACT_CONTROL_HEIGHT))
+                    .icon(IconName::RotateCw)
+                    .tooltip(locale.text("刷新分支"))
+                    .accessibility_label(locale.text("刷新分支"))
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        app.presenter.refresh_workspace_branches();
+                        cx.notify();
+                    })),
+            );
+        }
         row
     }
 
