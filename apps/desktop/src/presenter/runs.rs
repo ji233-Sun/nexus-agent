@@ -213,7 +213,7 @@ impl Presenter {
                 let message = probe_status(&probe);
                 self.model.harnesses.insert(harness, probe);
                 if harness == self.model.selected_harness {
-                    if self.model.active_run.is_none() {
+                    if self.model.active_run.is_none() || self.issue_launch_selection {
                         if !available {
                             self.model.model_catalog = ModelCatalogState::NotReady(message.clone());
                         } else if matches!(self.model.model_catalog, ModelCatalogState::NotReady(_))
@@ -229,7 +229,7 @@ impl Presenter {
                 harness,
                 models,
             } if harness == self.model.selected_harness
-                && self.model.active_run.is_none()
+                && (self.model.active_run.is_none() || self.issue_launch_selection)
                 && self.model.model_catalog.accepts(request_id) =>
             {
                 self.model.model_catalog = if models.is_empty() {
@@ -279,7 +279,7 @@ impl Presenter {
                 harness,
                 message,
             } if harness == self.model.selected_harness
-                && self.model.active_run.is_none()
+                && (self.model.active_run.is_none() || self.issue_launch_selection)
                 && self.model.model_catalog.accepts(request_id) =>
             {
                 self.model.model_catalog.fail(message.into());

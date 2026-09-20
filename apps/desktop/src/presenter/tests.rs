@@ -518,6 +518,31 @@ fn creating_an_issue_starts_a_run_with_the_filed_content_and_current_selection()
 }
 
 #[test]
+fn issue_launch_runs_in_parallel_while_a_session_is_executing() {
+    use crate::model::issues::IssueLaunchKind;
+    for provider in IssueProvider::ALL {
+        let (mut presenter, runner, _directory, first) = worktree_fixture("先执行的任务");
+        assert_eq!(presenter.model.active_run, Some(first.run_id));
+        assert!(presenter.model.can_start_run());
+        seed_issues(&mut presenter, provider);
+        assert!(presenter.start_issue_run(
+            provider,
+            IssueLaunchKind::Create,
+            "并行提交的 Issue",
+            "claude"
+        ));
+        finish_workspace_operation(&mut presenter);
+        emit_current_catalog(&presenter, &runner, claude_aliases());
+        presenter.drain_events();
+        let second = last_start(&runner);
+        assert_ne!(second.run_id, first.run_id);
+        assert!(second.prompt.contains("并行提交的 Issue"));
+        assert_eq!(presenter.model.active_run, Some(second.run_id));
+        assert_eq!(presenter.model.active_run_count(), 2);
+    }
+}
+
+#[test]
 fn issues_mutations_block_duplicates_preserve_failures_and_update_filtered_lists() {
     for provider in IssueProvider::ALL {
         use crate::{

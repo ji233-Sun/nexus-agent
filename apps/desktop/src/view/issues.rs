@@ -71,8 +71,7 @@ impl NexusView {
     ) {
         let model = self.presenter.model();
         let issues = model.issues(provider);
-        if model.active_run.is_some()
-            || model.occupied_run_slots() >= 2
+        if !model.can_start_run()
             || !issues.enabled
             || issues.repository.is_none()
             || issues.detail_request.is_some()
@@ -94,6 +93,7 @@ impl NexusView {
             input.set_placeholder(placeholder, window, cx);
             input.focus(window, cx);
         });
+        self.presenter.set_issue_launch_selection(true);
         self.issue_launch = Some(IssueLaunch { provider, kind });
         self.model_picker_open = false;
         cx.notify();
@@ -103,6 +103,7 @@ impl NexusView {
         if self.issue_launch.take().is_none() {
             return;
         }
+        self.presenter.set_issue_launch_selection(false);
         self.issue_launch_input
             .update(cx, |input, cx| input.set_value("", window, cx));
         cx.notify();
@@ -120,6 +121,7 @@ impl NexusView {
         {
             return;
         }
+        self.presenter.set_issue_launch_selection(false);
         self.issue_launch = None;
         self.issue_launch_input
             .update(cx, |input, cx| input.set_value("", window, cx));
@@ -144,7 +146,7 @@ impl NexusView {
         let issues = model.issues(launch.provider);
         let repository = issues.repository.clone().unwrap_or_default();
         let content = self.issue_launch_input.read(cx).value();
-        let can_launch = model.can_submit()
+        let can_launch = model.can_start_run()
             && (launch.kind == IssueLaunchKind::Process || !content.trim().is_empty());
         let (title, label, action) = match launch.kind {
             IssueLaunchKind::Create => (
@@ -266,8 +268,8 @@ impl NexusView {
                             .flex_wrap()
                             .items_center()
                             .gap_2()
-                            .child(self.model_selector(window, cx))
-                            .child(self.effort_selector(cx))
+                            .child(self.model_selector(window, cx, true))
+                            .child(self.effort_selector(cx, true))
                             .child(self.permission_selector(cx)),
                     )
                     .child(
@@ -341,7 +343,8 @@ impl NexusView {
                                 locale.text("选择 Harness、模型与权限，直接启动处理此 Issue。"),
                             )
                             .disabled(
-                                busy || issues.comments.is_none()
+                                busy || !self.presenter.model().can_start_run()
+                                    || issues.comments.is_none()
                                     || issues.comments_request.is_some(),
                             )
                             .on_click(cx.listener(move |app, _, window, cx| {
@@ -979,7 +982,7 @@ impl NexusView {
                             .icon(IconName::Plus)
                             .label(locale.text("快捷提 Issue"))
                             .tooltip(locale.text("选择 Harness、模型与权限，直接启动创建 Issue。"))
-                            .disabled(self.presenter.model().active_run.is_some())
+                            .disabled(!self.presenter.model().can_start_run())
                             .on_click(cx.listener(move |app, _, window, cx| {
                                 app.open_issue_launch(provider, IssueLaunchKind::Create, window, cx)
                             })),
