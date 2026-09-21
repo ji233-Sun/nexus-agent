@@ -15,8 +15,7 @@ use {
 pub fn configure(command: &mut Command) {
     #[cfg(unix)]
     command.process_group(0);
-    #[cfg(windows)]
-    command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW：桌面应用不弹出控制台。
+    nexus_harness_core::hide_console_window(command.as_std_mut());
 }
 
 pub(super) async fn cancel(child: &mut Child, pid: u32) -> io::Result<ExitStatus> {

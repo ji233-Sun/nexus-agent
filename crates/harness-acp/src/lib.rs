@@ -4,7 +4,7 @@ use nexus_domain::{
 };
 use nexus_harness_core::{
     ApprovalOption, ApprovalPrompt, DecodedEvent, InputFrame, LaunchSpec, LineDecoder,
-    ModelCatalogError, resolve_executable, tool_content,
+    ModelCatalogError, hide_console_window, resolve_executable, tool_content,
 };
 use nexus_protocol::{EnvironmentVariable, HarnessProbe, StartRun, TextGenerationConfig};
 use serde_json::{Value, json};
@@ -502,7 +502,9 @@ pub async fn discover_models(
     }
     let executable = resolve_executable(executable)
         .ok_or_else(|| ModelCatalogError::Failed(format!("未找到 {harness} CLI。")))?;
-    let mut child = Command::new(executable)
+    let mut command = Command::new(executable);
+    hide_console_window(command.as_std_mut());
+    let mut child = command
         .args(args(harness))
         .envs(environment.iter().map(|v| (&v.name, &v.value)))
         .current_dir(cwd)
@@ -586,9 +588,11 @@ pub async fn probe(
         return result;
     };
     result.executable = path.to_string_lossy().into();
+    let mut version_command = Command::new(path);
+    hide_console_window(version_command.as_std_mut());
     if let Ok(Ok(output)) = timeout(
         Duration::from_secs(8),
-        Command::new(path)
+        version_command
             .arg("--version")
             .stdin(Stdio::null())
             .kill_on_drop(true)

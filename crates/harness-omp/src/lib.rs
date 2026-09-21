@@ -10,7 +10,7 @@ use nexus_domain::{
     UserAskAnswer, UserAskAnswerMode, UserAskAnswerValue,
 };
 pub use nexus_harness_core::{DecodedEvent, LaunchSpec, ModelCatalogError};
-use nexus_harness_core::{InputFrame, LineDecoder, resolve_executable};
+use nexus_harness_core::{InputFrame, LineDecoder, hide_console_window, resolve_executable};
 use nexus_protocol::{EnvironmentVariable, HarnessProbe};
 use serde_json::{Value, json};
 use tokio::{io::AsyncReadExt as _, process::Command, sync::watch, time::sleep};
@@ -113,7 +113,9 @@ pub async fn discover_models(
             "未找到 Oh My Pi，无法加载模型目录。请检查可执行文件路径。".into(),
         )
     })?;
-    let mut child = Command::new(&executable)
+    let mut command = Command::new(&executable);
+    hide_console_window(command.as_std_mut());
+    let mut child = command
         .args(["models", "--json"])
         .envs(
             environment
@@ -274,12 +276,11 @@ pub async fn probe(configured_executable: &str) -> HarnessProbe {
     };
 
     let deadline = tokio::time::Instant::now() + PROBE_TIMEOUT;
+    let mut version_command = Command::new(&executable);
+    hide_console_window(version_command.as_std_mut());
     let version = tokio::time::timeout_at(
         deadline,
-        Command::new(&executable)
-            .arg("--version")
-            .kill_on_drop(true)
-            .output(),
+        version_command.arg("--version").kill_on_drop(true).output(),
     )
     .await;
     let Ok(Ok(version)) = version else {
@@ -307,9 +308,11 @@ pub async fn probe(configured_executable: &str) -> HarnessProbe {
         };
     }
     let version = String::from_utf8_lossy(&version.stdout).trim().to_owned();
+    let mut models_command = Command::new(&executable);
+    hide_console_window(models_command.as_std_mut());
     let models = tokio::time::timeout_at(
         deadline,
-        Command::new(&executable)
+        models_command
             .args(["models", "--json"])
             .kill_on_drop(true)
             .output(),

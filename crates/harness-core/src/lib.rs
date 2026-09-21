@@ -8,6 +8,17 @@ use std::{
 use nexus_domain::{UserAskAnswer, UserAskQuestion};
 use serde_json::Value;
 
+pub fn hide_console_window(command: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    #[cfg(not(windows))]
+    let _ = command;
+}
+
 pub fn read_image_attachment(image: &nexus_domain::Attachment) -> Result<Vec<u8>, String> {
     use std::io::Read as _;
     if !image.is_image() || !Path::new(&image.path).is_absolute() || image.page == Some(0) {
@@ -611,5 +622,35 @@ mod tests {
     fn directories_are_never_treated_as_executables() {
         let directory = tempfile::tempdir().unwrap();
         assert!(resolve_in_paths(&directory.path().to_string_lossy(), [], None).is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn background_commands_do_not_create_console_windows() {
+        const CHILD_ENV: &str = "NEXUS_TEST_BACKGROUND_COMMAND_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            #[link(name = "kernel32")]
+            unsafe extern "system" {
+                fn GetConsoleWindow() -> *mut std::ffi::c_void;
+            }
+
+            assert!(unsafe { GetConsoleWindow().is_null() });
+            return;
+        }
+
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "tests::background_commands_do_not_create_console_windows",
+            ])
+            .env(CHILD_ENV, "1");
+        hide_console_window(&mut command);
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
