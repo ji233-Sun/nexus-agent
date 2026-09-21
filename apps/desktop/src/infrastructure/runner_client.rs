@@ -21,6 +21,7 @@ pub struct RunnerClient {
 impl RunnerClient {
     pub fn spawn() -> Result<Self> {
         let mut command = runner_command()?;
+        nexus_harness_core::hide_console_window(&mut command);
         command.env(
             "PATH",
             env::join_paths(nexus_harness_core::executable_search_paths())?,

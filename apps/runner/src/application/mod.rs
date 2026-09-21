@@ -467,7 +467,9 @@ async fn start_run(
 }
 
 async fn checkout_directory(cwd: &Path) -> PathBuf {
-    let output = tokio::process::Command::new("git")
+    let mut command = tokio::process::Command::new("git");
+    nexus_harness_core::hide_console_window(command.as_std_mut());
+    let output = command
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(cwd)
         .output()

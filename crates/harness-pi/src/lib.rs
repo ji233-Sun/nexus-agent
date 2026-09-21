@@ -3,8 +3,8 @@ use nexus_domain::{
     ThinkingEffort, UserAskAnswer,
 };
 use nexus_harness_core::{
-    DecodedEvent, InputFrame, LaunchSpec, LineDecoder, ModelCatalogError, resolve_executable,
-    rpc::RpcEventDecoder,
+    DecodedEvent, InputFrame, LaunchSpec, LineDecoder, ModelCatalogError, hide_console_window,
+    resolve_executable, rpc::RpcEventDecoder,
 };
 use nexus_protocol::{EnvironmentVariable, HarnessProbe, StartRun, TextGenerationConfig};
 use serde_json::{Value, json};
@@ -175,7 +175,9 @@ pub async fn discover_models(
     let executable = resolve_executable(executable).ok_or_else(|| {
         ModelCatalogError::Failed("未找到 Pi，请安装官方 pi-coding-agent。".into())
     })?;
-    let mut child = Command::new(executable)
+    let mut command = Command::new(executable);
+    hide_console_window(command.as_std_mut());
+    let mut child = command
         .args([
             "--mode",
             "rpc",
@@ -282,9 +284,11 @@ pub async fn probe(executable: &str) -> HarnessProbe {
         return probe;
     };
     probe.executable = path.to_string_lossy().into();
+    let mut version_command = Command::new(path);
+    hide_console_window(version_command.as_std_mut());
     if let Ok(Ok(output)) = timeout(
         TIMEOUT,
-        Command::new(path)
+        version_command
             .arg("--version")
             .stdin(Stdio::null())
             .kill_on_drop(true)

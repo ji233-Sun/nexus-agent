@@ -12,8 +12,8 @@ use nexus_domain::{
     UserAskStatus,
 };
 use nexus_harness_core::{
-    ApprovalOption, ApprovalPrompt, InputFrame, LineDecoder, UserAskRequest, resolve_executable,
-    summarize_text, tool_content,
+    ApprovalOption, ApprovalPrompt, InputFrame, LineDecoder, UserAskRequest, hide_console_window,
+    resolve_executable, summarize_text, tool_content,
 };
 pub use nexus_harness_core::{DecodedEvent, LaunchSpec, ModelCatalogError};
 use nexus_protocol::{EnvironmentVariable, HarnessProbe, StartRun};
@@ -206,7 +206,9 @@ impl AppServer {
         cwd: &Path,
         environment: &[EnvironmentVariable],
     ) -> Result<Self, ModelCatalogError> {
-        let mut child = Command::new(executable)
+        let mut command = Command::new(executable);
+        hide_console_window(command.as_std_mut());
+        let mut child = command
             .args(["app-server", "--listen", "stdio://"])
             .envs(
                 environment
@@ -442,7 +444,9 @@ pub async fn probe(configured_executable: &str) -> HarnessProbe {
         };
     };
 
-    let version = Command::new(&executable).arg("--version").output().await;
+    let mut version_command = Command::new(&executable);
+    hide_console_window(version_command.as_std_mut());
+    let version = version_command.arg("--version").output().await;
     let Ok(version) = version else {
         return HarnessProbe {
             harness: HarnessKind::Codex,
@@ -465,10 +469,9 @@ pub async fn probe(configured_executable: &str) -> HarnessProbe {
     }
     let version = String::from_utf8_lossy(&version.stdout).trim().to_owned();
 
-    let auth = Command::new(&executable)
-        .args(["login", "status"])
-        .output()
-        .await;
+    let mut auth_command = Command::new(&executable);
+    hide_console_window(auth_command.as_std_mut());
+    let auth = auth_command.args(["login", "status"]).output().await;
     let authenticated = auth.is_ok_and(|output| output.status.success())
         || env::var_os("CODEX_API_KEY").is_some_and(|value| !value.is_empty());
 

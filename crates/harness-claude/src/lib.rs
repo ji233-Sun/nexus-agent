@@ -11,7 +11,7 @@ use nexus_domain::{
 };
 use nexus_harness_core::{
     ApprovalOption, ApprovalPrompt, InputFrame, LineDecoder, ModelCatalogError, UserAskRequest,
-    resolve_executable, tool_content,
+    hide_console_window, resolve_executable, tool_content,
 };
 pub use nexus_harness_core::{DecodedEvent, LaunchSpec};
 use nexus_protocol::{EnvironmentVariable, HarnessProbe, StartRun};
@@ -431,7 +431,9 @@ pub async fn probe(configured_executable: &str) -> HarnessProbe {
         };
     };
 
-    let version = Command::new(&executable).arg("--version").output().await;
+    let mut version_command = Command::new(&executable);
+    hide_console_window(version_command.as_std_mut());
+    let version = version_command.arg("--version").output().await;
     let Ok(version) = version else {
         return HarnessProbe {
             harness: HarnessKind::Claude,
@@ -454,7 +456,9 @@ pub async fn probe(configured_executable: &str) -> HarnessProbe {
     }
     let version = String::from_utf8_lossy(&version.stdout).trim().to_owned();
 
-    let auth = Command::new(&executable)
+    let mut auth_command = Command::new(&executable);
+    hide_console_window(auth_command.as_std_mut());
+    let auth = auth_command
         .args(["auth", "status", "--json"])
         .output()
         .await;

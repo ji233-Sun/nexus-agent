@@ -21,7 +21,9 @@ pub(crate) struct Checkout {
 }
 
 pub(crate) fn git(path: &Path, args: &[&str]) -> Result<String> {
-    let output = SystemCommand::new("git")
+    let mut command = SystemCommand::new("git");
+    nexus_harness_core::hide_console_window(&mut command);
+    let output = command
         .args(["--no-pager", "--literal-pathspecs"])
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
