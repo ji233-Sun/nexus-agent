@@ -93,7 +93,6 @@ impl NexusView {
             input.set_placeholder(placeholder, window, cx);
             input.focus(window, cx);
         });
-        self.presenter.set_issue_launch_selection(true);
         self.issue_launch = Some(IssueLaunch { provider, kind });
         self.model_picker_open = false;
         cx.notify();
@@ -103,7 +102,6 @@ impl NexusView {
         if self.issue_launch.take().is_none() {
             return;
         }
-        self.presenter.set_issue_launch_selection(false);
         self.issue_launch_input
             .update(cx, |input, cx| input.set_value("", window, cx));
         cx.notify();
@@ -121,7 +119,6 @@ impl NexusView {
         {
             return;
         }
-        self.presenter.set_issue_launch_selection(false);
         self.issue_launch = None;
         self.issue_launch_input
             .update(cx, |input, cx| input.set_value("", window, cx));
@@ -268,8 +265,8 @@ impl NexusView {
                             .flex_wrap()
                             .items_center()
                             .gap_2()
-                            .child(self.model_selector(window, cx, true))
-                            .child(self.effort_selector(cx, true))
+                            .child(self.model_selector(window, cx))
+                            .child(self.effort_selector(cx))
                             .child(self.permission_selector(cx)),
                     )
                     .child(

@@ -1372,7 +1372,7 @@ impl NexusView {
         .into_any_element()
     }
 
-    fn effort_selector(&self, cx: &mut Context<Self>, for_issue_launch: bool) -> AnyElement {
+    fn effort_selector(&self, cx: &mut Context<Self>) -> AnyElement {
         let model = self.presenter.model();
         let locale = model.language;
         let selected = model.effort;
@@ -1405,8 +1405,8 @@ impl NexusView {
             } else {
                 locale.text("当前模型未确认支持独立思考设置，将使用默认行为。")
             })
-            .disabled((model.active_run.is_some() && !for_issue_launch) || !supported);
-        if (model.active_run.is_some() && !for_issue_launch) || !supported {
+            .disabled(model.active_run.is_some() || !supported);
+        if model.active_run.is_some() || !supported {
             return button.into_any_element();
         }
         AnimatedDropdown::new(button_id, button, self.reduced_motion, move |menu, _, _| {
@@ -2045,8 +2045,8 @@ impl NexusView {
                                                     .flex_wrap()
                                                     .items_center()
                                                     .gap_2()
-                                                    .child(self.model_selector(window, cx, false))
-                                                    .child(self.effort_selector(cx, false))
+                                                    .child(self.model_selector(window, cx))
+                                                    .child(self.effort_selector(cx))
                                                     .child(self.permission_selector(cx)),
                                             )
                                             .child(
@@ -2673,20 +2673,45 @@ mod catalog_model_tests {
     fn issue_launch_dialog_opens_and_launches_while_a_session_is_executing(
         cx: &mut gpui::TestAppContext,
     ) {
-        use crate::presenter::tests::{finish_workspace_operation, seed_issues, worktree_fixture};
+        use crate::{
+            infrastructure::issues::Response,
+            presenter::tests::{
+                cnb_comment, cnb_issue, finish_issue_request, finish_workspace_operation,
+                seed_issues, worktree_fixture,
+            },
+        };
         // Media loading uses Tokio workers outside GPUI's deterministic test scheduler.
         cx.executor().allow_parking();
         cx.update(gpui_kit::init);
         cx.update(theme::configure_theme);
         let (mut presenter, runner, _directory, first) = worktree_fixture("正在执行的任务");
         seed_issues(&mut presenter, IssueProvider::Cnb);
+        presenter.open_issues(IssueProvider::Cnb);
+        presenter.select_issue(IssueProvider::Cnb, "1".into());
+        finish_issue_request(
+            &mut presenter,
+            IssueProvider::Cnb,
+            Response::Detail(Ok(cnb_issue("1"))),
+        );
+        finish_issue_request(
+            &mut presenter,
+            IssueProvider::Cnb,
+            Response::Comments(Ok(vec![cnb_comment("1")])),
+        );
         assert_eq!(presenter.model().active_run, Some(first.run_id));
         let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
         cx.simulate_resize(gpui::size(px(1120.), px(900.)));
         cx.run_until_parked();
-        click_debug(cx, "sidebar-cnb");
-        cx.run_until_parked();
         assert!(cx.debug_bounds("cnb-page").is_some());
+        assert!(cx.debug_bounds("cnb-detail").is_some());
+        click_debug(cx, "cnb-chat");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("issue-launch-surface").is_some());
+        click_debug(cx, "issue-launch-cancel");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("issue-launch-surface").is_none());
+        click_debug(cx, "cnb-back");
+        cx.run_until_parked();
         click_debug(cx, "cnb-new-issue");
         cx.run_until_parked();
         assert!(cx.debug_bounds("issue-launch-surface").is_some());

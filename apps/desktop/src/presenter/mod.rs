@@ -71,10 +71,6 @@ pub(crate) struct Presenter {
     installation_worker: Option<crate::infrastructure::harness_installation::Worker>,
     cli_installation_result: Option<std::sync::mpsc::Receiver<Result<()>>>,
     workspace_events: Option<std::sync::mpsc::Receiver<workspace::WorkspaceEvent>>,
-    // True while the issue-launch dialog owns harness/model/effort selection:
-    // the picks configure the upcoming NEW task, so the running conversation's
-    // lock on these selections is lifted.
-    issue_launch_selection: bool,
     worktree_root: Result<std::path::PathBuf>,
 }
 
@@ -282,7 +278,6 @@ impl Presenter {
             installation_worker: None,
             cli_installation_result: None,
             workspace_events: None,
-            issue_launch_selection: false,
             worktree_root: crate::infrastructure::paths::worktree_directory(),
         };
         presenter.model.log_status(
@@ -851,13 +846,6 @@ impl Presenter {
         self.refresh_model_catalog();
     }
 
-    // The view enables this while the issue-launch dialog is open and disables
-    // it when the dialog closes, so its harness/model/effort picks configure the
-    // upcoming new task even while another conversation is running.
-    pub(crate) fn set_issue_launch_selection(&mut self, active: bool) {
-        self.issue_launch_selection = active;
-    }
-
     pub(crate) fn select_harness(
         &mut self,
         harness: HarnessKind,
@@ -877,7 +865,7 @@ impl Presenter {
         profile_id: Option<Uuid>,
         current_executable: &str,
     ) -> bool {
-        if (self.model.active_run.is_some() && !self.issue_launch_selection)
+        if self.model.active_run.is_some()
             || (self.model.selected_harness == harness
                 && self
                     .model
@@ -899,9 +887,7 @@ impl Presenter {
     }
 
     fn switch_harness(&mut self, harness: HarnessKind, current_executable: &str) -> bool {
-        if (self.model.active_run.is_some() && !self.issue_launch_selection)
-            || self.model.selected_harness == harness
-        {
+        if self.model.active_run.is_some() || self.model.selected_harness == harness {
             return false;
         }
         let current_executable = current_executable.trim().to_owned();
@@ -939,7 +925,7 @@ impl Presenter {
     }
 
     pub(crate) fn select_catalog_model(&mut self, model_id: Option<String>) {
-        if self.model.active_run.is_some() && !self.issue_launch_selection {
+        if self.model.active_run.is_some() {
             return;
         }
         if model_id.as_deref().is_some_and(|id| {
@@ -1006,9 +992,7 @@ impl Presenter {
     }
 
     pub(crate) fn select_effort(&mut self, effort: ThinkingEffort) {
-        if (self.model.active_run.is_some() && !self.issue_launch_selection)
-            || self.model.effort == effort
-        {
+        if self.model.active_run.is_some() || self.model.effort == effort {
             return;
         }
         if !effort.is_default()
@@ -1028,7 +1012,7 @@ impl Presenter {
     }
 
     pub(crate) fn refresh_model_catalog(&mut self) -> bool {
-        if self.model.active_run.is_some() && !self.issue_launch_selection {
+        if self.model.active_run.is_some() {
             return false;
         }
         if self.model.selected_project.is_none()
@@ -1116,7 +1100,7 @@ impl Presenter {
     }
 
     pub(crate) fn select_provider_profile(&mut self, profile_id: Option<Uuid>) -> bool {
-        if self.model.active_run.is_some() && !self.issue_launch_selection {
+        if self.model.active_run.is_some() {
             return false;
         }
         let harness = self.model.selected_harness;

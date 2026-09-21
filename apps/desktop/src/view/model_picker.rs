@@ -555,12 +555,7 @@ impl ListDelegate for ModelPickerList {
 }
 
 impl NexusView {
-    pub(super) fn model_selector(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        for_issue_launch: bool,
-    ) -> AnyElement {
+    pub(super) fn model_selector(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let model = self.presenter.model();
         let locale = model.language;
         let content = &self.catalog_model_select_content;
@@ -592,7 +587,7 @@ impl NexusView {
             .tooltip(tooltip)
             .accessibility_label(locale.text("选择 Harness、配置和模型"))
             .child(Icon::new(IconName::ChevronDown).size(px(14.)));
-        if model.active_run.is_some() && !for_issue_launch {
+        if model.active_run.is_some() {
             return button.disabled(true).into_any_element();
         }
         let app = cx.entity();
