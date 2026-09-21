@@ -21,13 +21,16 @@ fn main() {
     {
         cc::Build::new()
             .file("src/infrastructure/voice/apple_speech.m")
+            .file("src/infrastructure/status_item.m")
             .flag("-fobjc-arc")
             .flag("-fblocks")
-            .compile("nexus_apple_speech");
+            .compile("nexus_apple");
         println!("cargo::rustc-link-lib=framework=AVFoundation");
+        println!("cargo::rustc-link-lib=framework=AppKit");
         println!("cargo::rustc-link-lib=framework=Foundation");
         println!("cargo::rustc-link-lib=framework=Speech");
         println!("cargo::rerun-if-changed=src/infrastructure/voice/apple_speech.m");
+        println!("cargo::rerun-if-changed=src/infrastructure/status_item.m");
     }
     println!("cargo::rerun-if-changed=build.rs");
     println!("cargo::rerun-if-env-changed=NEXUS_RELEASE_TAG");

@@ -665,5 +665,11 @@
   "请查看所附文件。": "Please review the attached files.",
   "附件": "Attachments",
   "添加图片或文件，也可拖入或粘贴到输入框": "Add images or files, or drop or paste them into the composer",
-  "正在添加附件，请稍候。": "Adding attachments, please wait."
+  "正在添加附件，请稍候。": "Adding attachments, please wait.",
+  "隐藏主窗口": "Hide Main Window",
+  "显示主窗口": "Show Main Window",
+  "退出 Nexus Agent": "Quit Nexus Agent",
+  "退出": "Quit",
+  "有 {count} 个任务正在运行，退出 Nexus Agent 会立即中断它们。": "Tasks are still running. Quitting Nexus Agent will interrupt {count} of them.",
+  "正在运行的任务会被停止；重新启动后它们会显示为已中断，历史记录仍可阅读。": "Running tasks are stopped and marked as interrupted the next time Nexus starts; their history stays readable."
 }
