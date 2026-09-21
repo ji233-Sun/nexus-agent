@@ -493,6 +493,7 @@ impl NexusView {
                     issues.repository.as_deref().unwrap_or_default(),
                     issues.cli.as_ref().map(|cli| cli.path.as_path()),
                     self.presenter.model().language,
+                    self.issue_launch.is_none(),
                 )
             } else {
                 Default::default()
