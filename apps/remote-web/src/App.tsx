@@ -149,6 +149,8 @@ function RemoteWorkspace({
   const [error, setError] = useState("");
   const refreshTimer = useRef<number | null>(null);
   const selectedTaskRef = useRef<string | null>(null);
+  const timelineRef = useRef<HTMLElement | null>(null);
+  const enteredTaskRef = useRef<string | null>(null);
 
   selectedTaskRef.current = selectedTaskId;
 
@@ -265,12 +267,32 @@ function RemoteWorkspace({
   }, [projectTasks, state?.active_task_id, state?.selected_task_id]);
 
   useEffect(() => {
+    enteredTaskRef.current = selectedTaskId;
     setMessages([]);
     if (!selectedTaskId) {
       return;
     }
     void refreshMessages(selectedTaskId);
   }, [refreshMessages, selectedTaskId]);
+
+  // 进入会话时落在底部（最新消息）；其后仅在贴近底部时跟随最新输出，与桌面端一致。
+  useEffect(() => {
+    const timeline = timelineRef.current;
+    if (!timeline || !messages.length || messages[0].task_id !== selectedTaskId) {
+      return;
+    }
+    if (enteredTaskRef.current === selectedTaskId) {
+      enteredTaskRef.current = null;
+      timeline.scrollTop = timeline.scrollHeight;
+      return;
+    }
+    if (
+      state?.active_task_id === selectedTaskId &&
+      timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight <= 48
+    ) {
+      timeline.scrollTop = timeline.scrollHeight;
+    }
+  }, [messages, selectedTaskId, state?.active_task_id, state?.streaming_text]);
 
   const run = async (event: FormEvent) => {
     event.preventDefault();
@@ -378,7 +400,7 @@ function RemoteWorkspace({
 
         {error && <div className="error-banner workspace-error">{error}</div>}
 
-        <section className="timeline" aria-live="polite">
+        <section className="timeline" aria-live="polite" ref={timelineRef}>
           {loading && <EmptyState title="正在连接 Nexus" detail="读取本地状态和会话记录…" />}
           {!loading && messages.map((message) => <MessageCard key={message.id} message={message} />)}
           {showStreaming && (
