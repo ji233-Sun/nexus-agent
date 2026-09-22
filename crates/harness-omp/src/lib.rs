@@ -1066,6 +1066,17 @@ mod tests {
             matches!(decoder.decode_line(&plain.to_string()).unwrap().as_slice(),
             [DecodedEvent::ToolCompleted {output,..}] if output == &code)
         );
+        let media = json!({"content": [
+            {"type": "text", "text": "Read image"},
+            {"type": "image", "mimeType": "image/png", "data": "aW1hZ2U="}
+        ]});
+        let completed = json!({"type": "tool_execution_end", "toolCallId": "image",
+            "result": media, "isError": false});
+        assert!(
+            matches!(decoder.decode_line(&completed.to_string()).unwrap().as_slice(),
+            [DecodedEvent::ToolCompleted { output, .. }]
+                if serde_json::from_str::<Value>(output).unwrap() == media)
+        );
     }
 
     #[test]

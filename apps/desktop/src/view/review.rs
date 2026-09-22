@@ -107,6 +107,7 @@ impl ReviewFile {
                 .unwrap_or("text")
                 .into(),
             diff,
+            image: None,
         }
     }
 }

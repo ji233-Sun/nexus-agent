@@ -258,9 +258,21 @@ impl EventDecoder {
                 if let Some(kind) = update["kind"].as_str() {
                     tool.kind = kind.into();
                 }
-                if let Some(output) = update.get("rawOutput").filter(|v| !v.is_null()) {
+                let content = update.get("content").and_then(Value::as_array);
+                if content.is_some_and(|items| {
+                    items.iter().any(|item| {
+                        item["type"] == "content"
+                            && matches!(
+                                item["content"]["type"].as_str(),
+                                Some("image" | "audio" | "video" | "document")
+                            )
+                    })
+                }) {
+                    // Display content can carry images even when rawOutput is only a summary.
+                    tool.output = tool_content(&update["content"]);
+                } else if let Some(output) = update.get("rawOutput").filter(|v| !v.is_null()) {
                     tool.output = tool_content(output);
-                } else if let Some(content) = update.get("content").and_then(Value::as_array) {
+                } else if let Some(content) = content {
                     tool.output = content
                         .iter()
                         .map(content_text)
@@ -948,6 +960,30 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn tool_results_preserve_mixed_image_content() {
+        let mut decoder = active(HarnessKind::Codebuddy, PermissionMode::Ask);
+        decode(
+            &mut decoder,
+            update(json!({"sessionUpdate": "tool_call", "toolCallId": "image", "title": "Read"})),
+        );
+        let content = json!([
+            {"type": "content", "content": {"type": "text", "text": "Read image"}},
+            {"type": "content", "content": {"type": "image", "mimeType": "image/png", "data": "aW1hZ2U="}}
+        ]);
+        let events = decode(
+            &mut decoder,
+            update(
+                json!({"sessionUpdate": "tool_call_update", "toolCallId": "image",
+            "status": "completed", "content": content, "rawOutput": "Read image"}),
+            ),
+        );
+        assert!(
+            matches!(events.as_slice(), [DecodedEvent::ToolCompleted {output, is_error: false, ..}]
+            if serde_json::from_str::<Value>(output).unwrap() == content)
+        );
+    }
+
     #[test]
     fn streams_text_tools_and_terminal_failure_without_repeating_completed_tools() {
         let mut decoder = active(HarnessKind::Codebuddy, PermissionMode::Ask);

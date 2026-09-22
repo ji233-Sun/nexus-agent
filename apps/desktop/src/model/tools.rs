@@ -3,7 +3,8 @@ use nexus_domain::{Message, MessageKind, MessageRole};
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
-    path::Path,
+    path::{Path, PathBuf},
+    sync::Arc,
 };
 use uuid::Uuid;
 
@@ -156,6 +157,12 @@ pub(crate) struct ToolDetail {
     pub(crate) text: String,
     pub(crate) language: String,
     pub(crate) diff: bool,
+    pub(crate) image: Option<Arc<ToolImage>>,
+}
+
+pub(crate) enum ToolImage {
+    Base64 { mime_type: String, data: String },
+    Path(PathBuf),
 }
 
 impl<'a> ToolActivity<'a> {
@@ -191,7 +198,7 @@ impl<'a> ToolActivity<'a> {
             .as_str()
         {
             "command" | "bash" | "shell" | "exec_command" => ToolCategory::Command,
-            "read" | "read_file" => ToolCategory::Read,
+            "read" | "read_file" | "view_image" | "imageview" => ToolCategory::Read,
             "grep" | "glob" | "search" | "web search" | "websearch" => ToolCategory::Search,
             "edit" | "multiedit" | "file change" | "apply_patch" => ToolCategory::Edit,
             "write" | "write_file" | "create_file" => ToolCategory::Create,
@@ -214,6 +221,11 @@ impl<'a> ToolActivity<'a> {
 
     pub(crate) fn preview(&self, locale: Language) -> String {
         let input: Value = serde_json::from_str(self.input()).unwrap_or(Value::Null);
+        let media_output = self.input().is_empty()
+            && self.result.is_some_and(|result| {
+                serde_json::from_str::<Value>(&result.content)
+                    .is_ok_and(|value| output_blocks(&value).any(is_media_block))
+            });
         let value = string_field(
             &input,
             &["command", "cmd", "file_path", "path", "pattern", "query"],
@@ -221,7 +233,11 @@ impl<'a> ToolActivity<'a> {
         .or_else(|| input.pointer("/changes/0/path").and_then(Value::as_str))
         .unwrap_or_else(|| {
             if self.input().is_empty() {
-                self.result.map_or("", |result| result.content.as_str())
+                if media_output {
+                    locale.text("媒体预览")
+                } else {
+                    self.result.map_or("", |result| result.content.as_str())
+                }
             } else {
                 self.input()
             }
@@ -245,7 +261,7 @@ impl<'a> ToolActivity<'a> {
         }
     }
 
-    pub(crate) fn details(&self, locale: Language) -> Vec<ToolDetail> {
+    pub(crate) fn details(&self, locale: Language, directory: Option<&Path>) -> Vec<ToolDetail> {
         let input: Value = serde_json::from_str(self.input()).unwrap_or(Value::Null);
         let output = self.result.map(|result| {
             if self.is_error() {
@@ -316,12 +332,29 @@ impl<'a> ToolActivity<'a> {
             ));
         }
         if let Some(output) = output {
-            details.push(detail(
-                locale.text("输出"),
-                "text",
-                &pretty_payload(output),
-                false,
-            ));
+            if let Some(blocks) = media_output_details(&result, locale) {
+                details.extend(blocks);
+            } else if (self.category() == ToolCategory::Read || result["type"] == "imageView")
+                && !self.is_error()
+                && let Some(path) = string_field(&input, &["file_path", "path"])
+                    .or_else(|| string_field(&result, &["path"]))
+                && (is_image_path(path) || result["type"] == "imageView")
+            {
+                let path = Path::new(path);
+                let resolved = if path.is_absolute() {
+                    Some(path.to_path_buf())
+                } else {
+                    directory.map(|directory| directory.join(path))
+                };
+                details.push(image_detail(resolved.map(ToolImage::Path), locale));
+            } else {
+                details.push(detail(
+                    locale.text("输出"),
+                    "text",
+                    &pretty_payload(output),
+                    false,
+                ));
+            }
         }
         details
     }
@@ -346,7 +379,101 @@ fn detail(title: &str, language: &str, text: &str, diff: bool) -> ToolDetail {
         language: language.into(),
         text: text.into(),
         diff,
+        image: None,
     }
+}
+
+fn is_image_path(path: &str) -> bool {
+    matches!(
+        language_for_path(path).to_ascii_lowercase().as_str(),
+        "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "webp"
+            | "svg"
+            | "bmp"
+            | "tif"
+            | "tiff"
+            | "ico"
+            | "pnm"
+            | "ppm"
+            | "pgm"
+            | "pbm"
+    )
+}
+
+fn image_detail(image: Option<ToolImage>, locale: Language) -> ToolDetail {
+    let mut detail = detail(locale.text("图片预览"), "text", "", false);
+    detail.image = image.map(Arc::new);
+    if detail.image.is_none() {
+        detail.text = locale.text("无法预览此图片。").into();
+    }
+    detail
+}
+
+fn output_blocks(value: &Value) -> impl Iterator<Item = &Value> + Clone {
+    let blocks = value
+        .as_array()
+        .or_else(|| value.get("content").and_then(Value::as_array))
+        .map(Vec::as_slice)
+        .unwrap_or_else(|| std::slice::from_ref(value));
+    // ACP wraps a standard content block in a tool-call content item.
+    blocks.iter().map(|block| {
+        if block["type"] == "content" {
+            &block["content"]
+        } else {
+            block
+        }
+    })
+}
+
+fn is_media_block(block: &Value) -> bool {
+    matches!(
+        block["type"].as_str(),
+        Some("image" | "audio" | "video" | "document")
+    )
+}
+
+fn media_output_details(value: &Value, locale: Language) -> Option<Vec<ToolDetail>> {
+    let blocks = output_blocks(value);
+    if !blocks.clone().any(is_media_block) {
+        return None;
+    }
+    Some(
+        blocks
+            .map(|block| match block["type"].as_str() {
+                Some("image") => {
+                    let source = block.get("source").unwrap_or(block);
+                    let image = string_field(source, &["media_type", "mimeType"])
+                        .zip(string_field(source, &["data"]))
+                        .map(|(mime_type, data)| ToolImage::Base64 {
+                            mime_type: mime_type.into(),
+                            data: data.into(),
+                        });
+                    image_detail(image, locale)
+                }
+                Some("audio" | "video" | "document") => detail(
+                    locale.text("输出"),
+                    "text",
+                    locale.text("暂不支持预览此媒体。"),
+                    false,
+                ),
+                Some("text") => detail(
+                    locale.text("输出"),
+                    "text",
+                    block["text"].as_str().unwrap_or_default(),
+                    false,
+                ),
+                _ => detail(
+                    locale.text("输出"),
+                    "text",
+                    &pretty_payload(&block.to_string()),
+                    false,
+                ),
+            })
+            .collect(),
+    )
 }
 
 fn append_edit(details: &mut Vec<ToolDetail>, path: &str, input: &Value, locale: Language) {
@@ -477,7 +604,7 @@ mod tests {
         assert_eq!(last.len(), 2);
         assert_eq!(last[0].result.unwrap().content, "two");
         assert!(
-            last[1].details(Language::Chinese)[0]
+            last[1].details(Language::Chinese, None)[0]
                 .text
                 .contains("Legacy output")
         );
@@ -639,7 +766,7 @@ mod tests {
                 call: &call,
                 result: None,
             };
-            let details = activity.details(Language::Chinese);
+            let details = activity.details(Language::Chinese, None);
             assert_eq!(details.len(), 1);
             assert_eq!(details[0].language, "rs");
             assert_eq!(details[0].diff, diff);
@@ -650,7 +777,7 @@ mod tests {
             } else {
                 assert_eq!(details[0].text, code);
             }
-            let english = activity.details(Language::English);
+            let english = activity.details(Language::English, None);
             assert_eq!(english[0].text, details[0].text);
             assert_eq!(english[0].language, "rs");
             assert_eq!(
@@ -683,14 +810,14 @@ mod tests {
             call: &call,
             result: Some(&output),
         }
-        .details(Language::Chinese);
+        .details(Language::Chinese, None);
         assert_eq!(details[0].text, "cargo test");
         assert_eq!(details[1].text, code);
         let english = ToolActivity {
             call: &call,
             result: Some(&output),
         }
-        .details(Language::English);
+        .details(Language::English, None);
         assert_eq!(english[0].title, "Command");
         assert_eq!(english[1].title, "Output");
         assert_eq!(english[1].text, code);
@@ -710,10 +837,201 @@ mod tests {
             call: &call,
             result: Some(&output),
         }
-        .details(Language::Chinese);
+        .details(Language::Chinese, None);
         assert_eq!(details[0].text, "-old\n+new");
         assert!(details[0].diff);
         assert_eq!(details[1].text, "done");
+    }
+
+    #[test]
+    fn image_results_preserve_text_order_and_preview_each_image_without_dumping_data() {
+        use serde_json::json;
+        let run = Uuid::new_v4();
+        let call = message(
+            run,
+            MessageKind::ToolCall,
+            Some("read"),
+            "Read\n{\"file_path\":\"missing.png\"}",
+        );
+        let image = json!({"type": "image", "mimeType": "image/png", "data": "aW1hZ2U="});
+        let claude = json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aW1hZ2U="}});
+        let blocks = json!([
+            {"type": "text", "text": "before"}, image,
+            {"type": "text", "text": "after"}, claude
+        ]);
+        let acp: Vec<_> = blocks
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|block| json!({"type": "content", "content": block}))
+            .collect();
+        for payload in [blocks.clone(), json!({"content": blocks}), json!(acp)] {
+            let result = message(
+                run,
+                MessageKind::ToolResult,
+                Some("read"),
+                &payload.to_string(),
+            );
+            let details = ToolActivity {
+                call: &call,
+                result: Some(&result),
+            }
+            .details(Language::English, None);
+            assert_eq!(details.len(), 5);
+            assert_eq!(details[1].text, "before");
+            assert_eq!(details[3].text, "after");
+            for index in [2, 4] {
+                assert_eq!(details[index].title, "Image preview");
+                assert!(details[index].text.is_empty());
+                assert!(
+                    matches!(details[index].image.as_deref(), Some(ToolImage::Base64 { mime_type, data })
+                    if mime_type == "image/png" && data == "aW1hZ2U=")
+                );
+            }
+            assert!(
+                details
+                    .iter()
+                    .all(|detail| !detail.text.contains("aW1hZ2U="))
+            );
+            assert_eq!(
+                result.content,
+                payload.to_string(),
+                "stored payload must stay intact"
+            );
+        }
+        let result = message(run, MessageKind::ToolResult, None, &image.to_string());
+        let details = ToolActivity {
+            call: &result,
+            result: Some(&result),
+        }
+        .details(Language::English, None);
+        assert_eq!(details.len(), 1);
+        assert!(
+            details[0].image.is_some(),
+            "unpaired legacy results also show previews"
+        );
+        assert_eq!(
+            ToolActivity {
+                call: &result,
+                result: Some(&result)
+            }
+            .preview(Language::English),
+            "Tool output · Media preview"
+        );
+    }
+
+    #[test]
+    fn image_paths_use_the_task_directory_and_failed_reads_keep_the_diagnostic() {
+        let run = Uuid::new_v4();
+        let directory = tempfile::tempdir().unwrap();
+        let mut result = message(
+            run,
+            MessageKind::ToolResult,
+            Some("read"),
+            "Read image file",
+        );
+        for name in ["Read", "read_file", "functions.view_image", "imageView"] {
+            let call = message(
+                run,
+                MessageKind::ToolCall,
+                Some("read"),
+                &format!("{name}\n{{\"path\":\"assets/IMAGE.PNG\"}}"),
+            );
+            let activity = ToolActivity {
+                call: &call,
+                result: Some(&result),
+            };
+            let details = activity.details(Language::English, Some(directory.path()));
+            assert!(
+                matches!(details[1].image.as_deref(), Some(ToolImage::Path(path))
+                if path == &directory.path().join("assets/IMAGE.PNG"))
+            );
+            assert!(details[1].text.is_empty());
+            assert!(
+                activity.details(Language::English, None)[1].image.is_none(),
+                "never resolve relative paths against the desktop process directory"
+            );
+            assert_eq!(
+                ToolActivity {
+                    call: &call,
+                    result: None
+                }
+                .details(Language::English, Some(directory.path()))
+                .len(),
+                1
+            );
+        }
+        let path = directory.path().join("image-without-extension");
+        let native = message(
+            run,
+            MessageKind::ToolResult,
+            None,
+            &serde_json::json!({"type": "imageView", "path": path, "status": "completed"})
+                .to_string(),
+        );
+        let details = ToolActivity {
+            call: &native,
+            result: Some(&native),
+        }
+        .details(Language::English, None);
+        assert_eq!(details.len(), 1);
+        assert!(
+            matches!(details[0].image.as_deref(), Some(ToolImage::Path(resolved)) if resolved == &path)
+        );
+        let call = message(
+            run,
+            MessageKind::ToolCall,
+            Some("read"),
+            "Read\n{\"file_path\":\"image.png\"}",
+        );
+        result.content = "permission denied".into();
+        result.tool.as_mut().unwrap().is_error = true;
+        let details = ToolActivity {
+            call: &call,
+            result: Some(&result),
+        }
+        .details(Language::English, Some(directory.path()));
+        assert!(details[1].image.is_none());
+        assert_eq!(details[1].text, "permission denied");
+        let call = message(
+            run,
+            MessageKind::ToolCall,
+            Some("read"),
+            "read_file\n{\"path\":\"main.rs\"}",
+        );
+        result.content = "fn main() {}".into();
+        result.tool.as_mut().unwrap().is_error = false;
+        let details = ToolActivity {
+            call: &call,
+            result: Some(&result),
+        }
+        .details(Language::English, Some(directory.path()));
+        assert!(details[1].image.is_none());
+        assert_eq!(details[1].text, "fn main() {}");
+    }
+
+    #[test]
+    fn malformed_images_and_unsupported_media_do_not_dump_binary_payloads() {
+        for payload in [
+            serde_json::json!({"type": "image", "data": "opaque binary"}),
+            serde_json::json!({"type": "audio", "data": "opaque binary", "mimeType": "audio/wav"}),
+        ] {
+            let result = message(
+                Uuid::new_v4(),
+                MessageKind::ToolResult,
+                None,
+                &payload.to_string(),
+            );
+            let details = ToolActivity {
+                call: &result,
+                result: Some(&result),
+            }
+            .details(Language::English, None);
+            assert_eq!(details.len(), 1);
+            assert!(details[0].image.is_none());
+            assert!(!details[0].text.is_empty());
+            assert!(!details[0].text.contains("opaque binary"));
+        }
     }
 
     #[test]
@@ -728,7 +1046,7 @@ mod tests {
             call: &call,
             result: None,
         }
-        .details(Language::Chinese);
+        .details(Language::Chinese, None);
         assert_eq!(details[0].title, "main.rs");
         assert!(details[0].text.contains("未提供"));
         assert!(!details[0].diff);
