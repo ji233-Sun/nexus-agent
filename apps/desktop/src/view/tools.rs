@@ -1,9 +1,14 @@
 use super::*;
-use crate::model::tools::{ToolActivity, ToolCategory, ToolDetail};
-use gpui::{Axis, HighlightStyle};
+use crate::model::tools::{ToolActivity, ToolCategory, ToolDetail, ToolImage};
+use base64::Engine as _;
+use gpui::{Axis, HighlightStyle, ObjectFit, StyledImage as _};
 use gpui_kit::base::{ScrollableMask, TextView as CodeView, TextViewStyle as CodeStyle};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use std::{ops::Range, rc::Rc, sync::LazyLock};
+use std::{
+    ops::Range,
+    rc::Rc,
+    sync::{Arc, LazyLock},
+};
 use syntect::{
     easy::HighlightLines,
     highlighting::{FontStyle, ThemeSet},
@@ -58,11 +63,15 @@ impl NexusView {
             ));
         }
         let toggle_id = id.clone();
+        let directory = self.presenter.model().working_directory().map(Path::new);
         let height = if batch.iter().any(|tool| {
-            tool.category() == ToolCategory::Edit
-                && self.expanded_messages.contains(&tool.call.id.into())
+            self.expanded_messages.contains(&tool.call.id.into())
+                && (tool.category() == ToolCategory::Edit
+                    || tool_details(tool, locale, directory, window, cx)
+                        .iter()
+                        .any(|detail| detail.image.is_some()))
         }) {
-            // Show the complete diff card and a short result, not a clipped card
+            // Show the complete diff or image card and a short result, not a clipped card
             // inside a second scroll viewport. Other tool batches stay compact.
             360.
         } else if batch
@@ -179,13 +188,16 @@ impl NexusView {
             ToolCategory::Edit | ToolCategory::Create => IconName::FileText,
             ToolCategory::Other => IconName::Asterisk,
         };
+        let result_id = tool.result.map(|result| result.id);
         let preview = window.use_keyed_state((ElementId::from(id), "preview"), cx, |_, _| {
-            (locale, tool.preview(locale))
+            (result_id, locale, tool.preview(locale))
         });
-        if preview.read(cx).0 != locale {
-            preview.update(cx, |state, _| *state = (locale, tool.preview(locale)));
+        if preview.read(cx).0 != result_id || preview.read(cx).1 != locale {
+            preview.update(cx, |state, _| {
+                *state = (result_id, locale, tool.preview(locale))
+            });
         }
-        let preview = preview.read(cx).1.clone();
+        let preview = preview.read(cx).2.clone();
         div()
             .w_full()
             .min_w_0()
@@ -252,17 +264,8 @@ impl NexusView {
                     })),
             )
             .when(expanded, |element| {
-                let result_id = tool.result.map(|result| result.id);
-                let details =
-                    window.use_keyed_state((ElementId::from(id), "details"), cx, |_, _| {
-                        (result_id, locale, Rc::new(tool.details(locale)))
-                    });
-                if details.read(cx).0 != result_id || details.read(cx).1 != locale {
-                    details.update(cx, |state, _| {
-                        *state = (result_id, locale, Rc::new(tool.details(locale)))
-                    });
-                }
-                let details = details.read(cx).2.clone();
+                let directory = self.presenter.model().working_directory().map(Path::new);
+                let details = tool_details(tool, locale, directory, window, cx);
                 element.child(
                     div()
                         .pl_6()
@@ -294,6 +297,25 @@ impl NexusView {
             })
             .into_any_element()
     }
+}
+
+fn tool_details(
+    tool: &ToolActivity<'_>,
+    locale: Language,
+    directory: Option<&Path>,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) -> Rc<Vec<ToolDetail>> {
+    let result_id = tool.result.map(|result| result.id);
+    let details = window.use_keyed_state((ElementId::from(tool.call.id), "details"), cx, |_, _| {
+        (result_id, locale, Rc::new(tool.details(locale, directory)))
+    });
+    if details.read(cx).0 != result_id || details.read(cx).1 != locale {
+        details.update(cx, |state, _| {
+            *state = (result_id, locale, Rc::new(tool.details(locale, directory)))
+        });
+    }
+    details.read(cx).2.clone()
 }
 
 pub(super) fn render_detail(
@@ -350,6 +372,9 @@ fn render_detail_content(
     window: &mut Window,
     cx: &mut gpui::App,
 ) -> AnyElement {
+    if let Some(image) = &detail.image {
+        return render_image_detail(key, image, locale, window, cx);
+    }
     let colors = palette(cx);
     let dark = cx.global::<ResolvedAppearance>().dark;
     let id = ElementId::from(key.clone());
@@ -639,6 +664,122 @@ fn render_detail_content(
         .into_any_element()
 }
 
+fn image_source(image: &ToolImage) -> Option<gpui::ImageSource> {
+    match image {
+        ToolImage::Base64 { mime_type, data } => {
+            let format = gpui::ImageFormat::from_mime_type(mime_type)?;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .ok()?;
+            Some(Arc::new(gpui::Image::from_bytes(format, bytes)).into())
+        }
+        ToolImage::Path(path) => Some(path.clone().into()),
+    }
+}
+
+fn render_image_detail(
+    key: SharedString,
+    image: &Arc<ToolImage>,
+    locale: Language,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) -> AnyElement {
+    let colors = palette(cx);
+    let id = ElementId::from(key.clone());
+    // Decode and hash the payload once per result, not on every scrolling frame.
+    let source = window.use_keyed_state((id.clone(), "image-source"), cx, |_, _| {
+        (image.clone(), image_source(image))
+    });
+    if !Arc::ptr_eq(&source.read(cx).0, image) {
+        source.update(cx, |state, _| *state = (image.clone(), image_source(image)));
+    }
+    let source = source.read(cx).1.clone();
+    let expanded = window.use_keyed_state((id.clone(), "image-expanded"), cx, |_, _| false);
+    let is_expanded = *expanded.read(cx);
+    let height = px(if is_expanded { 360. } else { 160. });
+    let fallback = move || {
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(px(12.))
+            .text_color(rgb(colors.muted))
+            .child(locale.text("无法预览此图片。"))
+            .into_any_element()
+    };
+    let preview = source.map(|source| {
+        gpui::img(source)
+            .debug_selector({
+                let key = key.clone();
+                move || format!("{key}-image")
+            })
+            .w_full()
+            .h(height)
+            .min_h_0()
+            .max_h(height)
+            .flex_none()
+            .object_fit(ObjectFit::Contain)
+            .with_fallback(fallback)
+            .into_any_element()
+    });
+    div()
+        .w_full()
+        .min_w_0()
+        .flex_none()
+        .flex()
+        .flex_col()
+        .rounded(px(CONTROL_RADIUS))
+        .border_1()
+        .border_color(rgb(colors.border))
+        .bg(rgb(colors.surface))
+        .overflow_hidden()
+        .child(
+            div()
+                .h(px(30.))
+                .flex_none()
+                .px_3()
+                .flex()
+                .items_center()
+                .justify_between()
+                .text_size(px(12.))
+                .text_color(rgb(colors.text_secondary))
+                .child(locale.text("图片预览"))
+                .when(preview.is_some(), |element| {
+                    element.child(
+                        Button::new((id, "expand"))
+                            .debug_selector({
+                                let key = key.clone();
+                                move || format!("{key}-expand")
+                            })
+                            .ghost()
+                            .small()
+                            .h(px(24.))
+                            .label(locale.text(if is_expanded {
+                                "缩小图片"
+                            } else {
+                                "放大图片"
+                            }))
+                            .on_click(move |_, _, cx| {
+                                expanded.update(cx, |value, cx| {
+                                    *value = !*value;
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                }),
+        )
+        .child(
+            div()
+                .debug_selector(move || key.to_string())
+                .w_full()
+                .h(height)
+                .flex_none()
+                .child(preview.unwrap_or_else(fallback)),
+        )
+        .into_any_element()
+}
+
 fn fenced_code(code: &str, language: &str) -> String {
     let fence = "`".repeat(
         code.split(|character| character != '`')
@@ -861,6 +1002,112 @@ pub(super) fn code_highlights(
 mod tests {
     use super::*;
 
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+    #[test]
+    fn image_sources_reject_invalid_data_and_unsupported_formats() {
+        for (mime_type, data) in [("image/png", "not base64!"), ("image/unknown", PNG)] {
+            assert!(
+                image_source(&ToolImage::Base64 {
+                    mime_type: mime_type.into(),
+                    data: data.into()
+                })
+                .is_none()
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn tool_images_arriving_after_expansion_render_and_resize_without_code_controls(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::presenter::tests::fixture;
+        use nexus_protocol::Event;
+
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (mut presenter, runner, _directory) = fixture();
+        assert!(presenter.submit("Read an image", "claude"));
+        let run_id = presenter.model().active_run.unwrap();
+        runner.emit(Event::RunToolStarted {
+            run_id,
+            tool_id: "image".into(),
+            name: "Read".into(),
+            summary: "{\"file_path\":\"missing.png\"}".into(),
+        });
+        presenter.drain_events();
+        let id = presenter.model().messages.last().unwrap().id;
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut view = NexusView::new(presenter, window, cx);
+            view.set_appearance(
+                AppearanceSettings {
+                    reduced_motion: true,
+                    ..view.presenter.model().appearance
+                },
+                window,
+                cx,
+            );
+            view
+        });
+        cx.simulate_resize(gpui::size(px(1280.), px(900.)));
+        cx.run_until_parked();
+        let batch: &'static str = format!("tool-batch-{id}").leak();
+        let row: &'static str = format!("tool-row-{id}").leak();
+        let preview: &'static str = format!("tool-detail-{id}-1").leak();
+        let image_selector: &'static str = format!("{preview}-image").leak();
+        let expand: &'static str = format!("{preview}-expand").leak();
+        let copy: &'static str = format!("{preview}-copy").leak();
+        let code: &'static str = format!("{preview}-content").leak();
+        for selector in [batch, row] {
+            let position = cx.debug_bounds(selector).unwrap().center();
+            cx.simulate_click(position, Default::default());
+            cx.run_until_parked();
+        }
+        assert!(cx.debug_bounds(preview).is_none());
+        runner.emit(Event::RunToolCompleted { run_id, tool_id: "image".into(), is_error: false,
+            output: serde_json::json!([{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": PNG}}]).to_string() });
+        view.update(cx, |view, cx| view.poll_events(Instant::now(), cx));
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds(image_selector).unwrap().size.height,
+            px(160.)
+        );
+        assert!(cx.debug_bounds(code).is_none());
+        assert!(
+            cx.debug_bounds(copy).is_none(),
+            "binary data must not get text copy controls"
+        );
+        let Some(gpui::ImageSource::Image(image)) = image_source(&ToolImage::Base64 {
+            mime_type: "image/png".into(),
+            data: PNG.into(),
+        }) else {
+            panic!("image source")
+        };
+        cx.update(|window, cx| {
+            assert!(image.is_asset_cached(cx));
+            let rendered = image
+                .get_render_image(window, cx)
+                .expect("PNG must actually decode");
+            assert_eq!(
+                rendered.size(0),
+                gpui::size(gpui::DevicePixels(1), gpui::DevicePixels(1))
+            );
+        });
+        for height in [360., 160.] {
+            let position = cx.debug_bounds(expand).unwrap().center();
+            cx.simulate_click(position, Default::default());
+            cx.run_until_parked();
+            assert_eq!(
+                cx.debug_bounds(image_selector).unwrap().size.height,
+                px(height)
+            );
+        }
+        let position = cx.debug_bounds(row).unwrap().center();
+        cx.simulate_click(position, Default::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(preview).is_none());
+    }
+
     #[test]
     fn code_and_diff_highlights_preserve_unicode_and_addition_deletion_colors() {
         let code = "fn main() { println!(\"你好\"); }\n";
@@ -1066,6 +1313,7 @@ mod tests {
                 text: text.clone(),
                 language: "rs".into(),
                 diff: true,
+                image: None,
             },
         });
         let draw = |cx: &mut gpui::VisualTestContext| {

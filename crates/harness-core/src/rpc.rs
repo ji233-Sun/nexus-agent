@@ -327,7 +327,13 @@ fn decode_message(frame: &Value) -> Vec<DecodedEvent> {
 
 fn format_tool_result(result: &Value) -> String {
     // Edit tools include the actual patch in details (including hashline edits).
-    if result.get("details").is_some() {
+    // Mixed content must retain images instead of keeping only the text blocks.
+    if result.get("details").is_some()
+        || result
+            .get("content")
+            .and_then(Value::as_array)
+            .is_some_and(|blocks| blocks.iter().any(|block| block["type"] != "text"))
+    {
         return tool_content(result);
     }
     let text = result
