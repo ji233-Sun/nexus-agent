@@ -2713,6 +2713,99 @@ mod catalog_model_tests {
     }
 
     #[gpui::test]
+    fn issue_launch_dialog_opens_and_launches_while_a_session_is_executing(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::{
+            infrastructure::issues::Response,
+            presenter::tests::{
+                cnb_comment, cnb_issue, finish_issue_request, finish_workspace_operation,
+                seed_issues, worktree_fixture,
+            },
+        };
+        // Media loading uses Tokio workers outside GPUI's deterministic test scheduler.
+        cx.executor().allow_parking();
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (mut presenter, runner, _directory, first) = worktree_fixture("正在执行的任务");
+        seed_issues(&mut presenter, IssueProvider::Cnb);
+        presenter.open_issues(IssueProvider::Cnb);
+        presenter.select_issue(IssueProvider::Cnb, "1".into());
+        finish_issue_request(
+            &mut presenter,
+            IssueProvider::Cnb,
+            Response::Detail(Ok(cnb_issue("1"))),
+        );
+        finish_issue_request(
+            &mut presenter,
+            IssueProvider::Cnb,
+            Response::Comments(Ok(vec![cnb_comment("1")])),
+        );
+        assert_eq!(presenter.model().active_run, Some(first.run_id));
+        let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
+        cx.simulate_resize(gpui::size(px(1120.), px(900.)));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("cnb-page").is_some());
+        assert!(cx.debug_bounds("cnb-detail").is_some());
+        click_debug(cx, "cnb-chat");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("issue-launch-surface").is_some());
+        click_debug(cx, "issue-launch-cancel");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("issue-launch-surface").is_none());
+        click_debug(cx, "cnb-back");
+        cx.run_until_parked();
+        click_debug(cx, "cnb-new-issue");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("issue-launch-surface").is_some());
+        assert!(cx.debug_bounds("issue-launch-card").is_some());
+        view.update_in(cx, |view, window, cx| {
+            view.issue_launch_input.update(cx, |input, cx| {
+                input.set_value("并行提交的缺陷", window, cx)
+            });
+        });
+        cx.run_until_parked();
+        click_debug(cx, "issue-launch-start");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("issue-launch-surface").is_none());
+        // A worktree launch defers the run until the task directory's model
+        // catalog responds, mirroring the manual start flow.
+        view.update(cx, |view, _| {
+            finish_workspace_operation(&mut view.presenter);
+            view.presenter.drain_events();
+        });
+        let pending = view.read_with(cx, |view, _| {
+            let model = view.presenter.model();
+            match &model.model_catalog {
+                ModelCatalogState::Loading { request_id, .. } => {
+                    Some((*request_id, model.selected_harness))
+                }
+                _ => None,
+            }
+            .expect("catalog request for the new worktree")
+        });
+        runner.emit(Event::ModelCatalogLoaded {
+            request_id: pending.0,
+            harness: pending.1,
+            models: vec![],
+        });
+        view.update(cx, |view, _| {
+            view.presenter.drain_events();
+            assert_eq!(view.presenter.model().active_run_count(), 2);
+            assert_ne!(view.presenter.model().active_run, Some(first.run_id));
+            let prompt = view
+                .presenter
+                .model()
+                .messages
+                .iter()
+                .find(|message| message.role == MessageRole::User)
+                .map(|message| message.content.clone())
+                .expect("user prompt");
+            assert!(prompt.contains("并行提交的缺陷"));
+        });
+    }
+
+    #[gpui::test]
     fn cnb_navigation_renders_issues_details_and_pagination_without_a_composer(
         cx: &mut gpui::TestAppContext,
     ) {

@@ -484,11 +484,17 @@ impl AppModel {
     }
 
     pub(crate) fn can_submit(&self) -> bool {
+        self.active_run.is_none() && self.can_start_run()
+    }
+
+    // Whether a brand-new task's run could start right now. Unlike `can_submit`
+    // this ignores the selected conversation's own run: quick-issue launches
+    // always target a new task and may run in parallel (up to two slots).
+    pub(crate) fn can_start_run(&self) -> bool {
         let profile_ready = self
             .selected_provider_profile()
             .is_some_and(|profile| profile.credential_configured);
-        self.active_run.is_none()
-            && self.occupied_run_slots() < 2
+        self.occupied_run_slots() < 2
             && self
                 .working_directory()
                 .is_some_and(|path| !self.workspace_locked(std::path::Path::new(path)))

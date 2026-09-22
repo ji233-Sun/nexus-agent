@@ -518,6 +518,45 @@ fn creating_an_issue_starts_a_run_with_the_filed_content_and_current_selection()
 }
 
 #[test]
+fn issue_launch_runs_in_parallel_while_a_session_is_executing() {
+    use crate::{infrastructure::issues::Response, model::issues::IssueLaunchKind};
+    for provider in IssueProvider::ALL {
+        for kind in [IssueLaunchKind::Create, IssueLaunchKind::Process] {
+            let (mut presenter, runner, _directory, first) = worktree_fixture("先执行的任务");
+            assert_eq!(presenter.model.active_run, Some(first.run_id));
+            assert!(presenter.model.can_start_run());
+            seed_issues(&mut presenter, provider);
+            if kind == IssueLaunchKind::Process {
+                presenter.select_issue(provider, "1".into());
+                finish_issue_request(
+                    &mut presenter,
+                    provider,
+                    Response::Detail(Ok(cnb_issue("1"))),
+                );
+                finish_issue_request(
+                    &mut presenter,
+                    provider,
+                    Response::Comments(Ok(vec![cnb_comment("1")])),
+                );
+            }
+            let extra = match kind {
+                IssueLaunchKind::Create => "并行提交的 Issue",
+                IssueLaunchKind::Process => "并行处理的补充信息",
+            };
+            assert!(presenter.start_issue_run(provider, kind, extra, "claude"));
+            finish_workspace_operation(&mut presenter);
+            emit_current_catalog(&presenter, &runner, claude_aliases());
+            presenter.drain_events();
+            let second = last_start(&runner);
+            assert_ne!(second.run_id, first.run_id);
+            assert!(second.prompt.contains(extra));
+            assert_eq!(presenter.model.active_run, Some(second.run_id));
+            assert_eq!(presenter.model.active_run_count(), 2);
+        }
+    }
+}
+
+#[test]
 fn issues_mutations_block_duplicates_preserve_failures_and_update_filtered_lists() {
     for provider in IssueProvider::ALL {
         use crate::{
