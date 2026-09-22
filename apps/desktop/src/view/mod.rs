@@ -2796,6 +2796,11 @@ mod catalog_model_tests {
             let mut issue = cnb_issue("1");
             issue.body = "截图说明\n\n![截图](https://example.test/screenshot.png)\n\n[录屏.mp4](undefined/team/repo/-/files/issues/1/clip.mp4)\n\nhttps://example.test/sound.mp3\n\n[普通链接](https://example.test/page)\n\n```text\nhttps://example.test/code.mp4\n```".into();
             finish_issue_request(&mut view.presenter, IssueProvider::Cnb, Response::Detail(Ok(issue)));
+            finish_issue_request(
+                &mut view.presenter,
+                IssueProvider::Cnb,
+                Response::Comments(Ok(Vec::new())),
+            );
             cx.notify();
         });
         cx.run_until_parked();
@@ -2804,6 +2809,16 @@ mod catalog_model_tests {
         assert!(cx.debug_bounds("cnb-media-image").is_some());
         assert!(cx.debug_bounds("cnb-media-video").is_some());
         assert!(cx.debug_bounds("cnb-media-audio").is_some());
+        assert!(cx.debug_bounds("cnb-native-player-visible").is_some());
+        click_debug(cx, "cnb-chat");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("issue-launch-surface").is_some());
+        assert!(cx.debug_bounds("cnb-native-player-visible").is_none());
+        assert!(cx.debug_bounds("cnb-native-player-obscured").is_some());
+        click_debug(cx, "issue-launch-close");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("issue-launch-surface").is_none());
+        assert!(cx.debug_bounds("cnb-native-player-visible").is_some());
         click_debug(cx, "cnb-back");
         cx.run_until_parked();
         assert!(cx.debug_bounds("cnb-issue-1").is_some());

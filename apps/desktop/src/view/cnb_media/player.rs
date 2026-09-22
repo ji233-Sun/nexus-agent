@@ -18,6 +18,13 @@ pub(super) struct Player {
 struct PlayerBounds {
     full: Bounds<Pixels>,
     visible: Bounds<Pixels>,
+    unobscured: bool,
+}
+
+impl PlayerBounds {
+    fn should_show(self) -> bool {
+        self.unobscured && self.visible.size.width > px(0.) && self.visible.size.height > px(0.)
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -101,7 +108,7 @@ impl Player {
         })
     }
 
-    pub(super) fn element(&self, kind: MediaKind) -> impl IntoElement {
+    pub(super) fn element(&self, kind: MediaKind, unobscured: bool) -> impl IntoElement {
         let webview = self.webview.clone();
         let last_bounds = self.bounds.clone();
         div()
@@ -121,13 +128,14 @@ impl Player {
                         let next = PlayerBounds {
                             full: bounds,
                             visible,
+                            unobscured,
                         };
                         let previous = last_bounds.get();
                         if previous == Some(next) {
                             return;
                         }
                         last_bounds.set(Some(next));
-                        let shown = visible.size.width > px(0.) && visible.size.height > px(0.);
+                        let shown = next.should_show();
                         if shown {
                             let _ = webview.set_bounds(Rect {
                                 position: LogicalPosition::new(
@@ -149,9 +157,7 @@ impl Player {
                                 f32::from(bounds.origin.y - visible.origin.y),
                             ));
                         }
-                        let was_shown = previous.is_some_and(|last| {
-                            last.visible.size.width > px(0.) && last.visible.size.height > px(0.)
-                        });
+                        let was_shown = previous.is_some_and(PlayerBounds::should_show);
                         if shown != was_shown {
                             let _ = webview.set_visible(shown);
                         }
@@ -254,6 +260,30 @@ addEventListener('wheel',e=>{{if(e.ctrlKey)return;const scale=e.deltaMode===1?16
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cnb_player_hides_while_a_gpui_overlay_is_open() {
+        let visible = Bounds {
+            origin: gpui::point(px(0.), px(0.)),
+            size: gpui::size(px(640.), px(360.)),
+        };
+        assert!(
+            PlayerBounds {
+                full: visible,
+                visible,
+                unobscured: true,
+            }
+            .should_show()
+        );
+        assert!(
+            !PlayerBounds {
+                full: visible,
+                visible,
+                unobscured: false,
+            }
+            .should_show()
+        );
+    }
 
     #[tokio::test]
     async fn cnb_player_serves_byte_ranges_only_for_its_attachment() {

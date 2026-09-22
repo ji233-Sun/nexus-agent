@@ -16,11 +16,13 @@ pub(super) fn extensions(
     repository: &str,
     cli: Option<&Path>,
     locale: Language,
+    native_player_visible: bool,
 ) -> MarkdownExtensions {
     MarkdownExtensions::default().plugin(MediaPlugin {
         repository: repository.to_owned(),
         cli: cli.map(Path::to_path_buf),
         locale,
+        native_player_visible,
     })
 }
 
@@ -28,6 +30,7 @@ struct MediaPlugin {
     repository: String,
     cli: Option<PathBuf>,
     locale: Language,
+    native_player_visible: bool,
 }
 
 enum Part {
@@ -133,11 +136,18 @@ impl MarkdownPlugin for MediaPlugin {
                                 label.clone(),
                                 self.cli.clone(),
                                 self.locale,
+                                self.native_player_visible,
                                 cx,
                             )
                         },
                     );
-                    state.update(cx, |state, _| state.locale = self.locale);
+                    state.update(cx, |state, cx| {
+                        state.locale = self.locale;
+                        if state.native_player_visible != self.native_player_visible {
+                            state.native_player_visible = self.native_player_visible;
+                            cx.notify();
+                        }
+                    });
                     body = body.child(state);
                 }
             }
@@ -151,6 +161,7 @@ struct MediaView {
     label: String,
     cli: Option<PathBuf>,
     locale: Language,
+    native_player_visible: bool,
     loaded: Option<Result<LoadedMedia, LocalizedText>>,
     task: Task<()>,
     abort: Option<tokio::task::AbortHandle>,
@@ -164,6 +175,7 @@ impl MediaView {
         label: String,
         cli: Option<PathBuf>,
         locale: Language,
+        native_player_visible: bool,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.on_release(|view, cx| {
@@ -179,6 +191,7 @@ impl MediaView {
             label,
             cli,
             locale,
+            native_player_visible,
             loaded: None,
             task: Task::ready(()),
             abort: None,
@@ -264,6 +277,22 @@ impl Render for MediaView {
             .gap_2()
             .text_size(px(12.))
             .text_color(rgb(colors.muted));
+        #[cfg(test)]
+        let frame = if self.source.kind == MediaKind::Image {
+            frame
+        } else {
+            let selector = if self.native_player_visible {
+                "cnb-native-player-visible"
+            } else {
+                "cnb-native-player-obscured"
+            };
+            frame.child(
+                div()
+                    .absolute()
+                    .size(px(0.))
+                    .debug_selector(move || selector.to_owned()),
+            )
+        };
         let content = match &self.loaded {
             None => div()
                 .p_4()
@@ -315,7 +344,9 @@ impl Render for MediaView {
                         );
                     }
                     match self.player.as_ref().expect("player initialized") {
-                        Ok(player) => player.element(self.source.kind).into_any_element(),
+                        Ok(player) => player
+                            .element(self.source.kind, self.native_player_visible)
+                            .into_any_element(),
                         Err(error) => self.error(error, cx).into_any_element(),
                     }
                 }
