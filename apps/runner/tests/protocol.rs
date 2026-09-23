@@ -904,6 +904,40 @@ async fn runner_loads_all_codex_model_pages_and_reaps_the_app_server() {
 }
 
 #[tokio::test]
+async fn opencode_probe_finds_official_install_without_shell_path() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("home");
+    let bin = home.join(".opencode/bin");
+    fs::create_dir_all(&bin).unwrap();
+    let opencode = bin.join(format!("opencode{}", std::env::consts::EXE_SUFFIX));
+    fs::copy(fake_harness(directory.path()), &opencode).unwrap();
+
+    let mut runner = TestRunner::spawn_command(
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_nexus-runner"))
+            .current_dir(directory.path())
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .env("PATH", ""),
+    );
+    runner
+        .send(Command::HarnessProbe {
+            environment: Vec::new(),
+            harness: HarnessKind::Opencode,
+            executable: "opencode".into(),
+        })
+        .await;
+    let Event::HarnessDetected(probe) = runner.next().await else {
+        panic!("expected OpenCode probe result");
+    };
+    assert_eq!(probe.executable, opencode.to_string_lossy());
+    assert!(probe.available);
+    assert_eq!(probe.version.as_deref(), Some("fake-omp 1.0"));
+    assert!(probe.authenticated);
+    assert!(directory.path().join("acp-args.txt").exists());
+    runner.shutdown().await;
+}
+
+#[tokio::test]
 async fn omp_probe_times_out_in_both_stages() {
     let directory = tempfile::tempdir().unwrap();
     let executable = fake_harness(directory.path());

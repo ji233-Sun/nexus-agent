@@ -293,6 +293,7 @@ fn search_paths(
     if let Some(home) = &home {
         for suffix in [
             ".local/bin",
+            ".opencode/bin",
             ".vite-plus/bin",
             ".bun/bin",
             ".local/share/pnpm",
@@ -559,6 +560,21 @@ mod tests {
             resolve_in_paths("codex", paths, None),
             Some(vp.join("bin/codex"))
         );
+    }
+
+    #[test]
+    fn gui_search_finds_opencode_without_shell_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let bin = directory.path().join(".opencode/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let opencode = bin.join("opencode");
+        executable(&opencode);
+
+        let paths = search_paths("macos", |key| {
+            (key == "HOME").then(|| directory.path().as_os_str().into())
+        });
+        assert!(paths.contains(&bin));
+        assert_eq!(resolve_in_paths("opencode", paths, None), Some(opencode));
     }
 
     #[test]
