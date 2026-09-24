@@ -111,6 +111,18 @@ impl NexusView {
                             .text_color(rgb(colors.text_secondary))
                             .child(summary),
                     )
+                    .when(running > 0, |button| {
+                        button.child(
+                            div()
+                                .flex_none()
+                                .pr_1()
+                                .debug_selector(move || format!("tool-batch-running-{first}"))
+                                .child(bouncing_dots(
+                                    rgb(colors.accent).into(),
+                                    !self.reduced_motion,
+                                )),
+                        )
+                    })
                     .on_click(cx.listener(move |app, _, _, cx| {
                         if !app.expanded_messages.remove(&toggle_id) {
                             app.expanded_messages.insert(toggle_id.clone());
@@ -234,7 +246,19 @@ impl NexusView {
                             .flex_none()
                             .text_size(px(12.))
                             .text_color(rgb(if error { colors.danger } else { colors.muted }))
-                            .child(status),
+                            .map(|element| {
+                                if running {
+                                    element
+                                        .debug_selector(move || format!("tool-row-running-{id}"))
+                                        .child(bouncing_text(
+                                            locale.text("正在全力运行喵～"),
+                                            rgb(colors.accent).into(),
+                                            !self.reduced_motion,
+                                        ))
+                                } else {
+                                    element.child(status)
+                                }
+                            }),
                     )
                     .child(
                         Icon::new(if expanded {

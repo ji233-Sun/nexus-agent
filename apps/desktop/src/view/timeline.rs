@@ -69,7 +69,7 @@ impl NexusView {
                                             .gap_3()
                                             .text_size(px(13.))
                                             .text_color(rgb(colors.text_secondary))
-                                            .child(live_status_dot(
+                                            .child(bouncing_dots(
                                                 rgb(colors.accent).into(),
                                                 !self.reduced_motion,
                                             ))
@@ -509,6 +509,78 @@ mod tests {
         assert!(cx.debug_bounds(selector).is_some());
         assert!(cx.debug_bounds(content_selector).is_none());
         assert!(cx.debug_bounds(answer_selector).is_some());
+    }
+
+    #[gpui::test]
+    fn running_tools_bounce_while_silent_rest_under_reduced_motion_and_clear_on_result(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (mut presenter, runner, _directory) = fixture();
+        assert!(presenter.submit("Run the suite", "claude"));
+        let run_id = presenter.model().active_run.unwrap();
+        runner.emit(Event::RunToolStarted {
+            run_id,
+            tool_id: "suite".into(),
+            name: "Command".into(),
+            summary: "cargo test".into(),
+        });
+        presenter.drain_events();
+        let tool = presenter.model().messages.last().unwrap().id;
+        let batch_selector: &'static str = format!("tool-batch-{tool}").leak();
+        let batch_running: &'static str = format!("tool-batch-running-{tool}").leak();
+        let row_running: &'static str = format!("tool-row-running-{tool}").leak();
+        let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
+        cx.simulate_resize(size(px(1280.), px(900.)));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(batch_running).is_some());
+        let trigger = cx.debug_bounds(batch_selector).unwrap().center();
+        cx.simulate_click(trigger, Default::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(row_running).is_some());
+
+        // No new events arrive, yet the indicator keeps painting frames.
+        let frame = |cx: &mut gpui::VisualTestContext| {
+            cx.executor().advance_clock(Duration::from_secs(90));
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                let _ = window.draw(cx);
+            });
+        };
+        let timeline = view.read_with(cx, |view, _| view.timeline_pane.clone());
+        let renders = timeline.read_with(cx, |pane, _| pane.render_count);
+        frame(cx);
+        assert!(timeline.read_with(cx, |pane, _| pane.render_count) > renders);
+
+        view.update_in(cx, |view, window, cx| {
+            view.set_appearance(
+                AppearanceSettings {
+                    reduced_motion: true,
+                    ..view.presenter.model().appearance
+                },
+                window,
+                cx,
+            )
+        });
+        // Drain the frame the last animated paint had already requested.
+        frame(cx);
+        assert!(cx.debug_bounds(row_running).is_some());
+        let renders = timeline.read_with(cx, |pane, _| pane.render_count);
+        frame(cx);
+        frame(cx);
+        assert_eq!(timeline.read_with(cx, |pane, _| pane.render_count), renders);
+
+        runner.emit(Event::RunToolCompleted {
+            run_id,
+            tool_id: "suite".into(),
+            output: "Tests passed.".into(),
+            is_error: false,
+        });
+        view.update(cx, |view, cx| view.poll_events(Instant::now(), cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(batch_running).is_none());
+        assert!(cx.debug_bounds(row_running).is_none());
     }
 
     #[gpui::test]
