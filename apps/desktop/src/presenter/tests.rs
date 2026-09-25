@@ -2993,6 +2993,7 @@ fn emit_current_catalog(
             HarnessKind::Codebuddy => nexus_domain::ModelSource::CodebuddyAcp,
             HarnessKind::Opencode => nexus_domain::ModelSource::OpencodeAcp,
             HarnessKind::Deepseek => nexus_domain::ModelSource::DeepseekAcp,
+            HarnessKind::CommandCode => nexus_domain::ModelSource::CommandCodeCli,
         };
     }
     runner.emit(Event::ModelCatalogLoaded {

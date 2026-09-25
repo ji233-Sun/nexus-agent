@@ -2317,6 +2317,7 @@ fn provider_environment_defaults(harness: HarnessKind) -> (&'static str, &'stati
         HarnessKind::Opencode => ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"),
         // dsh 的 DeepSeek 官方路由默认读取 DEEPSEEK_API_KEY，可选用 DEEPSEEK_BASE_URL 覆盖端点。
         HarnessKind::Deepseek => ("DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL"),
+        HarnessKind::CommandCode => ("COMMAND_CODE_API_KEY", ""),
     }
 }
 

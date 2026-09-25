@@ -18,6 +18,15 @@ pub(super) fn harness_icon(harness: HarnessKind, colors: Palette, size: f32) -> 
                 .child("π")
                 .into_any_element();
         }
+        HarnessKind::CommandCode => {
+            return div()
+                .size(px(size))
+                .flex_none()
+                .text_size(px(size * 0.58))
+                .text_color(rgb(colors.text))
+                .child("CC")
+                .into_any_element();
+        }
         HarnessKind::Kimi => (
             include_bytes!("../../assets/harness/kimi.svg"),
             rgb(colors.text),

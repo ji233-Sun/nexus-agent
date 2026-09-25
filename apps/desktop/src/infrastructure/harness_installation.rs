@@ -80,6 +80,7 @@ pub(crate) fn documentation(harness: HarnessKind) -> &'static str {
         HarnessKind::Codebuddy => "https://www.codebuddy.ai/docs/cli/overview",
         HarnessKind::Opencode => "https://opencode.ai/docs/",
         HarnessKind::Deepseek => "https://deepseek-harness.github.io/deepseek-harness/en/",
+        HarnessKind::CommandCode => "https://commandcode.ai/docs/reference/cli",
     }
 }
 
@@ -95,6 +96,7 @@ fn package(harness: HarnessKind) -> &'static str {
         HarnessKind::Codebuddy => "@tencent-ai/codebuddy-code",
         HarnessKind::Opencode => "opencode-ai",
         HarnessKind::Deepseek => "@deepseek-ai/dsh",
+        HarnessKind::CommandCode => "command-code",
     }
 }
 
@@ -581,8 +583,9 @@ fn native_install(harness: HarnessKind, environment: &Environment) -> Option<Mai
         | HarnessKind::Qoder
         | HarnessKind::QoderCn
         | HarnessKind::Codebuddy
-        // dsh 只有 npm 分发，没有官方安装脚本。
-        | HarnessKind::Deepseek => {
+        // dsh 和 Command Code 只有 npm 分发，没有官方安装脚本。
+        | HarnessKind::Deepseek
+        | HarnessKind::CommandCode => {
             return None;
         }
         HarnessKind::Kimi => (
@@ -659,7 +662,8 @@ fn install_options(
             | HarnessKind::Qoder
             | HarnessKind::QoderCn
             | HarnessKind::Codebuddy
-            | HarnessKind::Deepseek => {
+            | HarnessKind::Deepseek
+            | HarnessKind::CommandCode => {
                 vec![]
             }
         },
@@ -709,7 +713,8 @@ fn winget_id(harness: HarnessKind) -> Option<&'static str> {
         | HarnessKind::QoderCn
         | HarnessKind::Codebuddy
         | HarnessKind::Opencode
-        | HarnessKind::Deepseek => None,
+        | HarnessKind::Deepseek
+        | HarnessKind::CommandCode => None,
     }
 }
 
@@ -729,7 +734,8 @@ fn homebrew_owner(real: &Path, harness: HarnessKind) -> Option<(PathBuf, String,
         | HarnessKind::Qoder
         | HarnessKind::QoderCn
         | HarnessKind::Codebuddy
-        | HarnessKind::Deepseek => {
+        | HarnessKind::Deepseek
+        | HarnessKind::CommandCode => {
             return None;
         }
         HarnessKind::Claude => "claude-code",
@@ -922,6 +928,7 @@ async fn ownership(
         HarnessKind::Codebuddy => "codebuddy",
         HarnessKind::Opencode => "opencode",
         HarnessKind::Deepseek => "deepseek",
+        HarnessKind::CommandCode => "command-code",
     };
     if matches!(
         harness,
@@ -945,7 +952,8 @@ async fn ownership(
         | HarnessKind::Qoder
         | HarnessKind::QoderCn
         | HarnessKind::Codebuddy
-        | HarnessKind::Deepseek => false,
+        | HarnessKind::Deepseek
+        | HarnessKind::CommandCode => false,
         HarnessKind::Kimi => inside(
             real,
             &environment

@@ -1552,6 +1552,7 @@ fn executable_setting_key(harness: HarnessKind) -> &'static str {
         HarnessKind::Codebuddy => "codebuddy_executable",
         HarnessKind::Opencode => "opencode_executable",
         HarnessKind::Deepseek => "deepseek_executable",
+        HarnessKind::CommandCode => "commandcode_executable",
     }
 }
 
