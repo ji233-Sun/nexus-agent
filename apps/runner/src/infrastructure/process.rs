@@ -3,7 +3,7 @@ use crate::application::{
     finish_user_asks,
     user_ask::{PendingUserAsks, UserAskInput},
 };
-use nexus_domain::{RunStatus, UserAskStatus, compact_task_title};
+use nexus_domain::{HarnessKind, RunStatus, UserAskStatus, compact_task_title};
 use nexus_harness_core::{ApprovalPrompt, DecodedEvent, InputFrame, LaunchSpec, LineDecoder};
 use nexus_protocol::{ApprovalRequest, EnvironmentVariable, ErrorCode, Event, StartRun};
 use serde_json::Value;
@@ -128,6 +128,13 @@ async fn run_prepared_harness(
         return (RunStatus::Failed, None);
     }
 
+    // Command Code reads the prompt to EOF in print mode.
+    let stdin = if harness == HarnessKind::CommandCode {
+        drop(stdin);
+        None
+    } else {
+        Some(stdin)
+    };
     let stdout = child.stdout.take().expect("piped harness stdout");
     let stderr = child.stderr.take();
     let mut stdout_task = tokio::spawn(read_stdout(
@@ -387,7 +394,7 @@ fn sanitize_generated_title(output: &str) -> Option<String> {
 
 async fn read_stdout(
     stdout: ChildStdout,
-    mut stdin: ChildStdin,
+    mut stdin: Option<ChildStdin>,
     mut decoder: Box<dyn LineDecoder>,
     mut input: mpsc::UnboundedReceiver<RunInput>,
     context: StreamContext,
@@ -763,7 +770,8 @@ async fn read_stdout(
     output
 }
 
-async fn write_frame(stdin: &mut ChildStdin, frame: &InputFrame) -> std::io::Result<()> {
+async fn write_frame(stdin: &mut Option<ChildStdin>, frame: &InputFrame) -> std::io::Result<()> {
+    let stdin = stdin.as_mut().ok_or(std::io::ErrorKind::BrokenPipe)?;
     let mut encoded = frame.0.to_string();
     encoded.push('\n');
     stdin.write_all(encoded.as_bytes()).await?;
@@ -1241,7 +1249,8 @@ mod tests {
                 | HarnessKind::Pi
                 | HarnessKind::Kimi
                 | HarnessKind::Opencode
-                | HarnessKind::Deepseek => {
+                | HarnessKind::Deepseek
+                | HarnessKind::CommandCode => {
                     unreachable!()
                 }
             }

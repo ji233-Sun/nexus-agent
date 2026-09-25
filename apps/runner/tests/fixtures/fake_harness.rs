@@ -34,6 +34,20 @@ fn main() {
         run_omp_catalog();
         return;
     }
+    if args.as_slice() == ["--list-models"] {
+        println!("Available models  ·  1 model\n\ndeepseek/deepseek-v4-flash  fast reasoning (default)");
+        return;
+    }
+    if args.as_slice() == ["status"] {
+        println!("Authenticated");
+        return;
+    }
+    if args.iter().any(|arg| arg == "--print")
+        && args.windows(2).any(|pair| pair == ["--output-format", "json"])
+    {
+        run_command_code(&args);
+        return;
+    }
     if args.iter().any(|arg| matches!(arg.as_str(), "acp" | "--acp")) { run_acp(&args); return; }
     let kimi_title = args.iter().any(|arg| arg == "--agent-file");
     // OpenCode 的后台文本生成使用 `run --format json`。
@@ -227,6 +241,36 @@ fn main() {
         io::stdout().flush().unwrap();
     }
     fs::write("catalog-stopped.txt", "stopped").unwrap();
+}
+
+fn run_command_code(args: &[String]) {
+    let title = args.iter().any(|arg| arg == "--no-session");
+    let mut prompt = String::new();
+    io::stdin().read_to_string(&mut prompt).unwrap();
+    fs::write(if title { "title-prompt.txt" } else { "command-code-prompt.txt" }, &prompt).unwrap();
+    fs::write(if title { "title-args.txt" } else { "command-code-args.txt" }, args.join("\n")).unwrap();
+    if title {
+        fs::write("title-executable.txt", env::current_exe().unwrap().to_string_lossy().as_bytes()).unwrap();
+    }
+    if let Ok(value) = env::var("TEST_PROVIDER_API_KEY") {
+        fs::write(if title { "title-provider-env.txt" } else { "provider-env.txt" }, value).unwrap();
+    }
+    let session = args.windows(2).find(|pair| pair[0] == "--resume")
+        .map(|pair| pair[1].as_str()).unwrap_or("command-session");
+    println!(r#"{{"type":"event","event":{{"type":"run_start","sessionId":{session:?}}}}}"#);
+    if !title {
+        println!(r#"{{"type":"event","event":{{"type":"text_delta","delta":"working"}}}}"#);
+        println!(r#"{{"type":"event","event":{{"type":"tool_queued","toolCallId":"tool-1","toolName":"read_file"}}}}"#);
+        println!(r#"{{"type":"event","event":{{"type":"tool_completed","toolCallId":"tool-1","result":[{{"type":"text","text":"file contents"}}]}}}}"#);
+    }
+    let text = if title && prompt.contains("Write a Git commit message") {
+        "fix: Preserve selected changes\n\nKeep unrelated staged files intact."
+    } else if title {
+        "Fix authentication flow"
+    } else {
+        "working"
+    };
+    println!(r#"{{"type":"result","subtype":"success","sessionId":{session:?},"finalText":{text:?},"usage":{{}},"durationMs":1}}"#);
 }
 
 fn run_turn(

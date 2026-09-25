@@ -299,6 +299,7 @@ async fn approval_round_trip_for_each_harness_rejects_invalid_and_duplicate_resp
     let executable = fake_harness(fixtures.path());
     for (harness, transport) in HarnessKind::ALL
         .into_iter()
+        .filter(|harness| *harness != HarnessKind::CommandCode)
         .map(|h| (h, nexus_domain::HarnessTransport::Acp))
         .chain(
             [
@@ -390,6 +391,7 @@ async fn approval_round_trip_for_each_harness_rejects_invalid_and_duplicate_resp
                 | HarnessKind::Deepseek => {
                     assert_eq!(response["result"]["outcome"]["outcome"], "selected")
                 }
+                HarnessKind::CommandCode => unreachable!(),
             }
             runner.shutdown().await;
         }
@@ -400,7 +402,10 @@ async fn approval_round_trip_for_each_harness_rejects_invalid_and_duplicate_resp
 async fn pending_approvals_are_cleared_on_cancel_and_late_replies_never_reach_harness() {
     let fixtures = tempfile::tempdir().unwrap();
     let executable = fake_harness(fixtures.path());
-    for harness in HarnessKind::ALL {
+    for harness in HarnessKind::ALL
+        .into_iter()
+        .filter(|harness| *harness != HarnessKind::CommandCode)
+    {
         let directory = tempfile::tempdir().unwrap();
         let request = request(
             directory.path(),
@@ -537,6 +542,7 @@ async fn runner_resumes_each_harness_session_across_processes() {
     let executable = fake_harness(directory.path());
     for (harness, transport) in HarnessKind::ALL
         .into_iter()
+        .filter(|harness| *harness != HarnessKind::CommandCode)
         .map(|h| (h, nexus_domain::HarnessTransport::Acp))
         .chain(
             [
@@ -601,6 +607,7 @@ async fn runner_resumes_each_harness_session_across_processes() {
             | HarnessKind::Codebuddy
             | HarnessKind::Opencode
             | HarnessKind::Deepseek => "acp-args.txt",
+            HarnessKind::CommandCode => unreachable!(),
         };
         let args = fs::read_to_string(directory.path().join(args_file)).unwrap();
         if harness == HarnessKind::Codex {
@@ -1353,6 +1360,7 @@ async fn commit_messages_use_each_harness_configuration_without_starting_a_run()
             HarnessKind::Qoder | HarnessKind::QoderCn | HarnessKind::Codebuddy => "--tools\n\n",
             HarnessKind::Opencode => "--agent\nnexus-text",
             HarnessKind::Deepseek => "--profile\nheadless",
+            HarnessKind::CommandCode => "--print\n--output-format\njson",
         }));
         let prompt = fs::read_to_string(directory.path().join("title-prompt.txt")).unwrap();
         assert!(prompt.contains("selected change"));
@@ -1484,7 +1492,8 @@ async fn runner_generates_titles_with_each_harness_in_a_safe_background_process(
             assert!(!args.contains("--thinking"));
         } else {
             assert!(args.contains(match harness {
-                HarnessKind::Claude | HarnessKind::Codebuddy => "--effort\nlow",
+                HarnessKind::Claude | HarnessKind::Codebuddy | HarnessKind::CommandCode =>
+                    "--effort\nlow",
                 HarnessKind::Qoder => "--reasoning-effort\nlow",
                 HarnessKind::QoderCn => "--reasoning-effort\nlow",
                 HarnessKind::Kimi | HarnessKind::Opencode | HarnessKind::Deepseek => unreachable!(),
@@ -1543,6 +1552,13 @@ async fn runner_generates_titles_with_each_harness_in_a_safe_background_process(
                 assert!(args.contains("--profile\nheadless"));
                 // 任务作为位置参数传入，位于 launcher 参数之后。
                 assert!(args.contains("headless\nGenerate a concise title"));
+            }
+            HarnessKind::CommandCode => {
+                assert!(args.contains("--print"));
+                assert!(args.contains("--output-format\njson"));
+                assert!(args.contains("--no-session"));
+                assert!(!args.contains("--yolo"));
+                assert!(!args.contains("--permission-mode"));
             }
         }
         assert!(
@@ -1685,7 +1701,8 @@ async fn steer_waits_for_all_tools_and_uses_native_receipts_in_the_same_run() {
                 | HarnessKind::QoderCn
                 | HarnessKind::Codebuddy
                 | HarnessKind::Opencode
-                | HarnessKind::Deepseek => unreachable!(),
+                | HarnessKind::Deepseek
+                | HarnessKind::CommandCode => unreachable!(),
                 HarnessKind::Claude => assert_eq!(frame["message"]["content"], prompt),
                 HarnessKind::Omp | HarnessKind::Pi => {
                     assert_eq!(frame["type"], "steer");
@@ -1875,4 +1892,93 @@ async fn acp_catalog_and_authentication_failures_finish_without_starting_model_c
         assert!(!directory.path().join("stdin.txt").exists());
         runner.shutdown().await;
     }
+}
+
+#[tokio::test]
+async fn command_code_probe_catalog_run_and_resume_use_headless_json() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = fake_harness(directory.path());
+    let mut runner = TestRunner::spawn();
+    runner
+        .send(Command::HarnessProbe {
+            environment: Vec::new(),
+            harness: HarnessKind::CommandCode,
+            executable: executable.to_string_lossy().into_owned(),
+        })
+        .await;
+    let Event::HarnessDetected(probe) = runner.next().await else {
+        panic!("expected Command Code probe")
+    };
+    assert!(probe.available);
+    assert!(probe.authenticated);
+
+    let request_id = Uuid::new_v4();
+    runner
+        .send(Command::ModelCatalogRefresh {
+            context_id: None,
+            purpose: Default::default(),
+            request_id,
+            harness: HarnessKind::CommandCode,
+            executable: executable.to_string_lossy().into_owned(),
+            cwd: directory.path().to_string_lossy().into_owned(),
+            environment: Vec::new(),
+        })
+        .await;
+    let Event::ModelCatalogLoaded { models, .. } = runner.next().await else {
+        panic!("expected Command Code models")
+    };
+    assert_eq!(models[0].id, "deepseek/deepseek-v4-flash");
+
+    let mut first = request(
+        directory.path(),
+        executable.clone(),
+        HarnessKind::CommandCode,
+        "private prompt",
+    );
+    first.title_generation = None;
+    first.model = Some(models[0].id.clone());
+    runner.send(Command::RunStart(first.clone())).await;
+    let events = runner.collect_run(first.run_id, RunStatus::Completed).await;
+    assert!(events.iter().any(|event| matches!(event,
+        Event::RunSessionStarted { session_id, .. } if session_id == "command-session"
+    )));
+    assert!(events.iter().any(|event| matches!(event,
+        Event::RunOutputDelta { text, .. } if text == "working"
+    )));
+    assert!(events.iter().any(|event| matches!(event,
+        Event::RunMessageCompleted { text, .. } if text == "working"
+    )));
+    assert!(events.iter().any(|event| matches!(event,
+        Event::RunToolStarted { tool_id, .. } if tool_id == "tool-1"
+    )));
+    assert!(events.iter().any(|event| matches!(event,
+        Event::RunToolCompleted { tool_id, is_error: false, .. } if tool_id == "tool-1"
+    )));
+    assert_eq!(
+        fs::read_to_string(directory.path().join("command-code-prompt.txt")).unwrap(),
+        "private prompt"
+    );
+    let args = fs::read_to_string(directory.path().join("command-code-args.txt")).unwrap();
+    assert!(args.contains("--permission-mode\nauto-accept"));
+    assert!(args.contains("--model\ndeepseek/deepseek-v4-flash"));
+    assert!(!args.contains("private prompt"));
+
+    let mut second = first;
+    second.run_id = Uuid::new_v4();
+    second.prompt = "follow-up".into();
+    second.session_id = Some("command-session".into());
+    runner.send(Command::RunStart(second.clone())).await;
+    runner
+        .collect_run(second.run_id, RunStatus::Completed)
+        .await;
+    assert!(
+        fs::read_to_string(directory.path().join("command-code-args.txt"))
+            .unwrap()
+            .contains("--resume\ncommand-session")
+    );
+    assert_eq!(
+        fs::read_to_string(directory.path().join("command-code-prompt.txt")).unwrap(),
+        "follow-up"
+    );
+    runner.shutdown().await;
 }

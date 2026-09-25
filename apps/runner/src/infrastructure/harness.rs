@@ -8,7 +8,8 @@ use nexus_harness_pi as pi;
 use nexus_protocol::{EnvironmentVariable, HarnessProbe, StartRun, TextGenerationConfig};
 use serde_json::{Value, json};
 use std::path::Path;
-use tokio::sync::watch;
+use std::{process::Stdio, time::Duration};
+use tokio::{process::Command, sync::watch, time::timeout};
 
 pub(crate) async fn probe(
     harness: HarnessKind,
@@ -20,6 +21,7 @@ pub(crate) async fn probe(
         HarnessKind::Codex => codex::probe(executable).await,
         HarnessKind::Omp => omp::probe(executable).await,
         HarnessKind::Pi => pi::probe(executable).await,
+        HarnessKind::CommandCode => probe_command_code(executable, environment).await,
         HarnessKind::Kimi
         | HarnessKind::Qoder
         | HarnessKind::QoderCn
@@ -40,6 +42,9 @@ pub(crate) async fn discover_models(
         HarnessKind::Codex => codex::discover_models(executable, cwd, environment, cancel).await,
         HarnessKind::Omp => omp::discover_models(executable, cwd, environment, cancel).await,
         HarnessKind::Pi => pi::discover_models(executable, cwd, environment, cancel).await,
+        HarnessKind::CommandCode => {
+            discover_command_code_models(executable, cwd, environment, cancel).await
+        }
         HarnessKind::Kimi
         | HarnessKind::Qoder
         | HarnessKind::QoderCn
@@ -201,6 +206,10 @@ fn prepare_native(
             ),
             Box::new(omp::EventDecoder::default()),
         ),
+        HarnessKind::CommandCode => {
+            let (spec, decoder) = nexus_harness_cli::command_code::prepare_run(request, cwd);
+            (spec, Box::new(decoder))
+        }
     })
 }
 
@@ -287,7 +296,101 @@ pub(crate) fn prepare_text_generation(
             ),
             Box::new(omp::EventDecoder::default()),
         ),
+        HarnessKind::CommandCode => {
+            let (spec, decoder) =
+                nexus_harness_cli::command_code::prepare_text_generation(request, cwd, prompt);
+            (spec, Box::new(decoder))
+        }
     })
+}
+
+async fn probe_command_code(executable: &str, environment: &[EnvironmentVariable]) -> HarnessProbe {
+    let mut probe = HarnessProbe {
+        harness: HarnessKind::CommandCode,
+        executable: executable.into(),
+        available: false,
+        authenticated: false,
+        version: None,
+        message: "未找到 Command Code CLI。".into(),
+    };
+    let Some(path) = nexus_harness_core::resolve_executable(executable) else {
+        return probe;
+    };
+    probe.executable = path.to_string_lossy().into();
+    let mut command = Command::new(&path);
+    nexus_harness_core::hide_console_window(command.as_std_mut());
+    let version = timeout(
+        Duration::from_secs(8),
+        command.arg("--version").kill_on_drop(true).output(),
+    )
+    .await;
+    let Ok(Ok(version)) = version else {
+        probe.message = "Command Code 版本探测失败或超时。".into();
+        return probe;
+    };
+    if !version.status.success() {
+        probe.message = "Command Code 版本探测失败。".into();
+        return probe;
+    }
+    probe.available = true;
+    probe.version = Some(String::from_utf8_lossy(&version.stdout).trim().into());
+    let mut command = Command::new(path);
+    nexus_harness_core::hide_console_window(command.as_std_mut());
+    probe.authenticated = matches!(
+        timeout(
+            Duration::from_secs(8),
+            command
+                .arg("status")
+                .envs(environment.iter().map(|v| (&v.name, &v.value)))
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .status(),
+        )
+        .await,
+        Ok(Ok(status)) if status.success()
+    );
+    probe.message = if probe.authenticated {
+        "Command Code 已就绪，模型调用仍取决于账号权限。"
+    } else {
+        "Command Code 尚未登录，请在终端运行 `command-code login`。"
+    }
+    .into();
+    probe
+}
+
+async fn discover_command_code_models(
+    executable: &str,
+    cwd: &Path,
+    environment: &[EnvironmentVariable],
+    mut cancel: watch::Receiver<bool>,
+) -> Result<Vec<ModelDescriptor>, ModelCatalogError> {
+    if *cancel.borrow() {
+        return Err(ModelCatalogError::Cancelled);
+    }
+    let path = nexus_harness_core::resolve_executable(executable)
+        .ok_or_else(|| ModelCatalogError::Failed("未找到 Command Code CLI。".into()))?;
+    let mut command = Command::new(path);
+    nexus_harness_core::hide_console_window(command.as_std_mut());
+    let output = tokio::select! {
+        output = timeout(Duration::from_secs(15), command
+            .arg("--list-models")
+            .envs(environment.iter().map(|v| (&v.name, &v.value)))
+            .current_dir(cwd)
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output()) => output.map_err(|_| ModelCatalogError::Failed("Command Code 模型目录探测超时。".into()))?
+                .map_err(|_| ModelCatalogError::Failed("无法执行 Command Code 模型目录命令。".into()))?,
+        _ = cancel.changed() => return Err(ModelCatalogError::Cancelled),
+    };
+    if !output.status.success() {
+        return Err(ModelCatalogError::Failed(
+            "Command Code 模型目录命令失败。".into(),
+        ));
+    }
+    nexus_harness_cli::command_code::parse_catalog(&String::from_utf8_lossy(&output.stdout))
+        .map_err(ModelCatalogError::Failed)
 }
 
 #[cfg(test)]

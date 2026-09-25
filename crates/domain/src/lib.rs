@@ -18,10 +18,11 @@ pub enum HarnessKind {
     Codebuddy,
     Opencode,
     Deepseek,
+    CommandCode,
 }
 
 impl HarnessKind {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Claude,
         Self::Codex,
         Self::Omp,
@@ -32,6 +33,7 @@ impl HarnessKind {
         Self::Codebuddy,
         Self::Opencode,
         Self::Deepseek,
+        Self::CommandCode,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -46,6 +48,7 @@ impl HarnessKind {
             Self::Codebuddy => "codebuddy",
             Self::Opencode => "opencode",
             Self::Deepseek => "deepseek",
+            Self::CommandCode => "commandcode",
         }
     }
 
@@ -60,7 +63,8 @@ impl HarnessKind {
             Self::QoderCn => Self::Codebuddy,
             Self::Codebuddy => Self::Opencode,
             Self::Opencode => Self::Deepseek,
-            Self::Deepseek => Self::Claude,
+            Self::Deepseek => Self::CommandCode,
+            Self::CommandCode => Self::Claude,
         }
     }
 
@@ -76,6 +80,13 @@ impl HarnessKind {
             Self::Codebuddy => "codebuddy",
             Self::Opencode => "opencode",
             Self::Deepseek => "dsh",
+            Self::CommandCode => {
+                if cfg!(windows) {
+                    "cmdc"
+                } else {
+                    "cmd"
+                }
+            }
         }
     }
 }
@@ -93,6 +104,7 @@ impl fmt::Display for HarnessKind {
             Self::Codebuddy => "CodeBuddy",
             Self::Opencode => "OpenCode",
             Self::Deepseek => "DeepSeek Harness",
+            Self::CommandCode => "Command Code",
         })
     }
 }
@@ -112,6 +124,7 @@ impl FromStr for HarnessKind {
             "codebuddy" => Ok(Self::Codebuddy),
             "opencode" => Ok(Self::Opencode),
             "deepseek" => Ok(Self::Deepseek),
+            "commandcode" => Ok(Self::CommandCode),
             _ => Err(format!("unknown harness: {value}")),
         }
     }
@@ -414,6 +427,7 @@ pub enum ModelSource {
     CodebuddyAcp,
     OpencodeAcp,
     DeepseekAcp,
+    CommandCodeCli,
 }
 
 impl ModelSource {
@@ -430,6 +444,7 @@ impl ModelSource {
             Self::CodebuddyAcp => HarnessKind::Codebuddy,
             Self::OpencodeAcp => HarnessKind::Opencode,
             Self::DeepseekAcp => HarnessKind::Deepseek,
+            Self::CommandCodeCli => HarnessKind::CommandCode,
         }
     }
 }
@@ -661,7 +676,8 @@ mod tests {
         assert_eq!(HarnessKind::QoderCn.next(), HarnessKind::Codebuddy);
         assert_eq!(HarnessKind::Codebuddy.next(), HarnessKind::Opencode);
         assert_eq!(HarnessKind::Opencode.next(), HarnessKind::Deepseek);
-        assert_eq!(HarnessKind::Deepseek.next(), HarnessKind::Claude);
+        assert_eq!(HarnessKind::Deepseek.next(), HarnessKind::CommandCode);
+        assert_eq!(HarnessKind::CommandCode.next(), HarnessKind::Claude);
         assert_eq!(HarnessKind::Codex.default_executable(), "codex");
         assert_eq!(ClaudeModel::Haiku.next(), ClaudeModel::Default);
         assert_eq!(ThinkingEffort::Max.next(), ThinkingEffort::Low);

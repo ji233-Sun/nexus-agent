@@ -243,3 +243,9 @@ Ask 显示 CLI 请求的审批；Auto Edit 自动批准编辑请求，其余继�
 后台标题中 Qoder / CodeBuddy 禁用工具与 MCP，并关闭会话保存；Kimi Code 使用 `kimi -p --output-format stream-json` 与无工具的临时 Markdown Agent；OpenCode 使用 `opencode run --format json` 与通过 `OPENCODE_CONFIG_CONTENT` 内联注册的无工具 Agent，不写入用户的 opencode 配置目录；DeepSeek Harness 使用 `dsh --profile headless <task>`，任务作为位置参数传入（与其他消息一样会出现在进程参数中），stdout 的纯文本即最终答案。Kimi Code 没有禁用 MCP 或 hooks 的启动参数，标题会话仍会加载用户 MCP 声明、触发已配置的 hooks，并在自己的数据目录保留会话，但不续用任务会话；dsh 的标题会话也会在自己的 profile 目录持久化。
 
 上述引擎也可用于侧栏的提交说明生成，复用无工具的后台文本生成配置。提交说明保留主题与正文的换行，不会作为会话消息发送。
+
+### Command Code
+
+Command Code 使用 `command-code` npm 包。安装菜单支持 npm、Vite+ 等现有 Node 包管理器；macOS / Linux 的默认命令是 `cmd`，Windows 是 `cmdc`。安装后运行 `command-code login`，Nexus 会通过 `--version` 和 `status` 探测可用性，通过 `--list-models` 读取当前 CLI 的模型列表。也可在凭据配置中为该引擎设置 `COMMAND_CODE_API_KEY`。
+
+任务通过 `--print --output-format json` 运行，提示词经 stdin 传入，逐行展示回答和工具事件；完成后保存原生 session ID，续聊时使用 `--resume <id>`。后台标题和提交说明使用 `--no-session`，不会接入任务会话。Command Code 的无交互模式不提供审批交互：Nexus 的 Ask 对应只读默认权限，Auto Edit 对应 `--permission-mode auto-accept`，YOLO 对应 `--yolo`。运行中的补充消息无法送入该 CLI；本轮结束后可继续会话。模型是否可用和思考层级支持范围仍由当前 CLI 与账号决定。

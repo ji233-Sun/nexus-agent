@@ -125,6 +125,7 @@ flowchart TB
 - `crates/harness-pi`：Pi RPC、临时审批扩展、原生 Session 文件与模型目录。
 - `crates/harness-cli`：复用 Claude 事件解码的 Qoder / Qoder CN / CodeBuddy stream-json 接入。
 - `crates/harness-acp`：Kimi Code / Qoder / CodeBuddy / OpenCode / DeepSeek Harness 共用的 ACP v1 握手、会话、模型配置、审批和事件适配。
+- `crates/harness-cli/src/command_code.rs`：Command Code 的无交互 JSON 事件、会话与模型目录适配。
 - `apps/runner/src/transport.rs`：JSONL 命令读取、协议版本校验和事件写出。
 - `apps/runner/src/application`：命令调度、双任务并发、任务与 checkout 互斥、取消和统一事件转换。
 - `apps/runner/src/infrastructure`：Harness 适配器选择、子进程执行和平台相关的进程树清理。
@@ -237,7 +238,7 @@ ACP 模型目录通过无 Prompt 的 `session/new` 获取，CLI 可能保存空�
 
 本次实际验证版本：Pi 0.85.1、Kimi Code 0.42.0、Qoder CLI 1.1.48、CodeBuddy 2.147.0。Kimi Code 使用官方安装器布局（`~/.kimi-code/bin/kimi`），核对 ACP 握手、会话模式/模型配置与 `kimi -p --output-format stream-json` 文本生成；Pi 使用隔离配置和本地模拟模型验证了审批、工具、标题与跨进程续聊；Qoder 验证原生启动参数和未认证错误，国内包 1.1.48 核对命令、Token 环境变量及安装来源；CodeBuddy 验证原生握手及 ACP 模型目录。真实账号模型调用、Windows / Linux 实机运行尚未验证。
 
-标题与提交说明统一通过 `TextGenerationConfig` / `prepare_text_generation` 执行；Kimi Code 通过 `kimi -p --output-format stream-json` 与只读 Markdown Agent（`tools: []`）生成文本，避免工具调用并限制输出为最终消息。StartRun 包含默认 CLI 的 transport，HarnessProbe 包含环境配置以支持地区探测；当前 Desktop / Runner 协议版本为 19，包含 Claude API 模型目录的 `claude_api` 来源。旧版外置 Runner 会被版本检查拒绝，需与 Desktop 同步更新。
+标题与提交说明统一通过 `TextGenerationConfig` / `prepare_text_generation` 执行；Kimi Code 通过 `kimi -p --output-format stream-json` 与只读 Markdown Agent（`tools: []`）生成文本，避免工具调用并限制输出为最终消息。StartRun 包含默认 CLI 的 transport，HarnessProbe 包含环境配置以支持地区探测；当前 Desktop / Runner 协议版本为 20，包含 Command Code 的 Harness 与模型来源。旧版外置 Runner 会被版本检查拒绝，需与 Desktop 同步更新。
 
 ### 修改 PDF 界面
 
