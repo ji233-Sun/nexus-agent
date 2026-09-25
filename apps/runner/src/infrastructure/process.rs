@@ -1249,7 +1249,8 @@ mod tests {
                 | HarnessKind::Pi
                 | HarnessKind::Kimi
                 | HarnessKind::Opencode
-                | HarnessKind::Deepseek => {
+                | HarnessKind::Deepseek
+                | HarnessKind::CommandCode => {
                     unreachable!()
                 }
             }
