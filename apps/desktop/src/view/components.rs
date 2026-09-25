@@ -610,20 +610,77 @@ pub(super) fn status_dot(color: Hsla) -> gpui::Div {
         .bg(color)
 }
 
-pub(super) fn live_status_dot(color: Hsla, animated: bool) -> gpui::AnyElement {
-    let dot = status_dot(color);
-    if animated {
-        dot.with_animation(
-            "active-run-pulse",
-            Animation::new(Duration::from_millis(1_800))
-                .repeat()
-                .with_easing(pulsating_between(0.45, 1.)),
-            |element, opacity| element.opacity(opacity),
+// Every running indicator shares one app-wide clock, so dots and glyphs across
+// the timeline hop in the same rhythm and never restart when a row re-renders.
+const BOUNCE_CYCLE: Duration = Duration::from_millis(1_400);
+
+/// Lift in 0..=1 at `phase`: a ballistic arc over the first 40% of the cycle,
+/// then rest, so staggered phases read as a wave that pauses between passes.
+fn hop(phase: f32) -> f32 {
+    let t = phase.rem_euclid(1.) / 0.4;
+    if t < 1. { 4. * t * (1. - t) } else { 0. }
+}
+
+fn bounce(
+    element: gpui::Div,
+    id: impl Into<ElementId>,
+    delay: f32,
+    height: f32,
+    fade: bool,
+) -> AnyElement {
+    element
+        .relative()
+        .with_animation(
+            id,
+            Animation::new(BOUNCE_CYCLE).repeat_synced(),
+            move |element, delta| {
+                let lift = hop(delta - delay);
+                element
+                    .top(px(-height * lift))
+                    .when(fade, |element| element.opacity(0.4 + 0.6 * lift))
+            },
         )
         .into_any_element()
-    } else {
-        dot.into_any_element()
+}
+
+pub(super) fn bouncing_dots(color: Hsla, animated: bool) -> AnyElement {
+    div()
+        .flex_none()
+        .h(px(12.))
+        .flex()
+        .items_end()
+        .gap(px(3.))
+        .children((0..3usize).map(|index| {
+            let dot = div().size(px(4.)).rounded_full().bg(color);
+            if animated {
+                bounce(dot, ("bouncing-dot", index), index as f32 * 0.14, 5., true)
+            } else {
+                dot.into_any_element()
+            }
+        }))
+        .into_any_element()
+}
+
+pub(super) fn bouncing_text(text: &'static str, color: Hsla, animated: bool) -> AnyElement {
+    let label = div().flex_none().flex().text_color(color);
+    if !animated {
+        return label.child(text).into_any_element();
     }
+    // The wave crosses the whole label in half a cycle regardless of length.
+    let stagger = 0.5 / text.chars().count() as f32;
+    label
+        .children(text.chars().enumerate().map(|(index, glyph)| {
+            // A lone space collapses to zero width; keep word gaps visible.
+            let glyph = if glyph == ' ' { '\u{a0}' } else { glyph };
+            bounce(
+                div().child(glyph.to_string()),
+                ("bouncing-glyph", index),
+                index as f32 * stagger,
+                3.,
+                false,
+            )
+        }))
+        .into_any_element()
 }
 
 pub(super) fn run_status_color(colors: Palette, status: RunStatus) -> Option<Hsla> {

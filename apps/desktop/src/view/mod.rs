@@ -31,7 +31,7 @@ use gpui::{
     ElementId, Entity, FocusHandle, Focusable as _, Hsla, InteractiveElement as _, IntoElement,
     KeyBinding, ParentElement as _, PromptButton, PromptLevel, Render, ScrollHandle, SharedString,
     StatefulInteractiveElement as _, Styled as _, Window, div, ease_out_quint,
-    prelude::FluentBuilder as _, pulsating_between, px, relative, rgb, rgba,
+    prelude::FluentBuilder as _, px, relative, rgb, rgba,
 };
 use gpui_kit as gpui;
 use gpui_kit::component::{
