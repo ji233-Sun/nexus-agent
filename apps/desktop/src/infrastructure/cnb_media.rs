@@ -221,9 +221,16 @@ mod tests {
     async fn cnb_media_downloads_are_isolated_and_removed_when_released() {
         use std::os::unix::fs::PermissionsExt as _;
         let scripts = tempfile::tempdir().unwrap();
-        let cli = scripts.path().join("cnb");
-        std::fs::write(&cli, "#!/bin/sh\nmkdir -p \"$TMPDIR/cnb-api\"\nprintf 'image bytes' > \"$TMPDIR/cnb-api/photo.png\"\nprintf '{\"status\":200,\"data\":\"%s/cnb-api/photo.png\"}' \"$TMPDIR\"\n").unwrap();
-        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let fake_cli = |name: &str, script: &str| {
+            let path = scripts.path().join(name);
+            std::fs::write(&path, script).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            path
+        };
+        let cli = fake_cli(
+            "cnb-success",
+            "#!/bin/sh\nmkdir -p \"$TMPDIR/cnb-api\"\nprintf 'image bytes' > \"$TMPDIR/cnb-api/photo.png\"\nprintf '{\"status\":200,\"data\":\"%s/cnb-api/photo.png\"}' \"$TMPDIR\"\n",
+        );
         let source = MediaSource::new("/-/imgs/issues/1/photo.png", "", true, "team/repo").unwrap();
         let first = source.load(Some(&cli)).await.unwrap();
         let second = source.load(Some(&cli)).await.unwrap();
@@ -233,23 +240,19 @@ mod tests {
         drop(first);
         assert!(!path.exists());
         assert!(second.url().to_file_path().unwrap().exists());
-        std::fs::write(&cli, "#!/bin/sh\nprintf '{\"status\":403,\"data\":{}}'\n").unwrap();
-        assert!(
-            source
-                .load(Some(&cli))
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("HTTP 403")
+        let forbidden_cli = fake_cli(
+            "cnb-forbidden",
+            "#!/bin/sh\nprintf '{\"status\":403,\"data\":{}}'\n",
         );
-        std::fs::write(
-            &cli,
-            format!(
+        let error = source.load(Some(&forbidden_cli)).await.unwrap_err();
+        assert!(error.to_string().contains("HTTP 403"), "{error:#}");
+        let outside_cli = fake_cli(
+            "cnb-outside",
+            &format!(
                 "#!/bin/sh\nprintf '{{\"status\":200,\"data\":\"{}\"}}'\n",
                 cli.display()
             ),
-        )
-        .unwrap();
-        assert!(source.load(Some(&cli)).await.is_err());
+        );
+        assert!(source.load(Some(&outside_cli)).await.is_err());
     }
 }
