@@ -2304,28 +2304,11 @@ fn working_directory_label(model: &AppModel) -> &str {
     }
 }
 
-fn provider_environment_defaults(harness: HarnessKind) -> (&'static str, &'static str) {
-    match harness {
-        HarnessKind::Claude => ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"),
-        HarnessKind::Codex => ("CODEX_API_KEY", "OPENAI_BASE_URL"),
-        HarnessKind::Omp => ("DEEPSEEK_API_KEY", ""),
-        HarnessKind::Pi => ("ANTHROPIC_API_KEY", ""),
-        HarnessKind::Kimi => ("KIMI_API_KEY", "KIMI_BASE_URL"),
-        HarnessKind::Qoder => ("QODER_PERSONAL_ACCESS_TOKEN", ""),
-        HarnessKind::QoderCn => ("QODERCN_PERSONAL_ACCESS_TOKEN", ""),
-        HarnessKind::Codebuddy => ("CODEBUDDY_API_KEY", "CODEBUDDY_BASE_URL"),
-        HarnessKind::Opencode => ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"),
-        // dsh 的 DeepSeek 官方路由默认读取 DEEPSEEK_API_KEY，可选用 DEEPSEEK_BASE_URL 覆盖端点。
-        HarnessKind::Deepseek => ("DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL"),
-        HarnessKind::CommandCode => ("COMMAND_CODE_API_KEY", ""),
-    }
-}
-
 fn profile_form_draft(
     profile: Option<&ProviderProfile>,
     harness: HarnessKind,
 ) -> ProviderProfileDraft {
-    let (default_api_key_env, default_base_url_env) = provider_environment_defaults(harness);
+    let info = harness.info();
     profile
         .map(|profile| ProviderProfileDraft {
             id: Some(profile.id),
@@ -2339,9 +2322,9 @@ fn profile_form_draft(
         .unwrap_or_else(|| ProviderProfileDraft {
             id: None,
             name: String::new(),
-            api_key_env: default_api_key_env.into(),
+            api_key_env: info.api_key_env.into(),
             api_key: String::new(),
-            base_url_env: default_base_url_env.into(),
+            base_url_env: info.base_url_env.into(),
             base_url: String::new(),
             model: String::new(),
         })

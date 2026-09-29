@@ -69,35 +69,11 @@ impl Drop for Worker {
 }
 
 pub(crate) fn documentation(harness: HarnessKind) -> &'static str {
-    match harness {
-        HarnessKind::Claude => "https://code.claude.com/docs/en/setup",
-        HarnessKind::Codex => "https://developers.openai.com/codex/cli/",
-        HarnessKind::Omp => "https://github.com/can1357/oh-my-pi#install",
-        HarnessKind::Pi => "https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent",
-        HarnessKind::Kimi => "https://moonshotai.github.io/kimi-code/en/guides/getting-started",
-        HarnessKind::Qoder => "https://docs.qoder.com/cli/quick-start",
-        HarnessKind::QoderCn => "https://docs.qoder.cn/cli/what-is-qoder-cli-cn",
-        HarnessKind::Codebuddy => "https://www.codebuddy.ai/docs/cli/overview",
-        HarnessKind::Opencode => "https://opencode.ai/docs/",
-        HarnessKind::Deepseek => "https://deepseek-harness.github.io/deepseek-harness/en/",
-        HarnessKind::CommandCode => "https://commandcode.ai/docs/reference/cli",
-    }
+    harness.info().documentation
 }
 
 fn package(harness: HarnessKind) -> &'static str {
-    match harness {
-        HarnessKind::Claude => "@anthropic-ai/claude-code",
-        HarnessKind::Codex => "@openai/codex",
-        HarnessKind::Omp => "@oh-my-pi/pi-coding-agent",
-        HarnessKind::Pi => "@earendil-works/pi-coding-agent",
-        HarnessKind::Kimi => "@moonshot-ai/kimi-code",
-        HarnessKind::Qoder => "@qoder-ai/qodercli",
-        HarnessKind::QoderCn => "@qodercn-ai/qoderclicn",
-        HarnessKind::Codebuddy => "@tencent-ai/codebuddy-code",
-        HarnessKind::Opencode => "opencode-ai",
-        HarnessKind::Deepseek => "@deepseek-ai/dsh",
-        HarnessKind::CommandCode => "command-code",
-    }
+    harness.info().npm_package
 }
 
 impl MaintenanceCommand {

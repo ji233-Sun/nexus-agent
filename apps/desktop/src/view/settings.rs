@@ -1110,48 +1110,40 @@ impl NexusView {
             .flex_col()
             .gap_8()
             .child(self.render_harness_management(cx))
-            .when(
-                matches!(
-                    model.selected_harness,
-                    HarnessKind::Qoder | HarnessKind::QoderCn | HarnessKind::Codebuddy
-                ),
-                |view| {
-                    view.child(settings_group(
+            .when(model.selected_harness.has_transport_choice(), |view| {
+                view.child(settings_group(
+                    colors,
+                    locale.text("接入方式"),
+                    [settings_row(
                         colors,
-                        locale.text("接入方式"),
-                        [settings_row(
-                            colors,
-                            locale.text("运行协议"),
-                            locale.text("新会话默认使用 CLI；已有会话沿用原接入方式。"),
-                            div().flex().gap_2().children(
-                                [
-                                    (nexus_domain::HarnessTransport::Cli, "CLI"),
-                                    (nexus_domain::HarnessTransport::Acp, "ACP"),
-                                ]
-                                .map(|(transport, label)| {
-                                    Button::new(label)
-                                        .outline()
-                                        .small()
-                                        .label(label)
-                                        .selected(
-                                            self.presenter
-                                                .harness_transport(model.selected_harness)
-                                                == transport,
-                                        )
-                                        .disabled(
-                                            model.active_run_count() > 0
-                                                || model.harness_manager.busy,
-                                        )
-                                        .on_click(cx.listener(move |app, _, _, cx| {
-                                            app.presenter.set_harness_transport(transport);
-                                            cx.notify();
-                                        }))
-                                }),
-                            ),
-                        )],
-                    ))
-                },
-            )
+                        locale.text("运行协议"),
+                        locale.text("新会话默认使用 CLI；已有会话沿用原接入方式。"),
+                        div().flex().gap_2().children(
+                            [
+                                (nexus_domain::HarnessTransport::Cli, "CLI"),
+                                (nexus_domain::HarnessTransport::Acp, "ACP"),
+                            ]
+                            .map(|(transport, label)| {
+                                Button::new(label)
+                                    .outline()
+                                    .small()
+                                    .label(label)
+                                    .selected(
+                                        self.presenter.harness_transport(model.selected_harness)
+                                            == transport,
+                                    )
+                                    .disabled(
+                                        model.active_run_count() > 0 || model.harness_manager.busy,
+                                    )
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        app.presenter.set_harness_transport(transport);
+                                        cx.notify();
+                                    }))
+                            }),
+                        ),
+                    )],
+                ))
+            })
             .when(model.selected_harness == HarnessKind::Codebuddy, |view| {
                 view.child(settings_group(
                     colors,

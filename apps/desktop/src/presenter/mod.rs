@@ -1353,16 +1353,14 @@ impl Presenter {
     }
 
     pub(crate) fn harness_transport(&self, harness: HarnessKind) -> nexus_domain::HarnessTransport {
-        if matches!(
-            harness,
-            HarnessKind::Kimi | HarnessKind::Opencode | HarnessKind::Deepseek
-        ) || self
-            .storage
-            .setting(&format!("harness_transport.{}", harness.as_str()))
-            .ok()
-            .flatten()
-            .as_deref()
-            == Some("acp")
+        if harness.default_transport() == nexus_domain::HarnessTransport::Acp
+            || self
+                .storage
+                .setting(&format!("harness_transport.{}", harness.as_str()))
+                .ok()
+                .flatten()
+                .as_deref()
+                == Some("acp")
         {
             nexus_domain::HarnessTransport::Acp
         } else {
