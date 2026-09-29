@@ -88,7 +88,12 @@ pub(crate) fn fixture() -> (Presenter, FakeRunner, tempfile::TempDir) {
     let directory = tempfile::tempdir().unwrap();
     let storage = Storage::open(Path::new(":memory:")).unwrap();
     let runner = FakeRunner::default();
-    let mut presenter = Presenter::new(storage, Ok(Box::new(runner.clone())), None);
+    let mut presenter = Presenter::new_with_credentials(
+        storage,
+        Ok(Box::new(runner.clone())),
+        None,
+        Box::new(FakeCredentialStore::default()),
+    );
     presenter.issues_client = crate::infrastructure::issues::Client::fake();
     presenter.open_project(directory.path());
     presenter.model.model_catalog = ModelCatalogState::Ready(claude_aliases());
@@ -6855,7 +6860,7 @@ fn working_directory_follows_project_and_task_selection_during_background_runs()
 
 #[test]
 fn voice_selection_persists_without_key_and_credentials_are_isolated() {
-    use crate::infrastructure::{credentials::MIMO_VOICE_CREDENTIAL, voice::Provider};
+    use crate::{infrastructure::credentials::MIMO_VOICE_CREDENTIAL, model::voice::Provider};
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("voice.sqlite");
     let credentials = FakeCredentialStore::default();
@@ -6930,7 +6935,7 @@ fn voice_selection_persists_without_key_and_credentials_are_isolated() {
 
 #[test]
 fn voice_completion_rejects_cancelled_wrong_session_and_provider_results() {
-    use crate::{infrastructure::voice::Provider, model::voice::Operation};
+    use crate::model::voice::{Operation, Provider};
     let (mut presenter, runner, _directory) = fixture();
     presenter.select_voice_provider(Provider::Mimo).unwrap();
     let operation = Operation {
@@ -7097,5 +7102,23 @@ fn native_transport_and_codebuddy_region_persist_and_reach_launch_configuration(
             .provider_launch_configuration(HarnessKind::Codebuddy)
             .unwrap()
             .is_empty()
+    );
+}
+
+#[test]
+fn constructing_presenter_does_not_start_remote_service() {
+    let (mut presenter, _, _directory) = fixture();
+    assert!(presenter.remote_endpoint().is_none());
+    assert!(
+        presenter
+            .storage
+            .setting(crate::remote_control::TOKEN_SETTING_KEY)
+            .unwrap()
+            .is_none()
+    );
+    presenter.attach_remote_control(Err(anyhow::anyhow!("remote port unavailable")));
+    assert_eq!(
+        presenter.remote_control_error(),
+        Some("remote port unavailable")
     );
 }

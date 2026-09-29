@@ -2984,7 +2984,7 @@ mod catalog_model_tests {
     fn voice_settings_select_before_configure_and_draft_insertion_is_undoable(
         cx: &mut gpui::TestAppContext,
     ) {
-        use crate::infrastructure::voice::Provider;
+        use crate::model::voice::Provider;
         cx.update(gpui_kit::init);
         cx.update(theme::configure_theme);
         let (presenter, _, _directory) = fixture();

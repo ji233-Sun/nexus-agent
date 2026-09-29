@@ -3,6 +3,16 @@ use crate::i18n::Language;
 use crate::remote_control::{RemoteControl, RemoteProject, RemoteState};
 
 impl Presenter {
+    pub(crate) fn attach_remote_control(&mut self, service: anyhow::Result<RemoteControl>) {
+        match service {
+            Ok(service) => {
+                self.remote_control = Some(service);
+                self.remote_control_error = None;
+            }
+            Err(error) => self.remote_control_error = Some(error.to_string()),
+        }
+    }
+
     pub(super) fn handle_remote_command(&mut self, command: RemoteCommand) -> bool {
         match command {
             RemoteCommand::GetState { reply } => {

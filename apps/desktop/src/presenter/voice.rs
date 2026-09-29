@@ -3,9 +3,9 @@ use crate::{
     i18n::LocalizedText,
     infrastructure::{
         credentials::MIMO_VOICE_CREDENTIAL,
-        voice::{self, Provider, Worker},
+        voice::{self, Worker},
     },
-    model::voice::{Operation, VoiceSettings},
+    model::voice::{Operation, Provider, VoiceSettings, supported_providers},
 };
 use anyhow::{Result, bail};
 use uuid::Uuid;
@@ -28,7 +28,7 @@ impl Presenter {
     }
 
     pub(crate) fn select_voice_provider(&mut self, provider: Provider) -> Result<()> {
-        if !voice::supported_providers().contains(&provider) {
+        if !supported_providers().contains(&provider) {
             bail!(self.model.language.text("当前平台不支持此语音 Provider"));
         }
         let settings = VoiceSettings {

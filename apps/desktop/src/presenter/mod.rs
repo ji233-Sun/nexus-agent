@@ -22,7 +22,7 @@ use crate::{
         issues::IssueProvider,
         updates::{UpdateChannel, UpdateModel, UpdateState},
     },
-    remote_control::{RemoteCommand, RemoteControl, TOKEN_SETTING_KEY},
+    remote_control::{RemoteCommand, RemoteControl},
 };
 use anyhow::{Result, bail};
 use nexus_domain::{
@@ -226,18 +226,6 @@ impl Presenter {
             .ok()
             .flatten()
             .filter(|name| !name.is_empty());
-        let remote_token = storage
-            .setting(TOKEN_SETTING_KEY)
-            .ok()
-            .flatten()
-            .filter(|token| !token.is_empty())
-            .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
-        let _ = storage.set_setting(TOKEN_SETTING_KEY, &remote_token);
-        let (remote_control, remote_control_error) = match RemoteControl::start(remote_token) {
-            Ok(remote_control) => (Some(remote_control), None),
-            Err(error) => (None, Some(error.to_string())),
-        };
-
         let has_storage_error = storage_error.is_some();
         let (runner, runner_error) = match runner {
             Ok(runner) => (Some(runner), None),
@@ -271,8 +259,8 @@ impl Presenter {
                 },
                 ..AppModel::default()
             },
-            remote_control,
-            remote_control_error,
+            remote_control: None,
+            remote_control_error: None,
             credentials,
             update_events: None,
             installation_worker: None,
