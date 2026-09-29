@@ -114,11 +114,11 @@ impl NexusView {
                 .all_conversations()
                 .any(|conversation| conversation.id == *id)
         });
-        if !model.changes_sidebar_open || !model.commit_editor_open {
+        if !model.conversation.changes_sidebar_open || !model.conversation.commit_editor_open {
             return;
         }
         let id = model.conversation.id;
-        let message = model.commit_message.clone();
+        let message = model.conversation.commit_message.clone();
         let placeholder = model.language.text("填写提交说明，或根据所选变更生成…");
         if let Some(input) = self.commit_inputs.get(&id) {
             if input.read(cx).value().as_str() != message {
@@ -149,8 +149,8 @@ impl NexusView {
         let model = self.presenter.model();
         let locale = model.language;
         let colors = palette(cx);
-        let review = model.workspace_review.as_ref();
-        let generating = model.commit_message_request.is_some();
+        let review = model.conversation.workspace_review.as_ref();
+        let generating = model.conversation.commit_message_request.is_some();
         let running = model.working_directory().is_some_and(|cwd| {
             model.all_conversations().any(|conversation| {
                 conversation.active_run.is_some()
@@ -163,12 +163,15 @@ impl NexusView {
         let busy = model.workspace_busy || generating || running;
         let has_changes = review.is_some_and(|review| !review.dirty_paths.is_empty());
         let kind = model
+            .conversation
             .selected_workspace
             .as_ref()
-            .map_or(model.workspace_draft.kind, |workspace| workspace.kind);
+            .map_or(model.conversation.workspace_draft.kind, |workspace| {
+                workspace.kind
+            });
         let branch = review
             .and_then(|review| review.branch.as_ref())
-            .or(model.workspace_branch.as_ref())
+            .or(model.conversation.workspace_branch.as_ref())
             .cloned()
             .unwrap_or_else(|| if review.is_some() { "HEAD" } else { "—" }.into());
         let branch_tooltip = match review {
@@ -185,7 +188,7 @@ impl NexusView {
         } else {
             locale.format("{count} 个文件", &[("count", count.to_string())])
         };
-        let expanded = model.changes_files_expanded;
+        let expanded = model.conversation.changes_files_expanded;
         let mut card = div()
             .id("environment-card")
             .debug_selector(|| "environment-card".into())
@@ -329,7 +332,7 @@ impl NexusView {
                                         move || format!("review-file-{path}")
                                     })
                                     .label(path.clone())
-                                    .checked(model.selected_changes.contains(path))
+                                    .checked(model.conversation.selected_changes.contains(path))
                                     .disabled(model.workspace_busy)
                                     .on_click(cx.listener(move |app, checked, _, cx| {
                                         app.presenter.select_changed_file(name.clone(), *checked);
@@ -441,13 +444,13 @@ impl NexusView {
                     }),
                     colors,
                 )
-                .disabled(!has_changes || (busy && !model.commit_editor_open))
+                .disabled(!has_changes || (busy && !model.conversation.commit_editor_open))
                 .when(!has_changes || busy, |row| {
                     row.text_color(rgb(colors.muted)).cursor_default()
                 })
                 .when(has_changes, |row| {
                     row.child(
-                        Icon::new(if model.commit_editor_open {
+                        Icon::new(if model.conversation.commit_editor_open {
                             IconName::ChevronDown
                         } else {
                             IconName::ChevronRight
@@ -457,10 +460,12 @@ impl NexusView {
                     )
                 })
                 .on_click(cx.listener(move |app, _, window, cx| {
-                    if has_changes && (!busy || app.presenter.model().commit_editor_open) {
+                    if has_changes
+                        && (!busy || app.presenter.model().conversation.commit_editor_open)
+                    {
                         app.presenter.toggle_commit_editor();
                         app.sync_commit_input(window, cx);
-                        if app.presenter.model().commit_editor_open
+                        if app.presenter.model().conversation.commit_editor_open
                             && let Some(input) = app
                                 .commit_inputs
                                 .get(&app.presenter.model().conversation.id)
@@ -471,7 +476,7 @@ impl NexusView {
                     }
                 })),
             );
-        if model.commit_editor_open && has_changes {
+        if model.conversation.commit_editor_open && has_changes {
             card = card.child(
                 div()
                     .id("commit-editor")
@@ -494,7 +499,10 @@ impl NexusView {
                             .child(div().text_color(rgb(colors.muted)).child(locale.format(
                                 "已选择 {selected}/{total} 个文件",
                                 &[
-                                    ("selected", model.selected_changes.len().to_string()),
+                                    (
+                                        "selected",
+                                        model.conversation.selected_changes.len().to_string(),
+                                    ),
                                     ("total", count.to_string()),
                                 ],
                             )))
@@ -525,7 +533,9 @@ impl NexusView {
                                     } else {
                                         "生成提交说明"
                                     }))
-                                    .disabled(busy || model.selected_changes.is_empty())
+                                    .disabled(
+                                        busy || model.conversation.selected_changes.is_empty(),
+                                    )
                                     .on_click(cx.listener(|app, _, _, cx| {
                                         app.presenter.generate_workspace_commit_message();
                                         cx.notify();
@@ -552,8 +562,8 @@ impl NexusView {
                             .w_full()
                             .label(locale.text("提交所选文件"))
                             .disabled(
-                                busy || model.selected_changes.is_empty()
-                                    || model.commit_message.trim().is_empty(),
+                                busy || model.conversation.selected_changes.is_empty()
+                                    || model.conversation.commit_message.trim().is_empty(),
                             )
                             .on_click(cx.listener(|app, _, window, cx| {
                                 app.confirm_workspace_commit(window, cx)
@@ -571,7 +581,7 @@ impl NexusView {
                     .child(locale.text("任务运行结束后可生成说明和提交。")),
             );
         }
-        if let Some(status) = &model.changes_status {
+        if let Some(status) = &model.conversation.changes_status {
             card = card.child(
                 div()
                     .debug_selector(|| "environment-status".into())
@@ -598,13 +608,18 @@ impl NexusView {
 
     fn confirm_workspace_commit(&self, window: &mut Window, cx: &mut Context<Self>) {
         let model = self.presenter.model();
-        let Some(review) = model.workspace_review.clone() else {
+        let Some(review) = model.conversation.workspace_review.clone() else {
             return;
         };
         let owner = model.conversation.id;
         let locale = model.language;
-        let files = model.selected_changes.iter().cloned().collect::<Vec<_>>();
-        let message = model.commit_message.clone();
+        let files = model
+            .conversation
+            .selected_changes
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let message = model.conversation.commit_message.clone();
         let detail = format!(
             "{}\n\n{}\n\n{}",
             review.branch.as_deref().unwrap_or("HEAD"),
@@ -639,15 +654,16 @@ impl NexusView {
         let model = self.presenter.model();
         let colors = palette(cx);
         let locale = model.language;
-        let draft = &model.workspace_draft;
-        let creating = model.selected_task.is_none() && model.selected_workspace.is_none();
+        let draft = &model.conversation.workspace_draft;
+        let creating = model.conversation.selected_task.is_none()
+            && model.conversation.selected_workspace.is_none();
         let mut row = div()
             .flex()
             .flex_none()
             .items_center()
             .gap_2()
             .text_size(px(12.));
-        if model.selected_project.is_none() {
+        if model.conversation.selected_project.is_none() {
             return row;
         }
         if creating {
@@ -683,9 +699,9 @@ impl NexusView {
                 self.reduced_motion,
                 move |menu, _, cx| {
                     let model = app.read(cx).presenter.model();
-                    let selected = model.workspace_draft.kind;
+                    let selected = model.conversation.workspace_draft.kind;
                     let busy = model.workspace_busy;
-                    let is_git = model.project_is_git;
+                    let is_git = model.conversation.project_is_git;
                     [
                         (WorkspaceKind::Local, "本地"),
                         (WorkspaceKind::Worktree, "Worktree"),
@@ -708,15 +724,19 @@ impl NexusView {
                 },
             ));
         } else {
-            let workspace = model.selected_workspace.as_ref();
+            let workspace = model.conversation.selected_workspace.as_ref();
             row = row.child(
                 locale.text(match workspace.map(|workspace| workspace.kind) {
                     Some(WorkspaceKind::Worktree) => "Worktree",
                     _ => "本地",
                 }),
             );
-            if model.selected_task.is_some() {
-                let branch = model.workspace_branch.clone().unwrap_or_else(|| "—".into());
+            if model.conversation.selected_task.is_some() {
+                let branch = model
+                    .conversation
+                    .workspace_branch
+                    .clone()
+                    .unwrap_or_else(|| "—".into());
                 row = row.child(
                     div()
                         .id("workspace-current-branch")
@@ -747,46 +767,48 @@ impl NexusView {
             }
         }
         if draft.kind == WorkspaceKind::Worktree
-            && (creating || (model.workspace_retry && model.selected_task.is_none()))
+            && (creating
+                || (model.conversation.workspace_retry
+                    && model.conversation.selected_task.is_none()))
         {
             let app = cx.entity();
-            let button = Button::new("workspace-base")
-                .debug_selector(|| "workspace-base".into())
-                .small()
-                .ghost()
-                .h(px(COMPACT_CONTROL_HEIGHT))
-                .max_w(px(200.))
-                .child(
-                    gpui::svg()
-                        .data(include_bytes!("../../assets/icons/git-branch.svg").as_slice())
-                        .size(px(14.))
-                        .text_color(rgb(colors.text))
-                        .flex_none(),
-                )
-                .child(div().min_w_0().truncate().child(if draft.base.is_empty() {
-                    locale.text("选择来源分支").to_owned()
-                } else {
-                    draft.base.clone()
-                }))
-                .accessibility_label(locale.text("来源分支"))
-                .tooltip(locale.format(
-                    "从 {branch} 创建 Worktree",
-                    &[("branch", draft.base.clone())],
-                ))
-                .disabled(
-                    model.workspace_busy
-                        || model
-                            .selected_workspace
-                            .as_ref()
-                            .is_some_and(|workspace| workspace.status != WorkspaceStatus::Missing),
-                );
+            let button =
+                Button::new("workspace-base")
+                    .debug_selector(|| "workspace-base".into())
+                    .small()
+                    .ghost()
+                    .h(px(COMPACT_CONTROL_HEIGHT))
+                    .max_w(px(200.))
+                    .child(
+                        gpui::svg()
+                            .data(include_bytes!("../../assets/icons/git-branch.svg").as_slice())
+                            .size(px(14.))
+                            .text_color(rgb(colors.text))
+                            .flex_none(),
+                    )
+                    .child(div().min_w_0().truncate().child(if draft.base.is_empty() {
+                        locale.text("选择来源分支").to_owned()
+                    } else {
+                        draft.base.clone()
+                    }))
+                    .accessibility_label(locale.text("来源分支"))
+                    .tooltip(locale.format(
+                        "从 {branch} 创建 Worktree",
+                        &[("branch", draft.base.clone())],
+                    ))
+                    .disabled(
+                        model.workspace_busy
+                            || model.conversation.selected_workspace.as_ref().is_some_and(
+                                |workspace| workspace.status != WorkspaceStatus::Missing,
+                            ),
+                    );
             row = row.child(AnimatedDropdown::new(
                 "workspace-base",
                 button,
                 self.reduced_motion,
                 move |menu, _, cx| {
                     let presenter = &app.read(cx).presenter;
-                    let selected = presenter.model().workspace_draft.base.clone();
+                    let selected = presenter.model().conversation.workspace_draft.base.clone();
                     let menu = menu.min_w(px(180.)).max_w(px(320.)).scrollable(true);
                     match presenter.workspace_base_branches() {
                         Ok(branches) if !branches.is_empty() => {
@@ -813,7 +835,7 @@ impl NexusView {
                 },
             ));
         }
-        if model.workspace_retry {
+        if model.conversation.workspace_retry {
             row = row.child(
                 Button::new("workspace-retry")
                     .debug_selector(|| "workspace-retry".into())
@@ -825,8 +847,8 @@ impl NexusView {
                     })),
             );
         }
-        if model.project_is_git
-            && (model.selected_task.is_some() || draft.kind == WorkspaceKind::Worktree)
+        if model.conversation.project_is_git
+            && (model.conversation.selected_task.is_some() || draft.kind == WorkspaceKind::Worktree)
         {
             row = row.child(
                 Button::new("workspace-refresh-branch")
@@ -849,14 +871,15 @@ impl NexusView {
     pub(super) fn render_workspace_hints(&self, _cx: &mut Context<Self>) -> impl IntoElement {
         let model = self.presenter.model();
         let locale = model.language;
-        let creating =
-            model.selected_task.is_none() && model.workspace_draft.kind == WorkspaceKind::Worktree;
+        let creating = model.conversation.selected_task.is_none()
+            && model.conversation.workspace_draft.kind == WorkspaceKind::Worktree;
         let unavailable = model
+            .conversation
             .selected_workspace
             .as_ref()
             .is_some_and(|workspace| workspace.status != WorkspaceStatus::Ready);
         let hints = div();
-        if model.selected_project.is_none() || creating || !unavailable {
+        if model.conversation.selected_project.is_none() || creating || !unavailable {
             return hints;
         }
         hints

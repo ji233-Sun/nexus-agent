@@ -86,7 +86,9 @@ impl NexusView {
             .pr(px(62.))
             .group("sidebar-task")
             .debug_selector(move || format!("sidebar-task-{id}"))
-            .selected(model.selected_task == Some(id) && model.opened_issues().is_none())
+            .selected(
+                model.conversation.selected_task == Some(id) && model.opened_issues().is_none(),
+            )
             .suffix(move |_, _| {
                 let archive_app = app.clone();
                 let delete_app = app.clone();
@@ -166,7 +168,11 @@ impl NexusView {
         let colors = palette(cx);
         let model = self.presenter.model();
         let query = self.search_input.read(cx).value();
-        let selected_project_id = model.selected_project.as_ref().map(|project| project.id);
+        let selected_project_id = model
+            .conversation
+            .selected_project
+            .as_ref()
+            .map(|project| project.id);
         let project_rows = model.projects.iter().enumerate();
         let projects = div()
             .flex()
@@ -188,6 +194,7 @@ impl NexusView {
                 let can_delete = self.presenter.can_delete_project(project_id);
                 let reduced_motion = self.reduced_motion;
                 let tasks: Vec<_> = model
+                    .conversation
                     .tasks
                     .iter()
                     .filter(|task| task.project_id == Some(project_id))
@@ -525,7 +532,7 @@ impl NexusView {
                                     .child(
                                         navigation_row(colors, "projectless-tasks", locale.text("未关联项目"), Some(IconName::Plus))
                                             .debug_selector(|| "sidebar-projectless".into())
-                                            .selected(selected_project_id.is_none() && model.selected_task.is_none())
+                                            .selected(selected_project_id.is_none() && model.conversation.selected_task.is_none())
                                             .on_click(cx.listener(|app, _, window, cx| {
                                                 app.new_projectless_task(window, cx);
                                             })),
@@ -742,7 +749,7 @@ mod tests {
             presenter.set_issues_enabled(provider, false);
         }
         presenter.select_project(project);
-        presenter.select_task(presenter.model().tasks[0].id);
+        presenter.select_task(presenter.model().conversation.tasks[0].id);
         let (view, cx) = cx.add_window_view(|window, cx| {
             let mut view = NexusView::new(presenter, window, cx);
             view.set_appearance(
@@ -785,7 +792,9 @@ mod tests {
     #[gpui::test]
     fn task_rows_fill_the_same_width_and_accept_clicks_past_short_titles(cx: &mut TestAppContext) {
         let (view, cx) = scroll_test_view(cx);
-        let tasks = view.read_with(cx, |view, _| view.presenter.model().tasks[..2].to_vec());
+        let tasks = view.read_with(cx, |view, _| {
+            view.presenter.model().conversation.tasks[..2].to_vec()
+        });
         let bounds = tasks
             .iter()
             .map(|task| {
@@ -816,7 +825,11 @@ mod tests {
             Default::default(),
         );
         assert_eq!(
-            view.read_with(cx, |view, _| view.presenter.model().selected_task),
+            view.read_with(cx, |view, _| view
+                .presenter
+                .model()
+                .conversation
+                .selected_task),
             Some(tasks[short_index].id),
         );
     }
@@ -922,18 +935,21 @@ mod tests {
         cx.update(theme::configure_theme);
         let (mut presenter, runner, _directory) = crate::presenter::tests::fixture();
         assert!(presenter.submit("inactive conversation", "claude"));
-        let inactive_task = presenter.model().active_task.unwrap();
+        let inactive_task = presenter.model().conversation.active_task.unwrap();
         runner.emit(Event::RunExited {
-            run_id: presenter.model().active_run.unwrap(),
+            run_id: presenter.model().conversation.active_run.unwrap(),
             status: RunStatus::Completed,
             exit_code: Some(0),
         });
         presenter.drain_events();
         presenter.new_task();
         assert!(presenter.submit("background conversation", "claude"));
-        let active_task = presenter.model().active_task.unwrap();
+        let active_task = presenter.model().conversation.active_task.unwrap();
         presenter.select_task(inactive_task);
-        assert_ne!(presenter.model().selected_task, Some(active_task));
+        assert_ne!(
+            presenter.model().conversation.selected_task,
+            Some(active_task)
+        );
 
         let (_view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
         cx.run_until_parked();
@@ -1012,7 +1028,9 @@ mod tests {
     #[gpui::test]
     fn task_menu_archives_and_settings_restores_the_conversation(cx: &mut TestAppContext) {
         let (view, cx) = scroll_test_view(cx);
-        let task_id = view.read_with(cx, |view, _| view.presenter.model().selected_task.unwrap());
+        let task_id = view.read_with(cx, |view, _| {
+            view.presenter.model().conversation.selected_task.unwrap()
+        });
         let task_selector = format!("sidebar-task-{task_id}").leak();
         let actions_selector = format!("task-actions-{task_id}").leak();
         let actions = cx.debug_bounds(actions_selector).unwrap().center();
@@ -1030,7 +1048,7 @@ mod tests {
             let _ = window.draw(cx);
         });
         view.read_with(cx, |view, _| {
-            assert!(view.presenter.model().selected_task.is_none());
+            assert!(view.presenter.model().conversation.selected_task.is_none());
             assert_eq!(view.presenter.model().archived_tasks[0].id, task_id);
         });
         assert!(cx.debug_bounds(task_selector).is_none());
@@ -1057,6 +1075,7 @@ mod tests {
             assert!(
                 view.presenter
                     .model()
+                    .conversation
                     .tasks
                     .iter()
                     .any(|task| task.id == task_id)
@@ -1071,8 +1090,13 @@ mod tests {
         let (view, cx) = scroll_test_view(cx);
         let (project, task_id) = view.read_with(cx, |view, _| {
             (
-                view.presenter.model().selected_project.clone().unwrap(),
-                view.presenter.model().selected_task,
+                view.presenter
+                    .model()
+                    .conversation
+                    .selected_project
+                    .clone()
+                    .unwrap(),
+                view.presenter.model().conversation.selected_task,
             )
         });
         let project_selector = format!("sidebar-project-{}", project.id).leak();
@@ -1096,7 +1120,7 @@ mod tests {
         cx.simulate_prompt_answer("取消");
         cx.run_until_parked();
         view.read_with(cx, |view, _| {
-            assert_eq!(view.presenter.model().selected_task, task_id);
+            assert_eq!(view.presenter.model().conversation.selected_task, task_id);
             assert!(!view.collapsed_projects.contains(&project.id));
             assert_eq!(view.presenter.model().projects.len(), 1);
         });
@@ -1115,9 +1139,15 @@ mod tests {
         cx.run_until_parked();
         view.read_with(cx, |view, _| {
             assert!(view.presenter.model().projects.is_empty());
-            assert!(view.presenter.model().selected_project.is_none());
-            assert!(view.presenter.model().selected_task.is_none());
-            assert!(view.presenter.model().messages.is_empty());
+            assert!(
+                view.presenter
+                    .model()
+                    .conversation
+                    .selected_project
+                    .is_none()
+            );
+            assert!(view.presenter.model().conversation.selected_task.is_none());
+            assert!(view.presenter.model().conversation.messages.is_empty());
         });
         assert!(cx.debug_bounds(project_selector).is_none());
         assert!(cx.debug_bounds("add-project").is_some());
@@ -1127,10 +1157,11 @@ mod tests {
     fn permanent_task_deletion_requires_explicit_confirmation(cx: &mut TestAppContext) {
         let (view, cx) = scroll_test_view(cx);
         let (task_id, task_title) = view.read_with(cx, |view, _| {
-            let task_id = view.presenter.model().selected_task.unwrap();
+            let task_id = view.presenter.model().conversation.selected_task.unwrap();
             let task_title = view
                 .presenter
                 .model()
+                .conversation
                 .tasks
                 .iter()
                 .find(|task| task.id == task_id)
@@ -1155,6 +1186,7 @@ mod tests {
         assert!(view.read_with(cx, |view, _| {
             view.presenter
                 .model()
+                .conversation
                 .tasks
                 .iter()
                 .any(|task| task.id == task_id)
@@ -1165,6 +1197,7 @@ mod tests {
         assert!(view.read_with(cx, |view, _| {
             view.presenter
                 .model()
+                .conversation
                 .tasks
                 .iter()
                 .any(|task| task.id == task_id)
@@ -1197,6 +1230,7 @@ mod tests {
         let task_ids = view.read_with(cx, |view, _| {
             view.presenter
                 .model()
+                .conversation
                 .tasks
                 .iter()
                 .take(2)
@@ -1246,10 +1280,11 @@ mod tests {
     fn managing_another_task_preserves_the_current_timeline_state(cx: &mut TestAppContext) {
         let (view, cx) = scroll_test_view(cx);
         let (selected_task, other_tasks) = view.read_with(cx, |view, _| {
-            let selected_task = view.presenter.model().selected_task.unwrap();
+            let selected_task = view.presenter.model().conversation.selected_task.unwrap();
             let other_tasks = view
                 .presenter
                 .model()
+                .conversation
                 .tasks
                 .iter()
                 .filter(|task| task.id != selected_task)
@@ -1266,7 +1301,10 @@ mod tests {
                 .update(cx, |input, cx| input.focus(window, cx));
 
             view.archive_task(other_tasks[0], window, cx);
-            assert_eq!(view.presenter.model().selected_task, Some(selected_task));
+            assert_eq!(
+                view.presenter.model().conversation.selected_task,
+                Some(selected_task)
+            );
             assert_eq!(view.timeline_scroll.offset().y, px(-120.));
             assert!(view.expanded_messages.contains(&expanded_message));
             assert!(
@@ -1277,7 +1315,10 @@ mod tests {
             );
 
             view.delete_task(other_tasks[1], window, cx);
-            assert_eq!(view.presenter.model().selected_task, Some(selected_task));
+            assert_eq!(
+                view.presenter.model().conversation.selected_task,
+                Some(selected_task)
+            );
             assert_eq!(view.timeline_scroll.offset().y, px(-120.));
             assert!(view.expanded_messages.contains(&expanded_message));
             assert!(
@@ -1293,12 +1334,20 @@ mod tests {
     fn project_disclosure_animates_layout_reversibly_and_can_skip_motion(cx: &mut TestAppContext) {
         let (view, cx) = scroll_test_view(cx);
         let project_id = view.read_with(cx, |view, _| {
-            view.presenter.model().selected_project.as_ref().unwrap().id
+            view.presenter
+                .model()
+                .conversation
+                .selected_project
+                .as_ref()
+                .unwrap()
+                .id
         });
         let project_selector = format!("sidebar-project-{project_id}").leak();
         let project_bounds = cx.debug_bounds(project_selector).unwrap();
         let trigger = point(project_bounds.left() + px(60.), project_bounds.center().y);
-        let selected_task = view.read_with(cx, |view, _| view.presenter.model().selected_task);
+        let selected_task = view.read_with(cx, |view, _| {
+            view.presenter.model().conversation.selected_task
+        });
         view.update_in(cx, |view, window, cx| {
             view.set_appearance(
                 AppearanceSettings {
@@ -1348,7 +1397,11 @@ mod tests {
         frame(cx, 0);
         assert_eq!(cx.debug_bounds("add-project").unwrap().origin.y, expanded_y);
         assert_eq!(
-            view.read_with(cx, |view, _| view.presenter.model().selected_task),
+            view.read_with(cx, |view, _| view
+                .presenter
+                .model()
+                .conversation
+                .selected_task),
             selected_task,
         );
     }
@@ -1358,9 +1411,14 @@ mod tests {
         cx.update(gpui_kit::init);
         cx.update(theme::configure_theme);
         let (mut presenter, _, directory) = crate::presenter::tests::fixture();
-        let selected = presenter.model().selected_project.clone().unwrap();
+        let selected = presenter
+            .model()
+            .conversation
+            .selected_project
+            .clone()
+            .unwrap();
         assert!(presenter.submit("Keep the active conversation", "claude"));
-        let task = presenter.model().selected_task;
+        let task = presenter.model().conversation.selected_task;
         for name in ["second", "third"] {
             let path = directory.path().join(name);
             std::fs::create_dir(&path).unwrap();
@@ -1423,10 +1481,16 @@ mod tests {
                     expected
                 );
                 assert_eq!(
-                    view.presenter.model().selected_project.as_ref().unwrap().id,
+                    view.presenter
+                        .model()
+                        .conversation
+                        .selected_project
+                        .as_ref()
+                        .unwrap()
+                        .id,
                     selected.id
                 );
-                assert_eq!(view.presenter.model().selected_task, task);
+                assert_eq!(view.presenter.model().conversation.selected_task, task);
                 assert!(!view.collapsed_projects.contains(&selected.id));
                 assert_eq!(view.prompt_input.read(cx).value(), "Keep my draft");
             });
@@ -1474,7 +1538,7 @@ mod tests {
                         .collect::<Vec<_>>(),
                     before,
                 );
-                assert_eq!(view.presenter.model().selected_task, task);
+                assert_eq!(view.presenter.model().conversation.selected_task, task);
             });
         }
     }
@@ -1483,8 +1547,14 @@ mod tests {
     fn project_new_chat_opens_its_project_without_toggling_the_row(cx: &mut TestAppContext) {
         let (view, cx) = scroll_test_view(cx);
         let project_id = view.read_with(cx, |view, _| {
-            assert!(view.presenter.model().selected_task.is_some());
-            view.presenter.model().selected_project.as_ref().unwrap().id
+            assert!(view.presenter.model().conversation.selected_task.is_some());
+            view.presenter
+                .model()
+                .conversation
+                .selected_project
+                .as_ref()
+                .unwrap()
+                .id
         });
         let button_selector = format!("project-new-task-{project_id}").leak();
         let project_selector = format!("sidebar-project-{project_id}").leak();
@@ -1507,11 +1577,17 @@ mod tests {
         cx.simulate_click(button, Default::default());
         view.read_with(cx, |view, _| {
             assert_eq!(
-                view.presenter.model().selected_project.as_ref().unwrap().id,
+                view.presenter
+                    .model()
+                    .conversation
+                    .selected_project
+                    .as_ref()
+                    .unwrap()
+                    .id,
                 project_id
             );
-            assert!(view.presenter.model().selected_task.is_none());
-            assert!(view.presenter.model().messages.is_empty());
+            assert!(view.presenter.model().conversation.selected_task.is_none());
+            assert!(view.presenter.model().conversation.messages.is_empty());
             assert!(!view.collapsed_projects.contains(&project_id));
         });
 
@@ -1519,7 +1595,13 @@ mod tests {
         view.update(cx, |view, cx| {
             view.presenter.open_project(other_project.path());
             assert_ne!(
-                view.presenter.model().selected_project.as_ref().unwrap().id,
+                view.presenter
+                    .model()
+                    .conversation
+                    .selected_project
+                    .as_ref()
+                    .unwrap()
+                    .id,
                 project_id
             );
             cx.notify();
@@ -1534,10 +1616,16 @@ mod tests {
         cx.simulate_click(button, Default::default());
         view.read_with(cx, |view, _| {
             assert_eq!(
-                view.presenter.model().selected_project.as_ref().unwrap().id,
+                view.presenter
+                    .model()
+                    .conversation
+                    .selected_project
+                    .as_ref()
+                    .unwrap()
+                    .id,
                 project_id
             );
-            assert!(view.presenter.model().selected_task.is_none());
+            assert!(view.presenter.model().conversation.selected_task.is_none());
             assert!(!view.collapsed_projects.contains(&project_id));
         });
     }
@@ -1715,7 +1803,14 @@ mod tests {
         }
 
         view.update(cx, |view, cx| {
-            let project_id = view.presenter.model().selected_project.as_ref().unwrap().id;
+            let project_id = view
+                .presenter
+                .model()
+                .conversation
+                .selected_project
+                .as_ref()
+                .unwrap()
+                .id;
             view.collapsed_projects.insert(project_id);
             cx.notify();
         });
@@ -2048,7 +2143,9 @@ mod tests {
                 });
             }
         };
-        let task = view.read_with(cx, |view, _| view.presenter.model().selected_task);
+        let task = view.read_with(cx, |view, _| {
+            view.presenter.model().conversation.selected_task
+        });
         view.update_in(cx, |view, window, cx| {
             view.timeline_scroll.set_offset(point(px(0.), px(-120.)));
             view.sidebar_scroll.set_offset(point(px(0.), px(-60.)));
@@ -2103,7 +2200,7 @@ mod tests {
                 assert_preview_corners(cx);
                 view.read_with(cx, |view, cx| {
                     assert_eq!(view.presenter.model().appearance.theme, theme);
-                    assert_eq!(view.presenter.model().selected_task, task);
+                    assert_eq!(view.presenter.model().conversation.selected_task, task);
                     assert_eq!(view.prompt_input.read(cx).value(), "Keep my draft");
                     assert_eq!(view.timeline_scroll.offset().y, px(-120.));
                     assert_eq!(view.sidebar_scroll.offset().y, px(-60.));
@@ -2124,7 +2221,7 @@ mod tests {
                         view.presenter.model().appearance.reduced_motion
                     );
                     assert_eq!(view.timeline_scroll.offset().y, px(-120.));
-                    assert_eq!(view.presenter.model().selected_task, task);
+                    assert_eq!(view.presenter.model().conversation.selected_task, task);
                     assert_eq!(view.prompt_input.read(cx).value(), "Keep my draft");
                 });
             }
@@ -2179,7 +2276,7 @@ mod tests {
             );
             assert_eq!(reading_font(cx).family.as_ref(), ".SystemUIFont");
             assert_eq!(mono_font(cx).as_ref(), ".SystemUIFont");
-            assert_eq!(view.presenter.model().selected_task, task);
+            assert_eq!(view.presenter.model().conversation.selected_task, task);
             assert_eq!(view.prompt_input.read(cx).value(), "Keep my draft");
             assert_eq!(view.timeline_scroll.offset().y, px(-120.));
         });
@@ -2231,7 +2328,9 @@ mod tests {
         let (view, cx) = scroll_test_view(cx);
         cx.simulate_resize(gpui::size(px(1040.), px(680.)));
         cx.run_until_parked();
-        let selected_task = view.read_with(cx, |view, _| view.presenter.model().selected_task);
+        let selected_task = view.read_with(cx, |view, _| {
+            view.presenter.model().conversation.selected_task
+        });
         view.update_in(cx, |view, window, cx| {
             view.prompt_input.update(cx, |input, cx| {
                 input.set_value("Keep this draft", window, cx);
@@ -2347,7 +2446,10 @@ mod tests {
                             view.provider_api_key_input.read(cx).value(),
                             "unsaved-test-key"
                         );
-                        assert_eq!(view.presenter.model().selected_task, selected_task);
+                        assert_eq!(
+                            view.presenter.model().conversation.selected_task,
+                            selected_task
+                        );
                     });
                 }
             }
@@ -2369,7 +2471,10 @@ mod tests {
             );
             assert_eq!(view.prompt_input.read(cx).value(), "Keep this draft");
             assert_eq!(view.executable_input.read(cx).value(), "custom-agent");
-            assert_eq!(view.presenter.model().selected_task, selected_task);
+            assert_eq!(
+                view.presenter.model().conversation.selected_task,
+                selected_task
+            );
         });
         cx.simulate_keystrokes(settings_shortcut);
         view.read_with(cx, |view, cx| {
@@ -2393,7 +2498,10 @@ mod tests {
                     .focus_handle(cx)
                     .is_focused(window)
             );
-            assert_eq!(view.presenter.model().selected_task, selected_task);
+            assert_eq!(
+                view.presenter.model().conversation.selected_task,
+                selected_task
+            );
         });
         cx.simulate_keystrokes(settings_shortcut);
         assert!(view.read_with(cx, |view, _| view.settings_open));
@@ -2404,7 +2512,7 @@ mod tests {
         });
         view.update_in(cx, |view, window, cx| {
             assert!(!view.settings_open);
-            assert!(view.presenter.model().selected_task.is_none());
+            assert!(view.presenter.model().conversation.selected_task.is_none());
             assert!(
                 view.prompt_input
                     .read(cx)
@@ -2467,7 +2575,11 @@ mod tests {
         let (view, cx) = scroll_test_view(cx);
         let scroll = view.read_with(cx, |view, _| view.sidebar_scroll.clone());
         let marker = view.read_with(cx, |view, _| {
-            format!("sidebar-task-{}", view.presenter.model().tasks[3].id).leak()
+            format!(
+                "sidebar-task-{}",
+                view.presenter.model().conversation.tasks[3].id
+            )
+            .leak()
         });
         let marker_y = cx.debug_bounds(marker).unwrap().top();
         let event = ScrollWheelEvent {

@@ -504,6 +504,7 @@ impl Presenter {
         }
         if self
             .model
+            .conversation
             .selected_project
             .as_ref()
             .is_some_and(|project| project.id == project_id)
@@ -529,13 +530,13 @@ impl Presenter {
         }
         self.cancel_voice();
         self.model.fresh_conversation();
-        self.model.selected_task = None;
+        self.model.conversation.selected_task = None;
         self.reset_workspace_draft();
-        self.model.messages.clear();
-        self.model.streaming_text.clear();
+        self.model.conversation.messages.clear();
+        self.model.conversation.streaming_text.clear();
         self.model.log_status("已准备好新任务。".into());
-        self.model.permission_mode =
-            load_permission_mode(&self.storage, self.model.selected_harness);
+        self.model.conversation.permission_mode =
+            load_permission_mode(&self.storage, self.model.conversation.selected_harness);
         self.refresh_model_catalog();
     }
 
@@ -550,14 +551,14 @@ impl Presenter {
     fn select_project_context(&mut self, project: Option<Project>) {
         self.cancel_voice();
         self.model.fresh_conversation();
-        self.model.permission_mode =
-            load_permission_mode(&self.storage, self.model.selected_harness);
-        self.model.selected_project = project;
-        self.model.selected_task = None;
+        self.model.conversation.permission_mode =
+            load_permission_mode(&self.storage, self.model.conversation.selected_harness);
+        self.model.conversation.selected_project = project;
+        self.model.conversation.selected_task = None;
         self.reset_workspace_draft();
         self.reload_workspaces();
-        self.model.messages.clear();
-        self.model.streaming_text.clear();
+        self.model.conversation.messages.clear();
+        self.model.conversation.streaming_text.clear();
         self.reload_tasks();
         self.refresh_model_catalog();
         self.reset_issues_project();
@@ -567,7 +568,7 @@ impl Presenter {
         let Ok(mut projects) = self.storage.projects() else {
             return;
         };
-        if let Some(selected_project) = &self.model.selected_project
+        if let Some(selected_project) = &self.model.conversation.selected_project
             && !projects
                 .iter()
                 .any(|project| project.id == selected_project.id)
@@ -606,10 +607,11 @@ impl Presenter {
 
     fn reload_tasks(&mut self) {
         self.model.projectless_tasks = self.storage.tasks(None).unwrap_or_default();
-        self.model.tasks = self
+        self.model.conversation.tasks = self
             .storage
             .tasks(
                 self.model
+                    .conversation
                     .selected_project
                     .as_ref()
                     .map(|project| project.id),
@@ -624,6 +626,7 @@ impl Presenter {
         };
         let project_changed = self
             .model
+            .conversation
             .selected_project
             .as_ref()
             .map(|project| project.id)
@@ -632,7 +635,7 @@ impl Presenter {
             self.model.issues_mut(provider).opened = false;
         }
         self.cancel_voice();
-        if self.model.selected_task != Some(task_id) {
+        if self.model.conversation.selected_task != Some(task_id) {
             let existing = self
                 .model
                 .conversations
@@ -646,28 +649,32 @@ impl Presenter {
             }
         }
         // Resolve context from the saved task, never from the previously selected project.
-        self.model.selected_project = task
+        self.model.conversation.selected_project = task
             .project_id
             .and_then(|id| self.storage.project(id).ok().flatten());
-        self.model.selected_task = Some(task_id);
-        self.model.selected_workspace = self.storage.task_workspace(task_id).ok().flatten();
+        self.model.conversation.selected_task = Some(task_id);
+        self.model.conversation.selected_workspace =
+            self.storage.task_workspace(task_id).ok().flatten();
         self.reload_workspaces();
         if project_changed {
             self.reset_issues_project();
         }
-        self.model.messages = self.storage.messages(task_id).unwrap_or_default();
-        self.model.completed_runs = self.storage.completed_runs(task_id).unwrap_or_default();
+        self.model.conversation.messages = self.storage.messages(task_id).unwrap_or_default();
+        self.model.conversation.completed_runs =
+            self.storage.completed_runs(task_id).unwrap_or_default();
         self.reload_tasks();
-        if self.model.active_run.is_some() {
+        if self.model.conversation.active_run.is_some() {
             return;
         }
         if let Ok(Some(config)) = self.storage.conversation_config(task_id) {
-            self.model.selected_harness = config.harness;
-            self.model.permission_mode = config.permission_mode;
-            self.model.effort = normalize_effort_for_harness(config.harness, config.effort);
-            self.model.model_override = (config.model != "default").then_some(config.model.clone());
-            self.model.model_override_name = None;
-            self.model.model_catalog = ModelCatalogState::Idle;
+            self.model.conversation.selected_harness = config.harness;
+            self.model.conversation.permission_mode = config.permission_mode;
+            self.model.conversation.effort =
+                normalize_effort_for_harness(config.harness, config.effort);
+            self.model.conversation.model_override =
+                (config.model != "default").then_some(config.model.clone());
+            self.model.conversation.model_override_name = None;
+            self.model.conversation.model_catalog = ModelCatalogState::Idle;
             let executable = if config.executable.is_empty() {
                 self.storage
                     .setting(executable_setting_key(config.harness))
@@ -677,7 +684,7 @@ impl Presenter {
             } else {
                 config.executable
             };
-            self.model.executable = executable.clone();
+            self.model.conversation.executable = executable.clone();
             if !self
                 .model
                 .selected_probe()
@@ -715,7 +722,7 @@ impl Presenter {
             ));
             return false;
         }
-        if self.model.selected_task == Some(task_id) {
+        if self.model.conversation.selected_task == Some(task_id) {
             self.new_task();
         }
         self.reload_tasks();
@@ -752,9 +759,10 @@ impl Presenter {
             return false;
         }
         self.model
+            .conversation
             .queued_messages
             .retain(|message| message.task_id != task_id);
-        if self.model.selected_task == Some(task_id) {
+        if self.model.conversation.selected_task == Some(task_id) {
             self.new_task();
         }
         self.model
@@ -767,7 +775,7 @@ impl Presenter {
     }
 
     pub(crate) fn delete_archived_tasks(&mut self) -> bool {
-        if self.model.active_run.is_some() {
+        if self.model.conversation.active_run.is_some() {
             return false;
         }
         match self.storage.delete_archived_tasks() {
@@ -805,16 +813,16 @@ impl Presenter {
     }
 
     pub(crate) fn probe(&mut self, executable: &str) {
-        if self.model.active_run.is_some() || self.model.harness_manager.busy {
+        if self.model.conversation.active_run.is_some() || self.model.harness_manager.busy {
             return;
         }
         let executable = executable.trim().to_owned();
-        let harness = self.model.selected_harness;
-        if self.model.executable != executable {
-            self.model.model_catalog = ModelCatalogState::Idle;
+        let harness = self.model.conversation.selected_harness;
+        if self.model.conversation.executable != executable {
+            self.model.conversation.model_catalog = ModelCatalogState::Idle;
             self.invalidate_generation_catalogs(harness);
         }
-        self.model.executable = executable.clone();
+        self.model.conversation.executable = executable.clone();
         self.model.harnesses.remove(&harness);
         self.model.harness_manager.installations.remove(&harness);
         if let Some(runner) = &self.runner {
@@ -853,8 +861,8 @@ impl Presenter {
         profile_id: Option<Uuid>,
         current_executable: &str,
     ) -> bool {
-        if self.model.active_run.is_some()
-            || (self.model.selected_harness == harness
+        if self.model.conversation.active_run.is_some()
+            || (self.model.conversation.selected_harness == harness
                 && self
                     .model
                     .selected_provider_profile()
@@ -875,77 +883,93 @@ impl Presenter {
     }
 
     fn switch_harness(&mut self, harness: HarnessKind, current_executable: &str) -> bool {
-        if self.model.active_run.is_some() || self.model.selected_harness == harness {
+        if self.model.conversation.active_run.is_some()
+            || self.model.conversation.selected_harness == harness
+        {
             return false;
         }
         let current_executable = current_executable.trim().to_owned();
         if !current_executable.is_empty() {
             let _ = self.storage.set_setting(
-                executable_setting_key(self.model.selected_harness),
+                executable_setting_key(self.model.conversation.selected_harness),
                 &current_executable,
             );
         }
 
-        self.model.selected_harness = harness;
-        self.model.permission_mode = load_permission_mode(&self.storage, harness);
-        let _ = self
-            .storage
-            .set_setting("default_harness", self.model.selected_harness.as_str());
+        self.model.conversation.selected_harness = harness;
+        self.model.conversation.permission_mode = load_permission_mode(&self.storage, harness);
+        let _ = self.storage.set_setting(
+            "default_harness",
+            self.model.conversation.selected_harness.as_str(),
+        );
         let executable = self
             .storage
-            .setting(executable_setting_key(self.model.selected_harness))
+            .setting(executable_setting_key(
+                self.model.conversation.selected_harness,
+            ))
             .ok()
             .flatten()
-            .unwrap_or_else(|| self.model.selected_harness.default_executable().into());
-        self.model.executable = executable.clone();
+            .unwrap_or_else(|| {
+                self.model
+                    .conversation
+                    .selected_harness
+                    .default_executable()
+                    .into()
+            });
+        self.model.conversation.executable = executable.clone();
         if let Some(runner) = &self.runner {
             let _ = runner.send(CommandEnvelope::new(Command::HarnessProbe {
-                environment: self.codebuddy_environment(self.model.selected_harness),
-                harness: self.model.selected_harness,
+                environment: self.codebuddy_environment(self.model.conversation.selected_harness),
+                harness: self.model.conversation.selected_harness,
                 executable,
             }));
             self.model.log_status(LocalizedText::new(
                 "正在探测 {0}…",
-                &[("0", (self.model.selected_harness).to_string())],
+                &[("0", (self.model.conversation.selected_harness).to_string())],
             ));
         }
         true
     }
 
     pub(crate) fn select_catalog_model(&mut self, model_id: Option<String>) {
-        if self.model.active_run.is_some() {
+        if self.model.conversation.active_run.is_some() {
             return;
         }
         if model_id.as_deref().is_some_and(|id| {
             !self
                 .model
+                .conversation
                 .model_catalog
-                .can_select_model(self.model.selected_harness, id)
+                .can_select_model(self.model.conversation.selected_harness, id)
         }) {
             self.model.log_status(LocalizedText::new(
                 "所选模型不在当前 {0} 目录中，请刷新后重试。",
-                &[("0", (self.model.selected_harness).to_string())],
+                &[("0", (self.model.conversation.selected_harness).to_string())],
             ));
             return;
         }
-        if self.model.model_override == model_id {
+        if self.model.conversation.model_override == model_id {
             return;
         }
-        self.model.model_override = model_id;
+        self.model.conversation.model_override = model_id;
         self.remember_model_name();
-        let harness = self.model.selected_harness;
+        let harness = self.model.conversation.selected_harness;
         let profile_id = self
             .model
             .selected_provider_profile()
             .map(|profile| profile.id);
         let _ = self.storage.set_setting(
             &catalog_model_setting_key(harness, profile_id),
-            self.model.model_override.as_deref().unwrap_or_default(),
+            self.model
+                .conversation
+                .model_override
+                .as_deref()
+                .unwrap_or_default(),
         );
         let effort_reset = self.normalize_catalog_effort();
         self.model.log_status(if effort_reset {
             "模型已切换；原 effort 不受支持，已恢复为模型默认。".into()
-        } else if let Some(model) = &self.model.model_override {
+        } else if let Some(model) = &self.model.conversation.model_override {
             LocalizedText::new(
                 "本次 {harness} 任务将使用 {model}。",
                 &[
@@ -962,13 +986,13 @@ impl Presenter {
     }
 
     pub(crate) fn select_permission_mode(&mut self, mode: PermissionMode) {
-        if self.model.active_run.is_some() && !self.model.can_queue() {
+        if self.model.conversation.active_run.is_some() && !self.model.can_queue() {
             return;
         }
         if self
             .storage
             .set_setting(
-                &permission_setting_key(self.model.selected_harness),
+                &permission_setting_key(self.model.conversation.selected_harness),
                 mode.as_str(),
             )
             .is_err()
@@ -976,11 +1000,12 @@ impl Presenter {
             self.model.log_status("无法保存权限设置。".into());
             return;
         }
-        self.model.permission_mode = mode;
+        self.model.conversation.permission_mode = mode;
     }
 
     pub(crate) fn select_effort(&mut self, effort: ThinkingEffort) {
-        if self.model.active_run.is_some() || self.model.effort == effort {
+        if self.model.conversation.active_run.is_some() || self.model.conversation.effort == effort
+        {
             return;
         }
         if !effort.is_default()
@@ -991,29 +1016,30 @@ impl Presenter {
         {
             self.model.log_status(LocalizedText::new(
                 "当前 {0} 模型不支持所选 effort。",
-                &[("0", (self.model.selected_harness).to_string())],
+                &[("0", (self.model.conversation.selected_harness).to_string())],
             ));
             return;
         }
-        self.model.effort = normalize_effort_for_harness(self.model.selected_harness, effort);
+        self.model.conversation.effort =
+            normalize_effort_for_harness(self.model.conversation.selected_harness, effort);
         self.persist_catalog_effort();
     }
 
     pub(crate) fn refresh_model_catalog(&mut self) -> bool {
-        if self.model.active_run.is_some() {
+        if self.model.conversation.active_run.is_some() {
             return false;
         }
-        if self.model.selected_project.is_none()
-            && self.model.selected_task.is_none()
-            && self.model.selected_workspace.is_none()
+        if self.model.conversation.selected_project.is_none()
+            && self.model.conversation.selected_task.is_none()
+            && self.model.conversation.selected_workspace.is_none()
         {
             match self
                 .storage
-                .prepare_projectless_workspace(self.model.workspace_draft.task_id)
+                .prepare_projectless_workspace(self.model.conversation.workspace_draft.task_id)
             {
-                Ok(workspace) => self.model.selected_workspace = Some(workspace),
+                Ok(workspace) => self.model.conversation.selected_workspace = Some(workspace),
                 Err(error) => {
-                    self.model.model_catalog =
+                    self.model.conversation.model_catalog =
                         ModelCatalogState::NotReady(error.to_string().into());
                     return false;
                 }
@@ -1021,18 +1047,19 @@ impl Presenter {
         }
         let project_id = self
             .model
+            .conversation
             .selected_project
             .as_ref()
             .map(|project| project.id);
-        let project_changed = self.model.catalog_project != project_id;
+        let project_changed = self.model.conversation.catalog_project != project_id;
         if project_changed {
-            self.model.title_model_catalog = ModelCatalogState::Idle;
-            self.model.commit_model_catalog = ModelCatalogState::Idle;
+            self.model.conversation.title_model_catalog = ModelCatalogState::Idle;
+            self.model.conversation.commit_model_catalog = ModelCatalogState::Idle;
         }
-        self.model.catalog_project = project_id;
-        let harness = self.model.selected_harness;
+        self.model.conversation.catalog_project = project_id;
+        let harness = self.model.conversation.selected_harness;
         let Some(cwd) = self.model.working_directory().map(str::to_owned) else {
-            self.model.model_catalog = ModelCatalogState::Idle;
+            self.model.conversation.model_catalog = ModelCatalogState::Idle;
             return false;
         };
         if self
@@ -1040,7 +1067,7 @@ impl Presenter {
             .selected_probe()
             .is_some_and(|probe| !probe.available)
         {
-            self.model.model_catalog = ModelCatalogState::NotReady(
+            self.model.conversation.model_catalog = ModelCatalogState::NotReady(
                 "可执行文件尚未就绪，请在设置中检查并重新探测。".into(),
             );
             return false;
@@ -1048,12 +1075,16 @@ impl Presenter {
         let environment = match self.provider_launch_configuration(harness) {
             Ok(configuration) => configuration,
             Err(error) => {
-                self.model.model_catalog = ModelCatalogState::NotReady(error.to_string().into());
+                self.model.conversation.model_catalog =
+                    ModelCatalogState::NotReady(error.to_string().into());
                 return false;
             }
         };
         let Some(runner) = &self.runner else {
-            self.model.model_catalog.fail("Runner 不可用。".into());
+            self.model
+                .conversation
+                .model_catalog
+                .fail("Runner 不可用。".into());
             return false;
         };
         let request_id = Uuid::new_v4();
@@ -1062,12 +1093,13 @@ impl Presenter {
             request_id,
             purpose: ModelCatalogPurpose::Conversation,
             harness,
-            executable: self.model.executable.clone(),
+            executable: self.model.conversation.executable.clone(),
             cwd,
             environment,
         });
         let mut models = self
             .model
+            .conversation
             .model_catalog
             .models()
             .unwrap_or_default()
@@ -1079,19 +1111,22 @@ impl Presenter {
                 model.is_default = false;
             }
         }
-        self.model.model_catalog = ModelCatalogState::Loading { request_id, models };
+        self.model.conversation.model_catalog = ModelCatalogState::Loading { request_id, models };
         if runner.send(command).is_err() {
-            self.model.model_catalog.fail("Runner 不可用。".into());
+            self.model
+                .conversation
+                .model_catalog
+                .fail("Runner 不可用。".into());
             return false;
         }
         true
     }
 
     pub(crate) fn select_provider_profile(&mut self, profile_id: Option<Uuid>) -> bool {
-        if self.model.active_run.is_some() {
+        if self.model.conversation.active_run.is_some() {
             return false;
         }
-        let harness = self.model.selected_harness;
+        let harness = self.model.conversation.selected_harness;
         if let Some(profile_id) = profile_id {
             let Some(profile_index) = self
                 .model
@@ -1107,6 +1142,7 @@ impl Presenter {
                 credential_result.as_ref().copied().unwrap_or(false);
             let profile_name = self.model.provider_profiles[profile_index].name.clone();
             self.model
+                .conversation
                 .active_provider_profiles
                 .insert(harness, profile_id);
             let _ = self.storage.set_setting(
@@ -1131,7 +1167,10 @@ impl Presenter {
                 ),
             });
         } else {
-            self.model.active_provider_profiles.remove(&harness);
+            self.model
+                .conversation
+                .active_provider_profiles
+                .remove(&harness);
             let _ = self
                 .storage
                 .set_setting(&active_profile_setting_key(harness), "");
@@ -1149,7 +1188,7 @@ impl Presenter {
         if self.model.active_run_count() > 0 {
             return None;
         }
-        let harness = self.model.selected_harness;
+        let harness = self.model.conversation.selected_harness;
         let name = draft.name.trim().to_owned();
         let api_key_env = draft.api_key_env.trim().to_owned();
         let api_key = draft.api_key.trim();
@@ -1280,6 +1319,7 @@ impl Presenter {
         }
         self.model.provider_profiles = profiles;
         self.model
+            .conversation
             .active_provider_profiles
             .insert(harness, profile_id);
         let _ = self.storage.set_setting(
@@ -1324,12 +1364,16 @@ impl Presenter {
         self.model.provider_profiles = profiles;
         let harnesses = self
             .model
+            .conversation
             .active_provider_profiles
             .iter()
             .filter_map(|(harness, active_id)| (*active_id == profile_id).then_some(*harness))
             .collect::<Vec<_>>();
         for harness in harnesses {
-            self.model.active_provider_profiles.remove(&harness);
+            self.model
+                .conversation
+                .active_provider_profiles
+                .remove(&harness);
             let _ = self
                 .storage
                 .set_setting(&active_profile_setting_key(harness), "");
@@ -1368,7 +1412,10 @@ impl Presenter {
         if self
             .storage
             .set_setting(
-                &format!("harness_transport.{}", self.model.selected_harness.as_str()),
+                &format!(
+                    "harness_transport.{}",
+                    self.model.conversation.selected_harness.as_str()
+                ),
                 value,
             )
             .is_err()
@@ -1410,8 +1457,8 @@ impl Presenter {
             self.model.log_status("无法保存 CodeBuddy 地区。".into());
             return;
         }
-        self.model.model_catalog = ModelCatalogState::Idle;
-        let executable = self.model.executable.clone();
+        self.model.conversation.model_catalog = ModelCatalogState::Idle;
+        let executable = self.model.conversation.executable.clone();
         self.probe(&executable);
     }
 
@@ -1443,7 +1490,7 @@ impl Presenter {
     }
 
     fn restore_catalog_preferences(&mut self) {
-        let harness = self.model.selected_harness;
+        let harness = self.model.conversation.selected_harness;
         self.invalidate_generation_catalogs(harness);
         let profile_id = self
             .model
@@ -1456,30 +1503,38 @@ impl Presenter {
             .flatten()
             .and_then(|value| ThinkingEffort::from_str(&value).ok())
             .unwrap_or(ThinkingEffort::Default);
-        (self.model.model_override, self.model.effort) =
-            load_catalog_preferences(&self.storage, harness, profile_id, legacy_effort);
-        self.model.model_override_name = self
+        (
+            self.model.conversation.model_override,
+            self.model.conversation.effort,
+        ) = load_catalog_preferences(&self.storage, harness, profile_id, legacy_effort);
+        self.model.conversation.model_override_name = self
             .storage
             .setting(&catalog_model_name_setting_key(harness, profile_id))
             .ok()
             .flatten()
             .filter(|name| !name.is_empty());
-        self.model.model_catalog = ModelCatalogState::Idle;
+        self.model.conversation.model_catalog = ModelCatalogState::Idle;
     }
 
     fn remember_model_name(&mut self) {
-        self.model.model_override_name = self.model.model_override.as_ref().and_then(|_| {
-            self.model
-                .selected_catalog_model()
-                .map(|model| model.display_name.clone())
-        });
+        self.model.conversation.model_override_name = self
+            .model
+            .conversation
+            .model_override
+            .as_ref()
+            .and_then(|_| {
+                self.model
+                    .selected_catalog_model()
+                    .map(|model| model.display_name.clone())
+            });
         let profile_id = self
             .model
             .selected_provider_profile()
             .map(|profile| profile.id);
         let _ = self.storage.set_setting(
-            &catalog_model_name_setting_key(self.model.selected_harness, profile_id),
+            &catalog_model_name_setting_key(self.model.conversation.selected_harness, profile_id),
             self.model
+                .conversation
                 .model_override_name
                 .as_deref()
                 .unwrap_or_default(),
@@ -1487,27 +1542,27 @@ impl Presenter {
     }
 
     fn persist_catalog_effort(&self) {
-        let harness = self.model.selected_harness;
+        let harness = self.model.conversation.selected_harness;
         let profile_id = self
             .model
             .selected_provider_profile()
             .map(|profile| profile.id);
         let _ = self.storage.set_setting(
             &catalog_effort_setting_key(harness, profile_id),
-            self.model.effort.as_str(),
+            self.model.conversation.effort.as_str(),
         );
     }
 
     fn normalize_catalog_effort(&mut self) -> bool {
-        if self.model.effort.is_default()
+        if self.model.conversation.effort.is_default()
             || self
                 .model
                 .selected_catalog_model()
-                .is_some_and(|model| model.supports_effort(&self.model.effort))
+                .is_some_and(|model| model.supports_effort(&self.model.conversation.effort))
         {
             return false;
         }
-        self.model.effort = ThinkingEffort::Default;
+        self.model.conversation.effort = ThinkingEffort::Default;
         self.persist_catalog_effort();
         true
     }

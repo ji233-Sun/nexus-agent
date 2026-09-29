@@ -7,10 +7,12 @@ impl NexusView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let model = self.presenter.model();
-        if model.active_task != model.selected_task || model.pending_user_asks.is_empty() {
+        if model.conversation.active_task != model.conversation.selected_task
+            || model.conversation.pending_user_asks.is_empty()
+        {
             return div().into_any_element();
         }
-        let requests = model.pending_user_asks.clone();
+        let requests = model.conversation.pending_user_asks.clone();
         let total = requests.len();
         let mut stack = div()
             .id("user-ask-stack-scroll")

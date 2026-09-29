@@ -29,7 +29,8 @@ impl Presenter {
             cli: self.model.issues(provider).cli.clone(),
             ..IssuesModel::default()
         };
-        if self.model.issues(provider).enabled && self.model.selected_project.is_some() {
+        if self.model.issues(provider).enabled && self.model.conversation.selected_project.is_some()
+        {
             self.inspect_issues(provider);
         }
     }
@@ -41,6 +42,7 @@ impl Presenter {
         let id = Uuid::new_v4();
         let path = self
             .model
+            .conversation
             .selected_project
             .as_ref()
             .map(|project| project.canonical_path.clone().into());
@@ -203,7 +205,7 @@ impl Presenter {
         let prompt = {
             let issues = self.model.issues(provider);
             if !issues.enabled
-                || self.model.selected_project.is_none()
+                || self.model.conversation.selected_project.is_none()
                 || issues.detail_request.is_some()
                 || issues.comments_request.is_some()
                 || issues.action_request.is_some()
@@ -234,7 +236,7 @@ impl Presenter {
             None,
             &prompt,
             configured_executable,
-            self.model.permission_mode,
+            self.model.conversation.permission_mode,
         );
         if started {
             self.model.log_status(

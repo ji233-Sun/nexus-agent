@@ -456,26 +456,29 @@ impl NexusView {
                         ),
                 )],
             ))
-            .when_some(model.selected_project.as_ref(), |element, project| {
-                element.child(settings_group(
-                    colors,
-                    locale.text("项目空间"),
-                    [
-                        settings_row(
-                            colors,
-                            locale.text("当前项目"),
-                            locale.text("正在使用的本地项目。"),
-                            project.display_name.clone(),
-                        ),
-                        settings_row(
-                            colors,
-                            locale.text("工作目录"),
-                            locale.text("Agent 执行任务时使用的目录。"),
-                            project.canonical_path.clone(),
-                        ),
-                    ],
-                ))
-            })
+            .when_some(
+                model.conversation.selected_project.as_ref(),
+                |element, project| {
+                    element.child(settings_group(
+                        colors,
+                        locale.text("项目空间"),
+                        [
+                            settings_row(
+                                colors,
+                                locale.text("当前项目"),
+                                locale.text("正在使用的本地项目。"),
+                                project.display_name.clone(),
+                            ),
+                            settings_row(
+                                colors,
+                                locale.text("工作目录"),
+                                locale.text("Agent 执行任务时使用的目录。"),
+                                project.canonical_path.clone(),
+                            ),
+                        ],
+                    ))
+                },
+            )
     }
 
     fn render_generation_settings(
@@ -1096,7 +1099,7 @@ impl NexusView {
                 locale.format(
                     "{0} 可执行文件已就绪，将使用 Provider Profile：{1}",
                     &[
-                        ("0", (model.selected_harness).to_string()),
+                        ("0", (model.conversation.selected_harness).to_string()),
                         ("1", (profile.name).to_string()),
                     ],
                 )
@@ -1110,70 +1113,78 @@ impl NexusView {
             .flex_col()
             .gap_8()
             .child(self.render_harness_management(cx))
-            .when(model.selected_harness.has_transport_choice(), |view| {
-                view.child(settings_group(
-                    colors,
-                    locale.text("接入方式"),
-                    [settings_row(
+            .when(
+                model.conversation.selected_harness.has_transport_choice(),
+                |view| {
+                    view.child(settings_group(
                         colors,
-                        locale.text("运行协议"),
-                        locale.text("新会话默认使用 CLI；已有会话沿用原接入方式。"),
-                        div().flex().gap_2().children(
-                            [
-                                (nexus_domain::HarnessTransport::Cli, "CLI"),
-                                (nexus_domain::HarnessTransport::Acp, "ACP"),
-                            ]
-                            .map(|(transport, label)| {
-                                Button::new(label)
-                                    .outline()
-                                    .small()
-                                    .label(label)
-                                    .selected(
-                                        self.presenter.harness_transport(model.selected_harness)
-                                            == transport,
-                                    )
-                                    .disabled(
-                                        model.active_run_count() > 0 || model.harness_manager.busy,
-                                    )
-                                    .on_click(cx.listener(move |app, _, _, cx| {
-                                        app.presenter.set_harness_transport(transport);
-                                        cx.notify();
-                                    }))
-                            }),
-                        ),
-                    )],
-                ))
-            })
-            .when(model.selected_harness == HarnessKind::Codebuddy, |view| {
-                view.child(settings_group(
-                    colors,
-                    locale.text("CodeBuddy 地区"),
-                    [settings_row(
-                        colors,
-                        locale.text("账号地区"),
-                        locale.text("使用对应地区的登录与服务端点，不修改 CLI 全局配置。"),
-                        div().flex().gap_2().children(
-                            [("", "跟随 CLI"), ("internal", "国内"), ("external", "国际")].map(
-                                |(region, label)| {
+                        locale.text("接入方式"),
+                        [settings_row(
+                            colors,
+                            locale.text("运行协议"),
+                            locale.text("新会话默认使用 CLI；已有会话沿用原接入方式。"),
+                            div().flex().gap_2().children(
+                                [
+                                    (nexus_domain::HarnessTransport::Cli, "CLI"),
+                                    (nexus_domain::HarnessTransport::Acp, "ACP"),
+                                ]
+                                .map(|(transport, label)| {
                                     Button::new(label)
                                         .outline()
                                         .small()
-                                        .label(locale.text(label))
-                                        .selected(self.presenter.codebuddy_region() == region)
+                                        .label(label)
+                                        .selected(
+                                            self.presenter.harness_transport(
+                                                model.conversation.selected_harness,
+                                            ) == transport,
+                                        )
                                         .disabled(
                                             model.active_run_count() > 0
                                                 || model.harness_manager.busy,
                                         )
                                         .on_click(cx.listener(move |app, _, _, cx| {
-                                            app.presenter.set_codebuddy_region(region);
+                                            app.presenter.set_harness_transport(transport);
                                             cx.notify();
                                         }))
-                                },
+                                }),
                             ),
-                        ),
-                    )],
-                ))
-            })
+                        )],
+                    ))
+                },
+            )
+            .when(
+                model.conversation.selected_harness == HarnessKind::Codebuddy,
+                |view| {
+                    view.child(settings_group(
+                        colors,
+                        locale.text("CodeBuddy 地区"),
+                        [settings_row(
+                            colors,
+                            locale.text("账号地区"),
+                            locale.text("使用对应地区的登录与服务端点，不修改 CLI 全局配置。"),
+                            div().flex().gap_2().children(
+                                [("", "跟随 CLI"), ("internal", "国内"), ("external", "国际")].map(
+                                    |(region, label)| {
+                                        Button::new(label)
+                                            .outline()
+                                            .small()
+                                            .label(locale.text(label))
+                                            .selected(self.presenter.codebuddy_region() == region)
+                                            .disabled(
+                                                model.active_run_count() > 0
+                                                    || model.harness_manager.busy,
+                                            )
+                                            .on_click(cx.listener(move |app, _, _, cx| {
+                                                app.presenter.set_codebuddy_region(region);
+                                                cx.notify();
+                                            }))
+                                    },
+                                ),
+                            ),
+                        )],
+                    ))
+                },
+            )
             .child(settings_group(
                 colors,
                 locale.text("执行环境"),
@@ -1259,7 +1270,7 @@ impl NexusView {
         let manager = &model.harness_manager;
         let disabled = manager.busy
             || model.active_run_count() > 0
-            || self.executable_input.read(cx).value().trim() != model.executable;
+            || self.executable_input.read(cx).value().trim() != model.conversation.executable;
         let cards = HarnessKind::ALL.map(|harness| {
             let harness_id = harness.as_str();
             let installation = manager.installations.get(&harness);

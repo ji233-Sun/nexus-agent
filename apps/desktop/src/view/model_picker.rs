@@ -145,10 +145,10 @@ pub(super) struct CatalogModelSelectContent {
 impl CatalogModelSelectContent {
     pub(super) fn from_model(model: &AppModel) -> Self {
         Self::from_catalog(
-            model.selected_harness,
-            &model.model_catalog,
-            model.model_override.as_deref(),
-            model.model_override_name.as_deref(),
+            model.conversation.selected_harness,
+            &model.conversation.model_catalog,
+            model.conversation.model_override.as_deref(),
+            model.conversation.model_override_name.as_deref(),
             model
                 .selected_provider_profile()
                 .and_then(|profile| profile.model.as_deref()),
@@ -567,7 +567,7 @@ impl NexusView {
             .unwrap_or_else(|| locale.text("跟随默认").into());
         let tooltip = format!(
             "{} · {}\n{}",
-            model.selected_harness,
+            model.conversation.selected_harness,
             model
                 .selected_provider_profile()
                 .map_or(locale.text("CLI 默认配置"), |profile| profile
@@ -582,12 +582,16 @@ impl NexusView {
             .h(px(COMPACT_CONTROL_HEIGHT))
             .max_w(px(300.))
             .min_w_0()
-            .child(harness_icon(model.selected_harness, palette(cx), 16.))
+            .child(harness_icon(
+                model.conversation.selected_harness,
+                palette(cx),
+                16.,
+            ))
             .label(label)
             .tooltip(tooltip)
             .accessibility_label(locale.text("选择 Harness、配置和模型"))
             .child(Icon::new(IconName::ChevronDown).size(px(14.)));
-        if model.active_run.is_some() {
+        if model.conversation.active_run.is_some() {
             return button.disabled(true).into_any_element();
         }
         let app = cx.entity();
@@ -750,10 +754,14 @@ impl NexusView {
                             .flex()
                             .flex_col()
                             .gap_1()
-                            .when(model.selected_harness == HarnessKind::Claude, |footer| {
-                                footer
-                                    .child(locale.text("第三方模型可直接输入服务商提供的模型 ID。"))
-                            })
+                            .when(
+                                model.conversation.selected_harness == HarnessKind::Claude,
+                                |footer| {
+                                    footer.child(
+                                        locale.text("第三方模型可直接输入服务商提供的模型 ID。"),
+                                    )
+                                },
+                            )
                             .child(locale.text("↑ ↓ 浏览 · Enter 选择 · Esc 关闭")),
                     ),
             )
@@ -770,7 +778,7 @@ impl NexusView {
         let model = self.presenter.model();
         let locale = model.language;
         let colors = palette(cx);
-        let selected = model.selected_harness == harness
+        let selected = model.conversation.selected_harness == harness
             && model.selected_provider_profile().map(|profile| profile.id) == profile_id;
         let id = format!(
             "model-config-{}-{}",

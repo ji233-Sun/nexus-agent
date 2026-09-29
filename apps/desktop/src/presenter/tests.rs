@@ -96,7 +96,7 @@ pub(crate) fn fixture() -> (Presenter, FakeRunner, tempfile::TempDir) {
     );
     presenter.issues_client = crate::infrastructure::issues::Client::fake();
     presenter.open_project(directory.path());
-    presenter.model.model_catalog = ModelCatalogState::Ready(claude_aliases());
+    presenter.model.conversation.model_catalog = ModelCatalogState::Ready(claude_aliases());
     presenter
         .model
         .harnesses
@@ -121,21 +121,21 @@ fn attachments_survive_send_failure_queue_and_conversation_switch() {
     assert!(presenter.attach_pdf_capture("报告.pdf", 1, &png).is_err());
     let file = crate::infrastructure::attachments::import_attachment(&root, &source).unwrap();
     presenter.finish_attachment_import(conversation, vec![Ok(file.clone())]);
-    let images = presenter.model.attachments.clone();
+    let images = presenter.model.conversation.attachments.clone();
     assert_eq!(
         images.iter().map(|image| image.page).collect::<Vec<_>>(),
         vec![Some(12), Some(14), None]
     );
     runner.0.borrow_mut().fail_send = true;
     assert!(!presenter.submit("解释圈出的部分", "claude"));
-    assert_eq!(presenter.model.attachments, images);
+    assert_eq!(presenter.model.conversation.attachments, images);
     runner.0.borrow_mut().fail_send = false;
     assert!(presenter.submit(" ", "claude"));
     assert_eq!(last_start(&runner).prompt, "请查看所附文件。");
-    assert!(presenter.model.attachments.is_empty());
+    assert!(presenter.model.conversation.attachments.is_empty());
     assert_eq!(last_start(&runner).attachments, images);
-    let run_id = presenter.model.active_run.unwrap();
-    let task_id = presenter.model.selected_task.unwrap();
+    let run_id = presenter.model.conversation.active_run.unwrap();
+    let task_id = presenter.model.conversation.selected_task.unwrap();
     runner.emit(Event::RunSessionStarted {
         run_id,
         session_id: "pdf-session".into(),
@@ -144,11 +144,11 @@ fn attachments_survive_send_failure_queue_and_conversation_switch() {
     presenter.attach_pdf_capture("报告.pdf", 13, &png).unwrap();
     assert!(presenter.restore_attachments(std::slice::from_ref(&file)));
     assert!(presenter.submit("比较下一页", "claude"));
-    let queued = presenter.model.queued_messages[0].clone();
+    let queued = presenter.model.conversation.queued_messages[0].clone();
     assert_eq!(queued.attachments[0].page, Some(13));
     assert!(!presenter.steer_queued_message(queued.id));
     presenter.new_task();
-    assert!(presenter.model.attachments.is_empty());
+    assert!(presenter.model.conversation.attachments.is_empty());
     runner.emit(Event::RunExited {
         run_id,
         status: RunStatus::Failed,
@@ -156,7 +156,7 @@ fn attachments_survive_send_failure_queue_and_conversation_switch() {
     });
     presenter.drain_events();
     presenter.select_task(task_id);
-    assert_eq!(presenter.model.messages[0].attachments, images);
+    assert_eq!(presenter.model.conversation.messages[0].attachments, images);
     assert!(presenter.send_queued_message(queued.id));
     assert_eq!(last_start(&runner).attachments[0].page, Some(13));
     assert_eq!(last_start(&runner).attachments[1], file);
@@ -170,7 +170,7 @@ fn attachments_survive_send_failure_queue_and_conversation_switch() {
 fn attachment_import_reports_failures_and_returns_to_the_owning_conversation() {
     let (mut presenter, runner, directory) = fixture();
     assert!(presenter.submit("start", "claude"));
-    let task_id = presenter.model.selected_task.unwrap();
+    let task_id = presenter.model.conversation.selected_task.unwrap();
     let (conversation, root) = presenter.begin_attachment_import(2).unwrap();
     assert!(presenter.begin_attachment_import(1).is_none());
     let source = directory.path().join("notes.txt");
@@ -181,11 +181,11 @@ fn attachment_import_reports_failures_and_returns_to_the_owning_conversation() {
         conversation,
         vec![Ok(file.clone()), Err("missing file".into())],
     );
-    assert!(presenter.model.attachments.is_empty());
+    assert!(presenter.model.conversation.attachments.is_empty());
     presenter.select_task(task_id);
-    assert_eq!(presenter.model.attachments, vec![file.clone()]);
-    assert!(!presenter.model.attachments_loading);
-    assert!(presenter.model.attachment_error.is_some());
+    assert_eq!(presenter.model.conversation.attachments, vec![file.clone()]);
+    assert!(!presenter.model.conversation.attachments_loading);
+    assert!(presenter.model.conversation.attachment_error.is_some());
     assert!(!presenter.restore_attachments(&vec![file; nexus_domain::Attachment::MAX_COUNT]));
     assert!(last_start(&runner).attachments.is_empty());
 }
@@ -428,7 +428,7 @@ fn issues_launch_requires_complete_comments_and_starts_a_run_with_issue_context(
             provider,
             Response::Detail(Ok(cnb_issue("1"))),
         );
-        let harness = presenter.model.selected_harness;
+        let harness = presenter.model.conversation.selected_harness;
         assert!(!presenter.start_issue_run(
             provider,
             IssueLaunchKind::Process,
@@ -485,9 +485,9 @@ fn issues_launch_requires_complete_comments_and_starts_a_run_with_issue_context(
             assert!(start.prompt.contains(content), "{content}");
         }
         assert!(!presenter.model.issues(provider).opened);
-        assert_eq!(presenter.model.selected_harness, harness);
-        assert!(presenter.model.selected_task.is_some());
-        assert_eq!(presenter.model.active_run, Some(start.run_id));
+        assert_eq!(presenter.model.conversation.selected_harness, harness);
+        assert!(presenter.model.conversation.selected_task.is_some());
+        assert_eq!(presenter.model.conversation.active_run, Some(start.run_id));
     }
 }
 
@@ -498,8 +498,8 @@ fn creating_an_issue_starts_a_run_with_the_filed_content_and_current_selection()
         let (mut presenter, runner, _directory) = fixture();
         seed_issues(&mut presenter, provider);
         presenter.select_permission_mode(PermissionMode::Yolo);
-        let harness = presenter.model.selected_harness;
-        let executable = presenter.model.executable.clone();
+        let harness = presenter.model.conversation.selected_harness;
+        let executable = presenter.model.conversation.executable.clone();
         assert!(presenter.start_issue_run(
             provider,
             IssueLaunchKind::Create,
@@ -517,8 +517,8 @@ fn creating_an_issue_starts_a_run_with_the_filed_content_and_current_selection()
         }
         assert_eq!(start.harness, harness);
         assert_eq!(start.permission_mode, PermissionMode::Yolo);
-        assert!(presenter.model.selected_task.is_some());
-        assert_eq!(presenter.model.active_run, Some(start.run_id));
+        assert!(presenter.model.conversation.selected_task.is_some());
+        assert_eq!(presenter.model.conversation.active_run, Some(start.run_id));
     }
 }
 
@@ -528,7 +528,7 @@ fn issue_launch_runs_in_parallel_while_a_session_is_executing() {
     for provider in IssueProvider::ALL {
         for kind in [IssueLaunchKind::Create, IssueLaunchKind::Process] {
             let (mut presenter, runner, _directory, first) = worktree_fixture("先执行的任务");
-            assert_eq!(presenter.model.active_run, Some(first.run_id));
+            assert_eq!(presenter.model.conversation.active_run, Some(first.run_id));
             assert!(presenter.model.can_start_run());
             seed_issues(&mut presenter, provider);
             if kind == IssueLaunchKind::Process {
@@ -555,7 +555,7 @@ fn issue_launch_runs_in_parallel_while_a_session_is_executing() {
             let second = last_start(&runner);
             assert_ne!(second.run_id, first.run_id);
             assert!(second.prompt.contains(extra));
-            assert_eq!(presenter.model.active_run, Some(second.run_id));
+            assert_eq!(presenter.model.conversation.active_run, Some(second.run_id));
             assert_eq!(presenter.model.active_run_count(), 2);
         }
     }
@@ -943,7 +943,7 @@ fn failed_worktree_creation_retries_with_a_new_branch_and_keeps_the_selected_bas
     let planned = git::planned_workspace(
         presenter.worktree_root.as_ref().unwrap(),
         &project,
-        &presenter.model.workspace_draft,
+        &presenter.model.conversation.workspace_draft,
     );
     git::git(
         project_path,
@@ -952,9 +952,14 @@ fn failed_worktree_creation_retries_with_a_new_branch_and_keeps_the_selected_bas
     .unwrap();
     assert!(presenter.submit("retry task", "claude"));
     finish_workspace_operation(&mut presenter);
-    assert!(presenter.model.workspace_retry);
+    assert!(presenter.model.conversation.workspace_retry);
     assert_eq!(presenter.model.occupied_run_slots(), 0);
-    let failed = presenter.model.selected_workspace.clone().unwrap();
+    let failed = presenter
+        .model
+        .conversation
+        .selected_workspace
+        .clone()
+        .unwrap();
     assert_eq!(failed.status, WorkspaceStatus::Missing);
     presenter.select_workspace_base("release".into());
     assert!(presenter.retry_workspace_start());
@@ -966,7 +971,7 @@ fn failed_worktree_creation_retries_with_a_new_branch_and_keeps_the_selected_bas
     let branch = git::current_branch(Path::new(&started.cwd)).unwrap();
     assert!(branch.starts_with("feat/nx-"));
     assert_ne!(Some(branch), planned.branch);
-    assert_eq!(presenter.model.workspace_draft.base, "release");
+    assert_eq!(presenter.model.conversation.workspace_draft.base, "release");
     assert_ne!(failed.task_id, Some(started.task_id));
     assert_eq!(
         presenter
@@ -977,7 +982,10 @@ fn failed_worktree_creation_retries_with_a_new_branch_and_keeps_the_selected_bas
             .status,
         WorkspaceStatus::Missing
     );
-    assert_eq!(presenter.model.active_run, Some(started.run_id));
+    assert_eq!(
+        presenter.model.conversation.active_run,
+        Some(started.run_id)
+    );
 }
 
 #[test]
@@ -1001,14 +1009,14 @@ fn worktree_uses_the_selected_local_branch_and_keeps_the_user_prompt_in_history(
         presenter.workspace_base_branches().unwrap(),
         ["main", "release"]
     );
-    assert_eq!(presenter.model.workspace_draft.base, "main");
+    assert_eq!(presenter.model.conversation.workspace_draft.base, "main");
     presenter.select_workspace_kind(WorkspaceKind::Worktree);
     presenter.select_workspace_base("HEAD".into());
-    assert_eq!(presenter.model.workspace_draft.base, "main");
+    assert_eq!(presenter.model.conversation.workspace_draft.base, "main");
     presenter.select_workspace_base("release".into());
     assert!(presenter.submit("fix release", "claude"));
     presenter.select_workspace_base("main".into());
-    assert_eq!(presenter.model.workspace_draft.base, "release");
+    assert_eq!(presenter.model.conversation.workspace_draft.base, "release");
     finish_workspace_operation(&mut presenter);
     emit_current_catalog(&presenter, &runner, claude_aliases());
     presenter.drain_events();
@@ -1017,7 +1025,12 @@ fn worktree_uses_the_selected_local_branch_and_keeps_the_user_prompt_in_history(
         std::fs::read_to_string(Path::new(&start.cwd).join("tracked.txt")).unwrap(),
         "base\n"
     );
-    let workspace = presenter.model.selected_workspace.as_ref().unwrap();
+    let workspace = presenter
+        .model
+        .conversation
+        .selected_workspace
+        .as_ref()
+        .unwrap();
     assert_eq!(
         workspace.base_sha.as_deref(),
         Some(
@@ -1040,6 +1053,7 @@ fn worktree_uses_the_selected_local_branch_and_keeps_the_user_prompt_in_history(
     assert_eq!(
         presenter
             .model
+            .conversation
             .tasks
             .iter()
             .find(|task| task.id == start.task_id)
@@ -1054,12 +1068,15 @@ fn worktree_source_selection_handles_non_git_empty_and_detached_projects() {
     use crate::{infrastructure::git, model::workspace::WorkspaceKind};
     let (mut presenter, runner, directory) = fixture();
     presenter.select_workspace_kind(WorkspaceKind::Worktree);
-    assert_eq!(presenter.model.workspace_draft.kind, WorkspaceKind::Local);
+    assert_eq!(
+        presenter.model.conversation.workspace_draft.kind,
+        WorkspaceKind::Local
+    );
     git::git(directory.path(), &["init", "-b", "main"]).unwrap();
     presenter.open_project(directory.path());
     presenter.select_workspace_kind(WorkspaceKind::Worktree);
     assert!(presenter.workspace_base_branches().unwrap().is_empty());
-    assert!(presenter.model.workspace_draft.base.is_empty());
+    assert!(presenter.model.conversation.workspace_draft.base.is_empty());
     emit_current_catalog(&presenter, &runner, claude_aliases());
     presenter.drain_events();
     assert!(!presenter.submit("needs a source commit", "claude"));
@@ -1071,7 +1088,7 @@ fn worktree_source_selection_handles_non_git_empty_and_detached_projects() {
     let path = Path::new(&project.canonical_path);
     git::git(path, &["checkout", "--detach", "HEAD"]).unwrap();
     presenter.open_project(path);
-    assert_eq!(presenter.model.workspace_draft.base, "main");
+    assert_eq!(presenter.model.conversation.workspace_draft.base, "main");
 }
 
 #[test]
@@ -1082,18 +1099,27 @@ fn workspace_branch_refresh_syncs_external_switches_while_a_task_runs() {
     let (mut presenter, _runner, _fixture) = fixture();
     presenter.open_project(path);
     assert!(presenter.submit("local task", "claude"));
-    let run_id = presenter.model.active_run.unwrap();
+    let run_id = presenter.model.conversation.active_run.unwrap();
     presenter.refresh_workspace_branches();
-    assert_eq!(presenter.model.workspace_branch.as_deref(), Some("main"));
+    assert_eq!(
+        presenter.model.conversation.workspace_branch.as_deref(),
+        Some("main")
+    );
     // Switch branches outside the app (e.g. from VSCode), then refresh.
     git::git(path, &["switch", "-c", "feature"]).unwrap();
     presenter.refresh_workspace_branches();
-    assert_eq!(presenter.model.workspace_branch.as_deref(), Some("feature"));
+    assert_eq!(
+        presenter.model.conversation.workspace_branch.as_deref(),
+        Some("feature")
+    );
     git::git(path, &["switch", "main"]).unwrap();
     presenter.refresh_workspace_branches();
-    assert_eq!(presenter.model.workspace_branch.as_deref(), Some("main"));
+    assert_eq!(
+        presenter.model.conversation.workspace_branch.as_deref(),
+        Some("main")
+    );
     // Refresh is read-only: the running task is untouched.
-    assert_eq!(presenter.model.active_run, Some(run_id));
+    assert_eq!(presenter.model.conversation.active_run, Some(run_id));
     assert!(!presenter.model.workspace_busy);
 }
 
@@ -1108,7 +1134,7 @@ fn workspace_branch_refresh_revalidates_the_worktree_base_branch() {
     presenter.select_workspace_kind(WorkspaceKind::Worktree);
     presenter.select_workspace_base("release".into());
     presenter.refresh_workspace_branches();
-    assert_eq!(presenter.model.workspace_draft.base, "release");
+    assert_eq!(presenter.model.conversation.workspace_draft.base, "release");
     assert!(
         presenter
             .workspace_base_branches()
@@ -1118,15 +1144,15 @@ fn workspace_branch_refresh_revalidates_the_worktree_base_branch() {
     // A branch deleted externally falls back to the checked-out branch.
     git::git(path, &["branch", "-D", "release"]).unwrap();
     presenter.refresh_workspace_branches();
-    assert_eq!(presenter.model.workspace_draft.base, "main");
+    assert_eq!(presenter.model.conversation.workspace_draft.base, "main");
 }
 
 #[test]
 fn workspace_branch_refresh_degrades_without_git() {
     let (mut presenter, _runner, _directory) = fixture();
     presenter.refresh_workspace_branches();
-    assert!(!presenter.model.project_is_git);
-    assert_eq!(presenter.model.workspace_branch, None);
+    assert!(!presenter.model.conversation.project_is_git);
+    assert_eq!(presenter.model.conversation.workspace_branch, None);
 }
 
 #[test]
@@ -1160,13 +1186,16 @@ fn concurrent_worktree_tasks_isolate_output_approvals_queue_and_cancellation() {
         },
     });
     presenter.drain_events();
-    assert_eq!(presenter.model.selected_task, Some(second.task_id));
-    assert_eq!(presenter.model.streaming_text, "second output");
-    assert!(presenter.model.pending_approvals.is_empty());
+    assert_eq!(
+        presenter.model.conversation.selected_task,
+        Some(second.task_id)
+    );
+    assert_eq!(presenter.model.conversation.streaming_text, "second output");
+    assert!(presenter.model.conversation.pending_approvals.is_empty());
     presenter.new_task();
     assert!(!presenter.submit("third must wait", "claude"));
     presenter.select_task(first.task_id);
-    assert_eq!(presenter.model.streaming_text, "first output");
+    assert_eq!(presenter.model.conversation.streaming_text, "first output");
     assert!(presenter.respond_approval(first.run_id, approval_id, Some(0)));
     assert!(
         matches!(runner.0.borrow().commands.last().unwrap().command, Command::RunApprovalRespond { run_id, .. } if run_id == first.run_id)
@@ -1187,8 +1216,11 @@ fn concurrent_worktree_tasks_isolate_output_approvals_queue_and_cancellation() {
     assert_eq!(follow_up.cwd, first.cwd);
     assert_eq!(follow_up.session_id.as_deref(), Some("first-session"));
     assert_eq!(follow_up.prompt, "first follow-up");
-    assert_eq!(presenter.model.selected_task, Some(second.task_id));
-    assert!(presenter.model.run_cancelling);
+    assert_eq!(
+        presenter.model.conversation.selected_task,
+        Some(second.task_id)
+    );
+    assert!(presenter.model.conversation.run_cancelling);
     runner.emit(Event::RunExited {
         run_id: second.run_id,
         status: RunStatus::Cancelled,
@@ -1272,10 +1304,16 @@ fn worktree_task_binds_cwd_session_and_preserves_history_after_external_removal(
     assert!(!presenter.worktree_root.as_ref().unwrap().exists());
     assert!(presenter.submit("isolated task", "claude"));
     finish_workspace_operation(&mut presenter);
-    let workspace = presenter.model.selected_workspace.clone().unwrap();
+    let workspace = presenter
+        .model
+        .conversation
+        .selected_workspace
+        .clone()
+        .unwrap();
     assert_eq!(workspace.status, WorkspaceStatus::Ready);
     assert!(workspace.branch.as_ref().unwrap().starts_with("feat/nx-"));
-    let ModelCatalogState::Loading { request_id, .. } = presenter.model.model_catalog else {
+    let ModelCatalogState::Loading { request_id, .. } = presenter.model.conversation.model_catalog
+    else {
         panic!("catalog must use new cwd")
     };
     runner.emit(Event::ModelCatalogLoaded {
@@ -1314,7 +1352,7 @@ fn worktree_task_binds_cwd_session_and_preserves_history_after_external_removal(
         Some("fix/meaningful-task")
     );
     assert_eq!(
-        presenter.model.workspace_branch.as_deref(),
+        presenter.model.conversation.workspace_branch.as_deref(),
         Some("fix/meaningful-task")
     );
     presenter.select_task(start.task_id);
@@ -1334,7 +1372,13 @@ fn worktree_task_binds_cwd_session_and_preserves_history_after_external_removal(
     .unwrap();
     presenter.reload_workspaces();
     assert_eq!(
-        presenter.model.selected_workspace.as_ref().unwrap().status,
+        presenter
+            .model
+            .conversation
+            .selected_workspace
+            .as_ref()
+            .unwrap()
+            .status,
         WorkspaceStatus::Missing
     );
     runner.emit(Event::RunExited {
@@ -1482,13 +1526,13 @@ fn harness_management_guards_running_tasks_stale_settings_and_unowned_installs()
     assert!(!presenter.submit("must wait for installer", "claude"));
     presenter.model.harness_manager.busy = false;
     presenter.model.harness_manager.operating = None;
-    presenter.model.executable = "/changed/claude".into();
+    presenter.model.conversation.executable = "/changed/claude".into();
     assert!(
         presenter
             .harness_maintenance_request(HarnessKind::Claude, None)
             .is_none()
     );
-    presenter.model.executable = "claude".into();
+    presenter.model.conversation.executable = "claude".into();
     assert!(presenter.submit("running task", "claude"));
     assert!(
         presenter
@@ -1506,9 +1550,15 @@ fn harness_installation_events_refresh_versions_and_probes_without_switching_har
         .harness_maintenance_request(HarnessKind::Claude, None)
         .unwrap();
     presenter.select_harness(HarnessKind::Omp, "claude");
-    let selected = presenter.model.selected_harness;
-    let executable = presenter.model.executable.clone();
-    let project = presenter.model.selected_project.as_ref().unwrap().id;
+    let selected = presenter.model.conversation.selected_harness;
+    let executable = presenter.model.conversation.executable.clone();
+    let project = presenter
+        .model
+        .conversation
+        .selected_project
+        .as_ref()
+        .unwrap()
+        .id;
     for failed in [false, true] {
         let (send, worker) = Worker::test_channel();
         presenter.installation_worker = Some(worker);
@@ -1549,10 +1599,16 @@ fn harness_installation_events_refresh_versions_and_probes_without_switching_har
                 .harness_maintenance_request(HarnessKind::Claude, None)
                 .is_none()
         );
-        assert_eq!(presenter.model.selected_harness, selected);
-        assert_eq!(presenter.model.executable, executable);
+        assert_eq!(presenter.model.conversation.selected_harness, selected);
+        assert_eq!(presenter.model.conversation.executable, executable);
         assert_eq!(
-            presenter.model.selected_project.as_ref().unwrap().id,
+            presenter
+                .model
+                .conversation
+                .selected_project
+                .as_ref()
+                .unwrap()
+                .id,
             project
         );
         assert!(runner.0.borrow().commands.iter().any(|command| matches!(&command.command, Command::HarnessProbe { harness: HarnessKind::Claude, executable, .. } if executable == "claude")));
@@ -1618,7 +1674,10 @@ fn harness_scan_adopts_a_verified_manager_path_and_reprobes_it() {
     })
     .unwrap();
     assert!(presenter.drain_installation_events());
-    assert_eq!(presenter.model.executable, discovered.display().to_string());
+    assert_eq!(
+        presenter.model.conversation.executable,
+        discovered.display().to_string()
+    );
     assert_eq!(
         presenter
             .storage
@@ -1686,6 +1745,7 @@ fn cli_installation_reports_completion_and_failure_without_changing_the_conversa
         .to_owned();
     let original_project = presenter
         .model()
+        .conversation
         .selected_project
         .as_ref()
         .map(|project| project.id);
@@ -1714,6 +1774,7 @@ fn cli_installation_reports_completion_and_failure_without_changing_the_conversa
         assert_eq!(
             presenter
                 .model()
+                .conversation
                 .selected_project
                 .as_ref()
                 .map(|project| project.id),
@@ -1738,8 +1799,8 @@ fn cli_installation_reports_completion_and_failure_without_changing_the_conversa
 fn update_events_guard_concurrency_and_preserve_conversations_through_completion_and_failure() {
     let (mut presenter, _, directory) = fixture();
     assert!(presenter.submit("Keep this conversation running", "claude"));
-    let task = presenter.model().selected_task;
-    let run = presenter.model().active_run;
+    let task = presenter.model().conversation.selected_task;
+    let run = presenter.model().conversation.active_run;
     let status = presenter
         .model()
         .latest_log_text(presenter.model().language)
@@ -1786,8 +1847,8 @@ fn update_events_guard_concurrency_and_preserve_conversations_through_completion
         presenter.model().updates.state,
         UpdateState::Failed(_)
     ));
-    assert_eq!(presenter.model().selected_task, task);
-    assert_eq!(presenter.model().active_run, run);
+    assert_eq!(presenter.model().conversation.selected_task, task);
+    assert_eq!(presenter.model().conversation.active_run, run);
     assert_eq!(
         presenter
             .model()
@@ -1806,7 +1867,7 @@ fn update_installation_waits_for_all_tasks_and_workspace_work_and_blocks_new_ope
         path: directory.path().join("missing-update.zip"),
     };
     presenter.new_task();
-    assert!(presenter.model.active_run.is_none());
+    assert!(presenter.model.conversation.active_run.is_none());
     assert!(!presenter.install_update_when_idle());
     runner.emit(Event::RunExited {
         run_id: run.run_id,
@@ -1848,7 +1909,7 @@ fn update_installation_waits_for_all_tasks_and_workspace_work_and_blocks_new_ope
         presenter.model.updates.state,
         UpdateState::Failed(_)
     ));
-    assert!(presenter.model.active_run.is_none());
+    assert!(presenter.model.conversation.active_run.is_none());
 }
 
 #[test]
@@ -1974,19 +2035,30 @@ fn runtime_log_records_operations_and_background_events_without_replacing_run_pr
             .contains("消息已排队")
     );
     assert_eq!(
-        presenter.model.run_status.render(Language::Chinese),
+        presenter
+            .model
+            .conversation
+            .run_status
+            .render(Language::Chinese),
         "thinking"
     );
     runner.emit(Event::HarnessDetected(ready_probe(HarnessKind::Claude)));
     presenter.drain_events();
     assert_eq!(
-        presenter.model.run_status.render(Language::Chinese),
+        presenter
+            .model
+            .conversation
+            .run_status
+            .render(Language::Chinese),
         "thinking"
     );
     assert_eq!(remote_status(&mut presenter), "thinking");
 
     presenter.new_task();
-    assert_eq!(presenter.model.run_status, LocalizedText::default());
+    assert_eq!(
+        presenter.model.conversation.run_status,
+        LocalizedText::default()
+    );
     let other_directory = tempfile::tempdir().unwrap();
     presenter.open_project(other_directory.path());
     assert!(presenter.submit("second task", "claude"));
@@ -2003,7 +2075,11 @@ fn runtime_log_records_operations_and_background_events_without_replacing_run_pr
     });
     presenter.drain_events();
     assert_eq!(
-        presenter.model.run_status.render(Language::Chinese),
+        presenter
+            .model
+            .conversation
+            .run_status
+            .render(Language::Chinese),
         "reading files"
     );
     assert_eq!(
@@ -2013,7 +2089,11 @@ fn runtime_log_records_operations_and_background_events_without_replacing_run_pr
     assert_eq!(remote_status(&mut presenter), "reading files");
     presenter.select_task(first.task_id);
     assert_eq!(
-        presenter.model.run_status.render(Language::Chinese),
+        presenter
+            .model
+            .conversation
+            .run_status
+            .render(Language::Chinese),
         "testing"
     );
     runner.emit(Event::RunExited {
@@ -2027,7 +2107,11 @@ fn runtime_log_records_operations_and_background_events_without_replacing_run_pr
         "任务已完成"
     );
     assert_eq!(
-        presenter.model.run_status.render(Language::Chinese),
+        presenter
+            .model
+            .conversation
+            .run_status
+            .render(Language::Chinese),
         "testing"
     );
     assert_eq!(remote_status(&mut presenter), "testing");
@@ -2041,7 +2125,11 @@ fn runtime_log_records_operations_and_background_events_without_replacing_run_pr
     assert_eq!(presenter.model.runtime_log.len(), count);
     presenter.select_task(second.task_id);
     assert_eq!(
-        presenter.model.run_status.render(Language::Chinese),
+        presenter
+            .model
+            .conversation
+            .run_status
+            .render(Language::Chinese),
         "任务已完成"
     );
 }
@@ -2063,21 +2151,27 @@ fn language_switch_updates_status_and_preserves_active_runs_and_remote_content()
     );
     assert_eq!(remote_status(&mut presenter), "");
     assert!(presenter.submit("设置 {count} café", "claude"));
-    let task_id = presenter.model().selected_task;
-    let run_id = presenter.model().active_run;
+    let task_id = presenter.model().conversation.selected_task;
+    let run_id = presenter.model().conversation.active_run;
     assert!(presenter.submit("待发送 {error}", "claude"));
     let command_count = runner.0.borrow().commands.len();
     let status_before = remote_status(&mut presenter);
     for language in [Language::Chinese, Language::English] {
         assert!(presenter.set_language(language));
-        assert_eq!(presenter.model().selected_task, task_id);
-        assert_eq!(presenter.model().active_run, run_id);
-        assert_eq!(presenter.model().messages[0].content, "设置 {count} café");
+        assert_eq!(presenter.model().conversation.selected_task, task_id);
+        assert_eq!(presenter.model().conversation.active_run, run_id);
         assert_eq!(
-            presenter.model().queued_messages[0].prompt,
+            presenter.model().conversation.messages[0].content,
+            "设置 {count} café"
+        );
+        assert_eq!(
+            presenter.model().conversation.queued_messages[0].prompt,
             "待发送 {error}"
         );
-        assert_eq!(presenter.model().tasks[0].title, "设置 {count} café");
+        assert_eq!(
+            presenter.model().conversation.tasks[0].title,
+            "设置 {count} café"
+        );
         assert_eq!(remote_status(&mut presenter), status_before);
         assert_eq!(runner.0.borrow().commands.len(), command_count);
     }
@@ -2282,8 +2376,18 @@ fn sound_settings_default_on_and_restore_across_restart() {
 fn project_deletion_clears_selected_and_cached_state_and_preserves_worktree_files() {
     use crate::infrastructure::git;
     let (mut presenter, runner, _directory, start) = worktree_fixture("Keep my worktree");
-    let project = presenter.model.selected_project.clone().unwrap();
-    let workspace = presenter.model.selected_workspace.clone().unwrap();
+    let project = presenter
+        .model
+        .conversation
+        .selected_project
+        .clone()
+        .unwrap();
+    let workspace = presenter
+        .model
+        .conversation
+        .selected_workspace
+        .clone()
+        .unwrap();
     let repository = Path::new(&project.canonical_path);
     let worktree = Path::new(&workspace.path);
     fs::write(repository.join("tracked.txt"), "project edits\n").unwrap();
@@ -2299,6 +2403,7 @@ fn project_deletion_clears_selected_and_cached_state_and_preserves_worktree_file
     presenter.drain_events();
     presenter
         .model
+        .conversation
         .queued_messages
         .push_back(crate::model::QueuedMessage {
             attachments: Vec::new(),
@@ -2317,25 +2422,26 @@ fn project_deletion_clears_selected_and_cached_state_and_preserves_worktree_file
     }));
 
     assert!(presenter.delete_project(project.id));
-    assert!(presenter.model.selected_project.is_none());
-    assert!(presenter.model.selected_task.is_none());
+    assert!(presenter.model.conversation.selected_project.is_none());
+    assert!(presenter.model.conversation.selected_task.is_none());
     assert!(
         presenter
             .model
+            .conversation
             .selected_workspace
             .as_ref()
             .unwrap()
             .project_id
             .is_none()
     );
-    assert!(presenter.model.workspaces.is_empty());
-    assert!(presenter.model.messages.is_empty());
-    assert!(presenter.model.tasks.is_empty());
+    assert!(presenter.model.conversation.workspaces.is_empty());
+    assert!(presenter.model.conversation.messages.is_empty());
+    assert!(presenter.model.conversation.tasks.is_empty());
     assert!(presenter.model.archived_tasks.is_empty());
-    assert!(presenter.model.queued_messages.is_empty());
-    assert!(!presenter.model.project_is_git);
+    assert!(presenter.model.conversation.queued_messages.is_empty());
+    assert!(!presenter.model.conversation.project_is_git);
     assert!(matches!(
-        presenter.model.model_catalog,
+        presenter.model.conversation.model_catalog,
         ModelCatalogState::Loading { .. }
     ));
     assert!(!presenter.model.cnb.opened);
@@ -2381,13 +2487,23 @@ fn project_deletion_clears_selected_and_cached_state_and_preserves_worktree_file
 #[test]
 fn project_deletion_guards_background_runs_and_preserves_other_conversations() {
     let (mut presenter, runner, _directory) = fixture();
-    let project = presenter.model.selected_project.clone().unwrap();
+    let project = presenter
+        .model
+        .conversation
+        .selected_project
+        .clone()
+        .unwrap();
     assert!(presenter.submit("background task", "claude"));
     let start = last_start(&runner);
     assert!(!presenter.can_delete_project(project.id));
     let other_dir = tempfile::tempdir().unwrap();
     presenter.open_project(other_dir.path());
-    let other = presenter.model.selected_project.clone().unwrap();
+    let other = presenter
+        .model
+        .conversation
+        .selected_project
+        .clone()
+        .unwrap();
     assert!(presenter.submit("keep running", "claude"));
     let other_start = last_start(&runner);
     let selected_conversation = presenter.model.conversation.id;
@@ -2406,12 +2522,27 @@ fn project_deletion_guards_background_runs_and_preserves_other_conversations() {
     assert!(presenter.delete_project(project.id));
     assert_eq!(presenter.model.conversation.id, selected_conversation);
     assert_eq!(
-        presenter.model.selected_project.as_ref().unwrap().id,
+        presenter
+            .model
+            .conversation
+            .selected_project
+            .as_ref()
+            .unwrap()
+            .id,
         other.id
     );
-    assert_eq!(presenter.model.active_run, Some(other_start.run_id));
-    assert_eq!(presenter.model.selected_task, Some(other_start.task_id));
-    assert_eq!(presenter.model.messages[0].content, "keep running");
+    assert_eq!(
+        presenter.model.conversation.active_run,
+        Some(other_start.run_id)
+    );
+    assert_eq!(
+        presenter.model.conversation.selected_task,
+        Some(other_start.task_id)
+    );
+    assert_eq!(
+        presenter.model.conversation.messages[0].content,
+        "keep running"
+    );
     assert_eq!(presenter.model.active_run_count(), 1);
     assert!(presenter.model.conversations.values().all(|conversation| {
         conversation
@@ -2425,8 +2556,13 @@ fn project_deletion_guards_background_runs_and_preserves_other_conversations() {
 fn project_deletion_waits_for_pending_workspace_start_but_allows_failed_retry() {
     use crate::model::workspace::PendingWorkspaceStart;
     let (mut presenter, _runner, _directory) = fixture();
-    let project = presenter.model.selected_project.clone().unwrap();
-    presenter.model.pending_workspace_start = Some(PendingWorkspaceStart {
+    let project = presenter
+        .model
+        .conversation
+        .selected_project
+        .clone()
+        .unwrap();
+    presenter.model.conversation.pending_workspace_start = Some(PendingWorkspaceStart {
         attachments: Vec::new(),
         context_id: presenter.model.conversation.id,
         prompt: "pending worktree".into(),
@@ -2443,14 +2579,25 @@ fn project_deletion_waits_for_pending_workspace_start_but_allows_failed_retry() 
         .unwrap()
         .workspace_retry = true;
     assert!(presenter.delete_project(project.id));
-    assert!(presenter.model.pending_workspace_start.is_none());
+    assert!(
+        presenter
+            .model
+            .conversation
+            .pending_workspace_start
+            .is_none()
+    );
     assert!(presenter.model.conversations.is_empty());
 }
 
 #[test]
 fn conversation_actions_keep_active_and_archived_models_in_sync() {
     let (mut presenter, _runner, _directory) = fixture();
-    let project = presenter.model().selected_project.clone().unwrap();
+    let project = presenter
+        .model()
+        .conversation
+        .selected_project
+        .clone()
+        .unwrap();
     let create_task = |presenter: &mut Presenter, title: &str| {
         presenter
             .storage
@@ -2477,6 +2624,7 @@ fn conversation_actions_keep_active_and_archived_models_in_sync() {
         presenter.select_task(task_id);
         presenter
             .model
+            .conversation
             .queued_messages
             .push_back(crate::model::QueuedMessage {
                 attachments: Vec::new(),
@@ -2490,9 +2638,9 @@ fn conversation_actions_keep_active_and_archived_models_in_sync() {
     presenter.select_task(first_task);
 
     assert!(presenter.archive_task(first_task));
-    assert!(presenter.model().selected_task.is_none());
-    assert!(presenter.model().messages.is_empty());
-    assert_eq!(presenter.model().tasks[0].id, second_task);
+    assert!(presenter.model().conversation.selected_task.is_none());
+    assert!(presenter.model().conversation.messages.is_empty());
+    assert_eq!(presenter.model().conversation.tasks[0].id, second_task);
     assert_eq!(presenter.model().archived_tasks[0].id, first_task);
     assert_eq!(
         presenter
@@ -2504,13 +2652,13 @@ fn conversation_actions_keep_active_and_archived_models_in_sync() {
     );
 
     assert!(presenter.restore_task(first_task));
-    assert_eq!(presenter.model().tasks.len(), 2);
+    assert_eq!(presenter.model().conversation.tasks.len(), 2);
     assert!(presenter.model().archived_tasks.is_empty());
 
-    presenter.model.active_run = Some(Uuid::new_v4());
-    presenter.model.active_task = Some(first_task);
+    presenter.model.conversation.active_run = Some(Uuid::new_v4());
+    presenter.model.conversation.active_task = Some(first_task);
     assert!(!presenter.delete_task(first_task));
-    assert_eq!(presenter.model().tasks.len(), 2);
+    assert_eq!(presenter.model().conversation.tasks.len(), 2);
     assert_eq!(
         presenter
             .model()
@@ -2519,11 +2667,11 @@ fn conversation_actions_keep_active_and_archived_models_in_sync() {
             .sum::<usize>(),
         2
     );
-    presenter.model.active_run = None;
-    presenter.model.active_task = None;
+    presenter.model.conversation.active_run = None;
+    presenter.model.conversation.active_task = None;
 
     assert!(presenter.delete_task(first_task));
-    assert_eq!(presenter.model().tasks.len(), 1);
+    assert_eq!(presenter.model().conversation.tasks.len(), 1);
     assert_eq!(
         presenter
             .model()
@@ -2543,8 +2691,8 @@ fn conversation_actions_keep_active_and_archived_models_in_sync() {
     assert_eq!(presenter.model().archived_tasks.len(), 1);
     assert!(presenter.delete_archived_tasks());
     assert!(presenter.model().archived_tasks.is_empty());
-    assert!(presenter.model().tasks.is_empty());
-    assert!(presenter.model().queued_messages.is_empty());
+    assert!(presenter.model().conversation.tasks.is_empty());
+    assert!(presenter.model().conversation.queued_messages.is_empty());
 }
 
 #[test]
@@ -2557,11 +2705,17 @@ fn reordering_projects_preserves_the_active_conversation_and_survives_reload() {
     }
     presenter.reload_projects();
     assert!(presenter.submit("Keep this conversation running", "claude"));
-    let selected = presenter.model().selected_project.as_ref().unwrap().id;
+    let selected = presenter
+        .model()
+        .conversation
+        .selected_project
+        .as_ref()
+        .unwrap()
+        .id;
     let conversation = presenter.model().conversation.id;
-    let task = presenter.model().selected_task;
-    let run = presenter.model().active_run;
-    let messages = serde_json::to_value(&presenter.model().messages).unwrap();
+    let task = presenter.model().conversation.selected_task;
+    let run = presenter.model().conversation.active_run;
+    let messages = serde_json::to_value(&presenter.model().conversation.messages).unwrap();
     let commands = runner.0.borrow().commands.len();
     let original: Vec<_> = presenter
         .model()
@@ -2606,14 +2760,20 @@ fn reordering_projects_preserves_the_active_conversation_and_survives_reload() {
         original,
     );
     assert_eq!(
-        presenter.model().selected_project.as_ref().unwrap().id,
+        presenter
+            .model()
+            .conversation
+            .selected_project
+            .as_ref()
+            .unwrap()
+            .id,
         selected
     );
     assert_eq!(presenter.model().conversation.id, conversation);
-    assert_eq!(presenter.model().selected_task, task);
-    assert_eq!(presenter.model().active_run, run);
+    assert_eq!(presenter.model().conversation.selected_task, task);
+    assert_eq!(presenter.model().conversation.active_run, run);
     assert_eq!(
-        serde_json::to_value(&presenter.model().messages).unwrap(),
+        serde_json::to_value(&presenter.model().conversation.messages).unwrap(),
         messages
     );
     assert_eq!(runner.0.borrow().commands.len(), commands);
@@ -2762,13 +2922,23 @@ fn restoring_archived_project_preserves_the_selected_project_and_tasks() {
     assert!(presenter.restore_task(archived_task));
     assert!(presenter.model().archived_tasks.is_empty());
     assert_eq!(
-        presenter.model().selected_project.as_ref().unwrap().id,
+        presenter
+            .model()
+            .conversation
+            .selected_project
+            .as_ref()
+            .unwrap()
+            .id,
         oldest_recent_project.id
     );
-    assert_eq!(presenter.model().selected_task, Some(oldest_recent_task));
+    assert_eq!(
+        presenter.model().conversation.selected_task,
+        Some(oldest_recent_task)
+    );
     assert!(
         presenter
             .model()
+            .conversation
             .tasks
             .iter()
             .any(|task| task.id == oldest_recent_task)
@@ -2791,6 +2961,7 @@ fn restoring_archived_project_preserves_the_selected_project_and_tasks() {
     assert!(
         presenter
             .model()
+            .conversation
             .tasks
             .iter()
             .any(|task| task.id == archived_task)
@@ -2837,8 +3008,8 @@ fn deleting_archived_tasks_refreshes_projects_for_individual_and_bulk_actions() 
 fn tool_events_preserve_ids_and_full_payloads_after_reloading_a_task() {
     let (mut presenter, runner, _directory) = fixture();
     assert!(presenter.submit("run tools", "claude"));
-    let run_id = presenter.model().active_run.unwrap();
-    let task_id = presenter.model().active_task.unwrap();
+    let run_id = presenter.model().conversation.active_run.unwrap();
+    let task_id = presenter.model().conversation.active_task.unwrap();
     let long_text = "完整内容\n".repeat(100);
     for tool_id in ["a", "b"] {
         runner.emit(Event::RunToolStarted {
@@ -2858,7 +3029,7 @@ fn tool_events_preserve_ids_and_full_payloads_after_reloading_a_task() {
     }
     presenter.drain_events();
     presenter.select_task(task_id);
-    let messages = &presenter.model().messages;
+    let messages = &presenter.model().conversation.messages;
     assert_eq!(messages.len(), 5);
     assert_eq!(messages[1].tool.as_ref().unwrap().id, "a");
     assert_eq!(messages[2].tool.as_ref().unwrap().id, "b");
@@ -2867,7 +3038,10 @@ fn tool_events_preserve_ids_and_full_payloads_after_reloading_a_task() {
     assert!(!messages[4].tool.as_ref().unwrap().is_error);
     assert_eq!(messages[1].content, format!("Bash\n{long_text}"));
     assert_eq!(messages[4].content, long_text);
-    let items = crate::model::tools::timeline_items(messages, &presenter.model().completed_runs);
+    let items = crate::model::tools::timeline_items(
+        messages,
+        &presenter.model().conversation.completed_runs,
+    );
     let crate::model::tools::TimelineItem::Tools(batch) = &items[1] else {
         panic!("expected one tool batch")
     };
@@ -2907,7 +3081,7 @@ fn provider_fixture() -> (
         Box::new(credentials.clone()),
     );
     presenter.open_project(directory.path());
-    presenter.model.model_catalog = ModelCatalogState::Ready(claude_aliases());
+    presenter.model.conversation.model_catalog = ModelCatalogState::Ready(claude_aliases());
     runner.0.borrow_mut().commands.clear();
     (presenter, runner, credentials, directory)
 }
@@ -2975,7 +3149,9 @@ fn catalog_model_with_provider(
 }
 
 fn current_catalog_request_id(presenter: &Presenter) -> Uuid {
-    let ModelCatalogState::Loading { request_id, .. } = &presenter.model().model_catalog else {
+    let ModelCatalogState::Loading { request_id, .. } =
+        &presenter.model().conversation.model_catalog
+    else {
         panic!("expected a loading model catalog")
     };
     *request_id
@@ -2987,7 +3163,7 @@ fn emit_current_catalog(
     mut models: Vec<ModelDescriptor>,
 ) {
     for model in &mut models {
-        model.source = match presenter.model().selected_harness {
+        model.source = match presenter.model().conversation.selected_harness {
             HarnessKind::Claude => nexus_domain::ModelSource::ClaudeAliases,
             HarnessKind::Codex => nexus_domain::ModelSource::CodexAppServer,
             HarnessKind::Omp => nexus_domain::ModelSource::OmpCli,
@@ -3003,7 +3179,7 @@ fn emit_current_catalog(
     }
     runner.emit(Event::ModelCatalogLoaded {
         request_id: current_catalog_request_id(presenter),
-        harness: presenter.model().selected_harness,
+        harness: presenter.model().conversation.selected_harness,
         models,
     });
 }
@@ -3036,14 +3212,14 @@ fn permission_modes_are_snapshotted_per_turn_and_restored_per_harness_and_conver
     presenter.drain_events();
     presenter.select_permission_mode(PermissionMode::Yolo);
     assert!(presenter.submit("second", "claude"));
-    let queued = presenter.model().queued_messages[0].id;
+    let queued = presenter.model().conversation.queued_messages[0].id;
     assert!(!presenter.steer_queued_message(queued));
     presenter.select_permission_mode(PermissionMode::AutoEdit);
     assert!(presenter.submit("third", "claude"));
     presenter.select_permission_mode(PermissionMode::Ask);
     assert_eq!(last_start(&runner).permission_mode, PermissionMode::Ask);
     assert_eq!(
-        presenter.model().active_permission_mode,
+        presenter.model().conversation.active_permission_mode,
         Some(PermissionMode::Ask)
     );
     runner.emit(Event::RunExited {
@@ -3057,11 +3233,11 @@ fn permission_modes_are_snapshotted_per_turn_and_restored_per_harness_and_conver
     assert_eq!(second.permission_mode, PermissionMode::Yolo);
     assert_eq!(second.session_id.as_deref(), Some("session"));
     assert_eq!(
-        presenter.model().active_permission_mode,
+        presenter.model().conversation.active_permission_mode,
         Some(PermissionMode::Yolo)
     );
     assert_eq!(
-        presenter.model().queued_messages[0].permission_mode,
+        presenter.model().conversation.queued_messages[0].permission_mode,
         PermissionMode::AutoEdit
     );
     runner.emit(Event::RunExited {
@@ -3071,7 +3247,10 @@ fn permission_modes_are_snapshotted_per_turn_and_restored_per_harness_and_conver
     });
     presenter.drain_events();
     presenter.select_task(first.task_id);
-    assert_eq!(presenter.model().permission_mode, PermissionMode::Yolo);
+    assert_eq!(
+        presenter.model().conversation.permission_mode,
+        PermissionMode::Yolo
+    );
     let config = presenter
         .storage
         .conversation_config(first.task_id)
@@ -3079,21 +3258,33 @@ fn permission_modes_are_snapshotted_per_turn_and_restored_per_harness_and_conver
         .unwrap();
     assert_eq!(config.permission_mode, PermissionMode::Yolo);
     presenter.new_task();
-    assert_eq!(presenter.model().permission_mode, PermissionMode::Ask);
+    assert_eq!(
+        presenter.model().conversation.permission_mode,
+        PermissionMode::Ask
+    );
     assert!(presenter.select_harness(HarnessKind::Omp, "claude"));
-    assert_eq!(presenter.model().permission_mode, PermissionMode::AutoEdit);
+    assert_eq!(
+        presenter.model().conversation.permission_mode,
+        PermissionMode::AutoEdit
+    );
     presenter.select_permission_mode(PermissionMode::Yolo);
     assert!(presenter.select_harness(HarnessKind::Claude, "omp"));
-    assert_eq!(presenter.model().permission_mode, PermissionMode::Ask);
+    assert_eq!(
+        presenter.model().conversation.permission_mode,
+        PermissionMode::Ask
+    );
     assert!(presenter.select_harness(HarnessKind::Omp, "claude"));
-    assert_eq!(presenter.model().permission_mode, PermissionMode::Yolo);
+    assert_eq!(
+        presenter.model().conversation.permission_mode,
+        PermissionMode::Yolo
+    );
 }
 
 #[test]
 fn approvals_ignore_stale_events_validate_choices_and_remain_retryable_until_resolved() {
     let (mut presenter, runner, _directory) = fixture();
     assert!(presenter.submit("first", "claude"));
-    let run_id = presenter.model().active_run.unwrap();
+    let run_id = presenter.model().conversation.active_run.unwrap();
     let request = nexus_protocol::ApprovalRequest {
         request_id: Uuid::new_v4(),
         title: "Bash".into(),
@@ -3105,7 +3296,7 @@ fn approvals_ignore_stale_events_validate_choices_and_remain_retryable_until_res
         request: request.clone(),
     });
     presenter.drain_events();
-    assert!(presenter.model().pending_approvals.is_empty());
+    assert!(presenter.model().conversation.pending_approvals.is_empty());
     for _ in 0..2 {
         runner.emit(Event::RunApprovalRequested {
             run_id,
@@ -3121,17 +3312,17 @@ fn approvals_ignore_stale_events_validate_choices_and_remain_retryable_until_res
         request: second.clone(),
     });
     presenter.drain_events();
-    assert_eq!(presenter.model().pending_approvals.len(), 2);
+    assert_eq!(presenter.model().conversation.pending_approvals.len(), 2);
     assert!(!presenter.respond_approval(Uuid::new_v4(), request.request_id, Some(0)));
     assert!(!presenter.respond_approval(run_id, second.request_id, Some(0)));
     assert!(!presenter.respond_approval(run_id, request.request_id, Some(2)));
     runner.0.borrow_mut().fail_send = true;
     assert!(!presenter.respond_approval(run_id, request.request_id, Some(0)));
-    assert!(presenter.model().responding_approval.is_none());
+    assert!(presenter.model().conversation.responding_approval.is_none());
     runner.0.borrow_mut().fail_send = false;
     assert!(presenter.respond_approval(run_id, request.request_id, Some(1)));
     assert!(!presenter.respond_approval(run_id, request.request_id, Some(1)));
-    assert_eq!(presenter.model().pending_approvals.len(), 2);
+    assert_eq!(presenter.model().conversation.pending_approvals.len(), 2);
     assert!(matches!(runner.0.borrow().commands.last().unwrap().command,
         Command::RunApprovalRespond { run_id: run, request_id, option: Some(1) } if run == run_id && request_id == request.request_id));
     runner.emit(Event::RunApprovalResolved {
@@ -3139,17 +3330,17 @@ fn approvals_ignore_stale_events_validate_choices_and_remain_retryable_until_res
         request_id: request.request_id,
     });
     presenter.drain_events();
-    assert_eq!(presenter.model().pending_approvals.len(), 1);
+    assert_eq!(presenter.model().conversation.pending_approvals.len(), 1);
     assert!(presenter.respond_approval(run_id, second.request_id, None));
     presenter.cancel();
-    assert!(presenter.model().pending_approvals.is_empty());
-    assert!(presenter.model().responding_approval.is_none());
+    assert!(presenter.model().conversation.pending_approvals.is_empty());
+    assert!(presenter.model().conversation.responding_approval.is_none());
     runner.emit(Event::RunApprovalRequested {
         run_id,
         request: second,
     });
     presenter.drain_events();
-    assert!(presenter.model().pending_approvals.is_empty());
+    assert!(presenter.model().conversation.pending_approvals.is_empty());
     assert!(!presenter.respond_approval(run_id, request.request_id, Some(0)));
 }
 
@@ -3181,11 +3372,17 @@ fn startup_restores_preferences_and_probes_all_harnesses() {
     let runner = FakeRunner::default();
     let presenter = Presenter::new(storage, Ok(Box::new(runner.clone())), None);
 
-    assert_eq!(presenter.model().selected_harness, HarnessKind::Codex);
-    assert!(presenter.model().model_override.is_none());
-    assert_eq!(presenter.model().effort, ThinkingEffort::High);
-    assert_eq!(presenter.model().permission_mode, PermissionMode::Yolo);
-    assert_eq!(presenter.model().executable, "/custom/codex");
+    assert_eq!(
+        presenter.model().conversation.selected_harness,
+        HarnessKind::Codex
+    );
+    assert!(presenter.model().conversation.model_override.is_none());
+    assert_eq!(presenter.model().conversation.effort, ThinkingEffort::High);
+    assert_eq!(
+        presenter.model().conversation.permission_mode,
+        PermissionMode::Yolo
+    );
+    assert_eq!(presenter.model().conversation.executable, "/custom/codex");
     let state = runner.0.borrow();
     assert_eq!(state.commands.len(), HarnessKind::ALL.len() + 2);
     assert!(matches!(state.commands[0].command, Command::RunnerHello));
@@ -3244,7 +3441,7 @@ fn catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
     });
     assert!(presenter.drain_events());
     assert!(matches!(
-        presenter.model().model_catalog,
+        presenter.model().conversation.model_catalog,
         ModelCatalogState::Loading { request_id, .. } if request_id == failed_request_id
     ));
 
@@ -3255,7 +3452,7 @@ fn catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
     });
     presenter.drain_events();
     assert!(matches!(
-        &presenter.model().model_catalog,
+        &presenter.model().conversation.model_catalog,
         ModelCatalogState::Failed { message, .. } if message.render(Language::Chinese) == "model/list unavailable"
     ));
     assert_eq!(
@@ -3275,7 +3472,7 @@ fn catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
     emit_current_catalog(&presenter, &runner, Vec::new());
     presenter.drain_events();
     assert!(matches!(
-        presenter.model().model_catalog,
+        presenter.model().conversation.model_catalog,
         ModelCatalogState::Empty
     ));
     assert_eq!(
@@ -3297,7 +3494,7 @@ fn catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
         )],
     );
     presenter.drain_events();
-    let ModelCatalogState::Ready(models) = &presenter.model().model_catalog else {
+    let ModelCatalogState::Ready(models) = &presenter.model().conversation.model_catalog else {
         panic!("expected a ready model catalog")
     };
     assert_eq!(models[0].id, "codex-current");
@@ -3321,7 +3518,7 @@ fn catalog_lifecycle_ignores_stale_responses_and_supports_retry() {
     });
     presenter.drain_events();
     assert!(matches!(
-        presenter.model().model_catalog,
+        presenter.model().conversation.model_catalog,
         ModelCatalogState::NotReady(_)
     ));
     runner.emit(Event::HarnessDetected(ready_probe(HarnessKind::Codex)));
@@ -3394,7 +3591,12 @@ fn startup_reads_profile_credential_state_from_the_system_store() {
 #[test]
 fn invalid_submissions_never_create_tasks_or_send_commands() {
     let (mut presenter, runner, _directory) = fixture();
-    let project = presenter.model.selected_project.take().unwrap();
+    let project = presenter
+        .model
+        .conversation
+        .selected_project
+        .take()
+        .unwrap();
     assert!(!presenter.submit("hello", "claude"));
     assert_eq!(
         presenter
@@ -3402,7 +3604,7 @@ fn invalid_submissions_never_create_tasks_or_send_commands() {
             .latest_log_text(presenter.model().language),
         "任务缺少绑定目录"
     );
-    presenter.model.selected_project = Some(project.clone());
+    presenter.model.conversation.selected_project = Some(project.clone());
     assert!(!presenter.submit(" \n ", "claude"));
     assert_eq!(
         presenter
@@ -3424,8 +3626,14 @@ fn invalid_submissions_never_create_tasks_or_send_commands() {
     }
     assert!(presenter.storage.tasks(project.id).unwrap().is_empty());
     assert!(runner.0.borrow().commands.is_empty());
-    assert!(presenter.model.active_run_started_at.is_none());
-    assert!(presenter.model().active_run_elapsed_seconds.is_none());
+    assert!(presenter.model.conversation.active_run_started_at.is_none());
+    assert!(
+        presenter
+            .model()
+            .conversation
+            .active_run_elapsed_seconds
+            .is_none()
+    );
 }
 
 #[test]
@@ -3440,7 +3648,7 @@ fn projectless_chat_discovers_models_saves_history_and_resumes_after_restart() {
         let runner = FakeRunner::default();
         let mut presenter = Presenter::new(storage, Ok(Box::new(runner.clone())), None);
         assert!(presenter.model.projects.is_empty());
-        assert!(presenter.model.selected_project.is_none());
+        assert!(presenter.model.conversation.selected_project.is_none());
         assert!(!presenter.model.can_submit());
         let cwd = presenter.model.working_directory().unwrap().to_owned();
         assert!(Path::new(&cwd).is_dir());
@@ -3457,7 +3665,7 @@ fn projectless_chat_discovers_models_saves_history_and_resumes_after_restart() {
         runner.0.borrow_mut().fail_send = true;
         assert!(!presenter.submit("你好", harness.default_executable()));
         assert!(presenter.storage.tasks(None).unwrap().is_empty());
-        assert!(presenter.model.messages.is_empty());
+        assert!(presenter.model.conversation.messages.is_empty());
         runner.0.borrow_mut().fail_send = false;
         assert!(presenter.submit("你好", harness.default_executable()));
         let start = last_start(&runner);
@@ -3465,7 +3673,7 @@ fn projectless_chat_discovers_models_saves_history_and_resumes_after_restart() {
         assert_eq!(start.prompt, "你好");
         assert!(start.session_id.is_none());
         assert_eq!(presenter.model.projectless_tasks[0].id, start.task_id);
-        assert!(presenter.model.tasks[0].project_id.is_none());
+        assert!(presenter.model.conversation.tasks[0].project_id.is_none());
         assert!(presenter.storage.projects().unwrap().is_empty());
         fs::write(Path::new(&cwd).join("conversation.txt"), "saved context").unwrap();
         runner.emit(Event::RunSessionStarted {
@@ -3500,11 +3708,12 @@ fn projectless_chat_discovers_models_saves_history_and_resumes_after_restart() {
         assert!(presenter.model.archived_tasks[0].project_id.is_none());
         assert!(presenter.restore_task(start.task_id));
         presenter.select_task(start.task_id);
-        assert!(presenter.model.selected_project.is_none());
+        assert!(presenter.model.conversation.selected_project.is_none());
         assert_eq!(presenter.model.working_directory(), Some(cwd.as_str()));
         assert_eq!(
             presenter
                 .model
+                .conversation
                 .messages
                 .iter()
                 .map(|message| message.content.as_str())
@@ -3530,14 +3739,19 @@ fn projectless_chat_discovers_models_saves_history_and_resumes_after_restart() {
 #[test]
 fn projectless_tasks_isolate_directories_and_preserve_project_context_when_switching() {
     let (mut presenter, runner, directory) = fixture();
-    let project = presenter.model.selected_project.clone().unwrap();
+    let project = presenter
+        .model
+        .conversation
+        .selected_project
+        .clone()
+        .unwrap();
     assert!(presenter.submit("project task", "claude"));
     let project_start = last_start(&runner);
     presenter.new_projectless_task();
     emit_current_catalog(&presenter, &runner, claude_aliases());
     presenter.drain_events();
     assert!(presenter.model.can_submit());
-    assert!(presenter.model.selected_project.is_none());
+    assert!(presenter.model.conversation.selected_project.is_none());
     assert!(presenter.submit("independent chat", "claude"));
     let first = last_start(&runner);
     assert_ne!(first.cwd, project.canonical_path);
@@ -3564,21 +3778,33 @@ fn projectless_tasks_isolate_directories_and_preserve_project_context_when_switc
     assert!(second.session_id.is_none());
     presenter.select_task(project_start.task_id);
     assert_eq!(
-        presenter.model.selected_project.as_ref().unwrap().id,
+        presenter
+            .model
+            .conversation
+            .selected_project
+            .as_ref()
+            .unwrap()
+            .id,
         project.id
     );
     assert_eq!(
         presenter.model.working_directory(),
         Some(project.canonical_path.as_str())
     );
-    assert_eq!(presenter.model.active_run, Some(project_start.run_id));
+    assert_eq!(
+        presenter.model.conversation.active_run,
+        Some(project_start.run_id)
+    );
     presenter.select_task(first.task_id);
-    assert!(presenter.model.selected_project.is_none());
+    assert!(presenter.model.conversation.selected_project.is_none());
     assert_eq!(
         presenter.model.working_directory(),
         Some(first.cwd.as_str())
     );
-    assert_eq!(presenter.model.messages[0].content, "independent chat");
+    assert_eq!(
+        presenter.model.conversation.messages[0].content,
+        "independent chat"
+    );
     runner.emit(Event::RunExited {
         run_id: second.run_id,
         status: RunStatus::Completed,
@@ -3614,7 +3840,13 @@ fn expired_remote_start_does_not_change_selection_or_start_a_run() {
     presenter.drain_events();
     presenter.select_catalog_model(Some("explicit-remote-model".into()));
     presenter.select_effort(ThinkingEffort::High);
-    let project_id = presenter.model.selected_project.as_ref().unwrap().id;
+    let project_id = presenter
+        .model
+        .conversation
+        .selected_project
+        .as_ref()
+        .unwrap()
+        .id;
     let other_directory = tempfile::tempdir().unwrap();
     presenter.open_project(other_directory.path());
     assert!(
@@ -3625,7 +3857,13 @@ fn expired_remote_start_does_not_change_selection_or_start_a_run() {
             .is_default
     );
     runner.0.borrow_mut().commands.clear();
-    let selected_project_id = presenter.model.selected_project.as_ref().unwrap().id;
+    let selected_project_id = presenter
+        .model
+        .conversation
+        .selected_project
+        .as_ref()
+        .unwrap()
+        .id;
     let status = presenter
         .model
         .latest_log_text(presenter.model.language)
@@ -3640,14 +3878,20 @@ fn expired_remote_start_does_not_change_selection_or_start_a_run() {
     }));
 
     assert_eq!(
-        presenter.model.selected_project.as_ref().unwrap().id,
+        presenter
+            .model
+            .conversation
+            .selected_project
+            .as_ref()
+            .unwrap()
+            .id,
         selected_project_id
     );
     assert_eq!(
         presenter.model.latest_log_text(presenter.model.language),
         status
     );
-    assert!(presenter.model.active_run.is_none());
+    assert!(presenter.model.conversation.active_run.is_none());
     assert!(presenter.storage.tasks(project_id).unwrap().is_empty());
     assert!(runner.0.borrow().commands.is_empty());
 
@@ -3681,8 +3925,8 @@ fn expired_remote_start_does_not_change_selection_or_start_a_run() {
             .count(),
         1
     );
-    let task_id = presenter.model().selected_task.unwrap();
-    let run_id = presenter.model().active_run.unwrap();
+    let task_id = presenter.model().conversation.selected_task.unwrap();
+    let run_id = presenter.model().conversation.active_run.unwrap();
     runner.emit(Event::RunSessionStarted {
         run_id,
         session_id: "desktop-session".into(),
@@ -3702,7 +3946,7 @@ fn expired_remote_start_does_not_change_selection_or_start_a_run() {
         reply,
     });
     assert!(response.try_recv().unwrap().is_err());
-    assert_eq!(presenter.model().selected_task, Some(task_id));
+    assert_eq!(presenter.model().conversation.selected_task, Some(task_id));
     let (reply, mut response) = tokio::sync::oneshot::channel();
     presenter.handle_remote_command(RemoteCommand::StartRun {
         project_id,
@@ -3710,7 +3954,7 @@ fn expired_remote_start_does_not_change_selection_or_start_a_run() {
         reply,
     });
     assert_eq!(response.try_recv().unwrap(), Ok(()));
-    assert_ne!(presenter.model().selected_task, Some(task_id));
+    assert_ne!(presenter.model().conversation.selected_task, Some(task_id));
     assert_eq!(presenter.storage.tasks(project_id).unwrap().len(), 2);
     let state = runner.0.borrow();
     let Command::RunStart(request) = &state.commands.last().unwrap().command else {
@@ -3728,8 +3972,11 @@ fn submit_persists_configuration_and_queues_without_starting_concurrent_runs() {
     assert!(presenter.submit("  explain this project\n", "claude-custom"));
     assert!(!presenter.model().can_submit());
     assert!(presenter.submit("follow-up", "claude-custom"));
-    assert_eq!(presenter.model().queued_messages.len(), 1);
-    assert_eq!(presenter.model().queued_messages[0].prompt, "follow-up");
+    assert_eq!(presenter.model().conversation.queued_messages.len(), 1);
+    assert_eq!(
+        presenter.model().conversation.queued_messages[0].prompt,
+        "follow-up"
+    );
     let state = runner.0.borrow();
     assert_eq!(state.commands.len(), 1);
     let Command::RunStart(request) = &state.commands[0].command else {
@@ -3743,8 +3990,14 @@ fn submit_persists_configuration_and_queues_without_starting_concurrent_runs() {
         request.executable,
         ready_probe(HarnessKind::Claude).executable
     );
-    assert_eq!(presenter.model().active_run, Some(request.run_id));
-    assert_eq!(presenter.model().selected_task, Some(request.task_id));
+    assert_eq!(
+        presenter.model().conversation.active_run,
+        Some(request.run_id)
+    );
+    assert_eq!(
+        presenter.model().conversation.selected_task,
+        Some(request.task_id)
+    );
     let config = presenter
         .storage
         .conversation_config(request.task_id)
@@ -3753,18 +4006,24 @@ fn submit_persists_configuration_and_queues_without_starting_concurrent_runs() {
     assert_eq!(config.executable, request.executable);
     assert_eq!(config.model, "opus");
     assert_eq!(config.effort, request.effort);
-    assert_eq!(presenter.model().messages[0].content, request.prompt);
-    assert_eq!(presenter.model().tasks.len(), 1);
-    assert_eq!(presenter.model().tasks[0].title, "explain this project");
+    assert_eq!(
+        presenter.model().conversation.messages[0].content,
+        request.prompt
+    );
+    assert_eq!(presenter.model().conversation.tasks.len(), 1);
+    assert_eq!(
+        presenter.model().conversation.tasks[0].title,
+        "explain this project"
+    );
 }
 
 #[test]
 fn generated_title_replaces_fallback_and_is_persisted() {
     let (mut presenter, runner, _directory) = fixture();
     assert!(presenter.submit("  **请修复登录流程。**\n并补充回归测试  ", "claude"));
-    let task_id = presenter.model().selected_task.unwrap();
+    let task_id = presenter.model().conversation.selected_task.unwrap();
     assert_eq!(
-        presenter.model().tasks[0].title,
+        presenter.model().conversation.tasks[0].title,
         "请修复登录流程。 并补充回归测试"
     );
 
@@ -3774,7 +4033,7 @@ fn generated_title_replaces_fallback_and_is_persisted() {
     });
     assert!(presenter.drain_events());
     assert_eq!(
-        presenter.model().tasks[0].title,
+        presenter.model().conversation.tasks[0].title,
         "请修复登录流程。 并补充回归测试"
     );
 
@@ -3784,8 +4043,17 @@ fn generated_title_replaces_fallback_and_is_persisted() {
     });
     assert!(presenter.drain_events());
 
-    assert_eq!(presenter.model().tasks[0].title, "修复登录流程");
-    let project_id = presenter.model().selected_project.as_ref().unwrap().id;
+    assert_eq!(
+        presenter.model().conversation.tasks[0].title,
+        "修复登录流程"
+    );
+    let project_id = presenter
+        .model()
+        .conversation
+        .selected_project
+        .as_ref()
+        .unwrap()
+        .id;
     assert_eq!(
         presenter.storage.tasks(project_id).unwrap()[0].title,
         "修复登录流程"
@@ -3817,31 +4085,33 @@ fn title_generation_settings_persist_independently_of_conversation_selection() {
         presenter.model.title_generation.effort,
         ThinkingEffort::Default
     );
-    assert_eq!(presenter.model.effort, ThinkingEffort::High);
+    assert_eq!(presenter.model.conversation.effort, ThinkingEffort::High);
     assert!(presenter.select_generation_harness(GenerationKind::Title, HarnessKind::Omp));
     assert!(!presenter.select_generation_model(GenerationKind::Title, Some("missing".into())));
-    presenter.model.title_model_catalog = ModelCatalogState::Ready(vec![catalog_model(
-        "provider/title-model",
-        false,
-        &[ThinkingEffort::Low],
-        ThinkingEffort::Default,
-    )]);
+    presenter.model.conversation.title_model_catalog =
+        ModelCatalogState::Ready(vec![catalog_model(
+            "provider/title-model",
+            false,
+            &[ThinkingEffort::Low],
+            ThinkingEffort::Default,
+        )]);
     assert!(
         presenter
             .select_generation_model(GenerationKind::Title, Some("provider/title-model".into()))
     );
     assert!(presenter.select_generation_effort(GenerationKind::Title, ThinkingEffort::Low));
     assert!(!presenter.select_generation_effort(GenerationKind::Title, ThinkingEffort::High));
-    assert_eq!(presenter.model.effort, ThinkingEffort::High);
+    assert_eq!(presenter.model.conversation.effort, ThinkingEffort::High);
     assert!(presenter.select_harness(HarnessKind::Codex, "claude"));
     let expected = presenter.model.title_generation.clone();
     assert!(presenter.select_generation_harness(GenerationKind::Commit, HarnessKind::Codex));
-    presenter.model.commit_model_catalog = ModelCatalogState::Ready(vec![catalog_model(
-        "commit-model",
-        false,
-        &[ThinkingEffort::Medium],
-        ThinkingEffort::Default,
-    )]);
+    presenter.model.conversation.commit_model_catalog =
+        ModelCatalogState::Ready(vec![catalog_model(
+            "commit-model",
+            false,
+            &[ThinkingEffort::Medium],
+            ThinkingEffort::Default,
+        )]);
     assert!(presenter.select_generation_model(GenerationKind::Commit, Some("commit-model".into())));
     assert!(presenter.select_generation_effort(GenerationKind::Commit, ThinkingEffort::Medium));
     assert!(!presenter.select_generation_effort(GenerationKind::Commit, ThinkingEffort::High));
@@ -3862,14 +4132,20 @@ fn title_generation_settings_persist_independently_of_conversation_selection() {
             .effort,
         ThinkingEffort::Low
     );
-    assert_eq!(presenter.model.selected_harness, HarnessKind::Codex);
+    assert_eq!(
+        presenter.model.conversation.selected_harness,
+        HarnessKind::Codex
+    );
     assert!(presenter.select_generation_harness(GenerationKind::Title, HarnessKind::Claude));
     assert!(presenter.model.title_generation.model.is_none());
     assert_eq!(
         presenter.model.title_generation.effort,
         ThinkingEffort::Default
     );
-    assert_eq!(presenter.model.selected_harness, HarnessKind::Codex);
+    assert_eq!(
+        presenter.model.conversation.selected_harness,
+        HarnessKind::Codex
+    );
 }
 
 #[test]
@@ -3878,11 +4154,11 @@ fn commit_message_generation_uses_selected_changes_and_routes_results_to_the_own
     let cwd = Path::new(&start.cwd);
     fs::write(cwd.join("tracked.txt"), "selected content\n").unwrap();
     fs::write(cwd.join("unselected.txt"), "private unselected content\n").unwrap();
-    let conversation_status = presenter.model.run_status.clone();
+    let conversation_status = presenter.model.conversation.run_status.clone();
     presenter.toggle_changes_sidebar();
     finish_workspace_operation(&mut presenter);
-    assert_eq!(presenter.model.run_status, conversation_status);
-    assert!(presenter.model.changes_status.is_none());
+    assert_eq!(presenter.model.conversation.run_status, conversation_status);
+    assert!(presenter.model.conversation.changes_status.is_none());
     presenter.select_changed_file("tracked.txt".into(), true);
     assert!(
         !presenter.generate_workspace_commit_message(),
@@ -3894,17 +4170,18 @@ fn commit_message_generation_uses_selected_changes_and_routes_results_to_the_own
         exit_code: Some(0),
     });
     presenter.drain_events();
-    let conversation_status = presenter.model.run_status.clone();
+    let conversation_status = presenter.model.conversation.run_status.clone();
     presenter.select_changed_file("tracked.txt".into(), false);
     presenter.toggle_commit_editor();
-    assert_eq!(presenter.model.selected_changes.len(), 2);
+    assert_eq!(presenter.model.conversation.selected_changes.len(), 2);
     presenter.select_changed_file("unselected.txt".into(), false);
     assert!(presenter.review_conversation_changes());
     finish_workspace_operation(&mut presenter);
-    assert!(presenter.model.commit_editor_open);
+    assert!(presenter.model.conversation.commit_editor_open);
     assert_eq!(
         presenter
             .model
+            .conversation
             .selected_changes
             .iter()
             .cloned()
@@ -3915,7 +4192,7 @@ fn commit_message_generation_uses_selected_changes_and_routes_results_to_the_own
     assert!(presenter.generate_workspace_commit_message());
     finish_workspace_operation(&mut presenter);
     let owner = presenter.model.conversation.id;
-    let request_id = presenter.model.commit_message_request.unwrap();
+    let request_id = presenter.model.conversation.commit_message_request.unwrap();
     let commands = runner.0.borrow();
     let command = commands
         .commands
@@ -3945,18 +4222,24 @@ fn commit_message_generation_uses_selected_changes_and_routes_results_to_the_own
         message: "fix: Describe selected changes\n\nBody".into(),
     });
     presenter.drain_events();
-    assert!(presenter.model.commit_message.is_empty());
+    assert!(presenter.model.conversation.commit_message.is_empty());
     presenter.model.activate_conversation(owner);
     assert_eq!(
-        presenter.model.commit_message,
+        presenter.model.conversation.commit_message,
         "fix: Describe selected changes\n\nBody"
     );
-    assert!(presenter.model.commit_message_request.is_none());
+    assert!(
+        presenter
+            .model
+            .conversation
+            .commit_message_request
+            .is_none()
+    );
 
     for edit_draft in [true, false] {
         assert!(presenter.generate_workspace_commit_message());
         finish_workspace_operation(&mut presenter);
-        let request_id = presenter.model.commit_message_request.unwrap();
+        let request_id = presenter.model.conversation.commit_message_request.unwrap();
         if edit_draft {
             presenter.set_commit_message("manual edit".into());
         } else {
@@ -3967,24 +4250,37 @@ fn commit_message_generation_uses_selected_changes_and_routes_results_to_the_own
             message: "late result".into(),
         });
         presenter.drain_events();
-        assert_eq!(presenter.model.commit_message, "manual edit");
-        assert!(presenter.model.commit_message_request.is_none());
+        assert_eq!(presenter.model.conversation.commit_message, "manual edit");
+        assert!(
+            presenter
+                .model
+                .conversation
+                .commit_message_request
+                .is_none()
+        );
     }
     presenter.select_changed_file("tracked.txt".into(), true);
     assert!(presenter.generate_workspace_commit_message());
     finish_workspace_operation(&mut presenter);
-    let request_id = presenter.model.commit_message_request.unwrap();
+    let request_id = presenter.model.conversation.commit_message_request.unwrap();
     runner.emit(Event::CommitMessageFailed {
         request_id,
         message: "offline".into(),
     });
     presenter.drain_events();
-    assert_eq!(presenter.model.commit_message, "manual edit");
-    assert!(presenter.model.commit_message_request.is_none());
-    assert_eq!(presenter.model.run_status, conversation_status);
+    assert_eq!(presenter.model.conversation.commit_message, "manual edit");
+    assert!(
+        presenter
+            .model
+            .conversation
+            .commit_message_request
+            .is_none()
+    );
+    assert_eq!(presenter.model.conversation.run_status, conversation_status);
     assert_eq!(
         presenter
             .model
+            .conversation
             .changes_status
             .as_ref()
             .unwrap()
@@ -3995,7 +4291,13 @@ fn commit_message_generation_uses_selected_changes_and_routes_results_to_the_own
     let before = runner.0.borrow().commands.len();
     assert!(presenter.generate_workspace_commit_message());
     finish_workspace_operation(&mut presenter);
-    assert!(presenter.model.commit_message_request.is_none());
+    assert!(
+        presenter
+            .model
+            .conversation
+            .commit_message_request
+            .is_none()
+    );
     assert_eq!(
         runner.0.borrow().commands.len(),
         before,
@@ -4007,12 +4309,12 @@ fn commit_message_generation_uses_selected_changes_and_routes_results_to_the_own
 fn commit_model_catalog_does_not_replace_conversation_or_title_catalogs() {
     let (mut presenter, runner, _directory) = fixture();
     assert!(presenter.refresh_generation_model_catalog(GenerationKind::Title));
-    let title_request = match presenter.model.title_model_catalog {
+    let title_request = match presenter.model.conversation.title_model_catalog {
         ModelCatalogState::Loading { request_id, .. } => request_id,
         _ => panic!("title catalog loading"),
     };
     assert!(presenter.refresh_generation_model_catalog(GenerationKind::Commit));
-    let request_id = match presenter.model.commit_model_catalog {
+    let request_id = match presenter.model.conversation.commit_model_catalog {
         ModelCatalogState::Loading { request_id, .. } => request_id,
         _ => panic!("commit catalog loading"),
     };
@@ -4031,12 +4333,18 @@ fn commit_model_catalog_does_not_replace_conversation_or_title_catalogs() {
     });
     presenter.drain_events();
     assert!(matches!(
-        presenter.model.commit_model_catalog,
+        presenter.model.conversation.commit_model_catalog,
         ModelCatalogState::Idle
     ));
-    assert!(presenter.model.title_model_catalog.accepts(title_request));
+    assert!(
+        presenter
+            .model
+            .conversation
+            .title_model_catalog
+            .accepts(title_request)
+    );
     assert_eq!(
-        presenter.model.model_catalog.models().unwrap(),
+        presenter.model.conversation.model_catalog.models().unwrap(),
         claude_aliases()
     );
 }
@@ -4049,12 +4357,13 @@ fn title_generation_uses_separate_configuration_and_skips_resumed_runs() {
     draft.model = "provider/title-model".into();
     let title_profile = presenter.save_provider_profile(draft).unwrap();
     presenter.select_generation_harness(GenerationKind::Title, HarnessKind::Omp);
-    presenter.model.title_model_catalog = ModelCatalogState::Ready(vec![catalog_model(
-        "provider/title-model",
-        false,
-        &[ThinkingEffort::Low],
-        ThinkingEffort::Default,
-    )]);
+    presenter.model.conversation.title_model_catalog =
+        ModelCatalogState::Ready(vec![catalog_model(
+            "provider/title-model",
+            false,
+            &[ThinkingEffort::Low],
+            ThinkingEffort::Default,
+        )]);
     assert!(presenter.select_generation_effort(GenerationKind::Title, ThinkingEffort::Low));
     let profile_default = presenter
         .generation_configuration(GenerationKind::Title)
@@ -4117,7 +4426,10 @@ fn title_generation_uses_separate_configuration_and_skips_resumed_runs() {
     credentials.delete_api_key(title_profile).unwrap();
     assert!(presenter.submit("missing title credentials", "claude"));
     assert!(last_start(&runner).title_generation.is_none());
-    assert_eq!(presenter.model.tasks[0].title, "missing title credentials");
+    assert_eq!(
+        presenter.model.conversation.tasks[0].title,
+        "missing title credentials"
+    );
 }
 
 #[test]
@@ -4125,7 +4437,7 @@ fn title_effort_tracks_model_support_and_resets_after_catalog_changes() {
     let (mut presenter, runner, _directory) = fixture();
     assert!(presenter.select_generation_harness(GenerationKind::Title, HarnessKind::Codex));
     assert!(!presenter.select_generation_effort(GenerationKind::Title, ThinkingEffort::Low));
-    presenter.model.title_model_catalog = ModelCatalogState::Ready(vec![
+    presenter.model.conversation.title_model_catalog = ModelCatalogState::Ready(vec![
         catalog_model(
             "default-model",
             true,
@@ -4153,7 +4465,9 @@ fn title_effort_tracks_model_support_and_resets_after_catalog_changes() {
     assert!(presenter.select_generation_effort(GenerationKind::Title, ThinkingEffort::Low));
 
     assert!(presenter.refresh_generation_model_catalog(GenerationKind::Title));
-    let ModelCatalogState::Loading { request_id, .. } = presenter.model.title_model_catalog else {
+    let ModelCatalogState::Loading { request_id, .. } =
+        presenter.model.conversation.title_model_catalog
+    else {
         panic!("loading")
     };
     runner.emit(Event::ModelCatalogLoaded {
@@ -4187,8 +4501,11 @@ fn title_effort_tracks_model_support_and_resets_after_catalog_changes() {
     )
     .unwrap();
     assert_eq!(saved.effort, ThinkingEffort::Default);
-    assert_eq!(presenter.model.selected_harness, HarnessKind::Claude);
-    assert_eq!(presenter.model.effort, ThinkingEffort::Default);
+    assert_eq!(
+        presenter.model.conversation.selected_harness,
+        HarnessKind::Claude
+    );
+    assert_eq!(presenter.model.conversation.effort, ThinkingEffort::Default);
 }
 
 #[test]
@@ -4200,13 +4517,15 @@ fn title_model_catalog_is_independent_and_ignores_stale_results() {
     let ModelCatalogState::Loading {
         request_id: stale_request,
         ..
-    } = presenter.model.title_model_catalog
+    } = presenter.model.conversation.title_model_catalog
     else {
         panic!("loading")
     };
     assert!(presenter.select_generation_harness(GenerationKind::Title, HarnessKind::Omp));
     assert!(presenter.refresh_generation_model_catalog(GenerationKind::Title));
-    let ModelCatalogState::Loading { request_id, .. } = presenter.model.title_model_catalog else {
+    let ModelCatalogState::Loading { request_id, .. } =
+        presenter.model.conversation.title_model_catalog
+    else {
         panic!("loading")
     };
     let status = presenter
@@ -4224,7 +4543,13 @@ fn title_model_catalog_is_independent_and_ignores_stale_results() {
         });
     }
     presenter.drain_events();
-    assert!(presenter.model.title_model_catalog.accepts(request_id));
+    assert!(
+        presenter
+            .model
+            .conversation
+            .title_model_catalog
+            .accepts(request_id)
+    );
     assert_eq!(current_catalog_request_id(&presenter), conversation_request);
     runner.emit(Event::ModelCatalogLoaded {
         request_id,
@@ -4250,14 +4575,23 @@ fn title_model_catalog_is_independent_and_ignores_stale_results() {
     );
     emit_current_catalog(&presenter, &runner, claude_aliases());
     presenter.drain_events();
-    assert_eq!(presenter.model.selected_harness, HarnessKind::Claude);
-    assert!(presenter.model.model_override.is_none());
+    assert_eq!(
+        presenter.model.conversation.selected_harness,
+        HarnessKind::Claude
+    );
+    assert!(presenter.model.conversation.model_override.is_none());
     assert_eq!(
         presenter.model.title_generation.model.as_deref(),
         Some("provider/title-model")
     );
     assert_eq!(
-        presenter.model.title_model_catalog.models().unwrap()[0].id,
+        presenter
+            .model
+            .conversation
+            .title_model_catalog
+            .models()
+            .unwrap()[0]
+            .id,
         "provider/title-model"
     );
 }
@@ -4272,11 +4606,11 @@ fn queued_messages_start_one_at_a_time_and_resume_the_same_session() {
             .harnesses
             .insert(harness, ready_probe(harness));
         assert!(presenter.submit("first", harness.default_executable()));
-        let task_id = presenter.model().active_task.unwrap();
-        let mut run_id = presenter.model().active_run.unwrap();
+        let task_id = presenter.model().conversation.active_task.unwrap();
+        let mut run_id = presenter.model().conversation.active_run.unwrap();
         assert!(presenter.submit(" second ", harness.default_executable()));
         assert!(presenter.submit("third", harness.default_executable()));
-        assert_eq!(presenter.model().messages.len(), 1);
+        assert_eq!(presenter.model().conversation.messages.len(), 1);
         assert!(!presenter.submit(" \n ", harness.default_executable()));
         runner.emit(Event::RunSessionStarted {
             run_id,
@@ -4295,7 +4629,10 @@ fn queued_messages_start_one_at_a_time_and_resume_the_same_session() {
             assert_eq!(request.session_id.as_deref(), Some("queued-session"));
             assert_eq!(request.prompt, prompt);
             assert_eq!(request.harness, harness);
-            assert_eq!(presenter.model().queued_messages.len(), remaining);
+            assert_eq!(
+                presenter.model().conversation.queued_messages.len(),
+                remaining
+            );
             run_id = request.run_id;
         }
         runner.emit(Event::RunExited {
@@ -4304,11 +4641,12 @@ fn queued_messages_start_one_at_a_time_and_resume_the_same_session() {
             exit_code: Some(0),
         });
         presenter.drain_events();
-        assert!(presenter.model().active_run.is_none());
-        assert_eq!(presenter.model().tasks.len(), 1);
+        assert!(presenter.model().conversation.active_run.is_none());
+        assert_eq!(presenter.model().conversation.tasks.len(), 1);
         assert_eq!(
             presenter
                 .model()
+                .conversation
                 .messages
                 .iter()
                 .map(|message| message.content.as_str())
@@ -4328,12 +4666,12 @@ fn failed_or_cancelled_runs_keep_the_queue_for_explicit_retry() {
     ] {
         let (mut presenter, runner, _directory) = fixture();
         assert!(presenter.submit("first", "claude"));
-        let run_id = presenter.model().active_run.unwrap();
-        let task_id = presenter.model().active_task.unwrap();
+        let run_id = presenter.model().conversation.active_run.unwrap();
+        let task_id = presenter.model().conversation.active_task.unwrap();
         assert!(presenter.submit("keep me", "claude"));
         assert!(presenter.submit("remove me", "claude"));
-        let message_id = presenter.model().queued_messages[0].id;
-        presenter.remove_queued_message(presenter.model().queued_messages[1].id);
+        let message_id = presenter.model().conversation.queued_messages[0].id;
+        presenter.remove_queued_message(presenter.model().conversation.queued_messages[1].id);
         if status == RunStatus::Completed {
             // Stop can race with a successful exit; it must still pause the queue.
             presenter.cancel();
@@ -4349,14 +4687,14 @@ fn failed_or_cancelled_runs_keep_the_queue_for_explicit_retry() {
             exit_code: None,
         });
         presenter.drain_events();
-        assert!(presenter.model().active_run.is_none());
-        assert_eq!(presenter.model().queued_messages.len(), 1);
+        assert!(presenter.model().conversation.active_run.is_none());
+        assert_eq!(presenter.model().conversation.queued_messages.len(), 1);
         presenter.new_task();
         assert!(!presenter.send_queued_message(message_id));
         presenter.select_task(task_id);
         assert!(presenter.send_queued_message(message_id));
         assert_eq!(last_start(&runner).prompt, "keep me");
-        assert!(presenter.model().queued_messages.is_empty());
+        assert!(presenter.model().conversation.queued_messages.is_empty());
     }
 }
 
@@ -4365,7 +4703,7 @@ fn queued_message_survives_missing_session_and_runner_send_failure() {
     for missing_session in [true, false] {
         let (mut presenter, runner, _directory) = fixture();
         assert!(presenter.submit("first", "claude"));
-        let run_id = presenter.model().active_run.unwrap();
+        let run_id = presenter.model().conversation.active_run.unwrap();
         assert!(presenter.submit("keep me", "claude"));
         if !missing_session {
             runner.emit(Event::RunSessionStarted {
@@ -4380,8 +4718,11 @@ fn queued_message_survives_missing_session_and_runner_send_failure() {
             exit_code: Some(0),
         });
         presenter.drain_events();
-        assert!(presenter.model().active_run.is_none());
-        assert_eq!(presenter.model().queued_messages[0].prompt, "keep me");
+        assert!(presenter.model().conversation.active_run.is_none());
+        assert_eq!(
+            presenter.model().conversation.queued_messages[0].prompt,
+            "keep me"
+        );
         assert!(
             presenter
                 .model()
@@ -4393,8 +4734,8 @@ fn queued_message_survives_missing_session_and_runner_send_failure() {
                 })
         );
         if !missing_session {
-            let task_id = presenter.model().selected_task.unwrap();
-            let message_id = presenter.model().queued_messages[0].id;
+            let task_id = presenter.model().conversation.selected_task.unwrap();
+            let message_id = presenter.model().conversation.queued_messages[0].id;
             for _ in 0..2 {
                 let stored = presenter.storage.messages(task_id).unwrap();
                 assert_eq!(
@@ -4406,31 +4747,43 @@ fn queued_message_survives_missing_session_and_runner_send_failure() {
                 assert_eq!(
                     presenter
                         .storage
-                        .tasks(presenter.model().selected_project.as_ref().unwrap().id)
+                        .tasks(
+                            presenter
+                                .model()
+                                .conversation
+                                .selected_project
+                                .as_ref()
+                                .unwrap()
+                                .id
+                        )
                         .unwrap()[0]
                         .status,
                     RunStatus::Completed
                 );
                 assert!(!presenter.send_queued_message(message_id));
-                assert_eq!(presenter.model().queued_messages[0].id, message_id);
+                assert_eq!(
+                    presenter.model().conversation.queued_messages[0].id,
+                    message_id
+                );
             }
             runner.0.borrow_mut().fail_send = false;
             assert!(presenter.send_queued_message(message_id));
             let request = last_start(&runner);
             assert_eq!(request.task_id, task_id);
             assert_eq!(request.session_id.as_deref(), Some("saved-session"));
-            assert!(presenter.model().queued_messages.is_empty());
+            assert!(presenter.model().conversation.queued_messages.is_empty());
             presenter.select_task(task_id);
             assert_eq!(
                 presenter
                     .model()
+                    .conversation
                     .messages
                     .iter()
                     .map(|message| message.content.as_str())
                     .collect::<Vec<_>>(),
                 ["first", "keep me"]
             );
-            assert_eq!(presenter.model().messages[1].sequence, 2);
+            assert_eq!(presenter.model().conversation.messages[1].sequence, 2);
             assert_eq!(
                 runner
                     .0
@@ -4449,17 +4802,23 @@ fn queued_message_survives_missing_session_and_runner_send_failure() {
 fn steer_uses_the_active_run_and_dequeues_only_after_a_matching_receipt() {
     let (mut presenter, runner, _directory) = fixture();
     assert!(presenter.submit("first", "claude"));
-    let run_id = presenter.model().active_run.unwrap();
+    let run_id = presenter.model().conversation.active_run.unwrap();
     assert!(presenter.submit("ordinary queue", "claude"));
     assert!(presenter.submit("urgent correction", "claude"));
-    let message_id = presenter.model().queued_messages[1].id;
+    let message_id = presenter.model().conversation.queued_messages[1].id;
     assert!(presenter.steer_queued_message(message_id));
-    assert_eq!(presenter.model().queued_messages[0].id, message_id);
-    assert_eq!(presenter.model().messages.len(), 1);
-    assert_eq!(presenter.model().steering_message, Some(message_id));
+    assert_eq!(
+        presenter.model().conversation.queued_messages[0].id,
+        message_id
+    );
+    assert_eq!(presenter.model().conversation.messages.len(), 1);
+    assert_eq!(
+        presenter.model().conversation.steering_message,
+        Some(message_id)
+    );
     assert!(!presenter.steer_queued_message(message_id));
     presenter.remove_queued_message(message_id);
-    assert_eq!(presenter.model().queued_messages.len(), 2);
+    assert_eq!(presenter.model().conversation.queued_messages.len(), 2);
     assert!(
         matches!(&runner.0.borrow().commands.last().unwrap().command,
         Command::RunSteer { run_id: id, message_id: received, prompt }
@@ -4478,15 +4837,16 @@ fn steer_uses_the_active_run_and_dequeues_only_after_a_matching_receipt() {
         runner.emit(event);
     }
     presenter.drain_events();
-    assert_eq!(presenter.model().queued_messages.len(), 2);
+    assert_eq!(presenter.model().conversation.queued_messages.len(), 2);
     for _ in 0..2 {
         runner.emit(Event::RunInputAccepted { run_id, message_id });
     }
     presenter.drain_events();
-    assert!(presenter.model().steering_message.is_none());
-    assert_eq!(presenter.model().queued_messages.len(), 1);
+    assert!(presenter.model().conversation.steering_message.is_none());
+    assert_eq!(presenter.model().conversation.queued_messages.len(), 1);
     let user_messages = presenter
         .model()
+        .conversation
         .messages
         .iter()
         .filter(|message| message.role == MessageRole::User)
@@ -4510,9 +4870,9 @@ fn steer_uses_the_active_run_and_dequeues_only_after_a_matching_receipt() {
 fn accepted_steer_is_saved_without_changing_another_tasks_timeline() {
     let (mut presenter, runner, _directory) = fixture();
     assert!(presenter.submit("other conversation", "claude"));
-    let other_task = presenter.model().active_task.unwrap();
+    let other_task = presenter.model().conversation.active_task.unwrap();
     runner.emit(Event::RunExited {
-        run_id: presenter.model().active_run.unwrap(),
+        run_id: presenter.model().conversation.active_run.unwrap(),
         status: RunStatus::Completed,
         exit_code: Some(0),
     });
@@ -4520,14 +4880,15 @@ fn accepted_steer_is_saved_without_changing_another_tasks_timeline() {
     presenter.new_task();
 
     assert!(presenter.submit("active conversation", "claude"));
-    let task_id = presenter.model().active_task.unwrap();
-    let run_id = presenter.model().active_run.unwrap();
+    let task_id = presenter.model().conversation.active_task.unwrap();
+    let run_id = presenter.model().conversation.active_run.unwrap();
     assert!(presenter.submit("correction for active conversation", "claude"));
-    let message_id = presenter.model().queued_messages[0].id;
+    let message_id = presenter.model().conversation.queued_messages[0].id;
     assert!(presenter.steer_queued_message(message_id));
     presenter.select_task(other_task);
     let visible_message_ids = presenter
         .model()
+        .conversation
         .messages
         .iter()
         .map(|message| message.id)
@@ -4536,12 +4897,16 @@ fn accepted_steer_is_saved_without_changing_another_tasks_timeline() {
     runner.emit(Event::RunInputAccepted { run_id, message_id });
     presenter.drain_events();
 
-    assert!(presenter.model().queued_messages.is_empty());
-    assert!(presenter.model().steering_message.is_none());
-    assert_eq!(presenter.model().selected_task, Some(other_task));
+    assert!(presenter.model().conversation.queued_messages.is_empty());
+    assert!(presenter.model().conversation.steering_message.is_none());
+    assert_eq!(
+        presenter.model().conversation.selected_task,
+        Some(other_task)
+    );
     assert_eq!(
         presenter
             .model()
+            .conversation
             .messages
             .iter()
             .map(|message| message.id)
@@ -4550,7 +4915,7 @@ fn accepted_steer_is_saved_without_changing_another_tasks_timeline() {
     );
     assert_eq!(presenter.storage.messages(other_task).unwrap().len(), 1);
     presenter.select_task(task_id);
-    let messages = &presenter.model().messages;
+    let messages = &presenter.model().conversation.messages;
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[1].content, "correction for active conversation");
     assert_eq!(messages[1].task_id, task_id);
@@ -4561,7 +4926,7 @@ fn accepted_steer_is_saved_without_changing_another_tasks_timeline() {
 fn user_ask_reply_uses_the_active_run_without_creating_a_prompt_or_run() {
     let (mut presenter, runner, _directory) = fixture();
     assert!(presenter.submit("ask me", "claude"));
-    let run_id = presenter.model().active_run.unwrap();
+    let run_id = presenter.model().conversation.active_run.unwrap();
     let request_id = Uuid::new_v4();
     runner.emit(Event::RunUserAskRequested {
         run_id: Uuid::new_v4(),
@@ -4574,13 +4939,18 @@ fn user_ask_reply_uses_the_active_run_without_creating_a_prompt_or_run() {
         questions: user_ask_questions(),
     });
     presenter.drain_events();
-    assert_eq!(presenter.model().pending_user_asks.len(), 1);
-    assert_eq!(presenter.model().pending_user_asks[0].questions.len(), 2);
+    assert_eq!(presenter.model().conversation.pending_user_asks.len(), 1);
+    assert_eq!(
+        presenter.model().conversation.pending_user_asks[0]
+            .questions
+            .len(),
+        2
+    );
 
     let answers = user_ask_answers();
     assert!(presenter.answer_user_ask(request_id, answers.clone()));
     assert_eq!(
-        presenter.model().pending_user_asks[0].submission,
+        presenter.model().conversation.pending_user_asks[0].submission,
         UserAskSubmissionState::Submitting
     );
     assert!(!presenter.answer_user_ask(request_id, answers.clone()));
@@ -4600,18 +4970,20 @@ fn user_ask_reply_uses_the_active_run_without_creating_a_prompt_or_run() {
     });
     presenter.drain_events();
     assert_eq!(
-        presenter.model().pending_user_asks[0].submission,
+        presenter.model().conversation.pending_user_asks[0].submission,
         UserAskSubmissionState::Pending
     );
     assert_eq!(
-        presenter.model().pending_user_asks[0].error.as_deref(),
+        presenter.model().conversation.pending_user_asks[0]
+            .error
+            .as_deref(),
         Some("invalid")
     );
     assert!(presenter.answer_user_ask(request_id, answers));
     runner.emit(Event::RunUserAskAnswerSent { run_id, request_id });
     presenter.drain_events();
     assert_eq!(
-        presenter.model().pending_user_asks[0].submission,
+        presenter.model().conversation.pending_user_asks[0].submission,
         UserAskSubmissionState::Sent
     );
     runner.emit(Event::RunUserAskAnswerRejected {
@@ -4621,7 +4993,7 @@ fn user_ask_reply_uses_the_active_run_without_creating_a_prompt_or_run() {
     });
     presenter.drain_events();
     assert_eq!(
-        presenter.model().pending_user_asks[0].submission,
+        presenter.model().conversation.pending_user_asks[0].submission,
         UserAskSubmissionState::Sent
     );
     runner.emit(Event::RunUserAskFinished {
@@ -4631,18 +5003,30 @@ fn user_ask_reply_uses_the_active_run_without_creating_a_prompt_or_run() {
         message: None,
     });
     presenter.drain_events();
-    assert!(presenter.model().pending_user_asks.is_empty());
-    assert_eq!(presenter.model().messages.len(), 3);
-    assert!(presenter.model().messages[1].content.contains("Agent 提问"));
-    assert!(presenter.model().messages[1].content.contains("Target?"));
+    assert!(presenter.model().conversation.pending_user_asks.is_empty());
+    assert_eq!(presenter.model().conversation.messages.len(), 3);
     assert!(
-        presenter.model().messages[2]
+        presenter.model().conversation.messages[1]
+            .content
+            .contains("Agent 提问")
+    );
+    assert!(
+        presenter.model().conversation.messages[1]
+            .content
+            .contains("Target?")
+    );
+    assert!(
+        presenter.model().conversation.messages[2]
             .content
             .contains("User Ask 已回答")
     );
-    assert!(presenter.model().messages[2].content.contains("Workspace"));
     assert!(
-        presenter.model().messages[2]
+        presenter.model().conversation.messages[2]
+            .content
+            .contains("Workspace")
+    );
+    assert!(
+        presenter.model().conversation.messages[2]
             .content
             .contains("Keep it focused")
     );
@@ -4662,7 +5046,7 @@ fn user_ask_reply_uses_the_active_run_without_creating_a_prompt_or_run() {
 fn user_ask_drafts_cover_choice_text_navigation_and_retry_without_duplicate_submission() {
     let (mut presenter, runner, _directory) = fixture();
     assert!(presenter.submit("ask me", "claude"));
-    let run_id = presenter.model().active_run.unwrap();
+    let run_id = presenter.model().conversation.active_run.unwrap();
     let request_id = Uuid::new_v4();
     runner.emit(Event::RunUserAskRequested {
         run_id,
@@ -4674,11 +5058,14 @@ fn user_ask_drafts_cover_choice_text_navigation_and_retry_without_duplicate_subm
     assert!(!presenter.can_submit_user_ask(request_id));
     assert!(presenter.set_user_ask_question(request_id, 3));
     assert!(!presenter.set_user_ask_question(request_id, 4));
-    assert_eq!(presenter.model().pending_user_asks[0].active_question, 3);
+    assert_eq!(
+        presenter.model().conversation.pending_user_asks[0].active_question,
+        3
+    );
     assert!(presenter.toggle_user_ask_collapsed(request_id));
-    assert!(presenter.model().pending_user_asks[0].collapsed);
+    assert!(presenter.model().conversation.pending_user_asks[0].collapsed);
     assert!(presenter.toggle_user_ask_collapsed(request_id));
-    assert!(!presenter.model().pending_user_asks[0].collapsed);
+    assert!(!presenter.model().conversation.pending_user_asks[0].collapsed);
 
     assert!(presenter.set_user_ask_option(request_id, "target", "library", true));
     assert!(presenter.set_user_ask_option(request_id, "target", "workspace", true));
@@ -4687,7 +5074,9 @@ fn user_ask_drafts_cover_choice_text_navigation_and_retry_without_duplicate_subm
     assert!(presenter.set_user_ask_option(request_id, "scope", "focused", true));
     assert!(presenter.set_user_ask_text(request_id, "scope", String::new()));
     assert_eq!(
-        presenter.model().pending_user_asks[0].drafts.get("scope"),
+        presenter.model().conversation.pending_user_asks[0]
+            .drafts
+            .get("scope"),
         Some(&UserAskAnswerValue::Selected(vec!["focused".into()]))
     );
     assert!(presenter.set_user_ask_text(request_id, "scope", "entire workspace".into(),));
@@ -4722,7 +5111,7 @@ fn user_ask_drafts_cover_choice_text_navigation_and_retry_without_duplicate_subm
         Command::RunUserAskAnswer { answers, .. } if answers == &expected
     ));
     assert_eq!(
-        presenter.model().pending_user_asks[0].submitted_answers,
+        presenter.model().conversation.pending_user_asks[0].submitted_answers,
         Some(expected.clone())
     );
 
@@ -4732,7 +5121,7 @@ fn user_ask_drafts_cover_choice_text_navigation_and_retry_without_duplicate_subm
         message: "try again".into(),
     });
     presenter.drain_events();
-    let request = &presenter.model().pending_user_asks[0];
+    let request = &presenter.model().conversation.pending_user_asks[0];
     assert_eq!(request.submission, UserAskSubmissionState::Pending);
     assert_eq!(request.error.as_deref(), Some("try again"));
     assert_eq!(request.submitted_answers, None);
@@ -4758,7 +5147,7 @@ fn user_ask_drafts_cover_choice_text_navigation_and_retry_without_duplicate_subm
 fn user_ask_terminal_events_preserve_request_order_and_write_read_only_history() {
     let (mut presenter, runner, _directory) = fixture();
     assert!(presenter.submit("ask twice", "claude"));
-    let run_id = presenter.model().active_run.unwrap();
+    let run_id = presenter.model().conversation.active_run.unwrap();
     let first = Uuid::new_v4();
     let second = Uuid::new_v4();
     for request_id in [first, second] {
@@ -4772,6 +5161,7 @@ fn user_ask_terminal_events_preserve_request_order_and_write_read_only_history()
     assert_eq!(
         presenter
             .model()
+            .conversation
             .pending_user_asks
             .iter()
             .map(|request| request.request_id)
@@ -4786,18 +5176,28 @@ fn user_ask_terminal_events_preserve_request_order_and_write_read_only_history()
         message: Some("native request closed".into()),
     });
     presenter.drain_events();
-    assert_eq!(presenter.model().pending_user_asks.len(), 1);
-    assert_eq!(presenter.model().pending_user_asks[0].request_id, second);
+    assert_eq!(presenter.model().conversation.pending_user_asks.len(), 1);
+    assert_eq!(
+        presenter.model().conversation.pending_user_asks[0].request_id,
+        second
+    );
     assert_eq!(
         presenter
             .model()
             .latest_log_text(presenter.model().language),
         "Agent 正在等待你的回答。"
     );
-    assert!(presenter.model().messages.iter().any(|message| {
-        message.content.contains("User Ask 已取消")
-            && message.content.contains("native request closed")
-    }));
+    assert!(
+        presenter
+            .model()
+            .conversation
+            .messages
+            .iter()
+            .any(|message| {
+                message.content.contains("User Ask 已取消")
+                    && message.content.contains("native request closed")
+            })
+    );
 
     runner.emit(Event::RunExited {
         run_id,
@@ -4805,10 +5205,17 @@ fn user_ask_terminal_events_preserve_request_order_and_write_read_only_history()
         exit_code: Some(1),
     });
     presenter.drain_events();
-    assert!(presenter.model().pending_user_asks.is_empty());
-    assert!(presenter.model().messages.iter().any(|message| {
-        message.content.contains("User Ask 已失效") && message.content.contains("Target?")
-    }));
+    assert!(presenter.model().conversation.pending_user_asks.is_empty());
+    assert!(
+        presenter
+            .model()
+            .conversation
+            .messages
+            .iter()
+            .any(|message| {
+                message.content.contains("User Ask 已失效") && message.content.contains("Target?")
+            })
+    );
     assert!(!presenter.submit_user_ask(second));
 }
 
@@ -4816,7 +5223,7 @@ fn user_ask_terminal_events_preserve_request_order_and_write_read_only_history()
 fn user_ask_send_failure_and_run_exit_leave_no_stale_desktop_state() {
     let (mut presenter, runner, _directory) = fixture();
     assert!(presenter.submit("ask me", "claude"));
-    let run_id = presenter.model().active_run.unwrap();
+    let run_id = presenter.model().conversation.active_run.unwrap();
     let request_id = Uuid::new_v4();
     runner.emit(Event::RunUserAskRequested {
         run_id,
@@ -4828,10 +5235,14 @@ fn user_ask_send_failure_and_run_exit_leave_no_stale_desktop_state() {
     runner.0.borrow_mut().fail_send = true;
     assert!(!presenter.answer_user_ask(request_id, user_ask_answers()));
     assert_eq!(
-        presenter.model().pending_user_asks[0].submission,
+        presenter.model().conversation.pending_user_asks[0].submission,
         UserAskSubmissionState::Pending
     );
-    assert!(presenter.model().pending_user_asks[0].error.is_some());
+    assert!(
+        presenter.model().conversation.pending_user_asks[0]
+            .error
+            .is_some()
+    );
     runner.0.borrow_mut().fail_send = false;
 
     runner.emit(Event::RunExited {
@@ -4840,8 +5251,8 @@ fn user_ask_send_failure_and_run_exit_leave_no_stale_desktop_state() {
         exit_code: Some(1),
     });
     presenter.drain_events();
-    assert!(presenter.model().pending_user_asks.is_empty());
-    assert!(presenter.model().active_run.is_none());
+    assert!(presenter.model().conversation.pending_user_asks.is_empty());
+    assert!(presenter.model().conversation.active_run.is_none());
     assert!(!presenter.answer_user_ask(request_id, user_ask_answers()));
 }
 
@@ -4951,10 +5362,10 @@ fn rejected_steer_falls_back_to_the_next_turn_and_survives_cancellation() {
     for cancelled in [false, true] {
         let (mut presenter, runner, _directory) = fixture();
         assert!(presenter.submit("first", "claude"));
-        let run_id = presenter.model().active_run.unwrap();
+        let run_id = presenter.model().conversation.active_run.unwrap();
         assert!(presenter.submit("ordinary queue", "claude"));
         assert!(presenter.submit("correction", "claude"));
-        let message_id = presenter.model().queued_messages[1].id;
+        let message_id = presenter.model().conversation.queued_messages[1].id;
         assert!(presenter.steer_queued_message(message_id));
         runner.emit(Event::RunSessionStarted {
             run_id,
@@ -4969,8 +5380,8 @@ fn rejected_steer_falls_back_to_the_next_turn_and_survives_cancellation() {
             message: "turn ended".into(),
         });
         presenter.drain_events();
-        assert_eq!(presenter.model().queued_messages.len(), 2);
-        assert!(presenter.model().steering_message.is_none());
+        assert_eq!(presenter.model().conversation.queued_messages.len(), 2);
+        assert!(presenter.model().conversation.steering_message.is_none());
         runner.emit(Event::RunExited {
             run_id,
             status: if cancelled {
@@ -4982,22 +5393,22 @@ fn rejected_steer_falls_back_to_the_next_turn_and_survives_cancellation() {
         });
         presenter.drain_events();
         if cancelled {
-            assert_eq!(presenter.model().queued_messages.len(), 2);
-            assert!(presenter.model().active_run.is_none());
+            assert_eq!(presenter.model().conversation.queued_messages.len(), 2);
+            assert!(presenter.model().conversation.active_run.is_none());
         } else {
             let next = last_start(&runner);
             assert_ne!(next.run_id, run_id);
             assert_eq!(next.prompt, "correction");
             assert_eq!(next.session_id.as_deref(), Some("saved-session"));
             assert_eq!(
-                presenter.model().queued_messages[0].prompt,
+                presenter.model().conversation.queued_messages[0].prompt,
                 "ordinary queue"
             );
         }
         runner.emit(Event::RunInputAccepted { run_id, message_id });
         presenter.drain_events();
         assert_eq!(
-            presenter.model().queued_messages.len(),
+            presenter.model().conversation.queued_messages.len(),
             if cancelled { 2 } else { 1 }
         );
     }
@@ -5009,11 +5420,14 @@ fn steer_send_failure_preserves_queue_order_and_stopping_blocks_steer() {
     assert!(presenter.submit("first", "claude"));
     assert!(presenter.submit("second", "claude"));
     assert!(presenter.submit("third", "claude"));
-    let message_id = presenter.model().queued_messages[1].id;
+    let message_id = presenter.model().conversation.queued_messages[1].id;
     runner.0.borrow_mut().fail_send = true;
     assert!(!presenter.steer_queued_message(message_id));
-    assert_eq!(presenter.model().queued_messages[0].prompt, "second");
-    assert!(presenter.model().steering_message.is_none());
+    assert_eq!(
+        presenter.model().conversation.queued_messages[0].prompt,
+        "second"
+    );
+    assert!(presenter.model().conversation.steering_message.is_none());
     runner.0.borrow_mut().fail_send = false;
     presenter.cancel();
     assert!(!presenter.steer_queued_message(message_id));
@@ -5040,9 +5454,9 @@ fn follow_up_resumes_the_saved_session_after_reopening_and_new_task_starts_fresh
         let cwd = directory.path().canonicalize().unwrap();
         assert_eq!(Path::new(&last_start(&runner).cwd), cwd);
         assert_eq!(presenter.model().working_directory(), cwd.to_str());
-        let task_id = presenter.model().active_task.unwrap();
-        let first_run = presenter.model().active_run.unwrap();
-        let first_message = presenter.model().messages[0].id;
+        let task_id = presenter.model().conversation.active_task.unwrap();
+        let first_run = presenter.model().conversation.active_run.unwrap();
+        let first_message = presenter.model().conversation.messages[0].id;
         runner.emit(Event::RunSessionStarted {
             run_id: first_run,
             session_id: "saved-session".into(),
@@ -5079,7 +5493,10 @@ fn follow_up_resumes_the_saved_session_after_reopening_and_new_task_starts_fresh
         assert_eq!(presenter.model().working_directory(), cwd.to_str());
         assert!(!presenter.submit("follow-up before probe", &saved_probe.executable));
         assert!(!presenter.model().can_submit());
-        assert_eq!(presenter.model().executable, saved_probe.executable);
+        assert_eq!(
+            presenter.model().conversation.executable,
+            saved_probe.executable
+        );
         assert!(runner.0.borrow().commands.iter().any(|command| matches!(
             &command.command, Command::HarnessProbe { harness: probed_harness, executable, .. }
                 if *probed_harness == harness && executable == &saved_probe.executable
@@ -5108,21 +5525,25 @@ fn follow_up_resumes_the_saved_session_after_reopening_and_new_task_starts_fresh
                 .iter()
                 .all(|command| !matches!(command.command, Command::RunStart(_)))
         );
-        assert_eq!(presenter.model().messages.len(), 2);
+        assert_eq!(presenter.model().conversation.messages.len(), 2);
 
         runner.emit(Event::HarnessDetected(saved_probe.clone()));
         presenter.drain_events();
         assert!(presenter.model().can_submit());
         assert!(presenter.submit("  follow-up  ", harness.default_executable()));
-        let second_run = presenter.model().active_run.unwrap();
+        let second_run = presenter.model().conversation.active_run.unwrap();
         assert_ne!(first_run, second_run);
-        assert_eq!(presenter.model().selected_task, Some(task_id));
-        assert_eq!(presenter.model().tasks.len(), 1);
-        assert_eq!(presenter.model().tasks[0].title, "first question");
-        assert_eq!(presenter.model().messages[0].id, first_message);
+        assert_eq!(presenter.model().conversation.selected_task, Some(task_id));
+        assert_eq!(presenter.model().conversation.tasks.len(), 1);
+        assert_eq!(
+            presenter.model().conversation.tasks[0].title,
+            "first question"
+        );
+        assert_eq!(presenter.model().conversation.messages[0].id, first_message);
         assert_eq!(
             presenter
                 .model()
+                .conversation
                 .messages
                 .iter()
                 .map(|message| (message.sequence, message.content.as_str(), message.run_id))
@@ -5156,7 +5577,7 @@ fn follow_up_resumes_the_saved_session_after_reopening_and_new_task_starts_fresh
         });
         presenter.drain_events();
         assert!(presenter.submit("retry", harness.default_executable()));
-        let retry_run = presenter.model().active_run.unwrap();
+        let retry_run = presenter.model().conversation.active_run.unwrap();
         {
             let state = runner.0.borrow();
             let Command::RunStart(request) = &state.commands.last().unwrap().command else {
@@ -5184,8 +5605,8 @@ fn follow_up_resumes_the_saved_session_after_reopening_and_new_task_starts_fresh
             Some(request.cwd.as_str()),
             presenter.model().working_directory()
         );
-        assert_eq!(presenter.model().tasks.len(), 2);
-        assert_eq!(presenter.model().messages.len(), 1);
+        assert_eq!(presenter.model().conversation.tasks.len(), 2);
+        assert_eq!(presenter.model().conversation.messages.len(), 1);
     }
 }
 
@@ -5194,7 +5615,7 @@ fn follow_up_does_not_silently_restart_when_the_session_is_missing_or_harness_ch
     for missing_session in [true, false] {
         let (mut presenter, runner, _directory) = fixture();
         assert!(presenter.submit("first question", "claude"));
-        let run_id = presenter.model().active_run.unwrap();
+        let run_id = presenter.model().conversation.active_run.unwrap();
         if !missing_session {
             runner.emit(Event::RunSessionStarted {
                 run_id,
@@ -5217,9 +5638,9 @@ fn follow_up_does_not_silently_restart_when_the_session_is_missing_or_harness_ch
         runner.0.borrow_mut().commands.clear();
         assert!(!presenter.submit("follow-up", "configured-cli"));
         assert!(runner.0.borrow().commands.is_empty());
-        assert!(presenter.model().active_run.is_none());
-        assert_eq!(presenter.model().messages.len(), 1);
-        assert_eq!(presenter.model().tasks.len(), 1);
+        assert!(presenter.model().conversation.active_run.is_none());
+        assert_eq!(presenter.model().conversation.messages.len(), 1);
+        assert_eq!(presenter.model().conversation.tasks.len(), 1);
         assert!(
             presenter
                 .model()
@@ -5238,22 +5659,34 @@ fn send_failure_rolls_back_a_new_task_without_entering_busy_state() {
     let (mut presenter, runner, _directory) = fixture();
     runner.0.borrow_mut().fail_send = true;
     assert!(!presenter.submit("hello", "claude"));
-    assert!(presenter.model().active_run.is_none());
-    assert!(presenter.model.active_run_started_at.is_none());
-    assert!(presenter.model().active_run_elapsed_seconds.is_none());
+    assert!(presenter.model().conversation.active_run.is_none());
+    assert!(presenter.model.conversation.active_run_started_at.is_none());
+    assert!(
+        presenter
+            .model()
+            .conversation
+            .active_run_elapsed_seconds
+            .is_none()
+    );
     assert_eq!(
         presenter
             .model()
             .latest_log_text(presenter.model().language),
         "Runner 不可用，任务未启动。"
     );
-    let project_id = presenter.model().selected_project.as_ref().unwrap().id;
+    let project_id = presenter
+        .model()
+        .conversation
+        .selected_project
+        .as_ref()
+        .unwrap()
+        .id;
     assert!(presenter.storage.tasks(project_id).unwrap().is_empty());
     runner.0.borrow_mut().fail_send = false;
     assert!(presenter.submit("hello", "claude"));
     assert_eq!(presenter.storage.tasks(project_id).unwrap().len(), 1);
-    assert_eq!(presenter.model().messages.len(), 1);
-    assert_eq!(presenter.model().messages[0].content, "hello");
+    assert_eq!(presenter.model().conversation.messages.len(), 1);
+    assert_eq!(presenter.model().conversation.messages[0].content, "hello");
 }
 
 #[test]
@@ -5266,10 +5699,10 @@ fn runner_events_update_timeline_and_persist_terminal_statuses() {
     ] {
         let (mut presenter, runner, _directory) = fixture();
         assert!(presenter.submit("hello", "claude"));
-        let started = presenter.model.active_run_started_at.unwrap();
+        let started = presenter.model.conversation.active_run_started_at.unwrap();
         assert!(presenter.refresh_run_elapsed(started + Duration::from_secs(5)));
-        let run_id = presenter.model().active_run.unwrap();
-        let task_id = presenter.model().active_task.unwrap();
+        let run_id = presenter.model().conversation.active_run.unwrap();
+        let task_id = presenter.model().conversation.active_task.unwrap();
         runner.emit(Event::RunStarted { run_id, pid: 42 });
         runner.emit(Event::RunSessionStarted {
             run_id,
@@ -5280,14 +5713,20 @@ fn runner_events_update_timeline_and_persist_terminal_statuses() {
             text: "partial".into(),
         });
         assert!(presenter.drain_events());
-        assert_eq!(presenter.model().streaming_text, "partial");
+        assert_eq!(presenter.model().conversation.streaming_text, "partial");
         assert!(!presenter.drain_events());
         runner.emit(Event::RunMessageCompleted {
             run_id,
             text: "answer".into(),
         });
         presenter.drain_events();
-        assert!(!presenter.model().completed_runs.contains(&run_id));
+        assert!(
+            !presenter
+                .model()
+                .conversation
+                .completed_runs
+                .contains(&run_id)
+        );
         if status == RunStatus::Failed {
             runner.emit(Event::RunFailed {
                 run_id,
@@ -5301,16 +5740,26 @@ fn runner_events_update_timeline_and_persist_terminal_statuses() {
             exit_code: Some(0),
         });
         presenter.drain_events();
-        assert!(presenter.model().streaming_text.is_empty());
-        assert!(presenter.model().active_run.is_none());
-        assert!(presenter.model().active_task.is_none());
-        assert!(presenter.model().active_harness.is_none());
-        assert!(presenter.model.active_run_started_at.is_none());
-        assert!(presenter.model().active_run_elapsed_seconds.is_none());
+        assert!(presenter.model().conversation.streaming_text.is_empty());
+        assert!(presenter.model().conversation.active_run.is_none());
+        assert!(presenter.model().conversation.active_task.is_none());
+        assert!(presenter.model().conversation.active_harness.is_none());
+        assert!(presenter.model.conversation.active_run_started_at.is_none());
+        assert!(
+            presenter
+                .model()
+                .conversation
+                .active_run_elapsed_seconds
+                .is_none()
+        );
         assert!(!presenter.refresh_run_elapsed(started + Duration::from_secs(10)));
-        assert_eq!(presenter.model().tasks[0].status, status);
+        assert_eq!(presenter.model().conversation.tasks[0].status, status);
         assert_eq!(
-            presenter.model().completed_runs.contains(&run_id),
+            presenter
+                .model()
+                .conversation
+                .completed_runs
+                .contains(&run_id),
             status == RunStatus::Completed
         );
         assert_eq!(
@@ -5330,20 +5779,28 @@ fn runner_events_update_timeline_and_persist_terminal_statuses() {
         presenter.new_task();
         presenter.select_task(task_id);
         assert_eq!(
-            presenter.model().completed_runs.contains(&run_id),
+            presenter
+                .model()
+                .conversation
+                .completed_runs
+                .contains(&run_id),
             status == RunStatus::Completed
         );
         assert!(presenter.submit("next task", "claude"));
-        assert_eq!(presenter.model().selected_task, Some(task_id));
-        assert_eq!(presenter.model().tasks.len(), 1);
-        assert_eq!(presenter.model().active_run_elapsed_seconds, Some(0));
+        assert_eq!(presenter.model().conversation.selected_task, Some(task_id));
+        assert_eq!(presenter.model().conversation.tasks.len(), 1);
+        assert_eq!(
+            presenter.model().conversation.active_run_elapsed_seconds,
+            Some(0)
+        );
         assert!(
             !presenter
                 .model()
+                .conversation
                 .completed_runs
-                .contains(&presenter.model().active_run.unwrap())
+                .contains(&presenter.model().conversation.active_run.unwrap())
         );
-        assert!(presenter.model.active_run_started_at.unwrap() >= started);
+        assert!(presenter.model.conversation.active_run_started_at.unwrap() >= started);
     }
 }
 
@@ -5352,13 +5809,19 @@ fn run_elapsed_advances_without_output_and_only_changes_each_second() {
     let (mut presenter, runner, _directory) = fixture();
     assert!(!presenter.refresh_run_elapsed(Instant::now()));
     assert!(presenter.submit("hello", "claude"));
-    let started = presenter.model.active_run_started_at.unwrap();
-    let run_id = presenter.model().active_run.unwrap();
-    assert_eq!(presenter.model().active_run_elapsed_seconds, Some(0));
+    let started = presenter.model.conversation.active_run_started_at.unwrap();
+    let run_id = presenter.model().conversation.active_run.unwrap();
+    assert_eq!(
+        presenter.model().conversation.active_run_elapsed_seconds,
+        Some(0)
+    );
     assert!(!presenter.refresh_run_elapsed(started + Duration::from_millis(999)));
     assert!(!presenter.drain_events());
     assert!(presenter.refresh_run_elapsed(started + Duration::from_secs(1)));
-    assert_eq!(presenter.model().active_run_elapsed_seconds, Some(1));
+    assert_eq!(
+        presenter.model().conversation.active_run_elapsed_seconds,
+        Some(1)
+    );
     assert!(!presenter.refresh_run_elapsed(started + Duration::from_millis(1999)));
 
     runner.emit(Event::RunStarted { run_id, pid: 42 });
@@ -5367,23 +5830,35 @@ fn run_elapsed_advances_without_output_and_only_changes_each_second() {
         text: "partial".into(),
     });
     assert!(presenter.drain_events());
-    assert_eq!(presenter.model.active_run_started_at, Some(started));
+    assert_eq!(
+        presenter.model.conversation.active_run_started_at,
+        Some(started)
+    );
     assert!(presenter.refresh_run_elapsed(started + Duration::from_secs(65)));
-    assert_eq!(presenter.model().active_run_elapsed_seconds, Some(65));
+    assert_eq!(
+        presenter.model().conversation.active_run_elapsed_seconds,
+        Some(65)
+    );
 
     presenter.cancel();
     assert!(presenter.refresh_run_elapsed(started + Duration::from_secs(66)));
-    assert_eq!(presenter.model().active_run_elapsed_seconds, Some(66));
-    assert_eq!(presenter.model.active_run_started_at, Some(started));
-    assert!(presenter.model().active_run.is_some());
+    assert_eq!(
+        presenter.model().conversation.active_run_elapsed_seconds,
+        Some(66)
+    );
+    assert_eq!(
+        presenter.model.conversation.active_run_started_at,
+        Some(started)
+    );
+    assert!(presenter.model().conversation.active_run.is_some());
 }
 
 #[test]
 fn unrelated_run_events_cannot_replace_the_active_run() {
     let (mut presenter, runner, _directory) = fixture();
     assert!(presenter.submit("hello", "claude"));
-    let active_run = presenter.model().active_run;
-    let started = presenter.model.active_run_started_at;
+    let active_run = presenter.model().conversation.active_run;
+    let started = presenter.model.conversation.active_run_started_at;
     let other_run = Uuid::new_v4();
     runner.emit(Event::RunStarted {
         run_id: other_run,
@@ -5407,15 +5882,18 @@ fn unrelated_run_events_cannot_replace_the_active_run() {
         exit_code: Some(0),
     });
     presenter.drain_events();
-    assert_eq!(presenter.model().active_run, active_run);
-    assert_eq!(presenter.model.active_run_started_at, started);
-    assert_eq!(presenter.model().active_run_elapsed_seconds, Some(0));
-    assert_eq!(presenter.model().messages.len(), 1);
-    assert!(presenter.model().streaming_text.is_empty());
+    assert_eq!(presenter.model().conversation.active_run, active_run);
+    assert_eq!(presenter.model.conversation.active_run_started_at, started);
+    assert_eq!(
+        presenter.model().conversation.active_run_elapsed_seconds,
+        Some(0)
+    );
+    assert_eq!(presenter.model().conversation.messages.len(), 1);
+    assert!(presenter.model().conversation.streaming_text.is_empty());
     assert!(
         presenter
             .storage
-            .conversation_config(presenter.model().active_task.unwrap())
+            .conversation_config(presenter.model().conversation.active_task.unwrap())
             .unwrap()
             .unwrap()
             .session_id
@@ -5427,22 +5905,31 @@ fn unrelated_run_events_cannot_replace_the_active_run() {
 fn active_run_locks_configuration_and_cancels_the_matching_run() {
     let (mut presenter, runner, _directory) = fixture();
     assert!(presenter.submit("hello", "claude"));
-    let task_id = presenter.model().active_task;
-    let run_id = presenter.model().active_run.unwrap();
+    let task_id = presenter.model().conversation.active_task;
+    let run_id = presenter.model().conversation.active_run.unwrap();
     presenter.select_catalog_model(Some("opus".into()));
     presenter.select_effort(ThinkingEffort::Max);
     assert!(!presenter.select_harness(HarnessKind::Codex, "claude"));
     assert!(!presenter.select_model_configuration(HarnessKind::Codex, None, "claude"));
     presenter.new_task();
-    assert!(presenter.model().model_override.is_none());
-    assert_eq!(presenter.model().effort, ThinkingEffort::Default);
-    assert!(presenter.model().selected_task.is_none());
+    assert!(presenter.model().conversation.model_override.is_none());
+    assert_eq!(
+        presenter.model().conversation.effort,
+        ThinkingEffort::Default
+    );
+    assert!(presenter.model().conversation.selected_task.is_none());
     assert_eq!(presenter.model().active_run_count(), 1);
     presenter.select_task(task_id.unwrap());
     presenter.cancel();
     assert!(matches!(runner.0.borrow().commands.last().unwrap().command,
         Command::RunCancel { run_id: id } if id == run_id));
-    let project_id = presenter.model().selected_project.as_ref().unwrap().id;
+    let project_id = presenter
+        .model()
+        .conversation
+        .selected_project
+        .as_ref()
+        .unwrap()
+        .id;
     assert_eq!(
         presenter.storage.tasks(project_id).unwrap()[0].status,
         RunStatus::Cancelling
@@ -5458,7 +5945,7 @@ fn switching_harnesses_restores_each_executable_and_codex_uses_default_model() {
         .set_setting("codex_executable", "/custom/codex")
         .unwrap();
     assert!(presenter.select_harness(HarnessKind::Codex, "/custom/claude"));
-    assert_eq!(presenter.model().executable, "/custom/codex");
+    assert_eq!(presenter.model().conversation.executable, "/custom/codex");
     assert!(!presenter.select_harness(HarnessKind::Codex, "edited"));
     assert_eq!(
         presenter
@@ -5663,7 +6150,7 @@ fn codex_preferences_are_isolated_per_profile_and_invalid_effort_resets() {
         message: "temporary catalog failure".into(),
     });
     presenter.drain_events();
-    assert_eq!(presenter.model().effort, ThinkingEffort::High);
+    assert_eq!(presenter.model().conversation.effort, ThinkingEffort::High);
     assert_eq!(
         presenter.model().resolved_model_selection().effort,
         ThinkingEffort::High
@@ -5682,7 +6169,7 @@ fn codex_preferences_are_isolated_per_profile_and_invalid_effort_resets() {
     assert!(presenter.refresh_model_catalog());
     emit_current_catalog(&presenter, &runner, models.clone());
     presenter.drain_events();
-    assert_eq!(presenter.model().effort, ThinkingEffort::High);
+    assert_eq!(presenter.model().conversation.effort, ThinkingEffort::High);
     assert_eq!(
         presenter.model().resolved_model_selection().effort,
         ThinkingEffort::High
@@ -5693,28 +6180,31 @@ fn codex_preferences_are_isolated_per_profile_and_invalid_effort_resets() {
     let second_profile_id = presenter.save_provider_profile(second_draft).unwrap();
     emit_current_catalog(&presenter, &runner, models.clone());
     presenter.drain_events();
-    assert!(presenter.model().model_override.is_none());
-    assert_eq!(presenter.model().effort, ThinkingEffort::Default);
+    assert!(presenter.model().conversation.model_override.is_none());
+    assert_eq!(
+        presenter.model().conversation.effort,
+        ThinkingEffort::Default
+    );
     presenter.select_catalog_model(Some("model-beta".into()));
     presenter.select_effort(ThinkingEffort::Low);
 
     assert!(presenter.select_provider_profile(Some(first_profile_id)));
     assert!(presenter.model().selected_catalog_model().is_none());
     assert_eq!(
-        presenter.model().model_override.as_deref(),
+        presenter.model().conversation.model_override.as_deref(),
         Some("model-alpha")
     );
-    assert_eq!(presenter.model().effort, ThinkingEffort::High);
+    assert_eq!(presenter.model().conversation.effort, ThinkingEffort::High);
     emit_current_catalog(&presenter, &runner, models);
     presenter.drain_events();
-    assert_eq!(presenter.model().effort, ThinkingEffort::High);
+    assert_eq!(presenter.model().conversation.effort, ThinkingEffort::High);
 
     assert!(presenter.select_provider_profile(Some(second_profile_id)));
     assert_eq!(
-        presenter.model().model_override.as_deref(),
+        presenter.model().conversation.model_override.as_deref(),
         Some("model-beta")
     );
-    assert_eq!(presenter.model().effort, ThinkingEffort::Low);
+    assert_eq!(presenter.model().conversation.effort, ThinkingEffort::Low);
     emit_current_catalog(
         &presenter,
         &runner,
@@ -5726,7 +6216,10 @@ fn codex_preferences_are_isolated_per_profile_and_invalid_effort_resets() {
         )],
     );
     presenter.drain_events();
-    assert_eq!(presenter.model().effort, ThinkingEffort::Default);
+    assert_eq!(
+        presenter.model().conversation.effort,
+        ThinkingEffort::Default
+    );
     assert_eq!(
         presenter
             .storage
@@ -5890,7 +6383,7 @@ fn catalog_preferences_are_isolated_by_harness_and_profile() {
         )],
     );
     presenter.drain_events();
-    assert!(presenter.model().model_override.is_none());
+    assert!(presenter.model().conversation.model_override.is_none());
     presenter.select_catalog_model(Some("bigmodel/omp-model".into()));
     presenter.select_effort(ThinkingEffort::XHigh);
 
@@ -5930,10 +6423,10 @@ fn catalog_preferences_are_isolated_by_harness_and_profile() {
         Some(codex_profile_id)
     );
     assert_eq!(
-        presenter.model().model_override.as_deref(),
+        presenter.model().conversation.model_override.as_deref(),
         Some("codex-model")
     );
-    assert_eq!(presenter.model().effort, ThinkingEffort::High);
+    assert_eq!(presenter.model().conversation.effort, ThinkingEffort::High);
 
     assert!(presenter.select_harness(HarnessKind::Omp, "codex"));
     assert_eq!(
@@ -5944,10 +6437,10 @@ fn catalog_preferences_are_isolated_by_harness_and_profile() {
         Some(omp_profile_id)
     );
     assert_eq!(
-        presenter.model().model_override.as_deref(),
+        presenter.model().conversation.model_override.as_deref(),
         Some("bigmodel/omp-model")
     );
-    assert_eq!(presenter.model().effort, ThinkingEffort::XHigh);
+    assert_eq!(presenter.model().conversation.effort, ThinkingEffort::XHigh);
 }
 
 #[test]
@@ -5965,7 +6458,7 @@ fn all_harnesses_restore_each_profile_and_cli_selection_after_restart() {
     presenter.open_project(directory.path());
     let mut expected = Vec::new();
     for harness in HarnessKind::ALL {
-        let executable = presenter.model().executable.clone();
+        let executable = presenter.model().conversation.executable.clone();
         presenter.select_harness(harness, &executable);
         for (index, name) in ["cli", "first", "second"].into_iter().enumerate() {
             let profile = if index == 0 {
@@ -6007,18 +6500,22 @@ fn all_harnesses_restore_each_profile_and_cli_selection_after_restart() {
     );
     presenter.open_project(directory.path());
     for (harness, profile, model, effort) in expected.into_iter().rev() {
-        let executable = presenter.model().executable.clone();
+        let executable = presenter.model().conversation.executable.clone();
         presenter.select_harness(harness, &executable);
         presenter.select_provider_profile(profile);
         assert_eq!(
-            presenter.model().model_override.as_deref(),
+            presenter.model().conversation.model_override.as_deref(),
             Some(model.id.as_str())
         );
         assert_eq!(
-            presenter.model().model_override_name.as_deref(),
+            presenter
+                .model()
+                .conversation
+                .model_override_name
+                .as_deref(),
             Some(model.display_name.as_str())
         );
-        assert_eq!(presenter.model().effort, effort);
+        assert_eq!(presenter.model().conversation.effort, effort);
         emit_current_catalog(&presenter, &runner, vec![model.clone()]);
         presenter.drain_events();
         assert_eq!(
@@ -6054,7 +6551,10 @@ fn claude_custom_models_are_restored_per_configuration_and_can_start_runs() {
                 .unwrap()
         });
         presenter.select_catalog_model(Some(model_id.into()));
-        assert_eq!(presenter.model().model_override.as_deref(), Some(model_id));
+        assert_eq!(
+            presenter.model().conversation.model_override.as_deref(),
+            Some(model_id)
+        );
         expected.push((profile, model_id));
     }
     drop(presenter);
@@ -6072,7 +6572,10 @@ fn claude_custom_models_are_restored_per_configuration_and_can_start_runs() {
         .insert(HarnessKind::Claude, ready_probe(HarnessKind::Claude));
     for (profile, model_id) in expected.into_iter().rev() {
         presenter.select_provider_profile(profile);
-        assert_eq!(presenter.model().model_override.as_deref(), Some(model_id));
+        assert_eq!(
+            presenter.model().conversation.model_override.as_deref(),
+            Some(model_id)
+        );
         assert!(presenter.model().can_submit());
         emit_current_catalog(&presenter, &runner, claude_aliases());
         presenter.drain_events();
@@ -6082,7 +6585,10 @@ fn claude_custom_models_are_restored_per_configuration_and_can_start_runs() {
     }
 
     presenter.select_effort(ThinkingEffort::High);
-    assert_eq!(presenter.model().effort, ThinkingEffort::Default);
+    assert_eq!(
+        presenter.model().conversation.effort,
+        ThinkingEffort::Default
+    );
     for models in [vec![], claude_aliases()] {
         assert!(presenter.refresh_model_catalog());
         assert!(presenter.model().can_submit());
@@ -6109,7 +6615,10 @@ fn claude_custom_models_are_restored_per_configuration_and_can_start_runs() {
         .unwrap();
     assert_eq!(config.model, "GLM-5");
     presenter.select_catalog_model(Some("another-model".into()));
-    assert_eq!(presenter.model().model_override.as_deref(), Some("GLM-5"));
+    assert_eq!(
+        presenter.model().conversation.model_override.as_deref(),
+        Some("GLM-5")
+    );
 }
 
 #[test]
@@ -6119,13 +6628,13 @@ fn custom_model_selection_is_claude_only_and_generation_uses_the_same_rules() {
         presenter.select_harness(harness, "claude");
         presenter.select_catalog_model(Some("moonshotai/Kimi-K2.5".into()));
         assert_eq!(
-            presenter.model().model_override.is_some(),
+            presenter.model().conversation.model_override.is_some(),
             harness == HarnessKind::Claude
         );
         for invalid in ["", "  ", "model\0id", "model\nid"] {
-            let previous = presenter.model().model_override.clone();
+            let previous = presenter.model().conversation.model_override.clone();
             presenter.select_catalog_model(Some(invalid.into()));
-            assert_eq!(presenter.model().model_override, previous);
+            assert_eq!(presenter.model().conversation.model_override, previous);
         }
         for kind in GenerationKind::ALL {
             presenter.select_generation_harness(kind, harness);
@@ -6231,7 +6740,11 @@ fn catalog_context_changes_ignore_late_responses_and_keep_missing_model_names() 
             harness == HarnessKind::Claude
         );
         assert_eq!(
-            presenter.model().model_override_name.as_deref(),
+            presenter
+                .model()
+                .conversation
+                .model_override_name
+                .as_deref(),
             Some("Recognizable name")
         );
         presenter.select_catalog_model(None);
@@ -6268,7 +6781,13 @@ fn catalog_context_changes_ignore_late_responses_and_keep_missing_model_names() 
     emit_current_catalog(&presenter, &runner, claude_aliases());
     presenter.drain_events();
     assert_eq!(
-        presenter.model.model_catalog.models().unwrap().len(),
+        presenter
+            .model
+            .conversation
+            .model_catalog
+            .models()
+            .unwrap()
+            .len(),
         claude_aliases().len()
     );
 }
@@ -6278,7 +6797,10 @@ fn unavailable_models_and_unknown_efforts_cannot_change_the_requested_configurat
     let (mut presenter, runner, _directory) = fixture();
     presenter.select_catalog_model(Some("opus".into()));
     presenter.select_effort(ThinkingEffort::Max);
-    assert_eq!(presenter.model().effort, ThinkingEffort::Default);
+    assert_eq!(
+        presenter.model().conversation.effort,
+        ThinkingEffort::Default
+    );
     assert!(
         presenter
             .model()
@@ -6294,7 +6816,10 @@ fn unavailable_models_and_unknown_efforts_cannot_change_the_requested_configurat
     presenter.drain_events();
     assert!(!presenter.model().can_submit());
     assert!(!presenter.submit("must not start", "claude"));
-    assert_eq!(presenter.model().model_override.as_deref(), Some("opus"));
+    assert_eq!(
+        presenter.model().conversation.model_override.as_deref(),
+        Some("opus")
+    );
     presenter.select_catalog_model(None);
     assert!(presenter.model().can_submit());
     assert!(presenter.refresh_model_catalog());
@@ -6310,13 +6835,13 @@ fn unavailable_models_and_unknown_efforts_cannot_change_the_requested_configurat
     });
     presenter.drain_events();
     assert!(matches!(
-        presenter.model().model_catalog,
+        presenter.model().conversation.model_catalog,
         ModelCatalogState::Loading { .. }
     ));
     let remote = presenter.remote_state();
     assert_eq!(remote.model, request.model);
     assert_eq!(remote.effort, request.effort);
-    assert_eq!(presenter.model().executable, "claude");
+    assert_eq!(presenter.model().conversation.executable, "claude");
     let recorded = presenter
         .storage
         .conversation_config(request.task_id)
@@ -6336,7 +6861,7 @@ fn unavailable_models_and_unknown_efforts_cannot_change_the_requested_configurat
     emit_current_catalog(&presenter, &runner, claude_aliases());
     presenter.drain_events();
     assert!(matches!(
-        presenter.model().model_catalog,
+        presenter.model().conversation.model_catalog,
         ModelCatalogState::Ready(_)
     ));
 }
@@ -6393,7 +6918,7 @@ fn omp_catalog_ignores_a_response_from_the_previous_profile() {
     });
     presenter.drain_events();
     assert!(matches!(
-        presenter.model().model_catalog,
+        presenter.model().conversation.model_catalog,
         ModelCatalogState::Loading { request_id, .. } if request_id == current_request_id
     ));
 
@@ -6410,7 +6935,7 @@ fn omp_catalog_ignores_a_response_from_the_previous_profile() {
         )],
     );
     presenter.drain_events();
-    let ModelCatalogState::Ready(models) = &presenter.model().model_catalog else {
+    let ModelCatalogState::Ready(models) = &presenter.model().conversation.model_catalog else {
         panic!("expected current catalog")
     };
     assert_eq!(models[0].id, "second/model");
@@ -6444,7 +6969,7 @@ fn omp_profile_custom_model_is_preserved_when_catalog_availability_is_unknown() 
     );
     presenter.drain_events();
 
-    assert!(presenter.model().model_override.is_none());
+    assert!(presenter.model().conversation.model_override.is_none());
     assert_eq!(
         presenter.model().configured_catalog_model(),
         Some("private-provider/custom-model")
@@ -6486,11 +7011,19 @@ fn invalid_codex_catalog_selection_cannot_be_submitted() {
 
     assert!(!presenter.model().can_submit());
     assert!(!presenter.submit("must not start", "codex"));
-    assert!(presenter.model().active_run.is_none());
+    assert!(presenter.model().conversation.active_run.is_none());
     assert!(
         presenter
             .storage
-            .tasks(presenter.model().selected_project.as_ref().unwrap().id)
+            .tasks(
+                presenter
+                    .model()
+                    .conversation
+                    .selected_project
+                    .as_ref()
+                    .unwrap()
+                    .id
+            )
             .unwrap()
             .is_empty()
     );
@@ -6709,8 +7242,8 @@ fn selecting_a_saved_task_restores_its_configuration_and_messages() {
     presenter.select_catalog_model(Some("sonnet".into()));
     presenter.select_effort(ThinkingEffort::High);
     assert!(presenter.submit("hello", "claude"));
-    let run_id = presenter.model().active_run.unwrap();
-    let task_id = presenter.model().selected_task.unwrap();
+    let run_id = presenter.model().conversation.active_run.unwrap();
+    let task_id = presenter.model().conversation.selected_task.unwrap();
     runner.emit(Event::RunExited {
         run_id,
         status: RunStatus::Completed,
@@ -6718,22 +7251,31 @@ fn selecting_a_saved_task_restores_its_configuration_and_messages() {
     });
     presenter.drain_events();
     presenter.new_task();
-    assert!(presenter.model().messages.is_empty());
+    assert!(presenter.model().conversation.messages.is_empty());
     assert!(presenter.select_harness(HarnessKind::Codex, "claude"));
     presenter.select_effort(ThinkingEffort::Low);
     presenter.select_task(task_id);
-    assert_eq!(presenter.model().selected_harness, HarnessKind::Claude);
-    assert_eq!(presenter.model().model_override.as_deref(), Some("sonnet"));
-    assert_eq!(presenter.model().effort, ThinkingEffort::Default);
     assert_eq!(
-        presenter.model().executable,
+        presenter.model().conversation.selected_harness,
+        HarnessKind::Claude
+    );
+    assert_eq!(
+        presenter.model().conversation.model_override.as_deref(),
+        Some("sonnet")
+    );
+    assert_eq!(
+        presenter.model().conversation.effort,
+        ThinkingEffort::Default
+    );
+    assert_eq!(
+        presenter.model().conversation.executable,
         ready_probe(HarnessKind::Claude).executable
     );
-    assert_eq!(presenter.model().messages[0].content, "hello");
+    assert_eq!(presenter.model().conversation.messages[0].content, "hello");
 
     for catalog_pending in [false, true] {
         presenter.new_task();
-        let executable = presenter.model().executable.clone();
+        let executable = presenter.model().conversation.executable.clone();
         assert!(presenter.select_harness(HarnessKind::Codex, &executable));
         presenter
             .model
@@ -6744,10 +7286,13 @@ fn selecting_a_saved_task_restores_its_configuration_and_messages() {
             presenter.drain_events();
         }
         assert!(presenter.submit("another task", "codex"));
-        let run_id = presenter.model().active_run.unwrap();
+        let run_id = presenter.model().conversation.active_run.unwrap();
         runner.0.borrow_mut().commands.clear();
         presenter.select_task(task_id);
-        assert_eq!(presenter.model().selected_harness, HarnessKind::Claude);
+        assert_eq!(
+            presenter.model().conversation.selected_harness,
+            HarnessKind::Claude
+        );
 
         runner.emit(Event::RunExited {
             run_id,
@@ -6771,13 +7316,16 @@ fn selecting_a_saved_task_restores_its_configuration_and_messages() {
             request_id, harness: HarnessKind::Claude, executable, cwd, ..
         } if *request_id == current_catalog_request_id(&presenter)
             && *executable == ready_probe(HarnessKind::Claude).executable
-            && *cwd == presenter.model().selected_project.as_ref().unwrap().canonical_path));
+            && *cwd == presenter.model().conversation.selected_project.as_ref().unwrap().canonical_path));
         drop(state);
 
         emit_current_catalog(&presenter, &runner, claude_aliases());
         presenter.drain_events();
-        assert_eq!(presenter.model().model_override.as_deref(), Some("sonnet"));
-        assert_eq!(presenter.model().messages[0].content, "hello");
+        assert_eq!(
+            presenter.model().conversation.model_override.as_deref(),
+            Some("sonnet")
+        );
+        assert_eq!(presenter.model().conversation.messages[0].content, "hello");
         assert!(presenter.model().catalog_selection_is_valid());
     }
 }
@@ -6801,7 +7349,12 @@ fn working_directory_follows_project_and_task_selection_during_background_runs()
             presenter.model().working_directory()
         );
         conversations.push((
-            presenter.model().selected_project.clone().unwrap(),
+            presenter
+                .model()
+                .conversation
+                .selected_project
+                .clone()
+                .unwrap(),
             start.task_id,
         ));
         runner.emit(Event::RunSessionStarted {
@@ -6843,7 +7396,10 @@ fn working_directory_follows_project_and_task_selection_during_background_runs()
         exit_code: Some(0),
     });
     presenter.drain_events();
-    assert_eq!(presenter.model().selected_task, Some(*first_task));
+    assert_eq!(
+        presenter.model().conversation.selected_task,
+        Some(*first_task)
+    );
     assert_eq!(
         presenter.model().working_directory(),
         Some(first_project.canonical_path.as_str())
@@ -6976,7 +7532,7 @@ fn voice_completion_rejects_cancelled_wrong_session_and_provider_results() {
     );
     assert_eq!(presenter.model.voice.status, LocalizedText::default());
     assert!(runner.0.borrow().commands.is_empty());
-    assert!(presenter.model.queued_messages.is_empty());
+    assert!(presenter.model.conversation.queued_messages.is_empty());
     presenter.model.voice.operation = Some(operation);
     presenter.voice_error("previous voice error");
     presenter.cancel_voice();
@@ -7052,7 +7608,7 @@ fn native_transport_and_codebuddy_region_persist_and_reach_launch_configuration(
         HarnessKind::QoderCn,
         HarnessKind::Codebuddy,
     ] {
-        presenter.model.selected_harness = harness;
+        presenter.model.conversation.selected_harness = harness;
         // Kimi Code is ACP-only, so its default never falls back to the CLI.
         assert_eq!(
             presenter.harness_transport(harness),

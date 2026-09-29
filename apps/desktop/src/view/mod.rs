@@ -166,7 +166,7 @@ impl NexusView {
         });
         let executable_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .default_value(presenter.model().executable.clone())
+                .default_value(presenter.model().conversation.executable.clone())
                 .placeholder(locale.text("命令名或完整路径"))
         });
         let ProviderProfileDraft {
@@ -179,7 +179,7 @@ impl NexusView {
             model,
         } = profile_form_draft(
             presenter.model().selected_provider_profile(),
-            presenter.model().selected_harness,
+            presenter.model().conversation.selected_harness,
         );
         let provider_name_input = cx.new(|cx| {
             InputState::new(window, cx)
@@ -501,6 +501,7 @@ impl NexusView {
         let desired = self
             .presenter
             .model()
+            .conversation
             .pending_user_asks
             .iter()
             .flat_map(|request| {
@@ -559,11 +560,12 @@ impl NexusView {
                     .await;
                 if this
                     .update_in(cx, |app, window, cx| {
-                        let executable = app.presenter.model().executable.clone();
+                        let executable = app.presenter.model().conversation.executable.clone();
                         let untouched = app.executable_input.read(cx).value() == executable;
                         app.poll_events(Instant::now(), cx);
                         app.poll_voice_input(window, cx);
-                        if untouched && app.presenter.model().executable != executable {
+                        if untouched && app.presenter.model().conversation.executable != executable
+                        {
                             app.sync_executable(window, cx);
                         }
                         app.sync_approval_dialog(window, cx);
@@ -579,8 +581,9 @@ impl NexusView {
 
     fn sync_approval_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let model = self.presenter.model();
-        let next = model.active_run.zip(
+        let next = model.conversation.active_run.zip(
             model
+                .conversation
                 .pending_approvals
                 .front()
                 .map(|request| request.request_id),
@@ -601,17 +604,19 @@ impl NexusView {
             let model = app.read(cx).presenter.model();
             let locale = model.language;
             let Some(request) = model
+                .conversation
                 .pending_approvals
                 .front()
                 .filter(|request| request.request_id == request_id)
             else {
                 return dialog;
             };
-            let responding = model.responding_approval == Some(request_id);
+            let responding = model.conversation.responding_approval == Some(request_id);
             let title = model
+                .conversation
                 .tasks
                 .iter()
-                .find(|task| Some(task.id) == model.active_task)
+                .find(|task| Some(task.id) == model.conversation.active_task)
                 .map(|task| task.title.as_str())
                 .unwrap_or_default();
             let mut buttons = div().flex().flex_wrap().gap_2();
@@ -671,9 +676,13 @@ impl NexusView {
                         .child(request.details.clone()),
                 )
                 .child(
-                    div()
-                        .text_size(px(12.))
-                        .child(model.run_status.render(model.language).to_owned()),
+                    div().text_size(px(12.)).child(
+                        model
+                            .conversation
+                            .run_status
+                            .render(model.language)
+                            .to_owned(),
+                    ),
                 )
                 .footer(buttons)
         });
@@ -804,6 +813,7 @@ impl NexusView {
         let selected = self
             .presenter
             .model()
+            .conversation
             .selected_project
             .as_ref()
             .is_some_and(|project| project.id == project_id);
@@ -837,7 +847,7 @@ impl NexusView {
     }
 
     fn archive_task(&mut self, task_id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        let selected = self.presenter.model().selected_task == Some(task_id);
+        let selected = self.presenter.model().conversation.selected_task == Some(task_id);
         if self.presenter.archive_task(task_id) && selected {
             self.expanded_messages.clear();
             self.timeline_scroll.scroll_to_bottom();
@@ -858,6 +868,7 @@ impl NexusView {
         let Some(title) = self
             .presenter
             .model()
+            .conversation
             .tasks
             .iter()
             .chain(&self.presenter.model().archived_tasks)
@@ -886,7 +897,7 @@ impl NexusView {
     }
 
     fn delete_task(&mut self, task_id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        let selected = self.presenter.model().selected_task == Some(task_id);
+        let selected = self.presenter.model().conversation.selected_task == Some(task_id);
         if self.presenter.delete_task(task_id) && selected {
             self.expanded_messages.clear();
             self.timeline_scroll.scroll_to_bottom();
@@ -908,7 +919,7 @@ impl NexusView {
     ) {
         let locale = self.presenter.model().language;
         let count = self.presenter.model().archived_tasks.len();
-        if count == 0 || self.presenter.model().active_run.is_some() {
+        if count == 0 || self.presenter.model().conversation.active_run.is_some() {
             return;
         }
         let message = locale.format(
@@ -973,7 +984,7 @@ impl NexusView {
         self.settings_open = !self.settings_open;
         if self.settings_open {
             if matches!(
-                self.presenter.model().title_model_catalog,
+                self.presenter.model().conversation.title_model_catalog,
                 ModelCatalogState::Idle
             ) {
                 self.presenter
@@ -1187,7 +1198,10 @@ impl NexusView {
                 .find(|profile| profile.id == profile_id)
                 .cloned()
         });
-        let draft = profile_form_draft(profile.as_ref(), self.presenter.model().selected_harness);
+        let draft = profile_form_draft(
+            profile.as_ref(),
+            self.presenter.model().conversation.selected_harness,
+        );
         self.editing_provider_profile = draft.id;
         for (input, value) in [
             (&self.provider_name_input, draft.name),
@@ -1203,7 +1217,7 @@ impl NexusView {
 
     fn sync_executable(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.executable_input.update(cx, |input, cx| {
-            input.set_value(&self.presenter.model().executable, window, cx)
+            input.set_value(&self.presenter.model().conversation.executable, window, cx)
         });
     }
 
@@ -1242,12 +1256,12 @@ impl NexusView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let model = self.presenter.model();
-        let selected = model.selected_harness;
+        let selected = model.conversation.selected_harness;
         let app = cx.entity().clone();
         let button_id = id;
         Button::new(id)
             .icon(IconName::Bot)
-            .disabled(model.active_run.is_some())
+            .disabled(model.conversation.active_run.is_some())
             .small()
             .when(compact, |button| {
                 button
@@ -1303,14 +1317,14 @@ impl NexusView {
         let profiles = model
             .provider_profiles
             .iter()
-            .filter(|profile| profile.harness == model.selected_harness)
+            .filter(|profile| profile.harness == model.conversation.selected_harness)
             .cloned()
             .collect::<Vec<_>>();
         let app = cx.entity().clone();
         let button_id = id;
         Button::new(button_id)
             .icon(IconName::Globe)
-            .disabled(model.active_run.is_some())
+            .disabled(model.conversation.active_run.is_some())
             .small()
             .when(compact, |button| {
                 button
@@ -1372,7 +1386,7 @@ impl NexusView {
     fn permission_selector(&self, cx: &mut Context<Self>) -> AnyElement {
         let model = self.presenter.model();
         let locale = model.language;
-        let selected = model.permission_mode;
+        let selected = model.conversation.permission_mode;
         let app = cx.entity().clone();
         let button_id = "composer-permissions";
         let button = Button::new(button_id)
@@ -1382,7 +1396,7 @@ impl NexusView {
             .h(px(COMPACT_CONTROL_HEIGHT))
             .label(locale.permission_mode(selected))
             .tooltip(locale.text("设置下一条消息的权限，已开始的轮次保持原权限。"))
-            .disabled(model.active_run.is_some() && !model.can_queue());
+            .disabled(model.conversation.active_run.is_some() && !model.can_queue());
         AnimatedDropdown::new(button_id, button, self.reduced_motion, move |menu, _, _| {
             PermissionMode::ALL
                 .into_iter()
@@ -1406,7 +1420,7 @@ impl NexusView {
     fn effort_selector(&self, cx: &mut Context<Self>) -> AnyElement {
         let model = self.presenter.model();
         let locale = model.language;
-        let selected = model.effort;
+        let selected = model.conversation.effort;
         let mut efforts = vec![ThinkingEffort::Default];
         if let Some(descriptor) = model.selected_catalog_model() {
             efforts.extend(
@@ -1436,8 +1450,8 @@ impl NexusView {
             } else {
                 locale.text("当前模型未确认支持独立思考设置，将使用默认行为。")
             })
-            .disabled(model.active_run.is_some() || !supported);
-        if model.active_run.is_some() || !supported {
+            .disabled(model.conversation.active_run.is_some() || !supported);
+        if model.conversation.active_run.is_some() || !supported {
             return button.into_any_element();
         }
         AnimatedDropdown::new(button_id, button, self.reduced_motion, move |menu, _, _| {
@@ -1465,9 +1479,10 @@ impl NexusView {
         let model = self.presenter.model();
         let colors = palette(cx);
         let queued = model
+            .conversation
             .queued_messages
             .iter()
-            .filter(|message| Some(message.task_id) == model.selected_task)
+            .filter(|message| Some(message.task_id) == model.conversation.selected_task)
             .collect::<Vec<_>>();
         div().when(!queued.is_empty(), |element| {
             element
@@ -1505,7 +1520,7 @@ impl NexusView {
                                             message.prompt
                                         )),
                                 )
-                                .when(model.active_run.is_none(), |element| {
+                                .when(model.conversation.active_run.is_none(), |element| {
                                     element.child(
                                         Button::new((ElementId::from(id), "send-queued"))
                                             .ghost()
@@ -1518,23 +1533,28 @@ impl NexusView {
                                             })),
                                     )
                                 })
-                                .when(model.active_run.is_some(), |element| {
+                                .when(model.conversation.active_run.is_some(), |element| {
                                     element.child(
                                         Button::new((ElementId::from(id), "steer-queued"))
                                             .debug_selector(move || format!("steer-queued-{id}"))
                                             .ghost()
                                             .small()
-                                            .label(if model.steering_message == Some(id) {
-                                                locale.text("等待工具完成…")
-                                            } else {
-                                                locale.text("介入")
-                                            })
+                                            .label(
+                                                if model.conversation.steering_message == Some(id) {
+                                                    locale.text("等待工具完成…")
+                                                } else {
+                                                    locale.text("介入")
+                                                },
+                                            )
                                             .tooltip(locale.text("等待工具执行结束后介入当前对话"))
                                             .disabled(
                                                 !model.can_queue()
                                                     || !message.attachments.is_empty()
-                                                    || model.steering_message.is_some()
-                                                    || model.active_permission_mode
+                                                    || model
+                                                        .conversation
+                                                        .steering_message
+                                                        .is_some()
+                                                    || model.conversation.active_permission_mode
                                                         != Some(message.permission_mode),
                                             )
                                             .on_click(cx.listener(move |app, _, _, cx| {
@@ -1550,7 +1570,7 @@ impl NexusView {
                                         .small()
                                         .icon(IconName::Close)
                                         .accessibility_label(locale.text("移除排队消息"))
-                                        .disabled(model.steering_message == Some(id))
+                                        .disabled(model.conversation.steering_message == Some(id))
                                         .on_click(cx.listener(move |app, _, _, cx| {
                                             app.presenter.remove_queued_message(id);
                                             cx.notify();
@@ -1682,7 +1702,11 @@ impl NexusView {
         let locale = model.language;
         let colors = palette(cx);
         let query = self.project_search_input.read(cx).value();
-        let selected = model.selected_project.as_ref().map(|project| project.id);
+        let selected = model
+            .conversation
+            .selected_project
+            .as_ref()
+            .map(|project| project.id);
         let projects: Vec<_> = model
             .projects
             .iter()
@@ -1825,7 +1849,7 @@ impl NexusView {
             .read(cx)
             .focus_handle(cx)
             .is_focused(window);
-        let composer_hint = if model.active_run.is_some() {
+        let composer_hint = if model.conversation.active_run.is_some() {
             locale.text("Agent 正在执行 · 发送后排队，每轮结束后发送一条")
         } else if !model.can_submit() {
             locale.text("Agent 尚未就绪 · 打开设置检查探测和登录状态")
@@ -1834,15 +1858,20 @@ impl NexusView {
         } else {
             locale.text("Ctrl Enter 发送消息 · Enter 换行")
         };
-        let selected_task = model
-            .selected_task
-            .and_then(|task_id| model.tasks.iter().find(|task| task.id == task_id));
+        let selected_task = model.conversation.selected_task.and_then(|task_id| {
+            model
+                .conversation
+                .tasks
+                .iter()
+                .find(|task| task.id == task_id)
+        });
         let header_project = model
+            .conversation
             .selected_project
             .as_ref()
             .map(|project| project.display_name.clone())
             .unwrap_or_else(|| locale.text("未关联项目").into());
-        let header_project_tooltip = model.selected_project.as_ref().map_or_else(
+        let header_project_tooltip = model.conversation.selected_project.as_ref().map_or_else(
             || header_project.clone(),
             |project| format!("{}\n{}", project.display_name, project.canonical_path),
         );
@@ -1952,7 +1981,7 @@ impl NexusView {
                                     .items_center()
                                     .gap_2()
                                     .pl_3()
-                                    .when(model.selected_project.is_some(), |element| {
+                                    .when(model.conversation.selected_project.is_some(), |element| {
                                         element.child(
                                             Button::new("toggle-changes-sidebar")
                                                 .debug_selector(|| "toggle-changes-sidebar".into())
@@ -1961,7 +1990,7 @@ impl NexusView {
                                                 .icon(IconName::PanelRight)
                                                 .tooltip(locale.text("环境"))
                                                 .accessibility_label(locale.text("环境"))
-                                                .selected(model.changes_sidebar_open)
+                                                .selected(model.conversation.changes_sidebar_open)
                                                 .on_click(cx.listener(|app, _, _, cx| {
                                                     app.presenter.toggle_changes_sidebar();
                                                     cx.notify();
@@ -2027,14 +2056,14 @@ impl NexusView {
                                     .flex_col()
                                     .child(self.render_message_queue(cx))
                                     .child(self.render_attachments(
-                                        &model.attachments,
+                                        &model.conversation.attachments,
                                         None,
                                         cx,
                                     ))
-                                    .when(model.attachments_loading, |element| {
+                                    .when(model.conversation.attachments_loading, |element| {
                                         element.child(div().text_size(px(12.)).child(locale.text("正在添加附件，请稍候。")))
                                     })
-                                    .when_some(model.attachment_error.as_ref(), |element, error| {
+                                    .when_some(model.conversation.attachment_error.as_ref(), |element, error| {
                                         element.child(
                                             div()
                                                 .text_size(px(12.))
@@ -2093,7 +2122,7 @@ impl NexusView {
                                                             .label(locale.text("附件"))
                                                             .debug_selector(|| "attach-files".into())
                                                             .tooltip(locale.text("添加图片或文件，也可拖入或粘贴到输入框"))
-                                                            .disabled(model.attachments_loading)
+                                                            .disabled(model.conversation.attachments_loading)
                                                             .on_click(cx.listener(|app, _, _, cx| app.choose_attachments(cx))),
                                                     )
                                                     .child(
@@ -2107,7 +2136,7 @@ impl NexusView {
                                                                 |app, _, _, cx| app.choose_pdf(cx),
                                                             )),
                                                     )
-                                                    .when(model.active_run.is_some(), |element| {
+                                                    .when(model.conversation.active_run.is_some(), |element| {
                                                         element.child(
                                                             Button::new("composer-cancel")
                                                                 .debug_selector(|| {
@@ -2119,7 +2148,7 @@ impl NexusView {
                                                                 .h(px(COMPACT_CONTROL_HEIGHT))
                                                                 .icon(IconName::Pause)
                                                                 .label(locale.text("停止"))
-                                                                .disabled(model.run_cancelling)
+                                                                .disabled(model.conversation.run_cancelling)
                                                                 .tooltip(locale.text(
                                                                     "停止当前运行，保留已有输出",
                                                                 ))
@@ -2140,7 +2169,7 @@ impl NexusView {
                                                             .p_0()
                                                             .icon(IconName::ArrowUp)
                                                             .accessibility_label(
-                                                                if model.active_run.is_some() {
+                                                                if model.conversation.active_run.is_some() {
                                                                     locale.text("加入消息队列")
                                                                 } else {
                                                                     locale.text("发送任务")
@@ -2174,9 +2203,9 @@ impl NexusView {
                                             .child(composer_hint),
                                     )
                                     .when(
-                                        model.selected_project.is_some()
+                                        model.conversation.selected_project.is_some()
                                             && !model.can_submit()
-                                            && model.active_run.is_none(),
+                                            && model.conversation.active_run.is_none(),
                                         |element| {
                                             element.child(
                                                 Button::new("setup-agent")
@@ -2193,7 +2222,7 @@ impl NexusView {
                             ),
                     ),
             )
-            .when(model.changes_sidebar_open, |element| {
+            .when(model.conversation.changes_sidebar_open, |element| {
                 element.child(self.render_changes_sidebar(cx))
             })
             .into_any_element()
@@ -2204,7 +2233,7 @@ impl Render for NexusView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_user_ask_inputs(window, cx);
         self.sync_commit_input(window, cx);
-        if self.model_picker_open && self.presenter.model().active_run.is_some() {
+        if self.model_picker_open && self.presenter.model().conversation.active_run.is_some() {
             self.model_picker_open = false;
             self.prompt_input
                 .update(cx, |input, cx| input.focus(window, cx));
@@ -2292,7 +2321,7 @@ impl Render for NexusView {
 }
 
 fn working_directory_label(model: &AppModel) -> &str {
-    if model.selected_project.is_none() {
+    if model.conversation.selected_project.is_none() {
         return model.language.text("未关联项目");
     }
     match model.working_directory() {
@@ -2371,12 +2400,14 @@ mod catalog_model_tests {
         } else {
             "ctrl-v"
         });
-        cx.condition(&view, |view, _| !view.presenter.model().attachments_loading)
-            .await;
+        cx.condition(&view, |view, _| {
+            !view.presenter.model().conversation.attachments_loading
+        })
+        .await;
         view.read_with(cx, |view, cx| {
             assert_eq!(view.prompt_input.read(cx).value(), "保留问题");
-            assert_eq!(view.presenter.model().attachments.len(), 1);
-            assert!(view.presenter.model().attachments[0].is_image());
+            assert_eq!(view.presenter.model().conversation.attachments.len(), 1);
+            assert!(view.presenter.model().conversation.attachments[0].is_image());
         });
         cx.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("替换文字".into())));
         cx.simulate_keystrokes(if cfg!(target_os = "macos") {
@@ -2386,7 +2417,7 @@ mod catalog_model_tests {
         });
         view.read_with(cx, |view, cx| {
             assert_eq!(view.prompt_input.read(cx).value(), "替换文字");
-            assert_eq!(view.presenter.model().attachments.len(), 1);
+            assert_eq!(view.presenter.model().conversation.attachments.len(), 1);
         });
     }
 
@@ -2500,6 +2531,7 @@ mod catalog_model_tests {
             let prompt = view
                 .presenter
                 .model()
+                .conversation
                 .messages
                 .iter()
                 .find(|message| message.role == MessageRole::User)
@@ -2516,7 +2548,7 @@ mod catalog_model_tests {
                 assert!(prompt.contains(content), "{content}");
             }
             assert!(!prompt.contains("cnb.cool"));
-            assert!(view.presenter.model().active_run.is_some());
+            assert!(view.presenter.model().conversation.active_run.is_some());
             assert!(view.presenter.model().opened_issues().is_none());
         });
     }
@@ -2677,6 +2709,7 @@ mod catalog_model_tests {
             let prompt = view
                 .presenter
                 .model()
+                .conversation
                 .messages
                 .iter()
                 .find(|message| message.role == MessageRole::User)
@@ -2691,7 +2724,7 @@ mod catalog_model_tests {
             ] {
                 assert!(prompt.contains(content), "{content}");
             }
-            assert!(view.presenter.model().active_run.is_some());
+            assert!(view.presenter.model().conversation.active_run.is_some());
             assert!(view.presenter.model().opened_issues().is_none());
         });
     }
@@ -2725,7 +2758,10 @@ mod catalog_model_tests {
             IssueProvider::Cnb,
             Response::Comments(Ok(vec![cnb_comment("1")])),
         );
-        assert_eq!(presenter.model().active_run, Some(first.run_id));
+        assert_eq!(
+            presenter.model().conversation.active_run,
+            Some(first.run_id)
+        );
         let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
         cx.simulate_resize(gpui::size(px(1120.), px(900.)));
         cx.run_until_parked();
@@ -2760,9 +2796,9 @@ mod catalog_model_tests {
         });
         let pending = view.read_with(cx, |view, _| {
             let model = view.presenter.model();
-            match &model.model_catalog {
+            match &model.conversation.model_catalog {
                 ModelCatalogState::Loading { request_id, .. } => {
-                    Some((*request_id, model.selected_harness))
+                    Some((*request_id, model.conversation.selected_harness))
                 }
                 _ => None,
             }
@@ -2776,10 +2812,14 @@ mod catalog_model_tests {
         view.update(cx, |view, _| {
             view.presenter.drain_events();
             assert_eq!(view.presenter.model().active_run_count(), 2);
-            assert_ne!(view.presenter.model().active_run, Some(first.run_id));
+            assert_ne!(
+                view.presenter.model().conversation.active_run,
+                Some(first.run_id)
+            );
             let prompt = view
                 .presenter
                 .model()
+                .conversation
                 .messages
                 .iter()
                 .find(|message| message.role == MessageRole::User)
@@ -2803,7 +2843,13 @@ mod catalog_model_tests {
         cx.update(gpui_kit::init);
         cx.update(theme::configure_theme);
         let (mut presenter, _, _directory) = fixture();
-        let project = presenter.model().selected_project.as_ref().unwrap().id;
+        let project = presenter
+            .model()
+            .conversation
+            .selected_project
+            .as_ref()
+            .unwrap()
+            .id;
         seed_issues(&mut presenter, IssueProvider::Cnb);
         let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
         cx.simulate_resize(gpui::size(px(1040.), px(720.)));
@@ -3068,8 +3114,14 @@ mod catalog_model_tests {
                 view.prompt_input.read(cx).value(),
                 "已有草稿：用户刚编辑\n检查 src/main.rs 与 parseHTTP"
             );
-            assert!(view.presenter.model().queued_messages.is_empty());
-            assert!(view.presenter.model().active_run.is_none());
+            assert!(
+                view.presenter
+                    .model()
+                    .conversation
+                    .queued_messages
+                    .is_empty()
+            );
+            assert!(view.presenter.model().conversation.active_run.is_none());
             view.focus_prompt(window, cx);
             cx.notify();
         });
@@ -3206,7 +3258,12 @@ mod catalog_model_tests {
             cx.simulate_keystrokes("down down enter");
             cx.run_until_parked();
             assert_eq!(
-                view.read_with(cx, |view, _| view.presenter.model().workspace_draft.kind),
+                view.read_with(cx, |view, _| view
+                    .presenter
+                    .model()
+                    .conversation
+                    .workspace_draft
+                    .kind),
                 WorkspaceKind::Worktree
             );
             click_debug(cx, "workspace-base");
@@ -3217,6 +3274,7 @@ mod catalog_model_tests {
                 view.read_with(cx, |view, _| view
                     .presenter
                     .model()
+                    .conversation
                     .workspace_draft
                     .base
                     .clone()),
@@ -3244,7 +3302,12 @@ mod catalog_model_tests {
             cx.simulate_keystrokes("down enter");
             cx.run_until_parked();
             assert_eq!(
-                view.read_with(cx, |view, _| view.presenter.model().workspace_draft.kind),
+                view.read_with(cx, |view, _| view
+                    .presenter
+                    .model()
+                    .conversation
+                    .workspace_draft
+                    .kind),
                 WorkspaceKind::Local
             );
             assert!(cx.debug_bounds("workspace-base").is_none());
@@ -3290,6 +3353,7 @@ mod catalog_model_tests {
         seed_issues(&mut presenter, IssueProvider::Cnb);
         let original = presenter
             .model()
+            .conversation
             .workspace_review
             .as_ref()
             .unwrap()
@@ -3297,6 +3361,7 @@ mod catalog_model_tests {
             .clone();
         let id = presenter
             .model()
+            .conversation
             .workspace_review
             .as_ref()
             .unwrap()
@@ -3410,10 +3475,14 @@ mod catalog_model_tests {
         draw(cx);
         assert!(cx.debug_bounds("composer-surface").is_some());
         view.read_with(cx, |view, _| {
-            assert_eq!(view.presenter.model().commit_message, "Reviewed draft");
+            assert_eq!(
+                view.presenter.model().conversation.commit_message,
+                "Reviewed draft"
+            );
             assert_eq!(
                 view.presenter
                     .model()
+                    .conversation
                     .selected_changes
                     .iter()
                     .collect::<Vec<_>>(),
@@ -3459,7 +3528,12 @@ mod catalog_model_tests {
             .model()
             .latest_log_text(presenter.model().language)
             .to_owned();
-        let project = presenter.model().selected_project.clone().unwrap();
+        let project = presenter
+            .model()
+            .conversation
+            .selected_project
+            .clone()
+            .unwrap();
         let (root, cx) = cx.add_window_view(|window, cx| {
             let view = cx.new(|cx| NexusView::new(presenter, window, cx));
             gpui_kit::component::Root::new(view, window, cx)
@@ -3593,7 +3667,12 @@ mod catalog_model_tests {
         click_debug(cx, "generate-commit-message");
         view.update(cx, |view, cx| {
             finish_workspace_operation(&mut view.presenter);
-            let request_id = view.presenter.model().commit_message_request.unwrap();
+            let request_id = view
+                .presenter
+                .model()
+                .conversation
+                .commit_message_request
+                .unwrap();
             runner.emit(Event::CommitMessageGenerated {
                 request_id,
                 message: "fix: Generated description\n\nGenerated body".into(),
@@ -3633,7 +3712,7 @@ mod catalog_model_tests {
         cx.run_until_parked();
         view.update(cx, |view, cx| {
             finish_workspace_operation(&mut view.presenter);
-            assert!(!view.presenter.model().commit_editor_open);
+            assert!(!view.presenter.model().conversation.commit_editor_open);
             cx.notify();
         });
         assert_ne!(
@@ -3868,7 +3947,11 @@ mod catalog_model_tests {
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         assert_eq!(
-            view.read_with(cx, |view, _| view.presenter.model().selected_harness),
+            view.read_with(cx, |view, _| view
+                .presenter
+                .model()
+                .conversation
+                .selected_harness),
             HarnessKind::Claude
         );
     }
@@ -3882,23 +3965,30 @@ mod catalog_model_tests {
             (Language::English, "No directory selected"),
         ] {
             model.language = language;
-            model.selected_project = None;
+            model.conversation.selected_project = None;
             assert_eq!(working_directory_label(&model), language.text("未关联项目"));
-            model.selected_project = presenter.model().selected_project.clone();
+            model.conversation.selected_project =
+                presenter.model().conversation.selected_project.clone();
             let long_name = "中文 long directory ".repeat(30);
             for name in ["nexus", "含 空格的目录", long_name.as_str()] {
                 let path = Path::new("workspace").join(name).display().to_string();
-                let project = model.selected_project.as_mut().unwrap();
+                let project = model.conversation.selected_project.as_mut().unwrap();
                 project.canonical_path = path.clone();
                 project.display_name = "unrelated project alias".into();
                 assert_eq!(working_directory_label(&model), name);
                 assert_eq!(model.working_directory(), Some(path.as_str()));
             }
             let root = if cfg!(windows) { "C:\\" } else { "/" };
-            model.selected_project.as_mut().unwrap().canonical_path = root.into();
+            model
+                .conversation
+                .selected_project
+                .as_mut()
+                .unwrap()
+                .canonical_path = root.into();
             assert_eq!(working_directory_label(&model), root);
 
             model
+                .conversation
                 .selected_project
                 .as_mut()
                 .unwrap()
@@ -3916,11 +4006,21 @@ mod catalog_model_tests {
         cx.update(gpui_kit::init);
         cx.update(theme::configure_theme);
         let (mut presenter, _, directory) = fixture();
-        let first = presenter.model().selected_project.clone().unwrap();
+        let first = presenter
+            .model()
+            .conversation
+            .selected_project
+            .clone()
+            .unwrap();
         let path = directory.path().join("第二个 Project");
         std::fs::create_dir_all(&path).unwrap();
         presenter.open_project(&path);
-        let second = presenter.model().selected_project.clone().unwrap();
+        let second = presenter
+            .model()
+            .conversation
+            .selected_project
+            .clone()
+            .unwrap();
         let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
         view.update_in(cx, |view, window, cx| {
             view.prompt_input
@@ -3969,7 +4069,13 @@ mod catalog_model_tests {
         view.read_with(cx, |view, cx| {
             assert_eq!(view.prompt_input.read(cx).value(), "keep draft");
             assert_eq!(
-                view.presenter.model().selected_project.as_ref().unwrap().id,
+                view.presenter
+                    .model()
+                    .conversation
+                    .selected_project
+                    .as_ref()
+                    .unwrap()
+                    .id,
                 second.id
             );
         });
@@ -3984,7 +4090,13 @@ mod catalog_model_tests {
         assert!(cx.debug_bounds("project-picker-surface").is_none());
         view.read_with(cx, |view, _| {
             assert_eq!(
-                view.presenter.model().selected_project.as_ref().unwrap().id,
+                view.presenter
+                    .model()
+                    .conversation
+                    .selected_project
+                    .as_ref()
+                    .unwrap()
+                    .id,
                 first.id
             );
         });
@@ -3995,7 +4107,13 @@ mod catalog_model_tests {
         assert!(cx.debug_bounds("project-picker-surface").is_none());
         assert!(cx.debug_bounds("sidebar-projectless").is_some());
         view.read_with(cx, |view, _| {
-            assert!(view.presenter.model().selected_project.is_none());
+            assert!(
+                view.presenter
+                    .model()
+                    .conversation
+                    .selected_project
+                    .is_none()
+            );
             assert_eq!(
                 working_directory_label(view.presenter.model()),
                 "未关联项目"
@@ -4025,7 +4143,13 @@ mod catalog_model_tests {
         assert!(cx.debug_bounds("project-picker-surface").is_none());
         view.read_with(cx, |view, _| {
             assert_eq!(
-                view.presenter.model().selected_project.as_ref().unwrap().id,
+                view.presenter
+                    .model()
+                    .conversation
+                    .selected_project
+                    .as_ref()
+                    .unwrap()
+                    .id,
                 first.id
             );
         });
@@ -4050,7 +4174,11 @@ mod catalog_model_tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("project-picker-surface").is_none());
         assert!(view.read_with(cx, |view, _| {
-            view.presenter.model().selected_project.is_none()
+            view.presenter
+                .model()
+                .conversation
+                .selected_project
+                .is_none()
         }));
     }
 
@@ -4059,15 +4187,26 @@ mod catalog_model_tests {
         cx.update(gpui_kit::init);
         cx.update(theme::configure_theme);
         let (presenter, runner, _directory) = fixture();
-        let project = presenter.model().selected_project.clone().unwrap();
-        let models = presenter.model().model_catalog.models().unwrap().to_vec();
+        let project = presenter
+            .model()
+            .conversation
+            .selected_project
+            .clone()
+            .unwrap();
+        let models = presenter
+            .model()
+            .conversation
+            .model_catalog
+            .models()
+            .unwrap()
+            .to_vec();
         let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
         cx.run_until_parked();
         click_debug(cx, "sidebar-projectless");
         cx.run_until_parked();
         view.update_in(cx, |view, window, cx| {
             let ModelCatalogState::Loading { request_id, .. } =
-                view.presenter.model().model_catalog
+                view.presenter.model().conversation.model_catalog
             else {
                 panic!("expected model discovery in the conversation directory");
             };
@@ -4086,13 +4225,13 @@ mod catalog_model_tests {
         cx.run_until_parked();
         let (task_id, cwd) = view.read_with(cx, |view, cx| {
             let model = view.presenter.model();
-            assert!(model.selected_project.is_none());
-            assert!(model.active_run.is_some());
-            assert_eq!(model.messages[0].content, "你好");
+            assert!(model.conversation.selected_project.is_none());
+            assert!(model.conversation.active_run.is_some());
+            assert_eq!(model.conversation.messages[0].content, "你好");
             assert_eq!(working_directory_label(model), "未关联项目");
             assert!(view.prompt_input.read(cx).value().is_empty());
             (
-                model.selected_task.unwrap(),
+                model.conversation.selected_task.unwrap(),
                 model.working_directory().unwrap().to_owned(),
             )
         });
@@ -4101,22 +4240,26 @@ mod catalog_model_tests {
         click_debug(cx, format!("sidebar-project-{}", project.id).leak());
         cx.run_until_parked();
         assert!(view.read_with(cx, |view, _| {
-            view.presenter.model().selected_project.is_some()
+            view.presenter
+                .model()
+                .conversation
+                .selected_project
+                .is_some()
         }));
         click_debug(cx, task_row);
         cx.run_until_parked();
         view.read_with(cx, |view, _| {
             let model = view.presenter.model();
-            assert!(model.selected_project.is_none());
-            assert_eq!(model.selected_task, Some(task_id));
+            assert!(model.conversation.selected_project.is_none());
+            assert_eq!(model.conversation.selected_task, Some(task_id));
             assert_eq!(model.working_directory(), Some(cwd.as_str()));
         });
         view.update_in(cx, |view, window, cx| view.new_task(window, cx));
         cx.run_until_parked();
         view.read_with(cx, |view, _| {
             let model = view.presenter.model();
-            assert!(model.selected_project.is_none());
-            assert!(model.selected_task.is_none());
+            assert!(model.conversation.selected_project.is_none());
+            assert!(model.conversation.selected_task.is_none());
             assert_ne!(model.working_directory(), Some(cwd.as_str()));
         });
     }
@@ -4141,7 +4284,12 @@ mod catalog_model_tests {
             reduced_motion: true,
             ..Default::default()
         });
-        let mut project = presenter.model().selected_project.clone().unwrap();
+        let mut project = presenter
+            .model()
+            .conversation
+            .selected_project
+            .clone()
+            .unwrap();
         project.canonical_path = directory
             .path()
             .join("missing local 目录")
@@ -4312,11 +4460,11 @@ mod catalog_model_tests {
             click_debug(cx, "composer-cancel");
             view.update(cx, |view, cx| {
                 let model = view.presenter.model();
-                assert!(model.run_cancelling);
-                assert_eq!(model.queued_messages.len(), 1);
-                let queued_id = model.queued_messages[0].id;
+                assert!(model.conversation.run_cancelling);
+                assert_eq!(model.conversation.queued_messages.len(), 1);
+                let queued_id = model.conversation.queued_messages[0].id;
                 runner.emit(Event::RunExited {
-                    run_id: model.active_run.unwrap(),
+                    run_id: model.conversation.active_run.unwrap(),
                     status: RunStatus::Cancelled,
                     exit_code: None,
                 });
@@ -4365,7 +4513,7 @@ mod catalog_model_tests {
             },
             ..Default::default()
         };
-        model.model_override = Some("bigmodel/shared-model".into());
+        model.conversation.model_override = Some("bigmodel/shared-model".into());
 
         let content = CatalogModelSelectContent::from_model(&model);
         assert_eq!(
@@ -4459,7 +4607,7 @@ mod catalog_model_tests {
                 "CLI not ready",
             ),
         ] {
-            model.model_catalog = state;
+            model.conversation.model_catalog = state;
             let content = CatalogModelSelectContent::from_model(&model);
             let items = content
                 .groups
@@ -4478,8 +4626,8 @@ mod catalog_model_tests {
         default.availability = nexus_domain::ModelAvailability::Unavailable {
             reason: "disabled by provider".into(),
         };
-        model.model_catalog = ModelCatalogState::Ready(vec![default]);
-        model.model_override = None;
+        model.conversation.model_catalog = ModelCatalogState::Ready(vec![default]);
+        model.conversation.model_override = None;
         let content = CatalogModelSelectContent::from_model(&model);
         let default = &content.groups[0].items[0];
         assert!(default.title.contains("disabled by provider"));
@@ -4516,7 +4664,10 @@ mod catalog_model_tests {
             assert!(cx.debug_bounds("model-picker-surface").is_none());
             view.read_with(cx, |view, _| {
                 let model = view.presenter.model();
-                assert_eq!(model.model_override.as_deref(), Some(input.trim()));
+                assert_eq!(
+                    model.conversation.model_override.as_deref(),
+                    Some(input.trim())
+                );
                 assert!(model.can_submit());
                 let content = CatalogModelSelectContent::from_model(model);
                 let index = content.selected_index().unwrap();
@@ -4537,7 +4688,12 @@ mod catalog_model_tests {
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
         assert_eq!(
-            view.read_with(cx, |view, _| view.presenter.model().model_override.clone()),
+            view.read_with(cx, |view, _| view
+                .presenter
+                .model()
+                .conversation
+                .model_override
+                .clone()),
             Some("opus".into())
         );
         click_debug(cx, "composer-model");
@@ -4546,7 +4702,7 @@ mod catalog_model_tests {
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
         assert!(view.read_with(cx, |view, _| {
-            view.presenter.model().model_override.is_none()
+            view.presenter.model().conversation.model_override.is_none()
         }));
     }
 
@@ -4558,7 +4714,9 @@ mod catalog_model_tests {
         cx.update(theme::configure_theme);
         let (mut presenter, runner, _directory) = fixture();
         presenter.select_harness(HarnessKind::Omp, "claude");
-        let ModelCatalogState::Loading { request_id, .. } = presenter.model().model_catalog else {
+        let ModelCatalogState::Loading { request_id, .. } =
+            presenter.model().conversation.model_catalog
+        else {
             panic!("loading")
         };
         let mut long = omp_model("provider", "provider/needle-target");
@@ -4627,7 +4785,12 @@ mod catalog_model_tests {
             cx.run_until_parked();
             assert!(cx.debug_bounds("model-picker-surface").is_none());
             assert_eq!(
-                view.read_with(cx, |view, _| view.presenter.model().model_override.clone()),
+                view.read_with(cx, |view, _| view
+                    .presenter
+                    .model()
+                    .conversation
+                    .model_override
+                    .clone()),
                 Some("provider/needle-target".into())
             );
         }
@@ -4638,7 +4801,11 @@ mod catalog_model_tests {
         cx.simulate_click(claude.center(), Default::default());
         cx.run_until_parked();
         assert_eq!(
-            view.read_with(cx, |view, _| view.presenter.model().selected_harness),
+            view.read_with(cx, |view, _| view
+                .presenter
+                .model()
+                .conversation
+                .selected_harness),
             HarnessKind::Claude
         );
         assert!(cx.debug_bounds("model-picker-surface").is_some());
@@ -4658,7 +4825,7 @@ mod catalog_model_tests {
         view.update_in(cx, |view, window, cx| {
             view.toggle_settings(window, cx);
             assert!(matches!(
-                view.presenter.model().title_model_catalog,
+                view.presenter.model().conversation.title_model_catalog,
                 ModelCatalogState::Loading { .. }
             ));
         });
@@ -4790,13 +4957,19 @@ mod catalog_model_tests {
                         .as_deref(),
                     Some("provider/title-target")
                 );
-                assert_eq!(view.presenter.model().selected_harness, HarnessKind::Claude);
-                assert!(view.presenter.model().model_override.is_none());
+                assert_eq!(
+                    view.presenter.model().conversation.selected_harness,
+                    HarnessKind::Claude
+                );
+                assert!(view.presenter.model().conversation.model_override.is_none());
                 assert_eq!(
                     view.presenter.model().generation_settings(kind).effort,
                     ThinkingEffort::XHigh
                 );
-                assert_eq!(view.presenter.model().effort, ThinkingEffort::Default);
+                assert_eq!(
+                    view.presenter.model().conversation.effort,
+                    ThinkingEffort::Default
+                );
             });
             click_debug(cx, effort_selector);
             cx.run_until_parked();
@@ -4839,7 +5012,7 @@ mod catalog_model_tests {
                         .as_deref(),
                     Some("GLM-5")
                 );
-                assert!(view.presenter.model().model_override.is_none());
+                assert!(view.presenter.model().conversation.model_override.is_none());
             });
         }
     }
@@ -4853,8 +5026,8 @@ mod catalog_model_tests {
         let (mut presenter, runner, _directory) = fixture();
 
         assert!(presenter.submit("other task", "claude"));
-        let other_task = presenter.model().active_task.unwrap();
-        let other_run = presenter.model().active_run.unwrap();
+        let other_task = presenter.model().conversation.active_task.unwrap();
+        let other_run = presenter.model().conversation.active_run.unwrap();
         runner.emit(Event::RunExited {
             run_id: other_run,
             status: RunStatus::Completed,
@@ -4863,8 +5036,8 @@ mod catalog_model_tests {
         presenter.drain_events();
         presenter.new_task();
         assert!(presenter.submit("active task", "claude"));
-        let active_task = presenter.model().active_task.unwrap();
-        let run_id = presenter.model().active_run.unwrap();
+        let active_task = presenter.model().conversation.active_task.unwrap();
+        let run_id = presenter.model().conversation.active_run.unwrap();
         let request_id = Uuid::new_v4();
         let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
         cx.simulate_resize(gpui::size(px(1040.), px(680.)));
@@ -4950,7 +5123,7 @@ mod catalog_model_tests {
         assert!(cx.debug_bounds("user-ask-stack").is_some());
         view.read_with(cx, |view, cx| {
             assert_eq!(view.prompt_input.read(cx).value(), "普通消息草稿");
-            let request = &view.presenter.model().pending_user_asks[0];
+            let request = &view.presenter.model().conversation.pending_user_asks[0];
             assert_eq!(
                 request.drafts.get("scope"),
                 Some(&UserAskAnswerValue::Text("整个工作区\n".into()))
@@ -5054,7 +5227,7 @@ mod catalog_model_tests {
         cx.update(theme::configure_theme);
         let (mut presenter, runner, _directory) = fixture();
         assert!(presenter.submit("native questions", "claude"));
-        let run_id = presenter.model().active_run.unwrap();
+        let run_id = presenter.model().conversation.active_run.unwrap();
         let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
         cx.simulate_resize(gpui::size(px(1040.), px(680.)));
         // Claude keys answers by full question text, Codex by explicit ID, OMP by dialog ID.
@@ -5160,7 +5333,7 @@ mod catalog_model_tests {
         cx.update(theme::configure_theme);
         let (mut presenter, runner, _directory) = fixture();
         assert!(presenter.submit("long question", "claude"));
-        let run_id = presenter.model().active_run.unwrap();
+        let run_id = presenter.model().conversation.active_run.unwrap();
         let request_id = Uuid::new_v4();
         runner.emit(Event::RunUserAskRequested {
             run_id,
@@ -5229,7 +5402,7 @@ mod catalog_model_tests {
             ..Default::default()
         }));
         assert!(presenter.submit("approval task", "claude"));
-        let run_id = presenter.model().active_run.unwrap();
+        let run_id = presenter.model().conversation.active_run.unwrap();
         let (root, cx) = cx.add_window_view(|window, cx| {
             let view = cx.new(|cx| NexusView::new(presenter, window, cx));
             gpui_kit::component::Root::new(view, window, cx)
@@ -5268,12 +5441,20 @@ mod catalog_model_tests {
         });
         cx.simulate_keystrokes("enter escape");
         assert!(view.read_with(cx, |view, _| {
-            view.presenter.model().responding_approval.is_none()
+            view.presenter
+                .model()
+                .conversation
+                .responding_approval
+                .is_none()
         }));
         click_debug(cx, "approval-option-0");
         cx.run_until_parked();
         assert_eq!(
-            view.read_with(cx, |view, _| view.presenter.model().responding_approval),
+            view.read_with(cx, |view, _| view
+                .presenter
+                .model()
+                .conversation
+                .responding_approval),
             Some(request_id)
         );
         runner.emit(nexus_protocol::Event::RunApprovalResolved { run_id, request_id });
@@ -5294,8 +5475,8 @@ mod catalog_model_tests {
         let (mut presenter, runner, _directory) = fixture();
         assert!(presenter.submit("first", "claude"));
         assert!(presenter.submit("correction", "claude"));
-        let run_id = presenter.model().active_run.unwrap();
-        let message_id = presenter.model().queued_messages[0].id;
+        let run_id = presenter.model().conversation.active_run.unwrap();
+        let message_id = presenter.model().conversation.queued_messages[0].id;
         let selector = format!("steer-queued-{message_id}").leak();
         let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
         cx.update(|window, cx| {
@@ -5308,8 +5489,11 @@ mod catalog_model_tests {
             .center();
         cx.simulate_click(button, Default::default());
         view.read_with(cx, |view, _| {
-            assert_eq!(view.presenter.model().steering_message, Some(message_id));
-            assert_eq!(view.presenter.model().queued_messages.len(), 1);
+            assert_eq!(
+                view.presenter.model().conversation.steering_message,
+                Some(message_id)
+            );
+            assert_eq!(view.presenter.model().conversation.queued_messages.len(), 1);
         });
         runner.emit(Event::RunInputAccepted { run_id, message_id });
         view.update_in(cx, |view, _, cx| {
@@ -5322,7 +5506,11 @@ mod catalog_model_tests {
         });
         assert!(cx.debug_bounds(selector).is_none());
         assert!(view.read_with(cx, |view, _| {
-            view.presenter.model().queued_messages.is_empty()
+            view.presenter
+                .model()
+                .conversation
+                .queued_messages
+                .is_empty()
         }));
     }
 
@@ -5332,7 +5520,9 @@ mod catalog_model_tests {
         cx.update(theme::configure_theme);
         let (mut presenter, runner, _directory) = fixture();
         assert!(presenter.select_harness(HarnessKind::Omp, "claude"));
-        let ModelCatalogState::Loading { request_id, .. } = presenter.model().model_catalog else {
+        let ModelCatalogState::Loading { request_id, .. } =
+            presenter.model().conversation.model_catalog
+        else {
             panic!("expected loading catalog")
         };
         let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
