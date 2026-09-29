@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use super::worker::execute_request;
 use super::*;
 use crate::i18n::Language;
