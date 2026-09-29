@@ -18,7 +18,7 @@ pub fn configure(command: &mut Command) {
     nexus_harness_core::hide_console_window(command.as_std_mut());
 }
 
-pub(super) async fn cancel(child: &mut Child, pid: u32) -> io::Result<ExitStatus> {
+pub(crate) async fn cancel(child: &mut Child, pid: u32) -> io::Result<ExitStatus> {
     #[cfg(unix)]
     {
         if pid > 0 {
