@@ -1,3 +1,5 @@
+pub mod remote;
+
 use nexus_domain::{
     HarnessKind, ModelDescriptor, PermissionMode, RunStatus, ThinkingEffort, UserAskAnswer,
     UserAskQuestion, UserAskStatus,

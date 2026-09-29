@@ -1,4 +1,6 @@
 pub(crate) mod events;
+mod generation;
+mod session;
 pub(crate) mod user_ask;
 
 use nexus_domain::{RunStatus, UserAskAnswer, UserAskStatus};
@@ -16,11 +18,10 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use crate::infrastructure::{
-    harness,
-    process::{RunInput, SteerInput, generate_commit_message, generate_title, run_harness},
-};
+use crate::infrastructure::harness;
 use events::Emitter;
+use generation::{generate_commit_message, generate_title};
+use session::{RunInput, SteerInput, run_harness};
 use user_ask::PendingUserAsks;
 
 #[derive(Clone)]

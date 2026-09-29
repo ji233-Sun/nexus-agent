@@ -278,6 +278,7 @@ impl NexusView {
         if self
             .presenter
             .model()
+            .conversation
             .workspace_review
             .as_ref()
             .is_none_or(|review| review.workspace_id != id)
@@ -288,6 +289,7 @@ impl NexusView {
         let target = self
             .presenter
             .model()
+            .conversation
             .selected_project
             .as_ref()
             .and_then(|project| {
@@ -319,14 +321,20 @@ impl NexusView {
         let owner = model.conversation.id;
         let id = page.workspace_id;
         let review = model
+            .conversation
             .workspace_review
             .as_ref()
             .filter(|review| review.workspace_id == id);
         let plan = model
+            .conversation
             .merge_plan
             .as_ref()
             .filter(|plan| plan.workspace_id == id);
-        let workspace = model.workspaces.iter().find(|workspace| workspace.id == id);
+        let workspace = model
+            .conversation
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == id);
         let files = review
             .map(|review| review_files(review, plan))
             .unwrap_or_default();
@@ -498,7 +506,7 @@ impl NexusView {
                     )
                     .child(locale.text(if model.workspace_busy {
                         "正在读取变更…"
-                    } else if review.is_none() && model.changes_status.is_some() {
+                    } else if review.is_none() && model.conversation.changes_status.is_some() {
                         "无法显示差异，请刷新重试。"
                     } else {
                         "没有可审查的变更"
@@ -560,6 +568,7 @@ impl NexusView {
                             .child(format!(
                                 "{}  /  {branch}",
                                 model
+                                    .conversation
                                     .selected_project
                                     .as_ref()
                                     .map(|project| project.display_name.as_str())
@@ -636,23 +645,26 @@ impl NexusView {
                             .child(diff),
                     ),
             )
-            .when_some(model.changes_status.as_ref(), |element, status| {
-                element.child(
-                    div()
-                        .id("review-status")
-                        .debug_selector(|| "review-status".into())
-                        .flex_none()
-                        .max_h(px(96.))
-                        .overflow_y_scroll()
-                        .px_4()
-                        .py_2()
-                        .border_t_1()
-                        .border_color(rgb(colors.border))
-                        .text_size(px(12.))
-                        .text_color(rgb(colors.text_secondary))
-                        .child(status.render(locale).to_owned()),
-                )
-            })
+            .when_some(
+                model.conversation.changes_status.as_ref(),
+                |element, status| {
+                    element.child(
+                        div()
+                            .id("review-status")
+                            .debug_selector(|| "review-status".into())
+                            .flex_none()
+                            .max_h(px(96.))
+                            .overflow_y_scroll()
+                            .px_4()
+                            .py_2()
+                            .border_t_1()
+                            .border_color(rgb(colors.border))
+                            .text_size(px(12.))
+                            .text_color(rgb(colors.text_secondary))
+                            .child(status.render(locale).to_owned()),
+                    )
+                },
+            )
             .into_any_element()
     }
 
@@ -667,7 +679,11 @@ impl NexusView {
         let colors = palette(cx);
         let id = page.workspace_id;
         let owner = model.conversation.id;
-        let workspace = model.workspaces.iter().find(|workspace| workspace.id == id);
+        let workspace = model
+            .conversation
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == id);
         let mut panel = div()
             .id("review-merge-panel")
             .debug_selector(|| "review-merge-panel".into())
@@ -734,6 +750,7 @@ impl NexusView {
                             .on_click(move |_, _, cx| cx.reveal_path(Path::new(&path))),
                     );
         } else if let Some(plan) = model
+            .conversation
             .merge_plan
             .as_ref()
             .filter(|plan| plan.workspace_id == id)

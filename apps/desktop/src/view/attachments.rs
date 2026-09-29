@@ -1,5 +1,4 @@
 use super::*;
-use crate::infrastructure::storage::Storage;
 use std::path::PathBuf;
 
 impl NexusView {
@@ -63,13 +62,17 @@ impl NexusView {
             let mut results: Vec<_> = paths
                 .iter()
                 .map(|path| {
-                    Storage::import_attachment(&directory, path)
+                    crate::infrastructure::attachments::import_attachment(&directory, path)
                         .map_err(|error| format!("{}：{error}", path.display()))
                 })
                 .collect();
             for image in images {
                 let name = format!("clipboard.{}", image.format().extension());
-                let result = Storage::save_image_attachment(&directory, &name, image.bytes());
+                let result = crate::infrastructure::attachments::save_image_attachment(
+                    &directory,
+                    &name,
+                    image.bytes(),
+                );
                 results.push(result.map_err(|error| error.to_string()));
             }
             results

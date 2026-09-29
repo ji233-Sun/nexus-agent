@@ -32,7 +32,7 @@ impl NexusView {
         let first = batch[0].call.id;
         let id: ElementId = (ElementId::from(first), "tool-batch").into();
         let expanded = self.expanded_messages.contains(&id);
-        let active_run = self.presenter.model().active_run;
+        let active_run = self.presenter.model().conversation.active_run;
         let mut categories = Vec::new();
         for tool in batch {
             let label = tool.category().label(locale);
@@ -181,7 +181,7 @@ impl NexusView {
         let id = tool.call.id;
         let expanded = self.expanded_messages.contains(&id.into());
         let error = tool.is_error();
-        let running = tool.is_running(self.presenter.model().active_run);
+        let running = tool.is_running(self.presenter.model().conversation.active_run);
         let status = if error {
             locale.text("失败")
         } else if running {
@@ -1052,7 +1052,7 @@ mod tests {
         cx.update(theme::configure_theme);
         let (mut presenter, runner, _directory) = fixture();
         assert!(presenter.submit("Read an image", "claude"));
-        let run_id = presenter.model().active_run.unwrap();
+        let run_id = presenter.model().conversation.active_run.unwrap();
         runner.emit(Event::RunToolStarted {
             run_id,
             tool_id: "image".into(),
@@ -1060,7 +1060,7 @@ mod tests {
             summary: "{\"file_path\":\"missing.png\"}".into(),
         });
         presenter.drain_events();
-        let id = presenter.model().messages.last().unwrap().id;
+        let id = presenter.model().conversation.messages.last().unwrap().id;
         let (view, cx) = cx.add_window_view(|window, cx| {
             let mut view = NexusView::new(presenter, window, cx);
             view.set_appearance(

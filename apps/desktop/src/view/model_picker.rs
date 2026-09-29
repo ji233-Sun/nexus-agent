@@ -145,10 +145,10 @@ pub(super) struct CatalogModelSelectContent {
 impl CatalogModelSelectContent {
     pub(super) fn from_model(model: &AppModel) -> Self {
         Self::from_catalog(
-            model.selected_harness,
-            &model.model_catalog,
-            model.model_override.as_deref(),
-            model.model_override_name.as_deref(),
+            model.conversation.selected_harness,
+            &model.conversation.model_catalog,
+            model.conversation.model_override.as_deref(),
+            model.conversation.model_override_name.as_deref(),
             model
                 .selected_provider_profile()
                 .and_then(|profile| profile.model.as_deref()),
@@ -558,7 +558,7 @@ impl NexusView {
     pub(super) fn model_selector(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let model = self.presenter.model();
         let locale = model.language;
-        let content = &self.catalog_model_select_content;
+        let content = &self.model_picker.content;
         let selected = content
             .selected_index()
             .and_then(|index| content.groups.get(index.section)?.items.get(index.row));
@@ -567,7 +567,7 @@ impl NexusView {
             .unwrap_or_else(|| locale.text("跟随默认").into());
         let tooltip = format!(
             "{} · {}\n{}",
-            model.selected_harness,
+            model.conversation.selected_harness,
             model
                 .selected_provider_profile()
                 .map_or(locale.text("CLI 默认配置"), |profile| profile
@@ -582,12 +582,16 @@ impl NexusView {
             .h(px(COMPACT_CONTROL_HEIGHT))
             .max_w(px(300.))
             .min_w_0()
-            .child(harness_icon(model.selected_harness, palette(cx), 16.))
+            .child(harness_icon(
+                model.conversation.selected_harness,
+                palette(cx),
+                16.,
+            ))
             .label(label)
             .tooltip(tooltip)
             .accessibility_label(locale.text("选择 Harness、配置和模型"))
             .child(Icon::new(IconName::ChevronDown).size(px(14.)));
-        if model.active_run.is_some() {
+        if model.conversation.active_run.is_some() {
             return button.disabled(true).into_any_element();
         }
         let app = cx.entity();
@@ -595,14 +599,14 @@ impl NexusView {
             .anchor(Anchor::BottomLeft)
             .bottom_2()
             .appearance(false)
-            .open(self.model_picker_open)
-            .track_focus(&self.catalog_model_select.focus_handle(cx))
+            .open(self.model_picker.open)
+            .track_focus(&self.model_picker.list.focus_handle(cx))
             .trigger(button)
             .on_open_change(move |open, window, cx| {
                 app.update(cx, |app, cx| {
-                    app.model_picker_open = *open;
+                    app.model_picker.open = *open;
                     if *open {
-                        app.catalog_model_select.update(cx, |list, cx| {
+                        app.model_picker.list.update(cx, |list, cx| {
                             list.set_query("", window, cx);
                             let selected = list.delegate().selected_index();
                             list.set_selected_index(selected, window, cx);
@@ -612,7 +616,7 @@ impl NexusView {
                     cx.notify();
                 });
             })
-            .when(self.model_picker_open, |popover| {
+            .when(self.model_picker.open, |popover| {
                 popover.child(self.render_model_picker(window, cx))
             })
             .into_any_element()
@@ -731,10 +735,8 @@ impl NexusView {
                     )
                     .child(
                         div().flex_1().min_h_0().min_w_0().child(
-                            List::new(&self.catalog_model_select)
-                                .search_placeholder(
-                                    self.catalog_model_select_content.search_placeholder(),
-                                )
+                            List::new(&self.model_picker.list)
+                                .search_placeholder(self.model_picker.content.search_placeholder())
                                 .size_full(),
                         ),
                     )
@@ -750,10 +752,14 @@ impl NexusView {
                             .flex()
                             .flex_col()
                             .gap_1()
-                            .when(model.selected_harness == HarnessKind::Claude, |footer| {
-                                footer
-                                    .child(locale.text("第三方模型可直接输入服务商提供的模型 ID。"))
-                            })
+                            .when(
+                                model.conversation.selected_harness == HarnessKind::Claude,
+                                |footer| {
+                                    footer.child(
+                                        locale.text("第三方模型可直接输入服务商提供的模型 ID。"),
+                                    )
+                                },
+                            )
                             .child(locale.text("↑ ↓ 浏览 · Enter 选择 · Esc 关闭")),
                     ),
             )
@@ -770,7 +776,7 @@ impl NexusView {
         let model = self.presenter.model();
         let locale = model.language;
         let colors = palette(cx);
-        let selected = model.selected_harness == harness
+        let selected = model.conversation.selected_harness == harness
             && model.selected_provider_profile().map(|profile| profile.id) == profile_id;
         let id = format!(
             "model-config-{}-{}",
@@ -822,9 +828,126 @@ impl NexusView {
                     app.sync_provider_profile_form(profile_id, window, cx);
                     app.presenter.notify_remote_changed();
                 }
-                app.catalog_model_select
+                app.model_picker
+                    .list
                     .update(cx, |list, cx| list.focus(window, cx));
                 cx.notify();
             }))
+    }
+}
+
+/// Shared widget state for conversation and generation model catalogs.
+pub(super) struct ModelPickerControl {
+    pub(super) list: Entity<ListState<ModelPickerList>>,
+    pub(super) content: CatalogModelSelectContent,
+    pub(super) open: bool,
+}
+
+impl ModelPickerControl {
+    pub(super) fn new(
+        content: CatalogModelSelectContent,
+        window: &mut Window,
+        cx: &mut gpui::App,
+    ) -> Self {
+        let list = cx.new(|cx| {
+            let mut list =
+                ListState::new(ModelPickerList::new(content.clone()), window, cx).searchable(true);
+            list.set_selected_index(content.selected_index(), window, cx);
+            list
+        });
+        Self {
+            list,
+            content,
+            open: false,
+        }
+    }
+
+    pub(super) fn sync(
+        &mut self,
+        content: CatalogModelSelectContent,
+        window: &mut Window,
+        cx: &mut gpui::App,
+    ) {
+        if self.content == content {
+            return;
+        }
+        self.content = content.clone();
+        self.list.update(cx, |state, cx| {
+            state.delegate_mut().replace_content(content);
+            let selected = state.delegate().selected_index();
+            state.set_selected_index(selected, window, cx);
+            cx.notify();
+        });
+    }
+}
+
+impl NexusView {
+    pub(super) fn select_harness(
+        &mut self,
+        harness: HarnessKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let executable = self.executable_input.read(cx).value().to_string();
+        if self.presenter.select_harness(harness, &executable) {
+            self.sync_executable(window, cx);
+            self.sync_provider_profile_form(
+                self.presenter
+                    .model()
+                    .selected_provider_profile()
+                    .map(|profile| profile.id),
+                window,
+                cx,
+            );
+        }
+        self.presenter.notify_remote_changed();
+        cx.notify();
+    }
+
+    pub(super) fn select_catalog_model(
+        &mut self,
+        model_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.presenter.select_catalog_model(model_id);
+        self.presenter.notify_remote_changed();
+        cx.notify();
+    }
+
+    pub(super) fn refresh_model_catalog(
+        &mut self,
+        _: &gpui::ClickEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.presenter.refresh_model_catalog();
+        self.presenter.notify_remote_changed();
+        cx.notify();
+    }
+
+    pub(super) fn select_effort(&mut self, effort: ThinkingEffort, cx: &mut Context<Self>) {
+        self.presenter.select_effort(effort);
+        self.presenter.notify_remote_changed();
+        cx.notify();
+    }
+
+    pub(super) fn sync_catalog_model_select(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for kind in GenerationKind::ALL {
+            let content =
+                CatalogModelSelectContent::from_generation_settings(self.presenter.model(), kind);
+            self.generation_pickers
+                .get_mut(&kind)
+                .unwrap()
+                .sync(content, window, cx);
+        }
+        self.model_picker.sync(
+            CatalogModelSelectContent::from_model(self.presenter.model()),
+            window,
+            cx,
+        );
     }
 }

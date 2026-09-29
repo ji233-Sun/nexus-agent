@@ -9,8 +9,8 @@ impl Presenter {
         HarnessKind::ALL
             .into_iter()
             .map(|harness| {
-                let executable = if harness == self.model.selected_harness {
-                    self.model.executable.clone()
+                let executable = if harness == self.model.conversation.selected_harness {
+                    self.model.conversation.executable.clone()
                 } else {
                     self.storage
                         .setting(executable_setting_key(harness))
@@ -146,8 +146,8 @@ impl Presenter {
                                 Ok(()) => {
                                     installation.configured = path.clone();
                                     installation.discovered_from_manager = false;
-                                    if self.model.selected_harness == harness {
-                                        self.model.executable = path;
+                                    if self.model.conversation.selected_harness == harness {
+                                        self.model.conversation.executable = path;
                                     }
                                     if self.model.harness_manager.operating != Some(harness) {
                                         self.refresh_installed_harness(harness);
@@ -207,8 +207,8 @@ impl Presenter {
                 executable,
             }));
         }
-        if harness == self.model.selected_harness {
-            self.model.model_catalog = ModelCatalogState::Idle;
+        if harness == self.model.conversation.selected_harness {
+            self.model.conversation.model_catalog = ModelCatalogState::Idle;
             self.refresh_model_catalog();
         }
         self.invalidate_generation_catalogs(harness);

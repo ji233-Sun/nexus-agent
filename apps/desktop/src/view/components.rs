@@ -291,8 +291,8 @@ pub(super) fn matches_search(text: &str, query: &str) -> bool {
 
 pub(super) fn can_send_prompt(model: &crate::model::AppModel, prompt: &str) -> bool {
     (model.can_submit() || model.can_queue())
-        && !model.attachments_loading
-        && (!prompt.trim().is_empty() || !model.attachments.is_empty())
+        && !model.conversation.attachments_loading
+        && (!prompt.trim().is_empty() || !model.conversation.attachments.is_empty())
 }
 
 impl NexusView {
@@ -1085,29 +1085,32 @@ mod tests {
         for prompt in ["", "  ", "\n\t", "\u{3000}"] {
             assert!(!can_send_prompt(&model, prompt));
         }
-        model.attachments.push(nexus_domain::Attachment {
-            path: directory
-                .path()
-                .join("notes.txt")
-                .to_string_lossy()
-                .into_owned(),
-            source_name: "notes.txt".into(),
-            page: None,
-            kind: nexus_domain::AttachmentKind::File,
-        });
+        model
+            .conversation
+            .attachments
+            .push(nexus_domain::Attachment {
+                path: directory
+                    .path()
+                    .join("notes.txt")
+                    .to_string_lossy()
+                    .into_owned(),
+                source_name: "notes.txt".into(),
+                page: None,
+                kind: nexus_domain::AttachmentKind::File,
+            });
         assert!(can_send_prompt(&model, ""));
-        model.attachments_loading = true;
+        model.conversation.attachments_loading = true;
         assert!(!can_send_prompt(&model, ""));
         assert!(!can_send_prompt(&model, "wait"));
-        model.attachments_loading = false;
-        model.active_run = Some(Uuid::new_v4());
+        model.conversation.attachments_loading = false;
+        model.conversation.active_run = Some(Uuid::new_v4());
         assert!(!can_send_prompt(&model, "检查当前项目"));
-        model.active_task = Some(Uuid::new_v4());
-        model.selected_task = model.active_task;
+        model.conversation.active_task = Some(Uuid::new_v4());
+        model.conversation.selected_task = model.conversation.active_task;
         assert!(can_send_prompt(&model, "检查当前项目"));
-        model.run_cancelling = true;
+        model.conversation.run_cancelling = true;
         assert!(!can_send_prompt(&model, "检查当前项目"));
-        model.active_run = None;
+        model.conversation.active_run = None;
         model.harnesses.clear();
         assert!(!can_send_prompt(&model, "检查当前项目"));
     }

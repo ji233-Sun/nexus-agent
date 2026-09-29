@@ -5023,6 +5023,7 @@ dependencies = [
  "nexus-domain",
  "serde_json",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]

@@ -35,19 +35,21 @@ fn pick_base(current: Option<String>, branches: &[String]) -> String {
 
 impl Presenter {
     pub(super) fn reset_workspace_draft(&mut self) {
-        self.model.selected_workspace = None;
-        self.model.pending_workspace_start = None;
-        self.model.workspace_retry = false;
-        self.model.workspace_draft = WorkspaceDraft::default();
-        self.model.project_is_git = false;
-        if let Some(project) = self.model.selected_project.clone() {
-            self.model.project_is_git = git::repository(Path::new(&project.canonical_path)).is_ok();
-            if self.model.project_is_git {
+        self.model.conversation.selected_workspace = None;
+        self.model.conversation.pending_workspace_start = None;
+        self.model.conversation.workspace_retry = false;
+        self.model.conversation.workspace_draft = WorkspaceDraft::default();
+        self.model.conversation.project_is_git = false;
+        if let Some(project) = self.model.conversation.selected_project.clone() {
+            self.model.conversation.project_is_git =
+                git::repository(Path::new(&project.canonical_path)).is_ok();
+            if self.model.conversation.project_is_git {
                 let path = Path::new(&project.canonical_path);
                 let branches = git::local_branches(path).unwrap_or_default();
-                self.model.workspace_draft.base = pick_base(git::current_branch(path), &branches);
+                self.model.conversation.workspace_draft.base =
+                    pick_base(git::current_branch(path), &branches);
             }
-            if self.model.project_is_git
+            if self.model.conversation.project_is_git
                 && self
                     .storage
                     .setting(&format!("workspace_mode:{}", project.id))
@@ -56,22 +58,22 @@ impl Presenter {
                     .as_deref()
                     == Some("worktree")
             {
-                self.model.workspace_draft.kind = WorkspaceKind::Worktree;
+                self.model.conversation.workspace_draft.kind = WorkspaceKind::Worktree;
             }
         }
         self.refresh_workspace_branch();
     }
 
     pub(crate) fn select_workspace_kind(&mut self, kind: WorkspaceKind) {
-        if self.model.selected_task.is_some()
-            || self.model.selected_workspace.is_some()
+        if self.model.conversation.selected_task.is_some()
+            || self.model.conversation.selected_workspace.is_some()
             || self.model.workspace_busy
-            || (kind == WorkspaceKind::Worktree && !self.model.project_is_git)
+            || (kind == WorkspaceKind::Worktree && !self.model.conversation.project_is_git)
         {
             return;
         }
-        self.model.workspace_draft.kind = kind;
-        if let Some(project) = self.model.selected_project.clone() {
+        self.model.conversation.workspace_draft.kind = kind;
+        if let Some(project) = self.model.conversation.selected_project.clone() {
             let value = if kind == WorkspaceKind::Worktree {
                 "worktree"
             } else {
@@ -89,6 +91,7 @@ impl Presenter {
     pub(crate) fn workspace_base_branches(&self) -> Result<Vec<String>> {
         let project = self
             .model
+            .conversation
             .selected_project
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("请先选择项目目录。"))?;
@@ -96,33 +99,40 @@ impl Presenter {
     }
 
     pub(crate) fn select_workspace_base(&mut self, base: String) {
-        if self.model.selected_task.is_none()
-            && self.model.workspace_draft.kind == WorkspaceKind::Worktree
+        if self.model.conversation.selected_task.is_none()
+            && self.model.conversation.workspace_draft.kind == WorkspaceKind::Worktree
             && self
                 .model
+                .conversation
                 .selected_workspace
                 .as_ref()
                 .is_none_or(|workspace| {
-                    self.model.workspace_retry && workspace.status == WorkspaceStatus::Missing
+                    self.model.conversation.workspace_retry
+                        && workspace.status == WorkspaceStatus::Missing
                 })
             && !self.model.workspace_busy
             && self
                 .workspace_base_branches()
                 .is_ok_and(|branches| branches.contains(&base))
         {
-            self.model.workspace_draft.base = base;
+            self.model.conversation.workspace_draft.base = base;
         }
     }
 
     pub(crate) fn reload_workspaces(&mut self) {
-        let Some(project) = self.model.selected_project.clone() else {
-            self.model.workspaces.clear();
-            self.model.project_is_git = false;
-            self.model.workspace_branch = None;
+        self.reload_workspaces_in(self.model.conversation.id)
+    }
+
+    pub(crate) fn reload_workspaces_in(&mut self, context: Uuid) {
+        let Some(project) = self.model[context].selected_project.clone() else {
+            self.model[context].workspaces.clear();
+            self.model[context].project_is_git = false;
+            self.model[context].workspace_branch = None;
             return;
         };
-        self.model.project_is_git = git::repository(Path::new(&project.canonical_path)).is_ok();
-        self.model.workspaces = self
+        self.model[context].project_is_git =
+            git::repository(Path::new(&project.canonical_path)).is_ok();
+        self.model[context].workspaces = self
             .storage
             .workspaces(project.id)
             .unwrap_or_default()
@@ -137,50 +147,55 @@ impl Presenter {
                 recovered
             })
             .collect();
-        if let Some(selected) = &mut self.model.conversation.selected_workspace
-            && let Some(workspace) = self
-                .model
-                .conversation
+        let conversation = &mut self.model[context];
+        if let Some(selected) = &mut conversation.selected_workspace
+            && let Some(workspace) = conversation
                 .workspaces
                 .iter()
                 .find(|workspace| workspace.id == selected.id)
         {
             *selected = workspace.clone();
         }
-        self.refresh_workspace_branch();
+        self.refresh_workspace_branch_in(context);
     }
 
     pub(super) fn refresh_workspace_branch(&mut self) {
-        self.model.workspace_branch = self
+        self.refresh_workspace_branch_in(self.model.conversation.id)
+    }
+
+    pub(super) fn refresh_workspace_branch_in(&mut self, context: Uuid) {
+        self.model[context].workspace_branch = self
             .model
-            .working_directory()
+            .working_directory_in(context)
             .and_then(|path| git::current_branch(Path::new(path)));
     }
 
     // Manual refresh entry: re-reads branch state from disk so external switches
     // (e.g. done in VSCode) show up without re-selecting the project.
     pub(crate) fn refresh_workspace_branches(&mut self) {
-        let Some(project) = self.model.selected_project.clone() else {
+        let Some(project) = self.model.conversation.selected_project.clone() else {
             return;
         };
         let path = Path::new(&project.canonical_path);
-        self.model.project_is_git = git::repository(path).is_ok();
-        if self.model.workspace_draft.kind == WorkspaceKind::Worktree
-            && self.model.selected_task.is_none()
+        self.model.conversation.project_is_git = git::repository(path).is_ok();
+        if self.model.conversation.workspace_draft.kind == WorkspaceKind::Worktree
+            && self.model.conversation.selected_task.is_none()
             && !self.model.workspace_busy
-            && self.model.project_is_git
+            && self.model.conversation.project_is_git
         {
             let branches = git::local_branches(path).unwrap_or_default();
             // Keep a base the user picked while it still exists; otherwise re-pick.
-            if !branches.contains(&self.model.workspace_draft.base) {
-                self.model.workspace_draft.base = pick_base(git::current_branch(path), &branches);
+            if !branches.contains(&self.model.conversation.workspace_draft.base) {
+                self.model.conversation.workspace_draft.base =
+                    pick_base(git::current_branch(path), &branches);
             }
         }
         self.refresh_workspace_branch();
     }
 
-    pub(super) fn begin_worktree(
+    pub(super) fn begin_worktree_in(
         &mut self,
+        context: Uuid,
         prompt: &str,
         executable: &str,
         permission: PermissionMode,
@@ -188,10 +203,10 @@ impl Presenter {
         if self.model.workspace_busy || prompt.trim().is_empty() || !self.model.can_submit() {
             return false;
         }
-        let Some(project) = self.model.selected_project.clone() else {
+        let Some(project) = self.model[context].selected_project.clone() else {
             return false;
         };
-        if self.model.workspace_draft.base.is_empty() {
+        if self.model[context].workspace_draft.base.is_empty() {
             self.model.log_status("请选择来源分支。".into());
             return false;
         }
@@ -202,16 +217,17 @@ impl Presenter {
                 return false;
             }
         };
-        let workspace = git::planned_workspace(root, &project, &self.model.workspace_draft);
-        let base = format!("refs/heads/{}", self.model.workspace_draft.base);
-        self.model.pending_workspace_start = Some(PendingWorkspaceStart {
+        let workspace =
+            git::planned_workspace(root, &project, &self.model[context].workspace_draft);
+        let base = format!("refs/heads/{}", self.model[context].workspace_draft.base);
+        self.model[context].pending_workspace_start = Some(PendingWorkspaceStart {
             attachments: Vec::new(),
-            context_id: self.model.conversation.id,
+            context_id: self.model[context].id,
             prompt: prompt.trim().to_owned(),
             executable: executable.to_owned(),
             permission,
         });
-        self.spawn_workspace_operation(move || {
+        self.spawn_workspace_operation_in(context, move || {
             WorkspaceEvent::Resolved(git::resolve_workspace(
                 Path::new(&project.canonical_path),
                 workspace,
@@ -226,6 +242,14 @@ impl Presenter {
         &mut self,
         operation: impl FnOnce() -> WorkspaceEvent + Send + 'static,
     ) {
+        self.spawn_workspace_operation_in(self.model.conversation.id, operation)
+    }
+
+    fn spawn_workspace_operation_in(
+        &mut self,
+        context: Uuid,
+        operation: impl FnOnce() -> WorkspaceEvent + Send + 'static,
+    ) {
         for path in &mut self.model.workspace_operation_paths {
             if let Ok(checkout) = git::checkout_path(path) {
                 *path = checkout;
@@ -234,8 +258,8 @@ impl Presenter {
         let (sender, receiver) = mpsc::channel();
         self.workspace_events = Some(receiver);
         self.model.workspace_busy = true;
-        self.model.workspace_operation_context = Some(self.model.conversation.id);
-        self.model.workspace_retry = false;
+        self.model.workspace_operation_context = Some(self.model[context].id);
+        self.model[context].workspace_retry = false;
         std::thread::spawn(move || {
             let _ = sender.send(operation());
         });
@@ -249,10 +273,10 @@ impl Presenter {
         else {
             return false;
         };
-        let selected = self.model.conversation.id;
-        if let Some(owner) = self.model.workspace_operation_context {
-            self.model.activate_conversation(owner);
-        }
+        let context = self
+            .model
+            .workspace_operation_context
+            .unwrap_or(self.model.conversation.id);
         self.workspace_events = None;
         self.model.workspace_busy = false;
         self.model.workspace_operation_context = None;
@@ -271,7 +295,7 @@ impl Presenter {
                 result.and_then(|workspace| {
                     // Persist the exact SHA and ownership before Git creates a directory.
                     self.storage.save_workspace(&workspace)?;
-                    self.model.selected_workspace = Some(workspace.clone());
+                    self.model[context].selected_workspace = Some(workspace.clone());
                     let project = self
                         .storage
                         .project(
@@ -280,7 +304,7 @@ impl Presenter {
                                 .ok_or_else(|| anyhow::anyhow!("Worktree 缺少项目"))?,
                         )?
                         .ok_or_else(|| anyhow::anyhow!("项目不存在"))?;
-                    self.spawn_workspace_operation(move || {
+                    self.spawn_workspace_operation_in(context, move || {
                         WorkspaceEvent::Created(git::create_worktree(
                             Path::new(&project.canonical_path),
                             workspace,
@@ -292,40 +316,40 @@ impl Presenter {
             }
             WorkspaceEvent::Created(result) => result.and_then(|workspace| {
                 self.storage.save_workspace(&workspace)?;
-                self.model.selected_workspace = Some(workspace);
-                self.reload_workspaces();
+                self.model[context].selected_workspace = Some(workspace);
+                self.reload_workspaces_in(context);
                 // Catalog discovery and the Harness now resolve the same task cwd.
-                if self.refresh_model_catalog() {
+                if self.refresh_model_catalog_in(context) {
                     self.model
                         .log_status("Worktree 已创建，正在读取任务目录的模型配置…".into());
                 } else {
-                    self.retry_workspace_start();
+                    self.retry_workspace_start_in(context);
                 }
                 Ok(())
             }),
             WorkspaceEvent::Reviewed(result) | WorkspaceEvent::Committed(result) => {
                 result.map(|review| {
                     if committed {
-                        self.model.commit_message.clear();
-                        self.model.commit_message_request = None;
-                        self.model.commit_editor_open = false;
+                        self.model[context].commit_message.clear();
+                        self.model[context].commit_message_request = None;
+                        self.model[context].commit_editor_open = false;
                     }
                     if review.dirty_paths.is_empty() {
-                        self.model.commit_editor_open = false;
+                        self.model[context].commit_editor_open = false;
                     }
-                    self.model
+                    self.model[context]
                         .selected_changes
                         .retain(|path| review.dirty_paths.contains(path));
-                    self.model.workspace_review = Some(review);
-                    self.model.merge_plan = None;
-                    self.model.changes_status = committed.then(|| "提交成功。".into());
+                    self.model[context].workspace_review = Some(review);
+                    self.model[context].merge_plan = None;
+                    self.model[context].changes_status = committed.then(|| "提交成功。".into());
                 })
             }
             WorkspaceEvent::CommitPrepared {
                 request_id,
                 command,
             } => {
-                if self.model.commit_message_request != Some(request_id) {
+                if self.model[context].commit_message_request != Some(request_id) {
                     Ok(())
                 } else {
                     command
@@ -336,21 +360,21 @@ impl Presenter {
                                 .send(CommandEnvelope::new(command))
                         })
                         .inspect_err(|_| {
-                            self.model.commit_message_request = None;
+                            self.model[context].commit_message_request = None;
                         })
                 }
             }
             WorkspaceEvent::Planned(result) => result.map(|plan| {
-                self.model.merge_plan = Some(plan);
-                self.model.changes_status = None;
+                self.model[context].merge_plan = Some(plan);
+                self.model[context].changes_status = None;
             }),
             WorkspaceEvent::Merged(result) => result.and_then(|workspace| {
                 let conflicted = workspace.merge.is_some();
                 self.storage.save_workspace(&workspace)?;
-                self.model.merge_plan = None;
-                self.reload_workspaces();
-                self.model.workspace_review = Some(git::changes::review(&workspace)?);
-                self.model.changes_status = Some(if conflicted {
+                self.model[context].merge_plan = None;
+                self.reload_workspaces_in(context);
+                self.model[context].workspace_review = Some(git::changes::review(&workspace)?);
+                self.model[context].changes_status = Some(if conflicted {
                     "合并存在冲突。请在目标目录解决并暂存文件，然后继续合并；也可以中止。".into()
                 } else {
                     "本地合并操作已完成。".into()
@@ -361,14 +385,14 @@ impl Presenter {
         if let Err(error) = result {
             let message = format!("Git 操作失败：{error}").into();
             if changes_operation {
-                self.model.changes_status = Some(message);
+                self.model[context].changes_status = Some(message);
             } else {
                 self.model.log_status(message);
             }
-            self.model.workspace_retry = self.model.pending_workspace_start.is_some();
-            self.reload_workspaces();
+            self.model[context].workspace_retry =
+                self.model[context].pending_workspace_start.is_some();
+            self.reload_workspaces_in(context);
         }
-        self.model.activate_conversation(selected);
         self.reload_tasks();
         true
     }
@@ -408,54 +432,57 @@ impl Presenter {
         };
         if self
             .model
+            .conversation
             .workspace_review
             .as_ref()
             .is_none_or(|review| review.workspace_id != id)
         {
-            self.model.selected_changes.clear();
+            self.model.conversation.selected_changes.clear();
         }
-        self.model.workspace_review = None;
-        self.model.commit_message_request = None;
-        self.model.merge_plan = None;
+        self.model.conversation.workspace_review = None;
+        self.model.conversation.commit_message_request = None;
+        self.model.conversation.merge_plan = None;
         self.spawn_workspace_operation(move || {
             WorkspaceEvent::Reviewed(git::changes::review(&workspace))
         });
-        self.model.changes_status = None;
+        self.model.conversation.changes_status = None;
         true
     }
 
     pub(crate) fn select_changed_file(&mut self, path: String, selected: bool) {
-        self.model.commit_message_request = None;
-        self.model.changes_status = None;
+        self.model.conversation.commit_message_request = None;
+        self.model.conversation.changes_status = None;
         if selected {
-            self.model.selected_changes.insert(path);
+            self.model.conversation.selected_changes.insert(path);
         } else {
-            self.model.selected_changes.remove(&path);
+            self.model.conversation.selected_changes.remove(&path);
         }
     }
 
     pub(crate) fn toggle_changes_sidebar(&mut self) {
-        self.model.changes_sidebar_open = !self.model.changes_sidebar_open;
-        if self.model.changes_sidebar_open {
+        self.model.conversation.changes_sidebar_open =
+            !self.model.conversation.changes_sidebar_open;
+        if self.model.conversation.changes_sidebar_open {
             self.review_conversation_changes();
         }
     }
 
     pub(crate) fn toggle_changes_files(&mut self) {
-        self.model.changes_files_expanded = !self.model.changes_files_expanded;
+        self.model.conversation.changes_files_expanded =
+            !self.model.conversation.changes_files_expanded;
     }
 
     pub(crate) fn toggle_commit_editor(&mut self) {
-        if self.model.commit_editor_open {
-            self.model.commit_editor_open = false;
-        } else if let Some(review) = &self.model.workspace_review
+        if self.model.conversation.commit_editor_open {
+            self.model.conversation.commit_editor_open = false;
+        } else if let Some(review) = &self.model.conversation.workspace_review
             && !review.dirty_paths.is_empty()
         {
             let files = review.dirty_paths.clone();
-            if self.model.selected_changes.is_empty() {
-                self.model.selected_changes.extend(files);
+            if self.model.conversation.selected_changes.is_empty() {
+                self.model.conversation.selected_changes.extend(files);
             }
-            self.model.commit_editor_open = true;
+            self.model.conversation.commit_editor_open = true;
         }
     }
 
@@ -463,40 +490,53 @@ impl Presenter {
         if self.model.workspace_busy {
             return false;
         }
-        let workspace = self.model.selected_workspace.clone().or_else(|| {
-            (self.model.selected_task.is_none()
-                && self.model.workspace_draft.kind == WorkspaceKind::Local)
-                .then(|| self.model.selected_project.as_ref().map(Workspace::local))
-                .flatten()
-        });
+        let workspace = self
+            .model
+            .conversation
+            .selected_workspace
+            .clone()
+            .or_else(|| {
+                (self.model.conversation.selected_task.is_none()
+                    && self.model.conversation.workspace_draft.kind == WorkspaceKind::Local)
+                    .then(|| {
+                        self.model
+                            .conversation
+                            .selected_project
+                            .as_ref()
+                            .map(Workspace::local)
+                    })
+                    .flatten()
+            });
         let Some(workspace) = workspace else {
-            self.model.changes_status = Some("任务目录尚未就绪，无法查看变更。".into());
+            self.model.conversation.changes_status =
+                Some("任务目录尚未就绪，无法查看变更。".into());
             return false;
         };
         if let Err(error) = self.storage.save_workspace(&workspace) {
-            self.model.changes_status = Some(error.to_string().into());
+            self.model.conversation.changes_status = Some(error.to_string().into());
             return false;
         }
         self.review_workspace(workspace.id)
     }
 
     pub(crate) fn set_commit_message(&mut self, message: String) {
-        if self.model.commit_message != message {
-            self.model.commit_message = message;
-            self.model.commit_message_request = None;
-            self.model.changes_status = None;
+        if self.model.conversation.commit_message != message {
+            self.model.conversation.commit_message = message;
+            self.model.conversation.commit_message_request = None;
+            self.model.conversation.changes_status = None;
         }
     }
 
     pub(crate) fn generate_workspace_commit_message(&mut self) -> bool {
-        if self.model.commit_message_request.is_some() {
+        if self.model.conversation.commit_message_request.is_some() {
             return false;
         }
-        let Some(review) = self.model.workspace_review.clone() else {
+        let Some(review) = self.model.conversation.workspace_review.clone() else {
             return false;
         };
         let files = self
             .model
+            .conversation
             .selected_changes
             .iter()
             .cloned()
@@ -515,13 +555,13 @@ impl Presenter {
         let (workspace, configuration) = match configuration {
             Ok(configuration) => configuration,
             Err(error) => {
-                self.model.changes_status = Some(error.to_string().into());
+                self.model.conversation.changes_status = Some(error.to_string().into());
                 return false;
             }
         };
         let request_id = Uuid::new_v4();
         let language = self.model.language.as_str().to_owned();
-        self.model.commit_message_request = Some(request_id);
+        self.model.conversation.commit_message_request = Some(request_id);
         self.model.workspace_operation_paths = vec![Path::new(&workspace.path).to_path_buf()];
         self.spawn_workspace_operation(move || WorkspaceEvent::CommitPrepared {
             request_id,
@@ -535,7 +575,7 @@ impl Presenter {
                 }
             }),
         });
-        self.model.changes_status = None;
+        self.model.conversation.changes_status = None;
         true
     }
 
@@ -548,12 +588,12 @@ impl Presenter {
         let workspace = match self.workspace_for_write(review.workspace_id) {
             Ok(workspace) => workspace,
             Err(error) => {
-                self.model.changes_status = Some(error.to_string().into());
+                self.model.conversation.changes_status = Some(error.to_string().into());
                 return false;
             }
         };
         self.model.workspace_operation_paths = vec![Path::new(&workspace.path).to_path_buf()];
-        self.model.changes_status = None;
+        self.model.conversation.changes_status = None;
         self.spawn_workspace_operation(move || {
             WorkspaceEvent::Committed(git::changes::commit_files(
                 &workspace, &review, &files, &message,
@@ -566,7 +606,7 @@ impl Presenter {
         let workspace = match self.workspace_for_write(id) {
             Ok(workspace) => workspace,
             Err(error) => {
-                self.model.changes_status = Some(error.to_string().into());
+                self.model.conversation.changes_status = Some(error.to_string().into());
                 return false;
             }
         };
@@ -576,8 +616,8 @@ impl Presenter {
         let Ok(Some(project)) = self.storage.project(project_id) else {
             return false;
         };
-        self.model.merge_plan = None;
-        self.model.changes_status = None;
+        self.model.conversation.merge_plan = None;
+        self.model.conversation.changes_status = None;
         self.spawn_workspace_operation(move || {
             WorkspaceEvent::Planned(git::changes::plan_merge(
                 Path::new(&project.canonical_path),
@@ -592,7 +632,7 @@ impl Presenter {
         let mut workspace = match self.workspace_for_write(plan.workspace_id) {
             Ok(workspace) => workspace,
             Err(error) => {
-                self.model.changes_status = Some(error.to_string().into());
+                self.model.conversation.changes_status = Some(error.to_string().into());
                 return false;
             }
         };
@@ -600,7 +640,8 @@ impl Presenter {
             .model
             .checkout_running(Path::new(&plan.state.target_path))
         {
-            self.model.changes_status = Some("目标目录仍有任务运行，不能合入。".into());
+            self.model.conversation.changes_status =
+                Some("目标目录仍有任务运行，不能合入。".into());
             return false;
         }
         let Some(project_id) = workspace.project_id else {
@@ -611,14 +652,14 @@ impl Presenter {
         };
         workspace.merge = Some(plan.state.clone());
         if let Err(error) = self.storage.save_workspace(&workspace) {
-            self.model.changes_status = Some(error.to_string().into());
+            self.model.conversation.changes_status = Some(error.to_string().into());
             return false;
         }
         self.model.workspace_operation_paths = vec![
             Path::new(&workspace.path).to_path_buf(),
             Path::new(&plan.state.target_path).to_path_buf(),
         ];
-        self.model.changes_status = None;
+        self.model.conversation.changes_status = None;
         self.spawn_workspace_operation(move || {
             WorkspaceEvent::Merged(git::changes::merge(
                 Path::new(&project.canonical_path),
@@ -633,7 +674,7 @@ impl Presenter {
         let workspace = match self.workspace_for_write(review.workspace_id) {
             Ok(workspace) => workspace,
             Err(error) => {
-                self.model.changes_status = Some(error.to_string().into());
+                self.model.conversation.changes_status = Some(error.to_string().into());
                 return false;
             }
         };
@@ -644,7 +685,7 @@ impl Presenter {
             Path::new(&workspace.path).to_path_buf(),
             Path::new(&state.target_path).to_path_buf(),
         ];
-        self.model.changes_status = None;
+        self.model.conversation.changes_status = None;
         self.spawn_workspace_operation(move || {
             WorkspaceEvent::Merged(git::changes::finish_merge(workspace, &review, abort))
         });
@@ -652,25 +693,28 @@ impl Presenter {
     }
 
     pub(crate) fn retry_workspace_start(&mut self) -> bool {
-        if self
-            .model
+        self.retry_workspace_start_in(self.model.conversation.id)
+    }
+
+    pub(crate) fn retry_workspace_start_in(&mut self, context: Uuid) -> bool {
+        if self.model[context]
             .pending_workspace_start
             .as_ref()
-            .is_some_and(|pending| pending.context_id != self.model.conversation.id)
+            .is_some_and(|pending| pending.context_id != self.model[context].id)
         {
             return false;
         }
-        let Some(pending) = self.model.pending_workspace_start.take() else {
+        let Some(pending) = self.model[context].pending_workspace_start.take() else {
             return false;
         };
-        self.model.workspace_retry = false;
-        let started = if self
-            .model
+        self.model[context].workspace_retry = false;
+        let started = if self.model[context]
             .selected_workspace
             .as_ref()
             .is_some_and(|workspace| workspace.status == WorkspaceStatus::Ready)
         {
-            self.start_run_with_attachments(
+            self.start_run_with_attachments_in(
+                context,
                 None,
                 &pending.prompt,
                 &pending.executable,
@@ -679,23 +723,27 @@ impl Presenter {
             )
         } else {
             // Failed creation keeps its record visible. A retry uses a new stable ID.
-            let previous = self.model.workspace_draft.clone();
-            self.model.workspace_draft = WorkspaceDraft {
+            let previous = self.model[context].workspace_draft.clone();
+            self.model[context].workspace_draft = WorkspaceDraft {
                 kind: previous.kind,
                 base: previous.base,
                 ..WorkspaceDraft::default()
             };
-            self.model.selected_workspace = None;
-            let started =
-                self.begin_worktree(&pending.prompt, &pending.executable, pending.permission);
-            if started && let Some(next) = &mut self.model.pending_workspace_start {
+            self.model[context].selected_workspace = None;
+            let started = self.begin_worktree_in(
+                context,
+                &pending.prompt,
+                &pending.executable,
+                pending.permission,
+            );
+            if started && let Some(next) = &mut self.model[context].pending_workspace_start {
                 next.attachments = pending.attachments.clone();
             }
             started
         };
         if !started {
-            self.model.pending_workspace_start = Some(pending);
-            self.model.workspace_retry = true;
+            self.model[context].pending_workspace_start = Some(pending);
+            self.model[context].workspace_retry = true;
         }
         started
     }

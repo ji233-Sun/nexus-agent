@@ -13,23 +13,8 @@ use std::{
     thread,
 };
 
+use crate::model::voice::{Provider, supported_providers};
 use anyhow::{Context, bail};
-use serde::{Deserialize, Serialize};
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum Provider {
-    MacOs,
-    Mimo,
-}
-
-#[cfg(target_os = "macos")]
-const PROVIDERS: &[Provider] = &[Provider::MacOs, Provider::Mimo];
-#[cfg(not(target_os = "macos"))]
-const PROVIDERS: &[Provider] = &[Provider::Mimo];
-
-pub(crate) fn supported_providers() -> &'static [Provider] {
-    PROVIDERS
-}
 
 enum Command {
     Stop,
