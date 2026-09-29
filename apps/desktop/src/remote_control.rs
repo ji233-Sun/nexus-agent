@@ -18,7 +18,8 @@ use axum::{
     routing::{get, post},
 };
 use futures_util::StreamExt as _;
-use nexus_domain::{HarnessKind, Message, Project, TaskSummary, ThinkingEffort};
+use nexus_domain::Message;
+use nexus_protocol::remote::{RemoteState, StartRunRequest};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, oneshot};
 use tower_http::cors::{Any, CorsLayer};
@@ -33,37 +34,6 @@ const MAX_PROMPT_BYTES: usize = 64 * 1024;
 const WEB_INDEX: &str = include_str!("../../remote-web/dist/index.html");
 const WEB_SCRIPT: &str = include_str!("../../remote-web/dist/assets/app.js");
 const WEB_STYLES: &str = include_str!("../../remote-web/dist/assets/app.css");
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RemoteProject {
-    pub id: Uuid,
-    pub display_name: String,
-}
-
-impl From<&Project> for RemoteProject {
-    fn from(project: &Project) -> Self {
-        Self {
-            id: project.id,
-            display_name: project.display_name.clone(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RemoteState {
-    pub projects: Vec<RemoteProject>,
-    pub tasks: Vec<TaskSummary>,
-    pub selected_project_id: Option<Uuid>,
-    pub selected_task_id: Option<Uuid>,
-    pub active_run_id: Option<Uuid>,
-    pub active_task_id: Option<Uuid>,
-    pub streaming_text: String,
-    pub status: String,
-    pub harness: HarnessKind,
-    pub model: Option<String>,
-    pub effort: ThinkingEffort,
-    pub harness_ready: bool,
-}
 
 pub enum RemoteCommand {
     GetState {
@@ -288,12 +258,6 @@ async fn get_messages(
     Ok(Json(wait_for_response(response).await?))
 }
 
-#[derive(Deserialize)]
-struct StartRunRequest {
-    project_id: Uuid,
-    prompt: String,
-}
-
 #[derive(Serialize)]
 struct ActionResponse {
     accepted: bool,
@@ -480,6 +444,7 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
+    use nexus_domain::{HarnessKind, ThinkingEffort};
     use std::io::{Read as _, Write as _};
 
     use axum::{

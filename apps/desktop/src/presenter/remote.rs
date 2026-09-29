@@ -1,6 +1,7 @@
 use super::{Presenter, RemoteCommand};
 use crate::i18n::Language;
-use crate::remote_control::{RemoteControl, RemoteProject, RemoteState};
+use crate::remote_control::RemoteControl;
+use nexus_protocol::remote::{RemoteProject, RemoteState};
 
 impl Presenter {
     pub(crate) fn attach_remote_control(&mut self, service: anyhow::Result<RemoteControl>) {

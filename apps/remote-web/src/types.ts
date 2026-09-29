@@ -37,7 +37,21 @@ export interface Message {
   role: MessageRole;
   kind: MessageKind;
   content: string;
+  attachments?: Attachment[];
+  tool?: { id: string; is_error: boolean };
   created_at: string;
+}
+
+export interface Attachment {
+  path: string;
+  source_name: string;
+  page?: number;
+  kind: "image" | "file";
+}
+
+export interface StartRunRequest {
+  project_id: string;
+  prompt: string;
 }
 
 export interface RemoteState {
@@ -62,7 +76,18 @@ export interface RemoteState {
     | "deepseek"
     | "commandcode";
   model: string | null;
-  effort: "low" | "medium" | "high" | "xhigh" | "max";
+  effort:
+    | "default"
+    | "none"
+    | "off"
+    | "minimal"
+    | "low"
+    | "medium"
+    | "high"
+    | "xhigh"
+    | "max"
+    | "ultra"
+    | "auto";
   harness_ready: boolean;
 }
 

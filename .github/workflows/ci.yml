@@ -66,6 +66,14 @@ jobs:
       - name: Install Rust toolchain
         run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt --component clippy
 
+      - name: Check remote contract and bundled client
+        if: runner.os == 'Linux'
+        working-directory: apps/remote-web
+        run: |
+          npm ci --ignore-scripts
+          npm run build
+          git diff --exit-code -- dist
+
       - uses: Swatinem/rust-cache@v2
 
       - name: Check formatting

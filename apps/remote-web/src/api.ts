@@ -1,4 +1,4 @@
-import type { ConnectionConfig, Message, RemoteState } from "./types";
+import type { ConnectionConfig, Message, RemoteState, StartRunRequest } from "./types";
 
 interface ApiErrorBody {
   error?: string;
@@ -32,7 +32,7 @@ export class NexusApi {
   startRun(projectId: string, prompt: string): Promise<void> {
     return this.request("/api/v1/runs", {
       method: "POST",
-      body: JSON.stringify({ project_id: projectId, prompt }),
+      body: JSON.stringify({ project_id: projectId, prompt } satisfies StartRunRequest),
     }).then(() => undefined);
   }
 
