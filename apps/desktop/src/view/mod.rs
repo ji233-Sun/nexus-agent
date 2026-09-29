@@ -7,6 +7,7 @@ mod lifecycle;
 mod model_picker;
 mod pane;
 mod pdf;
+mod provider_profiles;
 mod review;
 mod settings;
 mod sidebar;
@@ -50,7 +51,7 @@ use gpui_kit::component::{
     text::{TextView, TextViewStyle},
     tooltip::Tooltip,
 };
-use model_picker::{CatalogModelChoice, CatalogModelSelectContent, ModelPickerList};
+use model_picker::{CatalogModelChoice, CatalogModelSelectContent};
 use nexus_domain::{
     HarnessKind, Message, MessageKind, MessageRole, ModelDescriptor, PermissionMode, Project,
     ProviderProfile, RunStatus, ThinkingEffort, UserAskAnswerMode, UserAskAnswerValue,
@@ -91,12 +92,6 @@ impl Render for DialogLayer {
     }
 }
 
-struct GenerationPicker {
-    list: Entity<ListState<ModelPickerList>>,
-    content: CatalogModelSelectContent,
-    open: bool,
-}
-
 pub(crate) struct NexusView {
     pdf_events: (
         std::sync::mpsc::Sender<crate::infrastructure::pdf::PdfEvent>,
@@ -107,19 +102,12 @@ pub(crate) struct NexusView {
     voice_key_input: Entity<InputState>,
     font_controls: fonts::FontControls,
     user_ask_inputs: BTreeMap<(Uuid, String), Entity<TextareaState>>,
-    catalog_model_select: Entity<ListState<ModelPickerList>>,
-    catalog_model_select_content: CatalogModelSelectContent,
-    model_picker_open: bool,
-    generation_pickers: BTreeMap<GenerationKind, GenerationPicker>,
+    model_picker: model_picker::ModelPickerControl,
+    generation_pickers: BTreeMap<GenerationKind, model_picker::ModelPickerControl>,
     commit_inputs: BTreeMap<Uuid, Entity<TextareaState>>,
     review_pages: BTreeMap<Uuid, review::ReviewPage>,
     executable_input: Entity<InputState>,
-    provider_name_input: Entity<InputState>,
-    provider_api_key_env_input: Entity<InputState>,
-    provider_api_key_input: Entity<InputState>,
-    provider_base_url_env_input: Entity<InputState>,
-    provider_base_url_input: Entity<InputState>,
-    provider_model_input: Entity<InputState>,
+    provider_form: provider_profiles::ProviderProfileForm,
     search_input: Entity<InputState>,
     project_search_input: Entity<InputState>,
     project_picker_open: bool,
@@ -139,7 +127,6 @@ pub(crate) struct NexusView {
     settings_open: bool,
     settings_section: SettingsSection,
     reduced_motion: bool,
-    editing_provider_profile: Option<Uuid>,
     approval_dialog: Option<(Uuid, Uuid)>,
     dialog_layer: Entity<DialogLayer>,
 }
@@ -169,48 +156,13 @@ impl NexusView {
                 .default_value(presenter.model().conversation.executable.clone())
                 .placeholder(locale.text("命令名或完整路径"))
         });
-        let ProviderProfileDraft {
-            id: editing_provider_profile,
-            name,
-            api_key_env,
-            api_key: _,
-            base_url_env,
-            base_url,
-            model,
-        } = profile_form_draft(
+        let provider_form = provider_profiles::ProviderProfileForm::new(
             presenter.model().selected_provider_profile(),
             presenter.model().conversation.selected_harness,
+            locale,
+            window,
+            cx,
         );
-        let provider_name_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .default_value(name)
-                .placeholder(locale.text("例如 DeepSeek Production"))
-        });
-        let provider_api_key_env_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .default_value(api_key_env)
-                .placeholder(locale.text("例如 DEEPSEEK_API_KEY"))
-        });
-        let provider_api_key_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .masked(true)
-                .placeholder(locale.text("新建时必填；编辑时留空保留"))
-        });
-        let provider_base_url_env_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .default_value(base_url_env)
-                .placeholder(locale.text("可选，例如 OPENAI_BASE_URL"))
-        });
-        let provider_base_url_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .default_value(base_url)
-                .placeholder(locale.text("可选，例如 https://api.example.com/v1"))
-        });
-        let provider_model_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .default_value(model)
-                .placeholder(locale.text("可选，例如 deepseek/deepseek-v4-pro"))
-        });
         let search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder(locale.text("搜索任务…")));
         let project_search_input = cx.new(|cx| InputState::new(window, cx));
@@ -228,27 +180,18 @@ impl NexusView {
             }
         })
         .detach();
-        let catalog_model_select_content = CatalogModelSelectContent::from_model(presenter.model());
-        let catalog_model_select = cx.new(|cx| {
-            let mut state = ListState::new(
-                ModelPickerList::new(catalog_model_select_content.clone()),
-                window,
-                cx,
-            )
-            .searchable(true);
-            state.set_selected_index(catalog_model_select_content.selected_index(), window, cx);
-            state
-        });
+        let model_picker = model_picker::ModelPickerControl::new(
+            CatalogModelSelectContent::from_model(presenter.model()),
+            window,
+            cx,
+        );
         let generation_pickers = GenerationKind::ALL
             .into_iter()
             .map(|kind| {
                 let content =
                     CatalogModelSelectContent::from_generation_settings(presenter.model(), kind);
-                let list = cx.new(|cx| {
-                    ListState::new(ModelPickerList::new(content.clone()), window, cx)
-                        .searchable(true)
-                });
-                cx.subscribe(&list, move |app, list, event: &ListEvent, cx| {
+                let picker = model_picker::ModelPickerControl::new(content, window, cx);
+                cx.subscribe(&picker.list, move |app, list, event: &ListEvent, cx| {
                     match event {
                         ListEvent::Confirm(index) => {
                             let choice = list
@@ -274,14 +217,7 @@ impl NexusView {
                     cx.notify();
                 })
                 .detach();
-                (
-                    kind,
-                    GenerationPicker {
-                        list,
-                        content,
-                        open: false,
-                    },
-                )
+                (kind, picker)
             })
             .collect();
         cx.subscribe(&prompt_input, |_, _, event: &InputEvent, cx| {
@@ -298,7 +234,7 @@ impl NexusView {
         })
         .detach();
         cx.subscribe_in(
-            &catalog_model_select,
+            &model_picker.list,
             window,
             |app, list, event: &ListEvent, _, cx| {
                 match event {
@@ -318,9 +254,9 @@ impl NexusView {
                             }
                             _ => return,
                         }
-                        app.model_picker_open = false;
+                        app.model_picker.open = false;
                     }
-                    ListEvent::Cancel => app.model_picker_open = false,
+                    ListEvent::Cancel => app.model_picker.open = false,
                     _ => return,
                 }
                 cx.notify();
@@ -370,19 +306,12 @@ impl NexusView {
             font_controls,
             prompt_input,
             user_ask_inputs: BTreeMap::new(),
-            catalog_model_select,
-            catalog_model_select_content,
-            model_picker_open: false,
+            model_picker,
             generation_pickers,
             commit_inputs: BTreeMap::new(),
             review_pages: BTreeMap::new(),
             executable_input,
-            provider_name_input,
-            provider_api_key_env_input,
-            provider_api_key_input,
-            provider_base_url_env_input,
-            provider_base_url_input,
-            provider_model_input,
+            provider_form,
             search_input,
             project_search_input,
             project_picker_open: false,
@@ -402,7 +331,6 @@ impl NexusView {
             settings_open,
             settings_section: SettingsSection::General,
             reduced_motion: false,
-            editing_provider_profile,
             approval_dialog: None,
             dialog_layer,
         };
@@ -449,6 +377,7 @@ impl NexusView {
         if self.presenter.set_language(language) {
             gpui_kit::component::set_locale(language.as_str());
             self.sync_font_controls(window, cx);
+            self.provider_form.set_language(language, window, cx);
             self.prompt_input.update(cx, |input, cx| {
                 input.set_placeholder(
                     language.text("描述一个目标，让 Agent 开始工作…"),
@@ -458,21 +387,6 @@ impl NexusView {
             });
             for (input, placeholder) in [
                 (&self.executable_input, "命令名或完整路径"),
-                (&self.provider_name_input, "例如 DeepSeek Production"),
-                (&self.provider_api_key_env_input, "例如 DEEPSEEK_API_KEY"),
-                (&self.provider_api_key_input, "新建时必填；编辑时留空保留"),
-                (
-                    &self.provider_base_url_env_input,
-                    "可选，例如 OPENAI_BASE_URL",
-                ),
-                (
-                    &self.provider_base_url_input,
-                    "可选，例如 https://api.example.com/v1",
-                ),
-                (
-                    &self.provider_model_input,
-                    "可选，例如 deepseek/deepseek-v4-pro",
-                ),
                 (&self.search_input, "搜索任务…"),
             ] {
                 input.update(cx, |input, cx| {
@@ -598,7 +512,7 @@ impl NexusView {
             return;
         };
         self.approval_dialog = next;
-        self.model_picker_open = false;
+        self.model_picker.open = false;
         let app = cx.entity().clone();
         window.open_dialog(cx, move |dialog, window, cx| {
             let model = app.read(cx).presenter.model();
@@ -1114,107 +1028,6 @@ impl NexusView {
         cx.notify();
     }
 
-    fn select_provider_profile(
-        &mut self,
-        profile_id: Option<Uuid>,
-        edit: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.presenter.select_provider_profile(profile_id) {
-            if edit {
-                self.sync_provider_profile_form(profile_id, window, cx);
-            }
-            self.presenter.notify_remote_changed();
-        }
-        cx.notify();
-    }
-
-    fn new_provider_profile(
-        &mut self,
-        _: &gpui::ClickEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.sync_provider_profile_form(None, window, cx);
-        self.provider_name_input
-            .update(cx, |input, cx| input.focus(window, cx));
-        cx.notify();
-    }
-
-    fn save_provider_profile(
-        &mut self,
-        _: &gpui::ClickEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let draft = ProviderProfileDraft {
-            id: self.editing_provider_profile,
-            name: self.provider_name_input.read(cx).value().to_string(),
-            api_key_env: self.provider_api_key_env_input.read(cx).value().to_string(),
-            api_key: self.provider_api_key_input.read(cx).value().to_string(),
-            base_url_env: self
-                .provider_base_url_env_input
-                .read(cx)
-                .value()
-                .to_string(),
-            base_url: self.provider_base_url_input.read(cx).value().to_string(),
-            model: self.provider_model_input.read(cx).value().to_string(),
-        };
-        if let Some(profile_id) = self.presenter.save_provider_profile(draft) {
-            self.sync_provider_profile_form(Some(profile_id), window, cx);
-            self.presenter.notify_remote_changed();
-        }
-        cx.notify();
-    }
-
-    fn delete_provider_profile(
-        &mut self,
-        _: &gpui::ClickEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(profile_id) = self.editing_provider_profile else {
-            return;
-        };
-        if self.presenter.delete_provider_profile(profile_id) {
-            self.sync_provider_profile_form(None, window, cx);
-            self.presenter.notify_remote_changed();
-        }
-        cx.notify();
-    }
-
-    fn sync_provider_profile_form(
-        &mut self,
-        profile_id: Option<Uuid>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let profile = profile_id.and_then(|profile_id| {
-            self.presenter
-                .model()
-                .provider_profiles
-                .iter()
-                .find(|profile| profile.id == profile_id)
-                .cloned()
-        });
-        let draft = profile_form_draft(
-            profile.as_ref(),
-            self.presenter.model().conversation.selected_harness,
-        );
-        self.editing_provider_profile = draft.id;
-        for (input, value) in [
-            (&self.provider_name_input, draft.name),
-            (&self.provider_api_key_env_input, draft.api_key_env),
-            (&self.provider_api_key_input, draft.api_key),
-            (&self.provider_base_url_env_input, draft.base_url_env),
-            (&self.provider_base_url_input, draft.base_url),
-            (&self.provider_model_input, draft.model),
-        ] {
-            input.update(cx, |input, cx| input.set_value(&value, window, cx));
-        }
-    }
-
     fn sync_executable(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.executable_input.update(cx, |input, cx| {
             input.set_value(&self.presenter.model().conversation.executable, window, cx)
@@ -1225,28 +1038,16 @@ impl NexusView {
         for kind in GenerationKind::ALL {
             let content =
                 CatalogModelSelectContent::from_generation_settings(self.presenter.model(), kind);
-            let picker = self.generation_pickers.get_mut(&kind).unwrap();
-            if content != picker.content {
-                picker.content = content.clone();
-                picker.list.update(cx, |state, cx| {
-                    state.delegate_mut().replace_content(content);
-                    let selected = state.delegate().selected_index();
-                    state.set_selected_index(selected, window, cx);
-                    cx.notify();
-                });
-            }
+            self.generation_pickers
+                .get_mut(&kind)
+                .unwrap()
+                .sync(content, window, cx);
         }
-        let content = CatalogModelSelectContent::from_model(self.presenter.model());
-        if content == self.catalog_model_select_content {
-            return;
-        }
-        self.catalog_model_select_content = content.clone();
-        self.catalog_model_select.update(cx, |state, cx| {
-            state.delegate_mut().replace_content(content);
-            let selected = state.delegate().selected_index();
-            state.set_selected_index(selected, window, cx);
-            cx.notify();
-        });
+        self.model_picker.sync(
+            CatalogModelSelectContent::from_model(self.presenter.model()),
+            window,
+            cx,
+        );
     }
 
     fn harness_selector(
@@ -2233,8 +2034,8 @@ impl Render for NexusView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_user_ask_inputs(window, cx);
         self.sync_commit_input(window, cx);
-        if self.model_picker_open && self.presenter.model().conversation.active_run.is_some() {
-            self.model_picker_open = false;
+        if self.model_picker.open && self.presenter.model().conversation.active_run.is_some() {
+            self.model_picker.open = false;
             self.prompt_input
                 .update(cx, |input, cx| input.focus(window, cx));
         }
@@ -2331,32 +2132,6 @@ fn working_directory_label(model: &AppModel) -> &str {
             .unwrap_or(path),
         None => model.language.text("未选择目录"),
     }
-}
-
-fn profile_form_draft(
-    profile: Option<&ProviderProfile>,
-    harness: HarnessKind,
-) -> ProviderProfileDraft {
-    let info = harness.info();
-    profile
-        .map(|profile| ProviderProfileDraft {
-            id: Some(profile.id),
-            name: profile.name.clone(),
-            api_key_env: profile.api_key_env.clone(),
-            api_key: String::new(),
-            base_url_env: profile.base_url_env.clone().unwrap_or_default(),
-            base_url: profile.base_url.clone().unwrap_or_default(),
-            model: profile.model.clone().unwrap_or_default(),
-        })
-        .unwrap_or_else(|| ProviderProfileDraft {
-            id: None,
-            name: String::new(),
-            api_key_env: info.api_key_env.into(),
-            api_key: String::new(),
-            base_url_env: info.base_url_env.into(),
-            base_url: String::new(),
-            model: String::new(),
-        })
 }
 
 #[cfg(test)]
@@ -4653,7 +4428,7 @@ mod catalog_model_tests {
             cx.simulate_input(input);
             cx.run_until_parked();
             view.read_with(cx, |view, cx| {
-                let list = view.catalog_model_select.read(cx).delegate();
+                let list = view.model_picker.list.read(cx).delegate();
                 let item = list.item(IndexPath::new(0)).unwrap();
                 assert_eq!(item.choice, CatalogModelChoice::Model(input.trim().into()));
                 assert!(!item.disabled);
@@ -4681,7 +4456,7 @@ mod catalog_model_tests {
         cx.simulate_input("opus");
         cx.run_until_parked();
         view.read_with(cx, |view, cx| {
-            let list = view.catalog_model_select.read(cx).delegate();
+            let list = view.model_picker.list.read(cx).delegate();
             assert_eq!(list.sections_count(cx), 1);
             assert_eq!(list.items_count(0, cx), 1);
         });
@@ -4765,11 +4540,7 @@ mod catalog_model_tests {
             assert!(cx.debug_bounds("model-config-codex-cli").is_some());
             assert!(cx.debug_bounds("model-config-omp-cli").is_some());
             view.update_in(cx, |view, window, cx| {
-                assert!(
-                    view.catalog_model_select
-                        .focus_handle(cx)
-                        .is_focused(window)
-                );
+                assert!(view.model_picker.list.focus_handle(cx).is_focused(window));
             });
             cx.simulate_keystrokes("down up escape");
             cx.run_until_parked();
@@ -5556,12 +5327,14 @@ mod catalog_model_tests {
 
         assert_eq!(
             view.read_with(cx, |view, cx| {
-                view.catalog_model_select
+                view.model_picker
+                    .list
                     .read(cx)
                     .delegate()
                     .selected_index()
                     .and_then(|index| {
-                        view.catalog_model_select
+                        view.model_picker
+                            .list
                             .read(cx)
                             .delegate()
                             .item(index)

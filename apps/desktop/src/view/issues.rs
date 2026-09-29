@@ -94,7 +94,7 @@ impl NexusView {
             input.focus(window, cx);
         });
         self.issue_launch = Some(IssueLaunch { provider, kind });
-        self.model_picker_open = false;
+        self.model_picker.open = false;
         cx.notify();
     }
 

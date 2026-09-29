@@ -2359,10 +2359,10 @@ mod tests {
                 input.set_value("custom-agent", window, cx);
                 input.focus(window, cx);
             });
-            view.provider_name_input.update(cx, |input, cx| {
+            view.provider_form.name.update(cx, |input, cx| {
                 input.set_value("Keep this provider draft", window, cx);
             });
-            view.provider_api_key_input.update(cx, |input, cx| {
+            view.provider_form.api_key.update(cx, |input, cx| {
                 input.set_value("unsaved-test-key", window, cx);
             });
         });
@@ -2382,15 +2382,16 @@ mod tests {
                 assert!(view.focus_handle.is_focused(window));
                 assert_eq!(view.executable_input.read(cx).value(), "custom-agent");
                 assert_eq!(
-                    view.provider_name_input.read(cx).value(),
+                    view.provider_form.name.read(cx).value(),
                     "Keep this provider draft"
                 );
                 assert_eq!(
-                    view.provider_api_key_input.read(cx).value(),
+                    view.provider_form.api_key.read(cx).value(),
                     "unsaved-test-key"
                 );
                 if section == SettingsSection::Providers {
-                    view.provider_name_input
+                    view.provider_form
+                        .name
                         .update(cx, |input, cx| input.focus(window, cx));
                 }
             });
@@ -2432,18 +2433,15 @@ mod tests {
                             view.search_input.read(cx).presentation().placeholder(),
                             search_placeholder
                         );
-                        assert_eq!(
-                            view.catalog_model_select_content.groups[0].title,
-                            group_title
-                        );
+                        assert_eq!(view.model_picker.content.groups[0].title, group_title);
                         assert_eq!(view.prompt_input.read(cx).value(), "Keep this draft");
                         assert_eq!(view.executable_input.read(cx).value(), "custom-agent");
                         assert_eq!(
-                            view.provider_name_input.read(cx).value(),
+                            view.provider_form.name.read(cx).value(),
                             "Keep this provider draft"
                         );
                         assert_eq!(
-                            view.provider_api_key_input.read(cx).value(),
+                            view.provider_form.api_key.read(cx).value(),
                             "unsaved-test-key"
                         );
                         assert_eq!(
@@ -2481,7 +2479,7 @@ mod tests {
             assert!(view.settings_open);
             assert_eq!(view.settings_section, SettingsSection::Providers);
             assert_eq!(
-                view.provider_name_input.read(cx).value(),
+                view.provider_form.name.read(cx).value(),
                 "Keep this provider draft"
             );
         });

@@ -558,7 +558,7 @@ impl NexusView {
     pub(super) fn model_selector(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let model = self.presenter.model();
         let locale = model.language;
-        let content = &self.catalog_model_select_content;
+        let content = &self.model_picker.content;
         let selected = content
             .selected_index()
             .and_then(|index| content.groups.get(index.section)?.items.get(index.row));
@@ -599,14 +599,14 @@ impl NexusView {
             .anchor(Anchor::BottomLeft)
             .bottom_2()
             .appearance(false)
-            .open(self.model_picker_open)
-            .track_focus(&self.catalog_model_select.focus_handle(cx))
+            .open(self.model_picker.open)
+            .track_focus(&self.model_picker.list.focus_handle(cx))
             .trigger(button)
             .on_open_change(move |open, window, cx| {
                 app.update(cx, |app, cx| {
-                    app.model_picker_open = *open;
+                    app.model_picker.open = *open;
                     if *open {
-                        app.catalog_model_select.update(cx, |list, cx| {
+                        app.model_picker.list.update(cx, |list, cx| {
                             list.set_query("", window, cx);
                             let selected = list.delegate().selected_index();
                             list.set_selected_index(selected, window, cx);
@@ -616,7 +616,7 @@ impl NexusView {
                     cx.notify();
                 });
             })
-            .when(self.model_picker_open, |popover| {
+            .when(self.model_picker.open, |popover| {
                 popover.child(self.render_model_picker(window, cx))
             })
             .into_any_element()
@@ -735,10 +735,8 @@ impl NexusView {
                     )
                     .child(
                         div().flex_1().min_h_0().min_w_0().child(
-                            List::new(&self.catalog_model_select)
-                                .search_placeholder(
-                                    self.catalog_model_select_content.search_placeholder(),
-                                )
+                            List::new(&self.model_picker.list)
+                                .search_placeholder(self.model_picker.content.search_placeholder())
                                 .size_full(),
                         ),
                     )
@@ -830,9 +828,55 @@ impl NexusView {
                     app.sync_provider_profile_form(profile_id, window, cx);
                     app.presenter.notify_remote_changed();
                 }
-                app.catalog_model_select
+                app.model_picker
+                    .list
                     .update(cx, |list, cx| list.focus(window, cx));
                 cx.notify();
             }))
+    }
+}
+
+/// Shared widget state for conversation and generation model catalogs.
+pub(super) struct ModelPickerControl {
+    pub(super) list: Entity<ListState<ModelPickerList>>,
+    pub(super) content: CatalogModelSelectContent,
+    pub(super) open: bool,
+}
+
+impl ModelPickerControl {
+    pub(super) fn new(
+        content: CatalogModelSelectContent,
+        window: &mut Window,
+        cx: &mut gpui::App,
+    ) -> Self {
+        let list = cx.new(|cx| {
+            let mut list =
+                ListState::new(ModelPickerList::new(content.clone()), window, cx).searchable(true);
+            list.set_selected_index(content.selected_index(), window, cx);
+            list
+        });
+        Self {
+            list,
+            content,
+            open: false,
+        }
+    }
+
+    pub(super) fn sync(
+        &mut self,
+        content: CatalogModelSelectContent,
+        window: &mut Window,
+        cx: &mut gpui::App,
+    ) {
+        if self.content == content {
+            return;
+        }
+        self.content = content.clone();
+        self.list.update(cx, |state, cx| {
+            state.delegate_mut().replace_content(content);
+            let selected = state.delegate().selected_index();
+            state.set_selected_index(selected, window, cx);
+            cx.notify();
+        });
     }
 }
