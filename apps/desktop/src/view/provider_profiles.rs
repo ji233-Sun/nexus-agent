@@ -356,3 +356,88 @@ pub(super) fn profile_form_draft(
             model: String::new(),
         })
 }
+
+impl NexusView {
+    pub(super) fn provider_profile_selector(
+        &self,
+        id: &'static str,
+        compact: bool,
+        edit_on_select: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let locale = self.presenter.model().language;
+        let model = self.presenter.model();
+        let selected = model.selected_provider_profile().map(|profile| profile.id);
+        let selected_name = model
+            .selected_provider_profile()
+            .map(|profile| profile.name.clone())
+            .unwrap_or_else(|| locale.text("CLI 凭据").into());
+        let profiles = model
+            .provider_profiles
+            .iter()
+            .filter(|profile| profile.harness == model.conversation.selected_harness)
+            .cloned()
+            .collect::<Vec<_>>();
+        let app = cx.entity().clone();
+        let button_id = id;
+        Button::new(button_id)
+            .icon(IconName::Globe)
+            .disabled(model.conversation.active_run.is_some())
+            .small()
+            .when(compact, |button| {
+                button
+                    .ghost()
+                    .h(px(COMPACT_CONTROL_HEIGHT))
+                    .max_w(px(180.))
+                    .label(selected_name.clone())
+            })
+            .when(!compact, |button| {
+                button
+                    .debug_selector(move || id.into())
+                    .outline()
+                    .w_full()
+                    .h(px(CONTROL_HEIGHT))
+                    .accessibility_label(selected_name.clone())
+                    .child(settings::control_label(selected_name))
+            })
+            .map(|button| {
+                AnimatedDropdown::new(button_id, button, self.reduced_motion, move |menu, _, _| {
+                    let app_for_default = app.clone();
+                    profiles.iter().cloned().fold(
+                        menu.min_w(if compact { px(180.) } else { px(220.) }).item(
+                            PopupMenuItem::new(locale.text("使用 CLI 当前凭据"))
+                                .checked(selected.is_none())
+                                .on_click(move |_, window, cx| {
+                                    app_for_default.update(cx, |app, cx| {
+                                        app.select_provider_profile(
+                                            None,
+                                            edit_on_select,
+                                            window,
+                                            cx,
+                                        )
+                                    });
+                                }),
+                        ),
+                        |menu, profile| {
+                            let app = app.clone();
+                            let profile_id = profile.id;
+                            menu.item(
+                                PopupMenuItem::new(profile.name)
+                                    .checked(selected == Some(profile_id))
+                                    .on_click(move |_, window, cx| {
+                                        app.update(cx, |app, cx| {
+                                            app.select_provider_profile(
+                                                Some(profile_id),
+                                                edit_on_select,
+                                                window,
+                                                cx,
+                                            )
+                                        });
+                                    }),
+                            )
+                        },
+                    )
+                })
+            })
+    }
+}

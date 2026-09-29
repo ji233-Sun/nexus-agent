@@ -449,3 +449,109 @@ impl NexusView {
             .into_any_element()
     }
 }
+
+impl NexusView {
+    pub(super) fn sync_user_ask_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let desired = self
+            .presenter
+            .model()
+            .conversation
+            .pending_user_asks
+            .iter()
+            .flat_map(|request| {
+                request.questions.iter().filter_map(move |question| {
+                    let accepts_text = matches!(
+                        question.answer_mode,
+                        UserAskAnswerMode::Text
+                            | UserAskAnswerMode::Choice {
+                                allow_custom: true,
+                                ..
+                            }
+                    );
+                    accepts_text.then(|| {
+                        let value = match request.drafts.get(&question.id) {
+                            Some(UserAskAnswerValue::Text(value)) => value.clone(),
+                            _ => String::new(),
+                        };
+                        ((request.request_id, question.id.clone()), value)
+                    })
+                })
+            })
+            .collect::<BTreeMap<_, _>>();
+        self.user_ask_inputs
+            .retain(|key, _| desired.contains_key(key));
+        let placeholder = self.presenter.model().language.text("输入回答…");
+        for (key, value) in desired {
+            if self.user_ask_inputs.contains_key(&key) {
+                continue;
+            }
+            let input = cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .auto_grow(2, 4)
+                    .default_value(value)
+                    .placeholder(placeholder)
+            });
+            let request_id = key.0;
+            let question_id = key.1.clone();
+            cx.subscribe(&input, move |app, input, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let value = input.read(cx).value().to_string();
+                    app.presenter
+                        .set_user_ask_text(request_id, &question_id, value);
+                }
+                cx.notify();
+            })
+            .detach();
+            self.user_ask_inputs.insert(key, input);
+        }
+    }
+
+    pub(super) fn select_user_ask_question(
+        &mut self,
+        request_id: Uuid,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if self.presenter.set_user_ask_question(request_id, index) {
+            cx.notify();
+        }
+    }
+
+    pub(super) fn toggle_user_ask(&mut self, request_id: Uuid, cx: &mut Context<Self>) {
+        if self.presenter.toggle_user_ask_collapsed(request_id) {
+            cx.notify();
+        }
+    }
+
+    pub(super) fn select_user_ask_option(
+        &mut self,
+        request_id: Uuid,
+        question_id: &str,
+        option_id: &str,
+        checked: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self
+            .presenter
+            .set_user_ask_option(request_id, question_id, option_id, checked)
+        {
+            return;
+        }
+        if checked
+            && let Some(input) = self
+                .user_ask_inputs
+                .get(&(request_id, question_id.to_owned()))
+        {
+            input.update(cx, |input, cx| input.set_value("", window, cx));
+        }
+        cx.notify();
+    }
+
+    pub(super) fn submit_user_ask(&mut self, request_id: Uuid, cx: &mut Context<Self>) {
+        if self.presenter.submit_user_ask(request_id) {
+            self.presenter.notify_remote_changed();
+            cx.notify();
+        }
+    }
+}

@@ -880,3 +880,74 @@ impl ModelPickerControl {
         });
     }
 }
+
+impl NexusView {
+    pub(super) fn select_harness(
+        &mut self,
+        harness: HarnessKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let executable = self.executable_input.read(cx).value().to_string();
+        if self.presenter.select_harness(harness, &executable) {
+            self.sync_executable(window, cx);
+            self.sync_provider_profile_form(
+                self.presenter
+                    .model()
+                    .selected_provider_profile()
+                    .map(|profile| profile.id),
+                window,
+                cx,
+            );
+        }
+        self.presenter.notify_remote_changed();
+        cx.notify();
+    }
+
+    pub(super) fn select_catalog_model(
+        &mut self,
+        model_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.presenter.select_catalog_model(model_id);
+        self.presenter.notify_remote_changed();
+        cx.notify();
+    }
+
+    pub(super) fn refresh_model_catalog(
+        &mut self,
+        _: &gpui::ClickEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.presenter.refresh_model_catalog();
+        self.presenter.notify_remote_changed();
+        cx.notify();
+    }
+
+    pub(super) fn select_effort(&mut self, effort: ThinkingEffort, cx: &mut Context<Self>) {
+        self.presenter.select_effort(effort);
+        self.presenter.notify_remote_changed();
+        cx.notify();
+    }
+
+    pub(super) fn sync_catalog_model_select(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for kind in GenerationKind::ALL {
+            let content =
+                CatalogModelSelectContent::from_generation_settings(self.presenter.model(), kind);
+            self.generation_pickers
+                .get_mut(&kind)
+                .unwrap()
+                .sync(content, window, cx);
+        }
+        self.model_picker.sync(
+            CatalogModelSelectContent::from_model(self.presenter.model()),
+            window,
+            cx,
+        );
+    }
+}
