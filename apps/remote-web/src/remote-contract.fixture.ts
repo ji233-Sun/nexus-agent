@@ -149,4 +149,3 @@ export const messageKinds = [
   "status",
   "error"
 ] satisfies MessageKind[];
-

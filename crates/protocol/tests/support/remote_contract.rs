@@ -153,6 +153,7 @@ pub fn typescript() -> String {
             MessageKind::Error,
         ],
     );
+    source.pop();
     source
 }
 
