@@ -119,7 +119,7 @@ fn attachments_survive_send_failure_queue_and_conversation_switch() {
     let (conversation, root) = presenter.begin_attachment_import(1).unwrap();
     assert!(!presenter.submit("wait for import", "claude"));
     assert!(presenter.attach_pdf_capture("报告.pdf", 1, &png).is_err());
-    let file = Storage::import_attachment(&root, &source).unwrap();
+    let file = crate::infrastructure::attachments::import_attachment(&root, &source).unwrap();
     presenter.finish_attachment_import(conversation, vec![Ok(file.clone())]);
     let images = presenter.model.attachments.clone();
     assert_eq!(
@@ -175,7 +175,7 @@ fn attachment_import_reports_failures_and_returns_to_the_owning_conversation() {
     assert!(presenter.begin_attachment_import(1).is_none());
     let source = directory.path().join("notes.txt");
     fs::write(&source, "notes").unwrap();
-    let file = Storage::import_attachment(&root, &source).unwrap();
+    let file = crate::infrastructure::attachments::import_attachment(&root, &source).unwrap();
     presenter.new_task();
     presenter.finish_attachment_import(
         conversation,

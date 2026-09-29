@@ -74,7 +74,12 @@ impl Presenter {
             self.model.attachments.len() < nexus_domain::Attachment::MAX_COUNT,
             "每条消息最多包含 8 个附件。"
         );
-        let image = self.storage.save_pdf_capture(name, page, bytes)?;
+        let image = crate::infrastructure::attachments::save_pdf_capture(
+            &self.storage.attachment_directory(),
+            name,
+            page,
+            bytes,
+        )?;
         self.model.attachments.push(image);
         self.model.attachment_error = None;
         Ok(())
