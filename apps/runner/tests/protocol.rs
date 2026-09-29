@@ -38,6 +38,7 @@ struct TestRunner {
     child: Child,
     stdin: ChildStdin,
     events: Lines<BufReader<ChildStdout>>,
+    _config: tempfile::TempDir,
 }
 
 impl TestRunner {
@@ -48,7 +49,17 @@ impl TestRunner {
     }
 
     fn spawn_command(command: &mut tokio::process::Command) -> Self {
+        let config = tempfile::tempdir().unwrap();
+        for name in [
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_BASE_URL",
+            "CODEX_API_KEY",
+        ] {
+            command.env_remove(name);
+        }
         let mut child = command
+            .env("CLAUDE_CONFIG_DIR", config.path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -61,6 +72,7 @@ impl TestRunner {
             child,
             stdin,
             events,
+            _config: config,
         }
     }
 
@@ -844,10 +856,16 @@ async fn runner_routes_claude_alias_catalog_without_starting_a_run() {
             harness: HarnessKind::Claude,
             executable: executable.to_string_lossy().into_owned(),
             cwd: directory.path().to_string_lossy().into_owned(),
-            environment: vec![EnvironmentVariable {
-                name: "ANTHROPIC_API_KEY".into(),
-                value: "catalog-secret".into(),
-            }],
+            environment: vec![
+                EnvironmentVariable {
+                    name: "ANTHROPIC_API_KEY".into(),
+                    value: "catalog-secret".into(),
+                },
+                EnvironmentVariable {
+                    name: "ANTHROPIC_BASE_URL".into(),
+                    value: "http://127.0.0.1:0".into(),
+                },
+            ],
         })
         .await;
     let event = runner.next().await;
@@ -945,11 +963,48 @@ async fn opencode_probe_finds_official_install_without_shell_path() {
 }
 
 #[tokio::test]
+async fn claude_and_codex_probes_bound_both_stages_and_close_stdin() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = fake_harness(directory.path());
+    for harness in [HarnessKind::Claude, HarnessKind::Codex] {
+        for blocked_stage in [
+            None,
+            Some("TEST_PROBE_VERSION_BLOCK"),
+            Some("TEST_PROBE_AUTH_BLOCK"),
+        ] {
+            let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_nexus-runner"));
+            if let Some(variable) = blocked_stage {
+                command.env(variable, "1");
+            }
+            let mut runner = TestRunner::spawn_command(&mut command);
+            runner
+                .send(Command::HarnessProbe {
+                    harness,
+                    executable: executable.to_string_lossy().into_owned(),
+                    environment: Vec::new(),
+                })
+                .await;
+            let Event::HarnessDetected(probe) = runner.next().await else {
+                panic!("expected probe result");
+            };
+            assert_eq!(
+                probe.available,
+                blocked_stage != Some("TEST_PROBE_VERSION_BLOCK")
+            );
+            assert_eq!(probe.authenticated, blocked_stage.is_none());
+            runner.send(Command::RunnerHello).await;
+            runner.expect_runner_ready().await;
+            runner.shutdown().await;
+        }
+    }
+}
+
+#[tokio::test]
 async fn omp_probe_times_out_in_both_stages() {
     let directory = tempfile::tempdir().unwrap();
     let executable = fake_harness(directory.path());
     for (variable, available, message) in [
-        ("TEST_OMP_VERSION_BLOCK", false, "版本探测超时"),
+        ("TEST_PROBE_VERSION_BLOCK", false, "版本探测超时"),
         ("TEST_OMP_CATALOG_BLOCK", true, "模型探测超时"),
     ] {
         let mut runner = TestRunner::spawn_command(

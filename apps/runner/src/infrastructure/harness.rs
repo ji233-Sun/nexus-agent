@@ -317,14 +317,13 @@ async fn probe_command_code(executable: &str, environment: &[EnvironmentVariable
         return probe;
     };
     probe.executable = path.to_string_lossy().into();
-    let mut command = Command::new(&path);
-    nexus_harness_core::hide_console_window(command.as_std_mut());
-    let version = timeout(
-        Duration::from_secs(8),
-        command.arg("--version").kill_on_drop(true).output(),
+    let mut command = nexus_harness_core::probe::command(&path);
+    let version = nexus_harness_core::probe::output(
+        command.arg("--version"),
+        tokio::time::Instant::now() + Duration::from_secs(8),
     )
     .await;
-    let Ok(Ok(version)) = version else {
+    let Ok(version) = version else {
         probe.message = "Command Code 版本探测失败或超时。".into();
         return probe;
     };
@@ -334,18 +333,15 @@ async fn probe_command_code(executable: &str, environment: &[EnvironmentVariable
     }
     probe.available = true;
     probe.version = Some(String::from_utf8_lossy(&version.stdout).trim().into());
-    let mut command = Command::new(path);
-    nexus_harness_core::hide_console_window(command.as_std_mut());
+    let mut command = nexus_harness_core::probe::command(path);
     probe.authenticated = matches!(
         timeout(
             Duration::from_secs(8),
             command
                 .arg("status")
                 .envs(environment.iter().map(|v| (&v.name, &v.value)))
-                .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .kill_on_drop(true)
                 .status(),
         )
         .await,

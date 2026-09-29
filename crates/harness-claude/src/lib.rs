@@ -11,12 +11,11 @@ use nexus_domain::{
 };
 use nexus_harness_core::{
     ApprovalOption, ApprovalPrompt, InputFrame, LineDecoder, ModelCatalogError, UserAskRequest,
-    hide_console_window, resolve_executable, tool_content,
+    resolve_executable, tool_content,
 };
 pub use nexus_harness_core::{DecodedEvent, LaunchSpec};
 use nexus_protocol::{EnvironmentVariable, HarnessProbe, StartRun};
 use serde_json::{Value, json};
-use tokio::process::Command;
 use tokio::sync::watch;
 /// Anthropic 兼容 API 接入点。第三方网关（Kimi、GLM 等）与官方 API 共用同一套
 /// 模型目录端点 `{base_url}/v1/models`。
@@ -44,6 +43,7 @@ pub async fn discover_models(
         environment,
         cancel,
         user_claude_config_dir().as_deref(),
+        |name| std::env::var(name).ok(),
     )
     .await
 }
@@ -54,6 +54,7 @@ async fn discover_models_in(
     environment: &[EnvironmentVariable],
     cancel: watch::Receiver<bool>,
     user_config_dir: Option<&Path>,
+    process_env: impl Fn(&str) -> Option<String>,
 ) -> Result<Vec<ModelDescriptor>, ModelCatalogError> {
     if *cancel.borrow() {
         return Err(ModelCatalogError::Cancelled);
@@ -65,7 +66,7 @@ async fn discover_models_in(
     }
     // Claude Code 自身无法枚举第三方 API 的模型，目录改为直接询问该 API；
     // 任何失败（未配置凭证、网关不支持、网络异常）都回退到 CLI 别名。
-    if let Some(endpoint) = resolve_anthropic_endpoint(environment, cwd, user_config_dir) {
+    if let Some(endpoint) = resolve_endpoint_with(environment, cwd, user_config_dir, process_env) {
         match fetch_claude_models(&endpoint, &cancel).await {
             Ok(models) if !models.is_empty() => return Ok(models),
             Ok(_) | Err(ModelCatalogError::Failed(_)) => {}
@@ -119,16 +120,6 @@ fn claude_settings_paths(cwd: &Path, user_config_dir: Option<&Path>) -> Vec<Path
 
 /// 解析模型目录端点。优先级与 Claude Code 启动时的生效顺序一致：
 /// Provider Profile 注入的环境变量 → Claude Code settings 文件 → 进程环境。
-fn resolve_anthropic_endpoint(
-    environment: &[EnvironmentVariable],
-    cwd: &Path,
-    user_config_dir: Option<&Path>,
-) -> Option<AnthropicEndpoint> {
-    resolve_endpoint_with(environment, cwd, user_config_dir, |name| {
-        std::env::var(name).ok()
-    })
-}
-
 fn resolve_endpoint_with(
     environment: &[EnvironmentVariable],
     cwd: &Path,
@@ -431,18 +422,26 @@ pub async fn probe(configured_executable: &str) -> HarnessProbe {
         };
     };
 
-    let mut version_command = Command::new(&executable);
-    hide_console_window(version_command.as_std_mut());
-    let version = version_command.arg("--version").output().await;
-    let Ok(version) = version else {
-        return HarnessProbe {
-            harness: HarnessKind::Claude,
-            available: false,
-            authenticated: false,
-            executable: executable.display().to_string(),
-            version: None,
-            message: "Claude Code 存在，但无法执行。请检查文件权限。".into(),
-        };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let mut version_command = nexus_harness_core::probe::command(&executable);
+    let version =
+        nexus_harness_core::probe::output(version_command.arg("--version"), deadline).await;
+    let version = match version {
+        Ok(version) => version,
+        Err(error) => {
+            return HarnessProbe {
+                harness: HarnessKind::Claude,
+                available: false,
+                authenticated: false,
+                executable: executable.display().to_string(),
+                version: None,
+                message: if error.kind() == std::io::ErrorKind::TimedOut {
+                    "Claude Code 版本探测超时，请重试。".into()
+                } else {
+                    "Claude Code 存在，但无法执行。请检查文件权限。".into()
+                },
+            };
+        }
     };
     if !version.status.success() {
         return HarnessProbe {
@@ -456,12 +455,12 @@ pub async fn probe(configured_executable: &str) -> HarnessProbe {
     }
     let version = String::from_utf8_lossy(&version.stdout).trim().to_owned();
 
-    let mut auth_command = Command::new(&executable);
-    hide_console_window(auth_command.as_std_mut());
-    let auth = auth_command
-        .args(["auth", "status", "--json"])
-        .output()
-        .await;
+    let mut auth_command = nexus_harness_core::probe::command(&executable);
+    let auth = nexus_harness_core::probe::output(
+        auth_command.args(["auth", "status", "--json"]),
+        deadline,
+    )
+    .await;
     let authenticated = auth
         .ok()
         .filter(|output| output.status.success())
@@ -851,20 +850,6 @@ fn decode_tool_results(frame: &Value) -> Vec<DecodedEvent> {
 mod tests {
     use super::*;
 
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// 清除进程中的 Anthropic 环境变量，保证目录测试不依赖开发机配置。
-    fn scrub_anthropic_env() {
-        for name in [
-            "ANTHROPIC_BASE_URL",
-            "ANTHROPIC_API_KEY",
-            "ANTHROPIC_AUTH_TOKEN",
-        ] {
-            // SAFETY: 持有 ENV_LOCK 期间独占修改进程环境，测试结束后恢复。
-            unsafe { std::env::remove_var(name) };
-        }
-    }
-
     async fn serve_model_catalog(body: &'static str) -> (String, tokio::task::JoinHandle<String>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -890,19 +875,15 @@ mod tests {
         (format!("http://{address}/"), server)
     }
 
-    // 环境变量必须在整个异步用例期间保持已清除，锁只能跨 await 持有。
-    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn catalog_prefers_api_discovery_and_falls_back_to_aliases() {
-        let guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-        scrub_anthropic_env();
         let executable = std::env::current_exe().unwrap();
         let cwd = tempfile::tempdir().unwrap();
         let user_config = tempfile::tempdir().unwrap();
         let endpoint = vec![
             EnvironmentVariable {
                 name: "ANTHROPIC_BASE_URL".into(),
-                value: "https://gateway.invalid/anthropic".into(),
+                value: "http://127.0.0.1:0/anthropic".into(),
             },
             EnvironmentVariable {
                 name: "ANTHROPIC_AUTH_TOKEN".into(),
@@ -917,6 +898,7 @@ mod tests {
             &endpoint,
             watch::channel(false).1,
             Some(user_config.path()),
+            |_| None,
         )
         .await
         .unwrap();
@@ -947,6 +929,7 @@ mod tests {
             &endpoint,
             watch::channel(false).1,
             Some(user_config.path()),
+            |_| None,
         )
         .await
         .unwrap();
@@ -963,6 +946,7 @@ mod tests {
             &[],
             watch::channel(false).1,
             Some(user_config.path()),
+            |_| None,
         )
         .await
         .unwrap();
@@ -977,7 +961,8 @@ mod tests {
                 cwd.path(),
                 &[],
                 receiver,
-                Some(user_config.path())
+                Some(user_config.path()),
+                |_| None,
             )
             .await,
             Err(ModelCatalogError::Cancelled)
@@ -988,12 +973,12 @@ mod tests {
                 cwd.path(),
                 &[],
                 watch::channel(false).1,
-                Some(user_config.path())
+                Some(user_config.path()),
+                |_| None,
             )
             .await,
             Err(ModelCatalogError::Failed(_))
         ));
-        drop(guard);
     }
 
     #[tokio::test]
@@ -1030,13 +1015,10 @@ mod tests {
         assert_eq!(models[0].id, "kimi-k2-turbo-preview");
     }
 
-    // 与会清除进程环境的目录测试串行，避免配置读取与环境修改并发。
-    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn catalog_cancellation_interrupts_stalled_headers_and_body() {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         for send_headers in [false, true] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let executable = std::env::current_exe().unwrap();
@@ -1062,6 +1044,7 @@ mod tests {
                 &environment,
                 receiver,
                 Some(directory.path()),
+                |_| None,
             );
             tokio::pin!(discovery);
             let gateway = async {

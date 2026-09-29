@@ -17,7 +17,7 @@ enum Harness {
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.as_slice() == ["--version"] {
-        if env::var_os("TEST_OMP_VERSION_BLOCK").is_some() {
+        if env::var_os("TEST_PROBE_VERSION_BLOCK").is_some() {
             loop {
                 thread::sleep(Duration::from_secs(1));
             }
@@ -40,6 +40,18 @@ fn main() {
     }
     if args.as_slice() == ["status"] {
         println!("Authenticated");
+        return;
+    }
+    if args.as_slice() == ["auth", "status", "--json"] || args.as_slice() == ["login", "status"] {
+        if env::var_os("TEST_PROBE_AUTH_BLOCK").is_some() {
+            loop {
+                thread::sleep(Duration::from_secs(1));
+            }
+        }
+        let mut input = String::new();
+        io::stdin().read_to_string(&mut input).unwrap();
+        assert!(input.is_empty(), "probes must have no interactive stdin");
+        println!("{{\"loggedIn\":true}}");
         return;
     }
     if args.iter().any(|arg| arg == "--print")

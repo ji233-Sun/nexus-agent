@@ -444,18 +444,26 @@ pub async fn probe(configured_executable: &str) -> HarnessProbe {
         };
     };
 
-    let mut version_command = Command::new(&executable);
-    hide_console_window(version_command.as_std_mut());
-    let version = version_command.arg("--version").output().await;
-    let Ok(version) = version else {
-        return HarnessProbe {
-            harness: HarnessKind::Codex,
-            available: false,
-            authenticated: false,
-            executable: executable.display().to_string(),
-            version: None,
-            message: "Codex CLI 存在，但无法执行。请检查文件权限。".into(),
-        };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let mut version_command = nexus_harness_core::probe::command(&executable);
+    let version =
+        nexus_harness_core::probe::output(version_command.arg("--version"), deadline).await;
+    let version = match version {
+        Ok(version) => version,
+        Err(error) => {
+            return HarnessProbe {
+                harness: HarnessKind::Codex,
+                available: false,
+                authenticated: false,
+                executable: executable.display().to_string(),
+                version: None,
+                message: if error.kind() == std::io::ErrorKind::TimedOut {
+                    "Codex CLI 版本探测超时，请重试。".into()
+                } else {
+                    "Codex CLI 存在，但无法执行。请检查文件权限。".into()
+                },
+            };
+        }
     };
     if !version.status.success() {
         return HarnessProbe {
@@ -469,9 +477,9 @@ pub async fn probe(configured_executable: &str) -> HarnessProbe {
     }
     let version = String::from_utf8_lossy(&version.stdout).trim().to_owned();
 
-    let mut auth_command = Command::new(&executable);
-    hide_console_window(auth_command.as_std_mut());
-    let auth = auth_command.args(["login", "status"]).output().await;
+    let mut auth_command = nexus_harness_core::probe::command(&executable);
+    let auth =
+        nexus_harness_core::probe::output(auth_command.args(["login", "status"]), deadline).await;
     let authenticated = auth.is_ok_and(|output| output.status.success())
         || env::var_os("CODEX_API_KEY").is_some_and(|value| !value.is_empty());
 
