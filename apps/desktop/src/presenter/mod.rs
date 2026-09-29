@@ -1,3 +1,4 @@
+mod events;
 mod generation;
 mod harness_installation;
 mod issues;
@@ -607,16 +608,18 @@ impl Presenter {
 
     fn reload_tasks(&mut self) {
         self.model.projectless_tasks = self.storage.tasks(None).unwrap_or_default();
-        self.model.conversation.tasks = self
-            .storage
-            .tasks(
-                self.model
-                    .conversation
-                    .selected_project
-                    .as_ref()
-                    .map(|project| project.id),
-            )
-            .unwrap_or_default();
+        let contexts: Vec<_> = self
+            .model
+            .all_conversations()
+            .map(|conversation| conversation.id)
+            .collect();
+        for context in contexts {
+            let project = self.model[context]
+                .selected_project
+                .as_ref()
+                .map(|project| project.id);
+            self.model[context].tasks = self.storage.tasks(project).unwrap_or_default();
+        }
         self.model.archived_tasks = self.storage.archived_tasks().unwrap_or_default();
     }
 
@@ -648,33 +651,40 @@ impl Presenter {
                 self.model.fresh_conversation();
             }
         }
-        // Resolve context from the saved task, never from the previously selected project.
-        self.model.conversation.selected_project = task
-            .project_id
-            .and_then(|id| self.storage.project(id).ok().flatten());
-        self.model.conversation.selected_task = Some(task_id);
-        self.model.conversation.selected_workspace =
-            self.storage.task_workspace(task_id).ok().flatten();
-        self.reload_workspaces();
+        self.reload_task_context(self.model.conversation.id, task_id);
         if project_changed {
             self.reset_issues_project();
         }
-        self.model.conversation.messages = self.storage.messages(task_id).unwrap_or_default();
-        self.model.conversation.completed_runs =
+    }
+
+    fn reload_task_context(&mut self, context: Uuid, task_id: Uuid) {
+        let Ok(Some(task)) = self.storage.task(task_id) else {
+            return;
+        };
+        // Resolve context from the saved task, never from the previously selected project.
+        self.model[context].selected_project = task
+            .project_id
+            .and_then(|id| self.storage.project(id).ok().flatten());
+        self.model[context].selected_task = Some(task_id);
+        self.model[context].selected_workspace =
+            self.storage.task_workspace(task_id).ok().flatten();
+        self.reload_workspaces_in(context);
+        self.model[context].messages = self.storage.messages(task_id).unwrap_or_default();
+        self.model[context].completed_runs =
             self.storage.completed_runs(task_id).unwrap_or_default();
         self.reload_tasks();
-        if self.model.conversation.active_run.is_some() {
+        if self.model[context].active_run.is_some() {
             return;
         }
         if let Ok(Some(config)) = self.storage.conversation_config(task_id) {
-            self.model.conversation.selected_harness = config.harness;
-            self.model.conversation.permission_mode = config.permission_mode;
-            self.model.conversation.effort =
+            self.model[context].selected_harness = config.harness;
+            self.model[context].permission_mode = config.permission_mode;
+            self.model[context].effort =
                 normalize_effort_for_harness(config.harness, config.effort);
-            self.model.conversation.model_override =
+            self.model[context].model_override =
                 (config.model != "default").then_some(config.model.clone());
-            self.model.conversation.model_override_name = None;
-            self.model.conversation.model_catalog = ModelCatalogState::Idle;
+            self.model[context].model_override_name = None;
+            self.model[context].model_catalog = ModelCatalogState::Idle;
             let executable = if config.executable.is_empty() {
                 self.storage
                     .setting(executable_setting_key(config.harness))
@@ -684,10 +694,10 @@ impl Presenter {
             } else {
                 config.executable
             };
-            self.model.conversation.executable = executable.clone();
+            self.model[context].executable = executable.clone();
             if !self
                 .model
-                .selected_probe()
+                .selected_probe_in(context)
                 .is_some_and(|probe| probe.executable == executable)
             {
                 self.model.harnesses.remove(&config.harness);
@@ -707,7 +717,7 @@ impl Presenter {
                     },
                 );
             }
-            self.refresh_model_catalog();
+            self.refresh_model_catalog_in(context);
         }
     }
 
@@ -1026,80 +1036,79 @@ impl Presenter {
     }
 
     pub(crate) fn refresh_model_catalog(&mut self) -> bool {
-        if self.model.conversation.active_run.is_some() {
+        self.refresh_model_catalog_in(self.model.conversation.id)
+    }
+
+    pub(crate) fn refresh_model_catalog_in(&mut self, context: Uuid) -> bool {
+        if self.model[context].active_run.is_some() {
             return false;
         }
-        if self.model.conversation.selected_project.is_none()
-            && self.model.conversation.selected_task.is_none()
-            && self.model.conversation.selected_workspace.is_none()
+        if self.model[context].selected_project.is_none()
+            && self.model[context].selected_task.is_none()
+            && self.model[context].selected_workspace.is_none()
         {
             match self
                 .storage
-                .prepare_projectless_workspace(self.model.conversation.workspace_draft.task_id)
+                .prepare_projectless_workspace(self.model[context].workspace_draft.task_id)
             {
-                Ok(workspace) => self.model.conversation.selected_workspace = Some(workspace),
+                Ok(workspace) => self.model[context].selected_workspace = Some(workspace),
                 Err(error) => {
-                    self.model.conversation.model_catalog =
+                    self.model[context].model_catalog =
                         ModelCatalogState::NotReady(error.to_string().into());
                     return false;
                 }
             }
         }
-        let project_id = self
-            .model
-            .conversation
+        let project_id = self.model[context]
             .selected_project
             .as_ref()
             .map(|project| project.id);
-        let project_changed = self.model.conversation.catalog_project != project_id;
+        let project_changed = self.model[context].catalog_project != project_id;
         if project_changed {
-            self.model.conversation.title_model_catalog = ModelCatalogState::Idle;
-            self.model.conversation.commit_model_catalog = ModelCatalogState::Idle;
+            self.model[context].title_model_catalog = ModelCatalogState::Idle;
+            self.model[context].commit_model_catalog = ModelCatalogState::Idle;
         }
-        self.model.conversation.catalog_project = project_id;
-        let harness = self.model.conversation.selected_harness;
-        let Some(cwd) = self.model.working_directory().map(str::to_owned) else {
-            self.model.conversation.model_catalog = ModelCatalogState::Idle;
+        self.model[context].catalog_project = project_id;
+        let harness = self.model[context].selected_harness;
+        let Some(cwd) = self.model.working_directory_in(context).map(str::to_owned) else {
+            self.model[context].model_catalog = ModelCatalogState::Idle;
             return false;
         };
         if self
             .model
-            .selected_probe()
+            .selected_probe_in(context)
             .is_some_and(|probe| !probe.available)
         {
-            self.model.conversation.model_catalog = ModelCatalogState::NotReady(
+            self.model[context].model_catalog = ModelCatalogState::NotReady(
                 "可执行文件尚未就绪，请在设置中检查并重新探测。".into(),
             );
             return false;
         }
-        let environment = match self.provider_launch_configuration(harness) {
+        let environment = match self.provider_launch_configuration_in(context, harness) {
             Ok(configuration) => configuration,
             Err(error) => {
-                self.model.conversation.model_catalog =
+                self.model[context].model_catalog =
                     ModelCatalogState::NotReady(error.to_string().into());
                 return false;
             }
         };
         let Some(runner) = &self.runner else {
-            self.model
-                .conversation
+            self.model[context]
                 .model_catalog
                 .fail("Runner 不可用。".into());
             return false;
         };
         let request_id = Uuid::new_v4();
         let command = CommandEnvelope::new(Command::ModelCatalogRefresh {
-            context_id: Some(self.model.conversation.id),
+            context_id: Some(self.model[context].id),
             request_id,
             purpose: ModelCatalogPurpose::Conversation,
             harness,
-            executable: self.model.conversation.executable.clone(),
+            executable: self.model[context].executable.clone(),
             cwd,
             environment,
         });
-        let mut models = self
-            .model
-            .conversation
+        let mut models = self.model[context]
             .model_catalog
             .models()
             .unwrap_or_default()
@@ -1111,10 +1120,9 @@ impl Presenter {
                 model.is_default = false;
             }
         }
-        self.model.conversation.model_catalog = ModelCatalogState::Loading { request_id, models };
+        self.model[context].model_catalog = ModelCatalogState::Loading { request_id, models };
         if runner.send(command).is_err() {
-            self.model
-                .conversation
+            self.model[context]
                 .model_catalog
                 .fail("Runner 不可用。".into());
             return false;
@@ -1462,12 +1470,13 @@ impl Presenter {
         self.probe(&executable);
     }
 
-    fn provider_launch_configuration(
+    fn provider_launch_configuration_in(
         &self,
+        context: Uuid,
         harness: HarnessKind,
     ) -> Result<Vec<EnvironmentVariable>> {
         let mut environment = self.codebuddy_environment(harness);
-        let Some(profile) = self.model.provider_profile_for(harness) else {
+        let Some(profile) = self.model.provider_profile_in(context, harness) else {
             return Ok(environment);
         };
         let Some(api_key) = self.credentials.api_key(profile.id)? else {
@@ -1517,24 +1526,23 @@ impl Presenter {
     }
 
     fn remember_model_name(&mut self) {
-        self.model.conversation.model_override_name = self
-            .model
-            .conversation
-            .model_override
-            .as_ref()
-            .and_then(|_| {
+        self.remember_model_name_in(self.model.conversation.id)
+    }
+
+    fn remember_model_name_in(&mut self, context: Uuid) {
+        self.model[context].model_override_name =
+            self.model[context].model_override.as_ref().and_then(|_| {
                 self.model
-                    .selected_catalog_model()
+                    .selected_catalog_model_in(context)
                     .map(|model| model.display_name.clone())
             });
         let profile_id = self
             .model
-            .selected_provider_profile()
+            .selected_provider_profile_in(context)
             .map(|profile| profile.id);
         let _ = self.storage.set_setting(
-            &catalog_model_name_setting_key(self.model.conversation.selected_harness, profile_id),
-            self.model
-                .conversation
+            &catalog_model_name_setting_key(self.model[context].selected_harness, profile_id),
+            self.model[context]
                 .model_override_name
                 .as_deref()
                 .unwrap_or_default(),
@@ -1542,28 +1550,36 @@ impl Presenter {
     }
 
     fn persist_catalog_effort(&self) {
-        let harness = self.model.conversation.selected_harness;
+        self.persist_catalog_effort_in(self.model.conversation.id)
+    }
+
+    fn persist_catalog_effort_in(&self, context: Uuid) {
+        let harness = self.model[context].selected_harness;
         let profile_id = self
             .model
-            .selected_provider_profile()
+            .selected_provider_profile_in(context)
             .map(|profile| profile.id);
         let _ = self.storage.set_setting(
             &catalog_effort_setting_key(harness, profile_id),
-            self.model.conversation.effort.as_str(),
+            self.model[context].effort.as_str(),
         );
     }
 
     fn normalize_catalog_effort(&mut self) -> bool {
-        if self.model.conversation.effort.is_default()
+        self.normalize_catalog_effort_in(self.model.conversation.id)
+    }
+
+    fn normalize_catalog_effort_in(&mut self, context: Uuid) -> bool {
+        if self.model[context].effort.is_default()
             || self
                 .model
-                .selected_catalog_model()
-                .is_some_and(|model| model.supports_effort(&self.model.conversation.effort))
+                .selected_catalog_model_in(context)
+                .is_some_and(|model| model.supports_effort(&self.model[context].effort))
         {
             return false;
         }
-        self.model.conversation.effort = ThinkingEffort::Default;
-        self.persist_catalog_effort();
+        self.model[context].effort = ThinkingEffort::Default;
+        self.persist_catalog_effort_in(context);
         true
     }
 }

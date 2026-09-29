@@ -6011,13 +6011,17 @@ fn all_harnesses_share_selection_priority_and_run_configuration() {
         emit_current_catalog(&presenter, &runner, models.clone());
         presenter.drain_events();
         assert_eq!(
-            presenter.model().configured_catalog_model(),
+            presenter
+                .model()
+                .configured_catalog_model_in(presenter.model().conversation.id),
             Some("profile-model")
         );
 
         presenter.select_catalog_model(Some("explicit-model".into()));
         assert_eq!(
-            presenter.model().configured_catalog_model(),
+            presenter
+                .model()
+                .configured_catalog_model_in(presenter.model().conversation.id),
             Some("explicit-model")
         );
         assert_eq!(
@@ -6031,7 +6035,9 @@ fn all_harnesses_share_selection_priority_and_run_configuration() {
 
         presenter.select_catalog_model(None);
         assert_eq!(
-            presenter.model().configured_catalog_model(),
+            presenter
+                .model()
+                .configured_catalog_model_in(presenter.model().conversation.id),
             Some("profile-model")
         );
         assert_eq!(
@@ -6097,7 +6103,12 @@ fn all_harnesses_share_selection_priority_and_run_configuration() {
                 emit_current_catalog(&presenter, &runner, models.clone());
                 presenter.drain_events();
             }
-            assert_eq!(presenter.model().configured_catalog_model(), expected_model);
+            assert_eq!(
+                presenter
+                    .model()
+                    .configured_catalog_model_in(presenter.model().conversation.id),
+                expected_model
+            );
             assert!(presenter.submit("follow default", harness.default_executable()));
             request = last_start(&runner);
             assert_eq!(request.model.as_deref(), expected_model);
@@ -6277,7 +6288,9 @@ fn omp_selection_preserves_full_selector_and_default_priority_in_run_configurati
     presenter.drain_events();
 
     assert_eq!(
-        presenter.model().configured_catalog_model(),
+        presenter
+            .model()
+            .configured_catalog_model_in(presenter.model().conversation.id),
         Some("openai/shared-model")
     );
     presenter.select_catalog_model(Some("bigmodel/shared-model".into()));
@@ -6971,7 +6984,9 @@ fn omp_profile_custom_model_is_preserved_when_catalog_availability_is_unknown() 
 
     assert!(presenter.model().conversation.model_override.is_none());
     assert_eq!(
-        presenter.model().configured_catalog_model(),
+        presenter
+            .model()
+            .configured_catalog_model_in(presenter.model().conversation.id),
         Some("private-provider/custom-model")
     );
     assert!(presenter.model().selected_catalog_model().is_none());
@@ -7626,14 +7641,14 @@ fn native_transport_and_codebuddy_region_persist_and_reach_launch_configuration(
     }
     presenter.set_codebuddy_region("external");
     let environment = presenter
-        .provider_launch_configuration(HarnessKind::Codebuddy)
+        .provider_launch_configuration_in(presenter.model.conversation.id, HarnessKind::Codebuddy)
         .unwrap();
     assert_eq!(environment.len(), 1);
     assert_eq!(environment[0].name, "CODEBUDDY_INTERNET_ENVIRONMENT");
     assert_eq!(environment[0].value, "external");
     assert!(
         presenter
-            .provider_launch_configuration(HarnessKind::QoderCn)
+            .provider_launch_configuration_in(presenter.model.conversation.id, HarnessKind::QoderCn)
             .unwrap()
             .is_empty()
     );
@@ -7655,7 +7670,10 @@ fn native_transport_and_codebuddy_region_persist_and_reach_launch_configuration(
     presenter.set_codebuddy_region("");
     assert!(
         presenter
-            .provider_launch_configuration(HarnessKind::Codebuddy)
+            .provider_launch_configuration_in(
+                presenter.model.conversation.id,
+                HarnessKind::Codebuddy
+            )
             .unwrap()
             .is_empty()
     );

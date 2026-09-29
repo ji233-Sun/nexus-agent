@@ -285,12 +285,16 @@ impl AppModel {
     }
 
     pub(crate) fn working_directory(&self) -> Option<&str> {
-        let cwd = if let Some(workspace) = &self.conversation.selected_workspace {
+        self.working_directory_in(self.conversation.id)
+    }
+
+    pub(crate) fn working_directory_in(&self, context: Uuid) -> Option<&str> {
+        let cwd = if let Some(workspace) = &self[context].selected_workspace {
             Some(workspace.path.as_str())
-        } else if self.conversation.selected_task.is_some() {
+        } else if self[context].selected_task.is_some() {
             None
         } else {
-            self.conversation
+            self[context]
                 .selected_project
                 .as_ref()
                 .map(|project| project.canonical_path.as_str())
@@ -313,12 +317,20 @@ impl AppModel {
     }
 
     pub(crate) fn set_run_status(&mut self, message: LocalizedText) {
-        self.conversation.run_status = message.clone();
+        self.set_run_status_in(self.conversation.id, message)
+    }
+
+    pub(crate) fn set_run_status_in(&mut self, context: Uuid, message: LocalizedText) {
+        self[context].run_status = message.clone();
         self.log_status(message);
     }
 
     pub(crate) fn selected_probe(&self) -> Option<&HarnessProbe> {
-        self.harnesses.get(&self.conversation.selected_harness)
+        self.selected_probe_in(self.conversation.id)
+    }
+
+    pub(crate) fn selected_probe_in(&self, context: Uuid) -> Option<&HarnessProbe> {
+        self.harnesses.get(&self[context].selected_harness)
     }
 
     pub(crate) fn can_submit(&self) -> bool {
@@ -357,26 +369,42 @@ impl AppModel {
     }
 
     pub(crate) fn selected_provider_profile(&self) -> Option<&ProviderProfile> {
-        self.provider_profile_for(self.conversation.selected_harness)
+        self.selected_provider_profile_in(self.conversation.id)
+    }
+
+    pub(crate) fn selected_provider_profile_in(&self, context: Uuid) -> Option<&ProviderProfile> {
+        self.provider_profile_in(context, self[context].selected_harness)
     }
 
     pub(crate) fn provider_profile_for(&self, harness: HarnessKind) -> Option<&ProviderProfile> {
-        let profile_id = self.conversation.active_provider_profiles.get(&harness)?;
+        self.provider_profile_in(self.conversation.id, harness)
+    }
+
+    pub(crate) fn provider_profile_in(
+        &self,
+        context: Uuid,
+        harness: HarnessKind,
+    ) -> Option<&ProviderProfile> {
+        let profile_id = self[context].active_provider_profiles.get(&harness)?;
         self.provider_profiles
             .iter()
             .find(|profile| profile.id == *profile_id && profile.harness == harness)
     }
 
-    pub(crate) fn configured_catalog_model(&self) -> Option<&str> {
-        self.conversation.model_override.as_deref().or_else(|| {
-            self.selected_provider_profile()
+    pub(crate) fn configured_catalog_model_in(&self, context: Uuid) -> Option<&str> {
+        self[context].model_override.as_deref().or_else(|| {
+            self.selected_provider_profile_in(context)
                 .and_then(|profile| profile.model.as_deref())
         })
     }
 
     pub(crate) fn selected_catalog_model(&self) -> Option<&ModelDescriptor> {
-        let models = self.conversation.model_catalog.models()?;
-        if let Some(id) = self.configured_catalog_model() {
+        self.selected_catalog_model_in(self.conversation.id)
+    }
+
+    pub(crate) fn selected_catalog_model_in(&self, context: Uuid) -> Option<&ModelDescriptor> {
+        let models = self[context].model_catalog.models()?;
+        if let Some(id) = self.configured_catalog_model_in(context) {
             models.iter().find(|model| model.id == id)
         } else {
             models.iter().find(|model| model.is_default)
@@ -391,9 +419,17 @@ impl AppModel {
     }
 
     pub(crate) fn generation_catalog(&self, kind: GenerationKind) -> &ModelCatalogState {
+        self.generation_catalog_in(self.conversation.id, kind)
+    }
+
+    pub(crate) fn generation_catalog_in(
+        &self,
+        context: Uuid,
+        kind: GenerationKind,
+    ) -> &ModelCatalogState {
         match kind {
-            GenerationKind::Title => &self.conversation.title_model_catalog,
-            GenerationKind::Commit => &self.conversation.commit_model_catalog,
+            GenerationKind::Title => &self[context].title_model_catalog,
+            GenerationKind::Commit => &self[context].commit_model_catalog,
         }
     }
 
@@ -401,9 +437,17 @@ impl AppModel {
         &mut self,
         kind: GenerationKind,
     ) -> &mut ModelCatalogState {
+        self.generation_catalog_mut_in(self.conversation.id, kind)
+    }
+
+    pub(crate) fn generation_catalog_mut_in(
+        &mut self,
+        context: Uuid,
+        kind: GenerationKind,
+    ) -> &mut ModelCatalogState {
         match kind {
-            GenerationKind::Title => &mut self.conversation.title_model_catalog,
-            GenerationKind::Commit => &mut self.conversation.commit_model_catalog,
+            GenerationKind::Title => &mut self[context].title_model_catalog,
+            GenerationKind::Commit => &mut self[context].commit_model_catalog,
         }
     }
 
@@ -412,9 +456,18 @@ impl AppModel {
         kind: GenerationKind,
         model_override: Option<&str>,
     ) -> Option<&ModelDescriptor> {
-        let models = self.generation_catalog(kind).models()?;
+        self.generation_catalog_model_in(self.conversation.id, kind, model_override)
+    }
+
+    pub(crate) fn generation_catalog_model_in(
+        &self,
+        context: Uuid,
+        kind: GenerationKind,
+        model_override: Option<&str>,
+    ) -> Option<&ModelDescriptor> {
+        let models = self.generation_catalog_in(context, kind).models()?;
         let model_id = model_override.or_else(|| {
-            self.provider_profile_for(self.generation_settings(kind).harness)
+            self.provider_profile_in(context, self.generation_settings(kind).harness)
                 .and_then(|profile| profile.model.as_deref())
         });
         models.iter().find(|model| {
@@ -423,47 +476,51 @@ impl AppModel {
         })
     }
 
-    pub(crate) fn model_override_is_unavailable(&self) -> bool {
-        self.conversation
-            .model_override
-            .as_deref()
-            .is_some_and(|id| {
-                !self
-                    .conversation
-                    .model_catalog
-                    .can_select_model(self.conversation.selected_harness, id)
-            })
+    pub(crate) fn model_override_is_unavailable_in(&self, context: Uuid) -> bool {
+        self[context].model_override.as_deref().is_some_and(|id| {
+            !self[context]
+                .model_catalog
+                .can_select_model(self[context].selected_harness, id)
+        })
     }
 
     pub(crate) fn catalog_selection_is_valid(&self) -> bool {
-        if self.model_override_is_unavailable() {
+        self.catalog_selection_is_valid_in(self.conversation.id)
+    }
+
+    pub(crate) fn catalog_selection_is_valid_in(&self, context: Uuid) -> bool {
+        if self.model_override_is_unavailable_in(context) {
             return false;
         }
-        self.selected_catalog_model().is_none_or(|model| {
+        self.selected_catalog_model_in(context).is_none_or(|model| {
             model.availability.is_selectable()
-                && (self.conversation.effort.is_default()
-                    || model.supports_effort(&self.conversation.effort))
+                && (self[context].effort.is_default()
+                    || model.supports_effort(&self[context].effort))
         })
     }
 
     // One resolution path for the composer, Remote API, StartRun and persisted requests.
     pub(crate) fn resolved_model_selection(&self) -> ResolvedModelSelection {
-        let model = self.configured_catalog_model().map(str::to_owned);
-        let descriptor = self.selected_catalog_model();
-        let effort =
-            if descriptor.is_some_and(|model| model.supports_effort(&self.conversation.effort)) {
-                self.conversation.effort
-            } else if model.is_some() && self.conversation.effort.is_default() {
-                descriptor
-                    .and_then(|model| {
-                        model
-                            .default_reasoning_effort
-                            .filter(|effort| model.supports_effort(effort))
-                    })
-                    .unwrap_or(ThinkingEffort::Default)
-            } else {
-                ThinkingEffort::Default
-            };
+        self.resolved_model_selection_in(self.conversation.id)
+    }
+
+    pub(crate) fn resolved_model_selection_in(&self, context: Uuid) -> ResolvedModelSelection {
+        let model = self.configured_catalog_model_in(context).map(str::to_owned);
+        let descriptor = self.selected_catalog_model_in(context);
+        let effort = if descriptor.is_some_and(|model| model.supports_effort(&self[context].effort))
+        {
+            self[context].effort
+        } else if model.is_some() && self[context].effort.is_default() {
+            descriptor
+                .and_then(|model| {
+                    model
+                        .default_reasoning_effort
+                        .filter(|effort| model.supports_effort(effort))
+                })
+                .unwrap_or(ThinkingEffort::Default)
+        } else {
+            ThinkingEffort::Default
+        };
         ResolvedModelSelection { model, effort }
     }
 }
@@ -490,5 +547,28 @@ impl AppModel {
         issues::IssueProvider::ALL
             .into_iter()
             .find(|provider| self.issues(*provider).opened)
+    }
+}
+
+impl std::ops::Index<Uuid> for AppModel {
+    type Output = ConversationState;
+    fn index(&self, id: Uuid) -> &Self::Output {
+        if self.conversation.id == id {
+            &self.conversation
+        } else {
+            &self.conversations[&id]
+        }
+    }
+}
+
+impl std::ops::IndexMut<Uuid> for AppModel {
+    fn index_mut(&mut self, id: Uuid) -> &mut Self::Output {
+        if self.conversation.id == id {
+            &mut self.conversation
+        } else {
+            self.conversations
+                .get_mut(&id)
+                .expect("known conversation context")
+        }
     }
 }
