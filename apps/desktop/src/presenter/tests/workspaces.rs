@@ -143,6 +143,72 @@ fn worktree_uses_the_selected_local_branch_and_keeps_the_user_prompt_in_history(
 }
 
 #[test]
+fn worktree_defaults_to_remote_main_and_resolves_its_exact_commit() {
+    use crate::{infrastructure::git, model::workspace::WorkspaceKind};
+    let (directory, project) = git::tests::repository_fixture();
+    let path = Path::new(&project.canonical_path);
+    let remote_sha = git::git(path, &["rev-parse", "HEAD"]).unwrap();
+    git::git(
+        path,
+        &["update-ref", "refs/remotes/origin/main", remote_sha.trim()],
+    )
+    .unwrap();
+    git::git(
+        path,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ],
+    )
+    .unwrap();
+    std::fs::write(path.join("tracked.txt"), "local main\n").unwrap();
+    git::git(path, &["commit", "-am", "advance local main"]).unwrap();
+    // A local branch with the same display name must not shadow the remote baseline.
+    git::git(path, &["branch", "origin/main"]).unwrap();
+    let (mut presenter, runner, _fixture) = fixture();
+    presenter.worktree_root = Ok(directory.path().canonicalize().unwrap().join("worktrees"));
+    presenter.open_project(path);
+    assert_eq!(
+        presenter.workspace_base_branches().unwrap(),
+        ["main", "origin/main"]
+    );
+    assert_eq!(
+        presenter.model.conversation.workspace_draft.base,
+        "origin/main"
+    );
+    presenter.select_workspace_kind(WorkspaceKind::Worktree);
+    presenter.select_workspace_base("main".into());
+    presenter.refresh_workspace_branches();
+    assert_eq!(presenter.model.conversation.workspace_draft.base, "main");
+    presenter.select_workspace_base("origin/main".into());
+    assert!(presenter.submit("start from remote main", "claude"));
+    finish_workspace_operation(&mut presenter);
+    emit_current_catalog(&presenter, &runner, claude_aliases());
+    presenter.drain_events();
+    let start = last_start(&runner);
+    assert_eq!(
+        std::fs::read_to_string(Path::new(&start.cwd).join("tracked.txt")).unwrap(),
+        "base\n"
+    );
+    assert_eq!(
+        presenter
+            .model
+            .conversation
+            .selected_workspace
+            .as_ref()
+            .unwrap()
+            .base_sha
+            .as_deref(),
+        Some(remote_sha.trim())
+    );
+    assert_eq!(
+        std::fs::read_to_string(path.join("tracked.txt")).unwrap(),
+        "local main\n"
+    );
+}
+
+#[test]
 fn worktree_source_selection_handles_non_git_empty_and_detached_projects() {
     use crate::{infrastructure::git, model::workspace::WorkspaceKind};
     let (mut presenter, runner, directory) = fixture();
@@ -208,6 +274,7 @@ fn workspace_branch_refresh_revalidates_the_worktree_base_branch() {
     let (_directory, project) = git::tests::repository_fixture();
     let path = Path::new(&project.canonical_path);
     git::git(path, &["branch", "release"]).unwrap();
+    git::git(path, &["update-ref", "refs/remotes/origin/main", "HEAD"]).unwrap();
     let (mut presenter, _runner, _fixture) = fixture();
     presenter.open_project(path);
     presenter.select_workspace_kind(WorkspaceKind::Worktree);
@@ -220,10 +287,13 @@ fn workspace_branch_refresh_revalidates_the_worktree_base_branch() {
             .unwrap()
             .contains(&"release".to_owned())
     );
-    // A branch deleted externally falls back to the checked-out branch.
+    // A branch deleted externally falls back to the preferred remote baseline.
     git::git(path, &["branch", "-D", "release"]).unwrap();
     presenter.refresh_workspace_branches();
-    assert_eq!(presenter.model.conversation.workspace_draft.base, "main");
+    assert_eq!(
+        presenter.model.conversation.workspace_draft.base,
+        "origin/main"
+    );
 }
 
 #[test]
