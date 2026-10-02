@@ -249,9 +249,15 @@ fn creating_an_issue_starts_a_run_with_the_filed_content_and_current_selection()
     for provider in IssueProvider::ALL {
         let (mut presenter, runner, _directory) = fixture();
         seed_issues(&mut presenter, provider);
+        let source_permission = presenter.model.conversation.permission_mode;
+        let previous = presenter
+            .prepare_issue_run(provider, IssueLaunchKind::Create)
+            .unwrap();
         presenter.select_permission_mode(PermissionMode::Yolo);
         let harness = presenter.model.conversation.selected_harness;
         let executable = presenter.model.conversation.executable.clone();
+        assert!(!presenter.start_issue_run(provider, IssueLaunchKind::Create, "  ", &executable));
+        assert_eq!(presenter.model.occupied_run_slots(), 0);
         assert!(presenter.start_issue_run(
             provider,
             IssueLaunchKind::Create,
@@ -269,6 +275,7 @@ fn creating_an_issue_starts_a_run_with_the_filed_content_and_current_selection()
         }
         assert_eq!(start.harness, harness);
         assert_eq!(start.permission_mode, PermissionMode::Yolo);
+        assert_eq!(presenter.model[previous].permission_mode, source_permission);
         assert!(presenter.model.conversation.selected_task.is_some());
         assert_eq!(presenter.model.conversation.active_run, Some(start.run_id));
     }
@@ -281,7 +288,6 @@ fn issue_launch_runs_in_parallel_while_a_session_is_executing() {
         for kind in [IssueLaunchKind::Create, IssueLaunchKind::Process] {
             let (mut presenter, runner, _directory, first) = worktree_fixture("先执行的任务");
             assert_eq!(presenter.model.conversation.active_run, Some(first.run_id));
-            assert!(presenter.model.can_start_run());
             seed_issues(&mut presenter, provider);
             if kind == IssueLaunchKind::Process {
                 presenter.select_issue(provider, "1".into());
@@ -300,17 +306,227 @@ fn issue_launch_runs_in_parallel_while_a_session_is_executing() {
                 IssueLaunchKind::Create => "并行提交的 Issue",
                 IssueLaunchKind::Process => "并行处理的补充信息",
             };
-            assert!(presenter.start_issue_run(provider, kind, extra, "claude"));
+            let previous = presenter.prepare_issue_run(provider, kind).unwrap();
+            assert_eq!(presenter.model[previous].active_run, Some(first.run_id));
+            assert!(presenter.select_harness(HarnessKind::Codex, "claude"));
+            presenter
+                .model
+                .harnesses
+                .insert(HarnessKind::Codex, ready_probe(HarnessKind::Codex));
+            let models = vec![catalog_model(
+                "gpt-5.2-codex",
+                false,
+                &[ThinkingEffort::High],
+                ThinkingEffort::High,
+            )];
+            emit_current_catalog(&presenter, &runner, models.clone());
+            presenter.drain_events();
+            presenter.select_catalog_model(Some("gpt-5.2-codex".into()));
+            presenter.select_effort(ThinkingEffort::High);
+            presenter.select_permission_mode(PermissionMode::Yolo);
+            assert!(presenter.start_issue_run(provider, kind, extra, "codex"));
             finish_workspace_operation(&mut presenter);
-            emit_current_catalog(&presenter, &runner, claude_aliases());
+            emit_current_catalog(&presenter, &runner, models);
             presenter.drain_events();
             let second = last_start(&runner);
             assert_ne!(second.run_id, first.run_id);
+            assert_ne!(second.cwd, first.cwd);
+            assert_eq!(second.harness, HarnessKind::Codex);
+            assert_eq!(second.model.as_deref(), Some("gpt-5.2-codex"));
+            assert_eq!(second.effort, ThinkingEffort::High);
+            assert_eq!(second.permission_mode, PermissionMode::Yolo);
+            assert_eq!(
+                presenter.model[previous].selected_harness,
+                HarnessKind::Claude
+            );
+            assert_eq!(
+                presenter.model[previous].permission_mode,
+                first.permission_mode
+            );
             assert!(second.prompt.contains(extra));
             assert_eq!(presenter.model.conversation.active_run, Some(second.run_id));
             assert_eq!(presenter.model.active_run_count(), 2);
         }
     }
+}
+
+#[test]
+fn cancelling_issue_configuration_restores_the_source_draft_and_ignores_late_catalogs() {
+    use crate::model::issues::IssueLaunchKind;
+    let (mut presenter, runner, _directory) = fixture();
+    seed_issues(&mut presenter, IssueProvider::GitHub);
+    presenter.select_permission_mode(PermissionMode::AutoEdit);
+    presenter.select_catalog_model(Some("opus".into()));
+    let previous = presenter
+        .prepare_issue_run(IssueProvider::GitHub, IssueLaunchKind::Create)
+        .unwrap();
+    let context = presenter.model.conversation.id;
+    assert!(presenter.select_harness(HarnessKind::Codex, "claude"));
+    let ModelCatalogState::Loading { request_id, .. } = presenter.model.conversation.model_catalog
+    else {
+        panic!("catalog refresh")
+    };
+    presenter.select_permission_mode(PermissionMode::Yolo);
+    presenter.cancel_issue_run(context, previous);
+    assert_eq!(presenter.model.conversation.id, previous);
+    assert_eq!(
+        presenter.model.conversation.selected_harness,
+        HarnessKind::Claude
+    );
+    assert_eq!(
+        presenter.model.conversation.permission_mode,
+        PermissionMode::AutoEdit
+    );
+    assert_eq!(
+        presenter.model.conversation.model_override.as_deref(),
+        Some("opus")
+    );
+    assert!(!presenter.model.conversations.contains_key(&context));
+    runner.emit(Event::ModelCatalogLoaded {
+        request_id,
+        harness: HarnessKind::Codex,
+        models: vec![catalog_model(
+            "gpt-5.2-codex",
+            false,
+            &[ThinkingEffort::High],
+            ThinkingEffort::High,
+        )],
+    });
+    presenter.drain_events();
+    assert_eq!(
+        presenter.model.conversation.selected_harness,
+        HarnessKind::Claude
+    );
+    assert_eq!(presenter.model.occupied_run_slots(), 0);
+}
+
+#[test]
+fn issue_processing_can_use_local_or_worktree_and_preserves_the_choice_when_starting() {
+    use crate::{
+        infrastructure::{git, issues::Response},
+        model::{issues::IssueLaunchKind, workspace::WorkspaceKind},
+    };
+    for kind in [WorkspaceKind::Local, WorkspaceKind::Worktree] {
+        let (directory, project) = git::tests::repository_fixture();
+        let path = Path::new(&project.canonical_path);
+        git::git(path, &["update-ref", "refs/remotes/origin/main", "HEAD"]).unwrap();
+        let (mut presenter, runner, _fixture) = fixture();
+        presenter.worktree_root = Ok(directory.path().canonicalize().unwrap().join("worktrees"));
+        presenter.open_project(path);
+        // The explicit launch choice must win over the opposite saved project preference.
+        presenter.select_workspace_kind(if kind == WorkspaceKind::Local {
+            WorkspaceKind::Worktree
+        } else {
+            WorkspaceKind::Local
+        });
+        seed_issues(&mut presenter, IssueProvider::GitHub);
+        presenter.open_issues(IssueProvider::GitHub);
+        presenter.select_issue(IssueProvider::GitHub, "1".into());
+        finish_issue_request(
+            &mut presenter,
+            IssueProvider::GitHub,
+            Response::Detail(Ok(cnb_issue("1"))),
+        );
+        finish_issue_request(
+            &mut presenter,
+            IssueProvider::GitHub,
+            Response::Comments(Ok(vec![])),
+        );
+        presenter
+            .prepare_issue_run(IssueProvider::GitHub, IssueLaunchKind::Process)
+            .unwrap();
+        presenter.select_workspace_kind(kind);
+        assert_eq!(
+            presenter.model.conversation.workspace_draft.base,
+            "origin/main"
+        );
+        assert!(presenter.start_issue_run(
+            IssueProvider::GitHub,
+            IssueLaunchKind::Process,
+            "",
+            "claude"
+        ));
+        if kind == WorkspaceKind::Worktree {
+            finish_workspace_operation(&mut presenter);
+            emit_current_catalog(&presenter, &runner, claude_aliases());
+            presenter.drain_events();
+        }
+        let start = last_start(&runner);
+        assert_eq!(
+            presenter
+                .model
+                .conversation
+                .selected_workspace
+                .as_ref()
+                .unwrap()
+                .kind,
+            kind
+        );
+        assert_eq!(
+            start.cwd == project.canonical_path,
+            kind == WorkspaceKind::Local
+        );
+    }
+}
+
+#[test]
+fn issue_configuration_defaults_to_worktree_when_the_local_checkout_is_occupied() {
+    use crate::{
+        infrastructure::git,
+        model::{issues::IssueLaunchKind, workspace::WorkspaceKind},
+    };
+    let (directory, project) = git::tests::repository_fixture();
+    let (mut presenter, runner, _fixture) = fixture();
+    presenter.worktree_root = Ok(directory.path().canonicalize().unwrap().join("worktrees"));
+    presenter.open_project(Path::new(&project.canonical_path));
+    assert!(presenter.submit("local task", "claude"));
+    let first = last_start(&runner);
+    seed_issues(&mut presenter, IssueProvider::Cnb);
+    let previous = presenter
+        .prepare_issue_run(IssueProvider::Cnb, IssueLaunchKind::Create)
+        .unwrap();
+    assert_eq!(
+        presenter.model.conversation.workspace_draft.kind,
+        WorkspaceKind::Worktree
+    );
+    presenter.select_workspace_kind(WorkspaceKind::Local);
+    assert!(
+        presenter
+            .issue_run_blocker()
+            .unwrap()
+            .render(Language::Chinese)
+            .contains("本地目录已有任务")
+    );
+    assert!(!presenter.start_issue_run(
+        IssueProvider::Cnb,
+        IssueLaunchKind::Create,
+        "new issue",
+        "claude"
+    ));
+    assert_eq!(presenter.model[previous].active_run, Some(first.run_id));
+    presenter.select_workspace_kind(WorkspaceKind::Worktree);
+    assert!(presenter.start_issue_run(
+        IssueProvider::Cnb,
+        IssueLaunchKind::Create,
+        "new issue",
+        "claude"
+    ));
+    finish_workspace_operation(&mut presenter);
+    emit_current_catalog(&presenter, &runner, claude_aliases());
+    presenter.drain_events();
+    assert_eq!(presenter.model.active_run_count(), 2);
+    assert_ne!(last_start(&runner).cwd, first.cwd);
+    assert!(presenter.can_prepare_issue_run(IssueProvider::Cnb, IssueLaunchKind::Create));
+    presenter
+        .prepare_issue_run(IssueProvider::Cnb, IssueLaunchKind::Create)
+        .unwrap();
+    assert!(
+        presenter
+            .issue_run_blocker()
+            .unwrap()
+            .render(Language::Chinese)
+            .contains("最多同时运行两个任务")
+    );
 }
 
 #[test]

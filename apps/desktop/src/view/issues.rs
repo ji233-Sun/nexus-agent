@@ -2,12 +2,14 @@ use super::*;
 use crate::model::issues::{Issue, IssueAction, IssueFilter, IssueLaunchKind, Label, PAGE_SIZE};
 use gpui_kit::component::{scroll::ScrollableElement as _, spinner::Spinner};
 
-// A pending "quick issue" launch started from the issue page. The harness runs
-// with the composer's current Harness/model/effort/permission selection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// Issue launch configuration belongs to a new conversation, independent of its source.
+#[derive(Clone, Debug)]
 pub(super) struct IssueLaunch {
     pub(super) provider: IssueProvider,
     pub(super) kind: IssueLaunchKind,
+    pub(super) context: Uuid,
+    pub(super) previous: Uuid,
+    pub(super) error: Option<String>,
 }
 
 pub(super) fn provider_icon(provider: IssueProvider, size: f32, color: u32) -> impl IntoElement {
@@ -69,19 +71,13 @@ impl NexusView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let model = self.presenter.model();
-        let issues = model.issues(provider);
-        if !model.can_start_run()
-            || !issues.enabled
-            || issues.repository.is_none()
-            || issues.detail_request.is_some()
-            || issues.comments_request.is_some()
-            || issues.action_request.is_some()
-            || (kind == IssueLaunchKind::Process
-                && (issues.detail.is_none() || issues.comments.is_none()))
-        {
+        if self.issue_launch.is_some() {
             return;
         }
+        let Some(previous) = self.presenter.prepare_issue_run(provider, kind) else {
+            return;
+        };
+        let model = self.presenter.model();
         let placeholder = match kind {
             IssueLaunchKind::Create => model
                 .language
@@ -93,30 +89,70 @@ impl NexusView {
             input.set_placeholder(placeholder, window, cx);
             input.focus(window, cx);
         });
-        self.issue_launch = Some(IssueLaunch { provider, kind });
+        self.issue_launch = Some(IssueLaunch {
+            provider,
+            kind,
+            context: model.conversation.id,
+            previous,
+            error: None,
+        });
         self.model_picker.open = false;
+        self.sync_executable(window, cx);
+        self.sync_provider_profile_form(
+            self.presenter
+                .model()
+                .selected_provider_profile()
+                .map(|profile| profile.id),
+            window,
+            cx,
+        );
+        self.presenter.notify_remote_changed();
         cx.notify();
     }
 
-    fn close_issue_launch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.issue_launch.take().is_none() {
+    pub(super) fn close_issue_launch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(launch) = self.issue_launch.take() else {
             return;
-        }
+        };
+        self.presenter
+            .cancel_issue_run(launch.context, launch.previous);
+        self.model_picker.open = false;
+        self.sync_executable(window, cx);
+        self.sync_provider_profile_form(
+            self.presenter
+                .model()
+                .selected_provider_profile()
+                .map(|profile| profile.id),
+            window,
+            cx,
+        );
         self.issue_launch_input
             .update(cx, |input, cx| input.set_value("", window, cx));
+        self.presenter.notify_remote_changed();
         cx.notify();
     }
 
     fn launch_issue(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(launch) = self.issue_launch else {
+        let Some(launch) = self.issue_launch.as_ref() else {
             return;
         };
+        if self.presenter.model().conversation.id != launch.context {
+            self.close_issue_launch(window, cx);
+            return;
+        }
         let content = self.issue_launch_input.read(cx).value().to_string();
         let executable = self.presenter.model().conversation.executable.clone();
         if !self
             .presenter
             .start_issue_run(launch.provider, launch.kind, &content, &executable)
         {
+            let error = self
+                .presenter
+                .model()
+                .latest_log_text(self.presenter.model().language)
+                .to_owned();
+            self.issue_launch.as_mut().unwrap().error = Some(error);
+            cx.notify();
             return;
         }
         self.issue_launch = None;
@@ -133,7 +169,7 @@ impl NexusView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let Some(launch) = self.issue_launch else {
+        let Some(launch) = self.issue_launch.as_ref() else {
             return div().into_any_element();
         };
         let model = self.presenter.model();
@@ -143,7 +179,8 @@ impl NexusView {
         let issues = model.issues(launch.provider);
         let repository = issues.repository.clone().unwrap_or_default();
         let content = self.issue_launch_input.read(cx).value();
-        let can_launch = model.can_start_run()
+        let blocker = self.presenter.issue_run_blocker();
+        let can_launch = blocker.is_none()
             && (launch.kind == IssueLaunchKind::Process || !content.trim().is_empty());
         let (title, label, action) = match launch.kind {
             IssueLaunchKind::Create => (
@@ -271,6 +308,33 @@ impl NexusView {
                     )
                     .child(
                         div()
+                            .id("issue-launch-workspace")
+                            .debug_selector(|| "issue-launch-workspace".into())
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_2()
+                            .child(self.render_workspace_controls(cx)),
+                    )
+                    .when_some(blocker.as_ref(), |card, message| {
+                        card.child(
+                            div()
+                                .debug_selector(|| "issue-launch-blocker".into())
+                                .text_size(px(12.))
+                                .text_color(rgb(colors.muted))
+                                .child(message.render(locale).to_owned()),
+                        )
+                    })
+                    .when_some(launch.error.as_ref(), |card, error| {
+                        card.child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(rgb(colors.danger))
+                                .child(error.clone()),
+                        )
+                    })
+                    .child(
+                        div()
                             .flex()
                             .items_center()
                             .justify_end()
@@ -340,9 +404,9 @@ impl NexusView {
                                 locale.text("选择 Harness、模型与权限，直接启动处理此 Issue。"),
                             )
                             .disabled(
-                                busy || !self.presenter.model().can_start_run()
-                                    || issues.comments.is_none()
-                                    || issues.comments_request.is_some(),
+                                busy || !self
+                                    .presenter
+                                    .can_prepare_issue_run(provider, IssueLaunchKind::Process),
                             )
                             .on_click(cx.listener(move |app, _, window, cx| {
                                 app.open_issue_launch(
@@ -980,7 +1044,11 @@ impl NexusView {
                             .icon(IconName::Plus)
                             .label(locale.text("快捷提 Issue"))
                             .tooltip(locale.text("选择 Harness、模型与权限，直接启动创建 Issue。"))
-                            .disabled(!self.presenter.model().can_start_run())
+                            .disabled(
+                                !self
+                                    .presenter
+                                    .can_prepare_issue_run(provider, IssueLaunchKind::Create),
+                            )
                             .on_click(cx.listener(move |app, _, window, cx| {
                                 app.open_issue_launch(provider, IssueLaunchKind::Create, window, cx)
                             })),

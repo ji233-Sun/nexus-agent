@@ -25,8 +25,11 @@ pub(super) enum WorkspaceEvent {
     Merged(Result<Workspace>),
 }
 
-// Default source branch: prefer the checked-out branch, then the first local branch.
+// Prefer the remote main baseline; repositories without it keep the local fallback.
 fn pick_base(current: Option<String>, branches: &[String]) -> String {
+    if branches.iter().any(|branch| branch == "origin/main") {
+        return "origin/main".into();
+    }
     current
         .filter(|branch| branches.contains(branch))
         .or_else(|| branches.first().cloned())
@@ -45,7 +48,7 @@ impl Presenter {
                 git::repository(Path::new(&project.canonical_path)).is_ok();
             if self.model.conversation.project_is_git {
                 let path = Path::new(&project.canonical_path);
-                let branches = git::local_branches(path).unwrap_or_default();
+                let branches = git::worktree_base_branches(path).unwrap_or_default();
                 self.model.conversation.workspace_draft.base =
                     pick_base(git::current_branch(path), &branches);
             }
@@ -95,7 +98,7 @@ impl Presenter {
             .selected_project
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("请先选择项目目录。"))?;
-        git::local_branches(Path::new(&project.canonical_path))
+        git::worktree_base_branches(Path::new(&project.canonical_path))
     }
 
     pub(crate) fn select_workspace_base(&mut self, base: String) {
@@ -183,7 +186,7 @@ impl Presenter {
             && !self.model.workspace_busy
             && self.model.conversation.project_is_git
         {
-            let branches = git::local_branches(path).unwrap_or_default();
+            let branches = git::worktree_base_branches(path).unwrap_or_default();
             // Keep a base the user picked while it still exists; otherwise re-pick.
             if !branches.contains(&self.model.conversation.workspace_draft.base) {
                 self.model.conversation.workspace_draft.base =
@@ -200,7 +203,10 @@ impl Presenter {
         executable: &str,
         permission: PermissionMode,
     ) -> bool {
-        if self.model.workspace_busy || prompt.trim().is_empty() || !self.model.can_submit() {
+        if self.model.workspace_busy
+            || prompt.trim().is_empty()
+            || !self.model.can_submit_in(context)
+        {
             return false;
         }
         let Some(project) = self.model[context].selected_project.clone() else {
@@ -219,7 +225,7 @@ impl Presenter {
         };
         let workspace =
             git::planned_workspace(root, &project, &self.model[context].workspace_draft);
-        let base = format!("refs/heads/{}", self.model[context].workspace_draft.base);
+        let base = self.model[context].workspace_draft.base.clone();
         self.model[context].pending_workspace_start = Some(PendingWorkspaceStart {
             attachments: Vec::new(),
             context_id: self.model[context].id,
@@ -228,11 +234,11 @@ impl Presenter {
             permission,
         });
         self.spawn_workspace_operation_in(context, move || {
-            WorkspaceEvent::Resolved(git::resolve_workspace(
-                Path::new(&project.canonical_path),
-                workspace,
-                &base,
-            ))
+            let path = Path::new(&project.canonical_path);
+            WorkspaceEvent::Resolved(
+                git::worktree_base_ref(path, &base)
+                    .and_then(|reference| git::resolve_workspace(path, workspace, &reference)),
+            )
         });
         self.model.log_status("正在解析 Worktree 创建基准…".into());
         true

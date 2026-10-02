@@ -255,6 +255,19 @@ impl AppModel {
     }
 
     pub(crate) fn fresh_conversation(&mut self) {
+        let previous_id = self.fork_conversation();
+        let previous = &self.conversations[&previous_id];
+        if previous.selected_task.is_none()
+            && previous.active_run.is_none()
+            && previous.pending_workspace_start.is_none()
+            && self.workspace_operation_context != Some(previous_id)
+        {
+            self.conversations.remove(&previous_id);
+        }
+    }
+
+    // Modal task configuration keeps the source draft available until cancellation.
+    pub(crate) fn fork_conversation(&mut self) -> Uuid {
         let next = ConversationState {
             id: Uuid::new_v4(),
             selected_project: self.conversation.selected_project.clone(),
@@ -275,13 +288,9 @@ impl AppModel {
             ..ConversationState::default()
         };
         let previous = std::mem::replace(&mut self.conversation, next);
-        if previous.selected_task.is_some()
-            || previous.active_run.is_some()
-            || previous.pending_workspace_start.is_some()
-            || self.workspace_operation_context == Some(previous.id)
-        {
-            self.conversations.insert(previous.id, previous);
-        }
+        let previous_id = previous.id;
+        self.conversations.insert(previous_id, previous);
+        previous_id
     }
 
     pub(crate) fn working_directory(&self) -> Option<&str> {
@@ -334,31 +343,28 @@ impl AppModel {
     }
 
     pub(crate) fn can_submit(&self) -> bool {
-        self.conversation.active_run.is_none() && self.can_start_run()
+        self.can_submit_in(self.conversation.id)
     }
 
-    // Whether a brand-new task's run could start right now. Unlike `can_submit`
-    // this ignores the selected conversation's own run: quick-issue launches
-    // always target a new task and may run in parallel (up to two slots).
-    pub(crate) fn can_start_run(&self) -> bool {
+    pub(crate) fn can_submit_in(&self, context: Uuid) -> bool {
         let profile_ready = self
-            .selected_provider_profile()
+            .selected_provider_profile_in(context)
             .is_some_and(|profile| profile.credential_configured);
-        self.occupied_run_slots() < 2
+        self[context].active_run.is_none()
+            && self.occupied_run_slots() < 2
             && self
-                .working_directory()
+                .working_directory_in(context)
                 .is_some_and(|path| !self.workspace_locked(std::path::Path::new(path)))
-            && self
-                .conversation
+            && self[context]
                 .selected_workspace
                 .as_ref()
                 .is_none_or(|workspace| workspace.status == workspace::WorkspaceStatus::Ready)
             && !self.updates.state.is_installing()
             && self.harness_manager.operating.is_none()
             && self
-                .selected_probe()
+                .selected_probe_in(context)
                 .is_some_and(|probe| probe.available && (probe.authenticated || profile_ready))
-            && self.catalog_selection_is_valid()
+            && self.catalog_selection_is_valid_in(context)
     }
 
     pub(crate) fn can_queue(&self) -> bool {
@@ -484,6 +490,7 @@ impl AppModel {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn catalog_selection_is_valid(&self) -> bool {
         self.catalog_selection_is_valid_in(self.conversation.id)
     }
