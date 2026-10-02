@@ -68,6 +68,50 @@ fn failed_worktree_creation_retries_with_a_new_branch_and_keeps_the_selected_bas
 }
 
 #[test]
+fn worktree_retry_uses_its_own_context_while_another_task_is_selected() {
+    use crate::{infrastructure::git, model::workspace::WorkspaceKind};
+    let (directory, project) = git::tests::repository_fixture();
+    let path = Path::new(&project.canonical_path);
+    let (mut presenter, runner, _fixture) = fixture();
+    presenter.worktree_root = Ok(directory.path().canonicalize().unwrap().join("worktrees"));
+    presenter.open_project(path);
+    presenter.select_workspace_kind(WorkspaceKind::Worktree);
+    let context = presenter.model.conversation.id;
+    let planned = git::planned_workspace(
+        presenter.worktree_root.as_ref().unwrap(),
+        &project,
+        &presenter.model.conversation.workspace_draft,
+    );
+    git::git(path, &["branch", planned.branch.as_deref().unwrap()]).unwrap();
+    assert!(presenter.submit("background worktree", "claude"));
+    finish_workspace_operation(&mut presenter);
+    assert!(presenter.model[context].workspace_retry);
+    presenter.new_task();
+    presenter.select_workspace_kind(WorkspaceKind::Local);
+    assert!(presenter.submit("foreground local task", "claude"));
+    let foreground = last_start(&runner);
+    assert!(presenter.retry_workspace_start_in(context));
+    finish_workspace_operation(&mut presenter);
+    let ModelCatalogState::Loading { request_id, .. } = presenter.model[context].model_catalog
+    else {
+        panic!("background catalog")
+    };
+    runner.emit(Event::ModelCatalogLoaded {
+        request_id,
+        harness: HarnessKind::Claude,
+        models: claude_aliases(),
+    });
+    presenter.drain_events();
+    assert_eq!(
+        presenter.model.conversation.active_run,
+        Some(foreground.run_id)
+    );
+    assert!(presenter.model[context].active_run.is_some());
+    assert_eq!(presenter.model.active_run_count(), 2);
+    assert_ne!(last_start(&runner).cwd, foreground.cwd);
+}
+
+#[test]
 fn worktree_uses_the_selected_local_branch_and_keeps_the_user_prompt_in_history() {
     use crate::{infrastructure::git, model::workspace::WorkspaceKind};
     let (directory, project) = git::tests::repository_fixture();

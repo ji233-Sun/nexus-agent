@@ -463,6 +463,13 @@ impl NexusView {
 
 impl Render for NexusView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self
+            .issue_launch
+            .as_ref()
+            .is_some_and(|launch| launch.context != self.presenter.model().conversation.id)
+        {
+            self.close_issue_launch(window, cx);
+        }
         self.sync_user_ask_inputs(window, cx);
         self.sync_commit_input(window, cx);
         if self.model_picker.open && self.presenter.model().conversation.active_run.is_some() {
@@ -474,6 +481,7 @@ impl Render for NexusView {
         let colors = palette(cx);
         let issue_launch = self
             .issue_launch
+            .as_ref()
             .map(|_| self.render_issue_launch(window, cx));
         let element = div()
             .key_context("Nexus")

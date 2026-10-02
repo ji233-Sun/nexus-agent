@@ -349,15 +349,71 @@ fn issue_launch_dialog_opens_and_launches_while_a_session_is_executing(
     click_debug(cx, "cnb-chat");
     cx.run_until_parked();
     assert!(cx.debug_bounds("issue-launch-surface").is_some());
+    assert!(cx.debug_bounds("issue-launch-workspace").is_some());
+    assert!(cx.debug_bounds("workspace-mode").is_some());
+    assert!(cx.debug_bounds("workspace-base").is_some());
+    click_debug(cx, "composer-model");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("model-picker-surface").is_some());
+    click_debug(cx, "model-config-codex-cli");
+    cx.run_until_parked();
+    view.read_with(cx, |view, _| {
+        assert_eq!(
+            view.presenter.model().conversation.selected_harness,
+            HarnessKind::Codex
+        );
+        assert!(view.presenter.model().conversation.active_run.is_none());
+    });
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
     click_debug(cx, "issue-launch-cancel");
     cx.run_until_parked();
     assert!(cx.debug_bounds("issue-launch-surface").is_none());
+    view.read_with(cx, |view, _| {
+        assert_eq!(
+            view.presenter.model().conversation.active_run,
+            Some(first.run_id)
+        );
+        assert_eq!(
+            view.presenter.model().conversation.selected_harness,
+            HarnessKind::Claude
+        );
+    });
     click_debug(cx, "cnb-back");
     cx.run_until_parked();
     click_debug(cx, "cnb-new-issue");
     cx.run_until_parked();
     assert!(cx.debug_bounds("issue-launch-surface").is_some());
     assert!(cx.debug_bounds("issue-launch-card").is_some());
+    click_debug(cx, "composer-model");
+    cx.run_until_parked();
+    click_debug(cx, "model-config-codex-cli");
+    cx.run_until_parked();
+    runner.emit(Event::HarnessDetected(nexus_protocol::HarnessProbe {
+        harness: HarnessKind::Codex,
+        available: true,
+        authenticated: true,
+        executable: "/fake/codex".into(),
+        version: Some("1.2.3".into()),
+        message: "ready".into(),
+    }));
+    view.update(cx, |view, cx| {
+        let ModelCatalogState::Loading { request_id, .. } =
+            view.presenter.model().conversation.model_catalog
+        else {
+            panic!("Codex catalog request")
+        };
+        runner.emit(Event::ModelCatalogLoaded {
+            request_id,
+            harness: HarnessKind::Codex,
+            models: vec![],
+        });
+        view.presenter.drain_events();
+        cx.notify();
+    });
+    cx.run_until_parked();
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
     view.update_in(cx, |view, window, cx| {
         view.issue_launch_input.update(cx, |input, cx| {
             input.set_value("并行提交的缺陷", window, cx)
@@ -391,6 +447,10 @@ fn issue_launch_dialog_opens_and_launches_while_a_session_is_executing(
     view.update(cx, |view, _| {
         view.presenter.drain_events();
         assert_eq!(view.presenter.model().active_run_count(), 2);
+        assert_eq!(
+            view.presenter.model().conversation.selected_harness,
+            HarnessKind::Codex
+        );
         assert_ne!(
             view.presenter.model().conversation.active_run,
             Some(first.run_id)

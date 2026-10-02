@@ -203,7 +203,10 @@ impl Presenter {
         executable: &str,
         permission: PermissionMode,
     ) -> bool {
-        if self.model.workspace_busy || prompt.trim().is_empty() || !self.model.can_submit() {
+        if self.model.workspace_busy
+            || prompt.trim().is_empty()
+            || !self.model.can_submit_in(context)
+        {
             return false;
         }
         let Some(project) = self.model[context].selected_project.clone() else {
