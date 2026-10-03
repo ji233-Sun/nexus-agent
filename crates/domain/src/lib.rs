@@ -1,129 +1,11 @@
+mod harness;
+pub use harness::{HarnessInfo, HarnessKind, HarnessTransport};
+
 use std::{fmt, str::FromStr};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum HarnessKind {
-    #[default]
-    Claude,
-    Codex,
-    Omp,
-    Pi,
-    Kimi,
-    Qoder,
-    QoderCn,
-    Codebuddy,
-    Opencode,
-    Deepseek,
-}
-
-impl HarnessKind {
-    pub const ALL: [Self; 10] = [
-        Self::Claude,
-        Self::Codex,
-        Self::Omp,
-        Self::Pi,
-        Self::Kimi,
-        Self::Qoder,
-        Self::QoderCn,
-        Self::Codebuddy,
-        Self::Opencode,
-        Self::Deepseek,
-    ];
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Claude => "claude",
-            Self::Codex => "codex",
-            Self::Omp => "omp",
-            Self::Pi => "pi",
-            Self::Kimi => "kimi",
-            Self::Qoder => "qoder",
-            Self::QoderCn => "qodercn",
-            Self::Codebuddy => "codebuddy",
-            Self::Opencode => "opencode",
-            Self::Deepseek => "deepseek",
-        }
-    }
-
-    pub fn next(self) -> Self {
-        match self {
-            Self::Claude => Self::Codex,
-            Self::Codex => Self::Omp,
-            Self::Omp => Self::Pi,
-            Self::Pi => Self::Kimi,
-            Self::Kimi => Self::Qoder,
-            Self::Qoder => Self::QoderCn,
-            Self::QoderCn => Self::Codebuddy,
-            Self::Codebuddy => Self::Opencode,
-            Self::Opencode => Self::Deepseek,
-            Self::Deepseek => Self::Claude,
-        }
-    }
-
-    pub fn default_executable(self) -> &'static str {
-        match self {
-            Self::Claude => "claude",
-            Self::Codex => "codex",
-            Self::Omp => "omp",
-            Self::Pi => "pi",
-            Self::Kimi => "kimi",
-            Self::Qoder => "qoder",
-            Self::QoderCn => "qodercn",
-            Self::Codebuddy => "codebuddy",
-            Self::Opencode => "opencode",
-            Self::Deepseek => "dsh",
-        }
-    }
-}
-
-impl fmt::Display for HarnessKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Claude => "Claude Code",
-            Self::Codex => "Codex CLI",
-            Self::Omp => "Oh My Pi",
-            Self::Pi => "Pi",
-            Self::Kimi => "Kimi Code",
-            Self::Qoder => "Qoder",
-            Self::QoderCn => "Qoder CN",
-            Self::Codebuddy => "CodeBuddy",
-            Self::Opencode => "OpenCode",
-            Self::Deepseek => "DeepSeek Harness",
-        })
-    }
-}
-
-impl FromStr for HarnessKind {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "claude" => Ok(Self::Claude),
-            "codex" => Ok(Self::Codex),
-            "omp" => Ok(Self::Omp),
-            "pi" => Ok(Self::Pi),
-            "kimi" => Ok(Self::Kimi),
-            "qoder" => Ok(Self::Qoder),
-            "qodercn" => Ok(Self::QoderCn),
-            "codebuddy" => Ok(Self::Codebuddy),
-            "opencode" => Ok(Self::Opencode),
-            "deepseek" => Ok(Self::Deepseek),
-            _ => Err(format!("unknown harness: {value}")),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum HarnessTransport {
-    #[default]
-    Cli,
-    Acp,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -414,6 +296,7 @@ pub enum ModelSource {
     CodebuddyAcp,
     OpencodeAcp,
     DeepseekAcp,
+    CommandCodeCli,
 }
 
 impl ModelSource {
@@ -430,6 +313,7 @@ impl ModelSource {
             Self::CodebuddyAcp => HarnessKind::Codebuddy,
             Self::OpencodeAcp => HarnessKind::Opencode,
             Self::DeepseekAcp => HarnessKind::Deepseek,
+            Self::CommandCodeCli => HarnessKind::CommandCode,
         }
     }
 }
@@ -661,7 +545,8 @@ mod tests {
         assert_eq!(HarnessKind::QoderCn.next(), HarnessKind::Codebuddy);
         assert_eq!(HarnessKind::Codebuddy.next(), HarnessKind::Opencode);
         assert_eq!(HarnessKind::Opencode.next(), HarnessKind::Deepseek);
-        assert_eq!(HarnessKind::Deepseek.next(), HarnessKind::Claude);
+        assert_eq!(HarnessKind::Deepseek.next(), HarnessKind::CommandCode);
+        assert_eq!(HarnessKind::CommandCode.next(), HarnessKind::Claude);
         assert_eq!(HarnessKind::Codex.default_executable(), "codex");
         assert_eq!(ClaudeModel::Haiku.next(), ClaudeModel::Default);
         assert_eq!(ThinkingEffort::Max.next(), ThinkingEffort::Low);

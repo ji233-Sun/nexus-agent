@@ -284,15 +284,10 @@ pub async fn probe(executable: &str) -> HarnessProbe {
         return probe;
     };
     probe.executable = path.to_string_lossy().into();
-    let mut version_command = Command::new(path);
-    hide_console_window(version_command.as_std_mut());
-    if let Ok(Ok(output)) = timeout(
-        TIMEOUT,
-        version_command
-            .arg("--version")
-            .stdin(Stdio::null())
-            .kill_on_drop(true)
-            .output(),
+    let mut version_command = nexus_harness_core::probe::command(path);
+    if let Ok(output) = nexus_harness_core::probe::output(
+        version_command.arg("--version"),
+        tokio::time::Instant::now() + TIMEOUT,
     )
     .await
         && output.status.success()

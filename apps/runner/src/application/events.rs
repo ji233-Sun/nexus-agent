@@ -87,6 +87,14 @@ fn truncate_tool_output(mut output: String) -> String {
     if output.char_indices().nth(MAX_TOOL_OUTPUT_CHARS).is_none() {
         return output;
     }
+    // Binary payloads are preview data, not display text. Keep their JSON envelope
+    // valid while applying the text limit to accompanying content blocks.
+    let mut remaining = MAX_TOOL_OUTPUT_CHARS;
+    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&output)
+        && trim_media_output(&mut value, &mut remaining)
+    {
+        return value.to_string();
+    }
     let retained_chars = MAX_TOOL_OUTPUT_CHARS - TOOL_OUTPUT_TRUNCATED_NOTICE.chars().count();
     let boundary = output
         .char_indices()
@@ -95,6 +103,49 @@ fn truncate_tool_output(mut output: String) -> String {
     output.truncate(boundary);
     output.push_str(TOOL_OUTPUT_TRUNCATED_NOTICE);
     output
+}
+
+fn trim_media_output(value: &mut serde_json::Value, remaining: &mut usize) -> bool {
+    use serde_json::Value;
+    match value {
+        Value::Object(object) => {
+            if matches!(
+                object.get("type").and_then(Value::as_str),
+                Some("image" | "audio" | "video" | "document")
+            ) {
+                return true;
+            }
+            let mut media = false;
+            for (key, value) in object {
+                if key == "text"
+                    && let Some(text) = value.as_str()
+                {
+                    let count = text.chars().count();
+                    if count > *remaining {
+                        let notice_len = TOOL_OUTPUT_TRUNCATED_NOTICE.chars().count();
+                        let retained = remaining.saturating_sub(notice_len);
+                        let mut truncated: String = text.chars().take(retained).collect();
+                        if *remaining >= notice_len {
+                            truncated.push_str(TOOL_OUTPUT_TRUNCATED_NOTICE);
+                        }
+                        *value = Value::String(truncated);
+                    }
+                    *remaining = remaining.saturating_sub(count);
+                } else {
+                    media |= trim_media_output(value, remaining);
+                }
+            }
+            media
+        }
+        Value::Array(items) => {
+            let mut media = false;
+            for item in items {
+                media |= trim_media_output(item, remaining);
+            }
+            media
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -130,6 +181,69 @@ mod tests {
             matches!(second.event, Event::RunToolCompleted { run_id: id, tool_id, output, is_error: true }
             if id == run_id && tool_id == "tool-1" && output == "failed")
         );
+    }
+
+    #[tokio::test]
+    async fn large_images_survive_emission_while_surrounding_text_is_bounded() {
+        use serde_json::{Value, json};
+        let (emitter, mut events) = Emitter::channel();
+        let data = "aW1hZ2U=".repeat(MAX_TOOL_OUTPUT_CHARS);
+        let blocks = json!([
+            {"type": "text", "text": "界".repeat(MAX_TOOL_OUTPUT_CHARS + 1)},
+            {"type": "image", "mimeType": "image/png", "data": data},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": data}},
+            {"type": "text", "text": "trailing text"}
+        ]);
+        let acp: Vec<_> = blocks
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|block| json!({"type": "content", "content": block}))
+            .collect();
+        for (payload, wrapped) in [
+            (blocks.clone(), false),
+            (json!({"content": blocks}), false),
+            (json!(acp), true),
+        ] {
+            emit_decoded(
+                Uuid::new_v4(),
+                DecodedEvent::ToolCompleted {
+                    id: "image".into(),
+                    output: payload.to_string(),
+                    is_error: false,
+                },
+                &emitter,
+            )
+            .await;
+            let Event::RunToolCompleted { output, .. } = events.recv().await.unwrap().event else {
+                panic!("tool result")
+            };
+            let value: Value = serde_json::from_str(&output).expect("media must remain valid JSON");
+            let blocks = value
+                .as_array()
+                .or_else(|| value["content"].as_array())
+                .unwrap();
+            let block = |index: usize| {
+                if wrapped {
+                    &blocks[index]["content"]
+                } else {
+                    &blocks[index]
+                }
+            };
+            assert_eq!(block(1)["data"], data);
+            assert_eq!(block(2)["source"]["data"], data);
+            assert!(
+                block(0)["text"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with(TOOL_OUTPUT_TRUNCATED_NOTICE)
+            );
+            assert_eq!(
+                block(0)["text"].as_str().unwrap().chars().count(),
+                MAX_TOOL_OUTPUT_CHARS
+            );
+            assert_eq!(block(3)["text"], "");
+        }
     }
 
     #[tokio::test]

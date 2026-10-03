@@ -4,6 +4,8 @@ use nexus_protocol::StartRun;
 use serde_json::{Value, json};
 use std::path::Path;
 
+pub mod command_code;
+
 /// Kimi Code and OpenCode are ACP-only; this decoder serves Qoder / Qoder CN / CodeBuddy.
 pub fn prepare_run(run: &StartRun, cwd: &Path) -> (LaunchSpec, Box<dyn LineDecoder>) {
     let qoder = matches!(run.harness, HarnessKind::Qoder | HarnessKind::QoderCn);

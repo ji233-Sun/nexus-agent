@@ -1,6 +1,7 @@
 use crate::{
     infrastructure::{fonts, runner_client::RunnerClient, storage::Storage, update_installation},
     presenter::{Presenter, RunnerPort},
+    remote_control::{RemoteControl, TOKEN_SETTING_KEY},
     view::{NexusView, theme},
 };
 use anyhow::{Context as _, ensure};
@@ -103,6 +104,15 @@ fn launch_desktop(executable: &Path, project_path: Option<&Path>) -> anyhow::Res
     Ok(())
 }
 
+fn start_remote_control(storage: &Storage) -> anyhow::Result<RemoteControl> {
+    let token = storage
+        .setting(TOKEN_SETTING_KEY)?
+        .filter(|token| !token.is_empty())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
+    storage.set_setting(TOKEN_SETTING_KEY, &token)?;
+    RemoteControl::start(token)
+}
+
 fn create_presenter(update_error: Option<String>) -> Presenter {
     let (storage, storage_error) = match Storage::open_default() {
         Ok(storage) => (storage, None),
@@ -115,7 +125,9 @@ fn create_presenter(update_error: Option<String>) -> Presenter {
     };
 
     let runner = RunnerClient::spawn().map(|runner| Box::new(runner) as Box<dyn RunnerPort>);
+    let remote_control = start_remote_control(&storage);
     let mut presenter = Presenter::new(storage, runner, storage_error);
+    presenter.attach_remote_control(remote_control);
     presenter.scan_harness_installations();
     if let Some(error) = update_error {
         presenter.report_update_error(error);

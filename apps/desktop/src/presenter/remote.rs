@@ -1,8 +1,19 @@
 use super::{Presenter, RemoteCommand};
 use crate::i18n::Language;
-use crate::remote_control::{RemoteControl, RemoteProject, RemoteState};
+use crate::remote_control::RemoteControl;
+use nexus_protocol::remote::{RemoteProject, RemoteState};
 
 impl Presenter {
+    pub(crate) fn attach_remote_control(&mut self, service: anyhow::Result<RemoteControl>) {
+        match service {
+            Ok(service) => {
+                self.remote_control = Some(service);
+                self.remote_control_error = None;
+            }
+            Err(error) => self.remote_control_error = Some(error.to_string()),
+        }
+    }
+
     pub(super) fn handle_remote_command(&mut self, command: RemoteCommand) -> bool {
         match command {
             RemoteCommand::GetState { reply } => {
@@ -34,6 +45,7 @@ impl Presenter {
                 {
                     if self
                         .model
+                        .conversation
                         .selected_project
                         .as_ref()
                         .map(|project| project.id)
@@ -42,8 +54,13 @@ impl Presenter {
                         self.select_project(project);
                     }
                     self.new_task();
-                    let executable = self.model.executable.clone();
-                    if self.start_run(None, &prompt, &executable, self.model.permission_mode) {
+                    let executable = self.model.conversation.executable.clone();
+                    if self.start_run(
+                        None,
+                        &prompt,
+                        &executable,
+                        self.model.conversation.permission_mode,
+                    ) {
                         Ok(())
                     } else {
                         Err(self.model.latest_log_text(Language::Chinese).to_owned())
@@ -81,15 +98,21 @@ impl Presenter {
             tasks,
             selected_project_id: self
                 .model
+                .conversation
                 .selected_project
                 .as_ref()
                 .map(|project| project.id),
-            selected_task_id: self.model.selected_task,
-            active_run_id: self.model.active_run,
-            active_task_id: self.model.active_task,
-            streaming_text: self.model.streaming_text.clone(),
-            status: self.model.run_status.render(Language::Chinese).to_owned(),
-            harness: self.model.selected_harness,
+            selected_task_id: self.model.conversation.selected_task,
+            active_run_id: self.model.conversation.active_run,
+            active_task_id: self.model.conversation.active_task,
+            streaming_text: self.model.conversation.streaming_text.clone(),
+            status: self
+                .model
+                .conversation
+                .run_status
+                .render(Language::Chinese)
+                .to_owned(),
+            harness: self.model.conversation.selected_harness,
             model: selection.model,
             effort: selection.effort,
             harness_ready: self.model.selected_probe().is_some_and(|probe| {

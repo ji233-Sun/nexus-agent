@@ -3,7 +3,7 @@ use crate::{
     infrastructure::pull_requests::{Request, Response},
     model::{
         issues::IssueFilter,
-        pull_requests::{MergeMethod, PullAction, PullRunKind},
+        pull_requests::{MergeMethod, PullAction},
     },
 };
 
@@ -211,37 +211,6 @@ impl Presenter {
             }
             Err(error) => pulls.action_error = Some(error.to_string().into()),
         }
-    }
-
-    pub(crate) fn start_pull_run(
-        &mut self,
-        provider: IssueProvider,
-        kind: PullRunKind,
-        extra: &str,
-        executable: &str,
-    ) -> bool {
-        let issues = self.model.issues(provider);
-        if !issues.enabled
-            || issues.pulls.detail_request.is_some()
-            || issues.pulls.detail_error.is_some()
-            || issues.pulls.action_request.is_some()
-            || self.model.selected_project.is_none()
-            || self.model.active_run.is_some()
-            || self.model.occupied_run_slots() >= 2
-        {
-            return false;
-        }
-        let (Some(repository), Some(detail)) =
-            (issues.repository.as_deref(), issues.pulls.detail.as_ref())
-        else {
-            return false;
-        };
-        if !detail.can_run(provider, kind) {
-            return false;
-        }
-        let prompt = detail.chat_prompt(provider, repository, kind, extra);
-        self.new_task();
-        self.start_run(None, &prompt, executable, self.model.permission_mode)
     }
 
     pub(super) fn handle_pull_event(

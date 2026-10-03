@@ -78,15 +78,21 @@ impl Presenter {
         )
     }
 
-    pub(super) fn normalize_generation_effort(&mut self, kind: GenerationKind) {
+    pub(super) fn normalize_generation_effort_in(&mut self, context: Uuid, kind: GenerationKind) {
         let settings = self.model.generation_settings(kind);
         if !settings.effort.is_default()
             && self
                 .model
-                .generation_catalog_model(kind, settings.model.as_deref())
+                .generation_catalog_model_in(context, kind, settings.model.as_deref())
                 .is_none_or(|model| !model.supports_effort(&settings.effort))
         {
-            self.select_generation_effort(kind, ThinkingEffort::Default);
+            self.set_generation_settings(
+                kind,
+                GenerationSettings {
+                    effort: ThinkingEffort::Default,
+                    ..settings.clone()
+                },
+            );
         }
     }
 
@@ -115,6 +121,14 @@ impl Presenter {
         &self,
         kind: GenerationKind,
     ) -> Result<TextGenerationConfig> {
+        self.generation_configuration_in(self.model.conversation.id, kind)
+    }
+
+    pub(super) fn generation_configuration_in(
+        &self,
+        context: Uuid,
+        kind: GenerationKind,
+    ) -> Result<TextGenerationConfig> {
         let settings = self.model.generation_settings(kind);
         let executable = self
             .storage
@@ -123,7 +137,7 @@ impl Presenter {
             .unwrap_or_else(|| settings.harness.default_executable().into());
         let model = settings.model.clone().or_else(|| {
             self.model
-                .provider_profile_for(settings.harness)
+                .provider_profile_in(context, settings.harness)
                 .and_then(|profile| profile.model.clone())
         });
         Ok(TextGenerationConfig {
@@ -131,7 +145,7 @@ impl Presenter {
             executable,
             model,
             effort: settings.effort,
-            environment: self.provider_launch_configuration(settings.harness)?,
+            environment: self.provider_launch_configuration_in(context, settings.harness)?,
         })
     }
 

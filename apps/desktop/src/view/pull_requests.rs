@@ -775,10 +775,9 @@ impl NexusView {
                             .icon(IconName::Bot)
                             .label(locale.text(kind.label()))
                             .disabled(
-                                busy || closed
-                                    || !detail.can_run(provider, kind)
-                                    || model.active_run.is_some()
-                                    || model.occupied_run_slots() >= 2,
+                                !self
+                                    .presenter
+                                    .can_prepare_issue_run(provider, IssueLaunchKind::Pull(kind)),
                             )
                             .on_click(cx.listener(move |app, _, window, cx| {
                                 app.open_issue_launch(

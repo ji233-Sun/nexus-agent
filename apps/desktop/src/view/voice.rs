@@ -1,6 +1,9 @@
 use super::settings::settings_group;
 use super::*;
-use crate::infrastructure::voice::{self, Provider};
+use crate::{
+    infrastructure::voice,
+    model::voice::{Provider, supported_providers},
+};
 use gpui_kit::component::menu::DropdownMenu as _;
 
 impl NexusView {
@@ -111,7 +114,7 @@ impl NexusView {
                 div().py_4().flex().flex_col().gap_4()
             .child(div().text_size(px(13.)).text_color(rgb(colors.muted)).line_height(relative(1.6))
                 .child(ui_locale.text("先选择 Provider，再完成配置。语音只回填可编辑草稿，不会自动发送。")))
-            .child(div().flex().gap_2().children(voice::supported_providers().iter().copied().map(|provider| {
+            .child(div().flex().gap_2().children(supported_providers().iter().copied().map(|provider| {
                 Button::new(match provider { Provider::MacOs => "voice-macos", Provider::Mimo => "voice-mimo" })
                     .outline().small().h(px(CONTROL_HEIGHT)).flex_1().min_w_0()
                     .label(ui_locale.text(match provider { Provider::MacOs => "macOS 系统语音识别", Provider::Mimo => "MiMo ASR" }))

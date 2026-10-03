@@ -26,6 +26,7 @@ const HARNESS_LABELS: Record<RemoteState["harness"], string> = {
   codebuddy: "CodeBuddy",
   opencode: "OpenCode",
   deepseek: "DeepSeek Harness",
+  commandcode: "Command Code",
 };
 
 function initialConnection(): ConnectionConfig | null {

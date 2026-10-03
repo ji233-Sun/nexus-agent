@@ -1,17 +1,16 @@
 use super::{Presenter, executable_setting_key};
-use crate::i18n::{Language, LocalizedText, probe_status};
+use crate::i18n::{Language, LocalizedText};
 use crate::infrastructure::git;
 use crate::infrastructure::storage::NewTaskRun;
-use crate::model::workspace::{WorkspaceKind, WorkspaceStatus};
+use crate::model::workspace::WorkspaceKind;
 use crate::model::{
-    GenerationKind, ModelCatalogState, PendingUserAsk, QueuedMessage, ResolvedModelSelection,
-    UserAskSubmissionState,
+    GenerationKind, PendingUserAsk, QueuedMessage, ResolvedModelSelection, UserAskSubmissionState,
 };
 use nexus_domain::{
-    MessageKind, MessageRole, PermissionMode, RunStatus, ToolMetadata, UserAskAnswer,
-    UserAskAnswerMode, UserAskAnswerValue, UserAskQuestion, UserAskStatus, compact_task_title,
+    PermissionMode, RunStatus, UserAskAnswer, UserAskAnswerMode, UserAskAnswerValue,
+    UserAskQuestion, UserAskStatus, compact_task_title,
 };
-use nexus_protocol::{Command, CommandEnvelope, Event, StartRun};
+use nexus_protocol::{Command, CommandEnvelope, StartRun};
 use std::time::Instant;
 use uuid::Uuid;
 
@@ -20,15 +19,15 @@ impl Presenter {
         &mut self,
         count: usize,
     ) -> Option<(Uuid, std::path::PathBuf)> {
-        if self.model.attachments_loading || count == 0 {
+        if self.model.conversation.attachments_loading || count == 0 {
             return None;
         }
-        if self.model.attachments.len() + count > nexus_domain::Attachment::MAX_COUNT {
+        if self.model.conversation.attachments.len() + count > nexus_domain::Attachment::MAX_COUNT {
             self.report_attachment_error("每条消息最多包含 8 个附件。".into());
             return None;
         }
-        self.model.attachments_loading = true;
-        self.model.attachment_error = None;
+        self.model.conversation.attachments_loading = true;
+        self.model.conversation.attachment_error = None;
         Some((
             self.model.conversation.id,
             self.storage.attachment_directory(),
@@ -60,7 +59,11 @@ impl Presenter {
     }
 
     pub(crate) fn report_attachment_error(&mut self, error: String) {
-        self.model.attachment_error = Some(error.clone().into());
+        self.report_attachment_error_in(self.model.conversation.id, error)
+    }
+
+    pub(crate) fn report_attachment_error_in(&mut self, context: Uuid, error: String) {
+        self.model[context].attachment_error = Some(error.clone().into());
         self.model.log_status(error.into());
     }
     pub(crate) fn attach_pdf_capture(
@@ -69,654 +72,72 @@ impl Presenter {
         page: u32,
         bytes: &[u8],
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(!self.model.attachments_loading, "正在添加附件，请稍候。");
         anyhow::ensure!(
-            self.model.attachments.len() < nexus_domain::Attachment::MAX_COUNT,
+            !self.model.conversation.attachments_loading,
+            "正在添加附件，请稍候。"
+        );
+        anyhow::ensure!(
+            self.model.conversation.attachments.len() < nexus_domain::Attachment::MAX_COUNT,
             "每条消息最多包含 8 个附件。"
         );
-        let image = self.storage.save_pdf_capture(name, page, bytes)?;
-        self.model.attachments.push(image);
-        self.model.attachment_error = None;
+        let image = crate::infrastructure::attachments::save_pdf_capture(
+            &self.storage.attachment_directory(),
+            name,
+            page,
+            bytes,
+        )?;
+        self.model.conversation.attachments.push(image);
+        self.model.conversation.attachment_error = None;
         Ok(())
     }
 
     pub(crate) fn remove_attachment(&mut self, index: usize) {
-        if index < self.model.attachments.len() {
-            self.model.attachments.remove(index);
+        if index < self.model.conversation.attachments.len() {
+            self.model.conversation.attachments.remove(index);
         }
-        self.model.attachment_error = None;
+        self.model.conversation.attachment_error = None;
     }
 
     pub(crate) fn restore_attachments(&mut self, images: &[nexus_domain::Attachment]) -> bool {
-        if self.model.attachments_loading {
+        if self.model.conversation.attachments_loading {
             return false;
         }
-        if self.model.attachments.len() + images.len() > nexus_domain::Attachment::MAX_COUNT {
-            self.model.attachment_error = Some("每条消息最多包含 8 个附件。".into());
+        if self.model.conversation.attachments.len() + images.len()
+            > nexus_domain::Attachment::MAX_COUNT
+        {
+            self.model.conversation.attachment_error = Some("每条消息最多包含 8 个附件。".into());
             return false;
         }
-        self.model.attachments.extend_from_slice(images);
-        self.model.attachment_error = None;
+        self.model
+            .conversation
+            .attachments
+            .extend_from_slice(images);
+        self.model.conversation.attachment_error = None;
         true
     }
 
     pub(crate) fn refresh_run_elapsed(&mut self, now: Instant) -> bool {
         let elapsed = self
             .model
+            .conversation
             .active_run_started_at
             .map(|started| now.saturating_duration_since(started).as_secs());
-        if self.model.active_run_elapsed_seconds == elapsed {
+        if self.model.conversation.active_run_elapsed_seconds == elapsed {
             return false;
         }
-        self.model.active_run_elapsed_seconds = elapsed;
+        self.model.conversation.active_run_elapsed_seconds = elapsed;
         true
     }
 
-    pub(super) fn handle_event(&mut self, event: Event) {
-        let refresh_tasks = matches!(
-            event,
-            Event::TaskTitleGenerated { .. }
-                | Event::RunExited { .. }
-                | Event::RunStarted { .. }
-                | Event::RunStatusChanged { .. }
-        );
-        let selected = self.model.conversation.id;
-        let target = self
-            .model
-            .all_conversations()
-            .find(|conversation| match &event {
-                Event::ModelCatalogLoaded { request_id, .. }
-                | Event::ModelCatalogFailed { request_id, .. } => {
-                    conversation.model_catalog.accepts(*request_id)
-                        || conversation.title_model_catalog.accepts(*request_id)
-                        || conversation.commit_model_catalog.accepts(*request_id)
-                }
-                Event::CommitMessageGenerated { request_id, .. }
-                | Event::CommitMessageFailed { request_id, .. } => {
-                    conversation.commit_message_request == Some(*request_id)
-                }
-                Event::RunStarted { run_id, .. }
-                | Event::RunSessionStarted { run_id, .. }
-                | Event::RunOutputDelta { run_id, .. }
-                | Event::RunMessageCompleted { run_id, .. }
-                | Event::RunApprovalRequested { run_id, .. }
-                | Event::RunApprovalResolved { run_id, .. }
-                | Event::RunApprovalRejected { run_id, .. }
-                | Event::RunInputAccepted { run_id, .. }
-                | Event::RunInputRejected { run_id, .. }
-                | Event::RunUserAskRequested { run_id, .. }
-                | Event::RunUserAskAnswerRejected { run_id, .. }
-                | Event::RunUserAskAnswerSent { run_id, .. }
-                | Event::RunUserAskFinished { run_id, .. }
-                | Event::RunToolStarted { run_id, .. }
-                | Event::RunToolCompleted { run_id, .. }
-                | Event::RunStatusChanged { run_id, .. }
-                | Event::RunFailed { run_id, .. }
-                | Event::RunExited { run_id, .. } => conversation.active_run == Some(*run_id),
-                _ => false,
-            })
-            .map(|conversation| conversation.id);
-        if let Some(target) = target {
-            self.model.activate_conversation(target);
-        }
-        // Route through the owning task's state, then restore the visible task before
-        // notifying the view. Queue continuation therefore uses its own configuration.
-        self.handle_conversation_event(event);
-        self.model.activate_conversation(selected);
-        if refresh_tasks {
-            self.reload_tasks();
-        }
-    }
-
-    fn handle_conversation_event(&mut self, event: Event) {
-        let generation_kind = GenerationKind::ALL.into_iter().find(|kind| match &event {
-            Event::ModelCatalogLoaded {
-                request_id,
-                harness,
-                ..
-            }
-            | Event::ModelCatalogFailed {
-                request_id,
-                harness,
-                ..
-            } => {
-                self.model.generation_settings(*kind).harness == *harness
-                    && self.model.generation_catalog(*kind).accepts(*request_id)
-            }
-            _ => false,
-        });
-        if let Some(kind) = generation_kind {
-            match event {
-                Event::ModelCatalogLoaded { models, .. } => {
-                    *self.model.generation_catalog_mut(kind) = if models.is_empty() {
-                        ModelCatalogState::Empty
-                    } else {
-                        ModelCatalogState::Ready(models)
-                    };
-                    self.normalize_generation_effort(kind);
-                }
-                Event::ModelCatalogFailed { message, .. } => {
-                    self.model.generation_catalog_mut(kind).fail(message.into())
-                }
-                _ => unreachable!(),
-            }
-            return;
-        }
-        match event {
-            Event::RunnerReady => self.model.log_status(LocalizedText::new(
-                "Runner 已连接，正在探测 {0}…",
-                &[("0", (self.model.selected_harness).to_string())],
-            )),
-            Event::HarnessDetected(probe) => {
-                let harness = probe.harness;
-                let available = probe.available;
-                let message = probe_status(&probe);
-                self.model.harnesses.insert(harness, probe);
-                if harness == self.model.selected_harness {
-                    if self.model.active_run.is_none() {
-                        if !available {
-                            self.model.model_catalog = ModelCatalogState::NotReady(message.clone());
-                        } else if matches!(self.model.model_catalog, ModelCatalogState::NotReady(_))
-                        {
-                            self.refresh_model_catalog();
-                        }
-                    }
-                    self.model.log_status(message);
-                }
-            }
-            Event::ModelCatalogLoaded {
-                request_id,
-                harness,
-                models,
-            } if harness == self.model.selected_harness
-                && self.model.active_run.is_none()
-                && self.model.model_catalog.accepts(request_id) =>
-            {
-                self.model.model_catalog = if models.is_empty() {
-                    ModelCatalogState::Empty
-                } else {
-                    ModelCatalogState::Ready(models)
-                };
-                if self.model.model_override.is_some()
-                    && self.model.selected_catalog_model().is_some()
-                {
-                    self.remember_model_name();
-                }
-                let selected_unavailable = self.model.model_override_is_unavailable();
-                let effort_reset = !selected_unavailable && self.normalize_catalog_effort();
-                let profile_model_unverified = self.model.model_override.is_none()
-                    && self
-                        .model
-                        .selected_provider_profile()
-                        .and_then(|profile| profile.model.as_deref())
-                        .is_some()
-                    && self.model.selected_catalog_model().is_none();
-                // Catalog progress belongs to the model picker. Record selection
-                // changes in the runtime log without changing conversation progress.
-                if selected_unavailable {
-                    self.model.log_status(LocalizedText::new(
-                        "当前 {harness} 模型 {0} 不可用，请重新选择或跟随默认。",
-                        &[
-                            ("harness", (harness).to_string()),
-                            (
-                                "0",
-                                (self.model.model_override.as_deref().unwrap_or_default())
-                                    .to_string(),
-                            ),
-                        ],
-                    ));
-                } else if effort_reset {
-                    self.model
-                        .log_status("当前模型不支持原 effort，已恢复为模型默认。".into());
-                } else if profile_model_unverified {
-                    self.model.log_status(
-                        "Profile 默认模型不在当前目录中；仍可使用，但尚未验证可用。".into(),
-                    );
-                }
-            }
-            Event::ModelCatalogFailed {
-                request_id,
-                harness,
-                message,
-            } if harness == self.model.selected_harness
-                && self.model.active_run.is_none()
-                && self.model.model_catalog.accepts(request_id) =>
-            {
-                self.model.model_catalog.fail(message.into());
-            }
-            Event::CommitMessageGenerated {
-                request_id,
-                message,
-            } if self.model.commit_message_request == Some(request_id) => {
-                self.model.commit_message_request = None;
-                if !message.trim().is_empty() && !message.contains('\0') {
-                    self.model.commit_message = message.trim().to_owned();
-                    self.model.changes_status = None;
-                } else {
-                    self.model.changes_status =
-                        Some("模型返回了空或无效的提交说明，请重试。".into());
-                }
-            }
-            Event::CommitMessageFailed {
-                request_id,
-                message,
-            } if self.model.commit_message_request == Some(request_id) => {
-                self.model.commit_message_request = None;
-                self.model.changes_status = Some(message.into());
-            }
-            Event::TaskTitleGenerated { task_id, title } => {
-                if let Some(title) = compact_task_title(&title)
-                    && self
-                        .storage
-                        .update_task_title(task_id, &title)
-                        .unwrap_or(false)
-                {
-                    self.reload_tasks();
-                }
-            }
-            Event::RunStarted { run_id, .. } if self.model.active_run == Some(run_id) => {
-                let harness = self
-                    .model
-                    .active_harness
-                    .unwrap_or(self.model.selected_harness);
-                self.model.set_run_status(LocalizedText::new(
-                    "{harness} 正在执行…",
-                    &[("harness", (harness).to_string())],
-                ));
-                let _ = self.storage.update_run_status(run_id, RunStatus::Running);
-            }
-            Event::RunSessionStarted { run_id, session_id }
-                if self.model.active_run == Some(run_id) && !session_id.is_empty() =>
-            {
-                if let Err(error) = self.storage.save_run_session(run_id, &session_id) {
-                    self.model.log_status(LocalizedText::new(
-                        "无法保存会话，后续可能无法续聊：{error}",
-                        &[("error", (error).to_string())],
-                    ));
-                }
-            }
-            Event::RunOutputDelta { run_id, text } if self.model.active_run == Some(run_id) => {
-                self.model.streaming_text.push_str(&text);
-            }
-            Event::RunApprovalRequested { run_id, request }
-                if self.model.active_run == Some(run_id) && !self.model.run_cancelling =>
-            {
-                if !self
-                    .model
-                    .pending_approvals
-                    .iter()
-                    .any(|pending| pending.request_id == request.request_id)
-                {
-                    self.model.pending_approvals.push_back(request);
-                }
-                self.model
-                    .set_run_status("等待授权，请在桌面弹窗中处理。".into());
-            }
-            Event::RunApprovalResolved { run_id, request_id }
-                if self.model.active_run == Some(run_id) =>
-            {
-                self.model
-                    .pending_approvals
-                    .retain(|request| request.request_id != request_id);
-                if self.model.responding_approval == Some(request_id) {
-                    self.model.responding_approval = None;
-                }
-                self.model
-                    .set_run_status(if self.model.pending_approvals.is_empty() {
-                        "审批已处理，等待 Agent 继续…".into()
-                    } else {
-                        "等待授权，请在桌面弹窗中处理。".into()
-                    });
-            }
-            Event::RunApprovalRejected {
-                run_id,
-                request_id,
-                message,
-            } if self.model.active_run == Some(run_id) => {
-                if self.model.responding_approval == Some(request_id) {
-                    self.model.responding_approval = None;
-                }
-                self.model.set_run_status(message.into());
-            }
-            Event::RunInputAccepted { run_id, message_id }
-                if self.model.active_run == Some(run_id)
-                    && self.model.steering_message == Some(message_id) =>
-            {
-                self.model.steering_message = None;
-                if let Some(index) = self
-                    .model
-                    .queued_messages
-                    .iter()
-                    .position(|message| message.id == message_id)
-                    && let Some(message) = self.model.queued_messages.remove(index)
-                {
-                    self.persist_live_message(
-                        run_id,
-                        MessageRole::User,
-                        MessageKind::Text,
-                        &message.prompt,
-                        None,
-                    );
-                    self.model.log_status("Steer 已送达当前轮次。".into());
-                }
-            }
-            Event::RunInputRejected {
-                run_id,
-                message_id,
-                message,
-            } if self.model.active_run == Some(run_id)
-                && self.model.steering_message == Some(message_id) =>
-            {
-                self.model.steering_message = None;
-                self.model.log_status(message.into());
-            }
-            Event::RunUserAskRequested {
-                run_id,
-                request_id,
-                questions,
-            } if self.model.active_run == Some(run_id)
-                && !self.model.run_cancelling
-                && !self
-                    .model
-                    .pending_user_asks
-                    .iter()
-                    .any(|request| request.request_id == request_id) =>
-            {
-                let history = format_user_ask_request(self.model.language, &questions);
-                self.persist_live_message(
-                    run_id,
-                    MessageRole::System,
-                    MessageKind::Status,
-                    &history,
-                    None,
-                );
-                self.model
-                    .pending_user_asks
-                    .push(PendingUserAsk::new(request_id, questions));
-                self.model.set_run_status("Agent 正在等待你的回答。".into());
-            }
-            Event::RunUserAskAnswerRejected {
-                run_id,
-                request_id,
-                message,
-            } if self.model.active_run == Some(run_id) => {
-                if let Some(request) = self.model.pending_user_asks.iter_mut().find(|request| {
-                    request.request_id == request_id
-                        && request.submission == UserAskSubmissionState::Submitting
-                }) {
-                    request.submission = UserAskSubmissionState::Pending;
-                    request.error = Some(message.clone());
-                    request.submitted_answers = None;
-                    self.model.set_run_status(message.into());
-                }
-            }
-            Event::RunUserAskAnswerSent { run_id, request_id }
-                if self.model.active_run == Some(run_id) =>
-            {
-                if let Some(request) = self.model.pending_user_asks.iter_mut().find(|request| {
-                    request.request_id == request_id
-                        && request.submission == UserAskSubmissionState::Submitting
-                }) {
-                    request.submission = UserAskSubmissionState::Sent;
-                    request.error = None;
-                    self.model
-                        .set_run_status("回答已发送，等待 Agent 继续…".into());
-                }
-            }
-            Event::RunUserAskFinished {
-                run_id,
-                request_id,
-                status,
-                message,
-            } if self.model.active_run == Some(run_id) => {
-                let request = self
-                    .model
-                    .pending_user_asks
-                    .iter()
-                    .position(|request| request.request_id == request_id)
-                    .map(|index| self.model.pending_user_asks.remove(index));
-                if let Some(request) = request {
-                    let history = format_user_ask_result(
-                        self.model.language,
-                        &request,
-                        status,
-                        message.as_deref(),
-                    );
-                    self.persist_live_message(
-                        run_id,
-                        MessageRole::System,
-                        MessageKind::Status,
-                        &history,
-                        None,
-                    );
-                    self.model
-                        .set_run_status(if self.model.pending_user_asks.is_empty() {
-                            message
-                                .unwrap_or_else(|| {
-                                    user_ask_status_text(self.model.language, status).into()
-                                })
-                                .into()
-                        } else {
-                            "Agent 正在等待你的回答。".into()
-                        });
-                }
-            }
-            Event::RunMessageCompleted { run_id, text }
-                if self.model.active_run == Some(run_id) =>
-            {
-                self.model.streaming_text.clear();
-                self.persist_live_message(
-                    run_id,
-                    MessageRole::Assistant,
-                    MessageKind::Text,
-                    &text,
-                    None,
-                );
-            }
-            Event::RunToolStarted {
-                run_id,
-                tool_id,
-                name,
-                summary,
-            } if self.model.active_run == Some(run_id) => {
-                let content = if summary.is_empty() {
-                    name
-                } else {
-                    format!("{name}\n{summary}")
-                };
-                self.persist_live_message(
-                    run_id,
-                    MessageRole::Tool,
-                    MessageKind::ToolCall,
-                    &content,
-                    Some(ToolMetadata {
-                        id: tool_id,
-                        is_error: false,
-                    }),
-                );
-            }
-            Event::RunToolCompleted {
-                run_id,
-                tool_id,
-                output,
-                is_error,
-            } if self.model.active_run == Some(run_id) => {
-                let content = if is_error {
-                    format!("工具执行失败\n{output}")
-                } else {
-                    output
-                };
-                self.persist_live_message(
-                    run_id,
-                    MessageRole::Tool,
-                    MessageKind::ToolResult,
-                    &content,
-                    Some(ToolMetadata {
-                        id: tool_id,
-                        is_error,
-                    }),
-                );
-            }
-            Event::RunStatusChanged {
-                run_id,
-                status,
-                message,
-            } if self.model.active_run == Some(run_id) => {
-                let _ = self.storage.update_run_status(run_id, status);
-                if let Some(message) = message {
-                    self.model.set_run_status(message.into());
-                }
-            }
-            Event::RunFailed {
-                run_id, message, ..
-            } if self.model.active_run == Some(run_id) => {
-                self.model.set_run_status(message.clone().into());
-                self.persist_live_message(
-                    run_id,
-                    MessageRole::System,
-                    MessageKind::Error,
-                    &message,
-                    None,
-                );
-            }
-            Event::RunExited {
-                run_id,
-                status,
-                exit_code,
-            } if self.model.active_run == Some(run_id) => {
-                let pending_catalog_request = match self.model.model_catalog {
-                    ModelCatalogState::Loading { request_id, .. } => Some(request_id),
-                    _ => None,
-                };
-                let task_id = self.model.active_task;
-                let cancelled = self.model.run_cancelling;
-                let stale_user_asks = std::mem::take(&mut self.model.pending_user_asks);
-                let stale_status = if cancelled || status == RunStatus::Cancelled {
-                    UserAskStatus::Cancelled
-                } else {
-                    UserAskStatus::Expired
-                };
-                for request in stale_user_asks {
-                    let history =
-                        format_user_ask_result(self.model.language, &request, stale_status, None);
-                    self.persist_live_message(
-                        run_id,
-                        MessageRole::System,
-                        MessageKind::Status,
-                        &history,
-                        None,
-                    );
-                }
-                let _ = self.storage.finish_run(run_id, status, exit_code);
-                if status == RunStatus::Completed {
-                    self.model.completed_runs.insert(run_id);
-                }
-                self.model.streaming_text.clear();
-                self.model.active_run = None;
-                self.model.active_checkout = None;
-                self.model.run_cancelling = false;
-                self.model.steering_message = None;
-                self.model.active_run_started_at = None;
-                self.model.active_run_elapsed_seconds = None;
-                self.model.active_task = None;
-                self.model.active_harness = None;
-                self.model.active_permission_mode = None;
-                self.model.pending_approvals.clear();
-                self.model.responding_approval = None;
-                self.model.set_run_status(match status {
-                    RunStatus::Completed => "任务已完成".into(),
-                    RunStatus::Cancelled => "任务已取消".into(),
-                    RunStatus::Failed => "任务执行失败".into(),
-                    _ => LocalizedText::new(
-                        "任务状态：{status}",
-                        &[("status", (status).to_string())],
-                    ),
-                });
-                if status == RunStatus::Completed && !cancelled && self.model.sound.task_complete {
-                    crate::infrastructure::sound::play_task_complete();
-                }
-                self.reload_tasks();
-                self.reload_workspaces();
-                if self.model.selected_task != task_id
-                    && let Some(selected_task) = self.model.selected_task
-                {
-                    self.select_task(selected_task);
-                }
-                if status == RunStatus::Completed
-                    && !cancelled
-                    && let Some(message) = self
-                        .model
-                        .queued_messages
-                        .iter()
-                        .find(|message| Some(message.task_id) == task_id)
-                {
-                    self.send_queued_message(message.id);
-                }
-                if self.model.active_run.is_none()
-                    && (pending_catalog_request
-                        .is_some_and(|request_id| self.model.model_catalog.accepts(request_id))
-                        || self.model.catalog_project
-                            != self
-                                .model
-                                .selected_project
-                                .as_ref()
-                                .map(|project| project.id))
-                {
-                    // Retry an ignored response only if task restoration has not replaced the request.
-                    self.refresh_model_catalog();
-                }
-            }
-            _ => {}
-        }
-        if self
-            .model
-            .pending_workspace_start
-            .as_ref()
-            .is_some_and(|pending| pending.context_id == self.model.conversation.id)
-            && !self.model.workspace_retry
-            && self
-                .model
-                .selected_workspace
-                .as_ref()
-                .is_some_and(|workspace| workspace.status == WorkspaceStatus::Ready)
-            && !matches!(
-                self.model.model_catalog,
-                ModelCatalogState::Loading { .. } | ModelCatalogState::Idle
-            )
-            && self.model.active_run.is_none()
-        {
-            self.retry_workspace_start();
-        }
-    }
-
-    fn persist_live_message(
-        &mut self,
-        run_id: Uuid,
-        role: MessageRole,
-        kind: MessageKind,
-        content: &str,
-        tool: Option<ToolMetadata>,
-    ) {
-        let Some(task_id) = self.model.active_task else {
-            return;
-        };
-        if let Ok(message) = self
-            .storage
-            .append_message(task_id, run_id, role, kind, content, tool)
-            && self.model.selected_task == Some(task_id)
-        {
-            self.model.messages.push(message);
-        }
-    }
-
     pub(crate) fn submit(&mut self, prompt: &str, configured_executable: &str) -> bool {
-        let attachments = self.model.attachments.clone();
-        if self.model.attachments_loading {
+        let attachments = self.model.conversation.attachments.clone();
+        if self.model.conversation.attachments_loading {
             return false;
         }
-        if let Err(error) =
-            nexus_harness_core::validate_attachments(&attachments, self.model.selected_harness)
-        {
+        if let Err(error) = nexus_harness_core::validate_attachments(
+            &attachments,
+            self.model.conversation.selected_harness,
+        ) {
             self.report_attachment_error(error);
             return false;
         }
@@ -725,7 +146,7 @@ impl Presenter {
         } else {
             prompt
         };
-        if self.model.active_run.is_some() {
+        if self.model.conversation.active_run.is_some() {
             if !self.model.can_queue() || prompt.trim().is_empty() {
                 return false;
             }
@@ -739,28 +160,31 @@ impl Presenter {
                     attachments,
                     permission_mode: self.model.conversation.permission_mode,
                 });
-            self.model.attachments.clear();
+            self.model.conversation.attachments.clear();
             self.model
                 .log_status("消息已排队，将在当前轮次结束后依次发送。".into());
             return true;
         }
         let started = self.start_run_with_attachments(
-            self.model.selected_task,
+            self.model.conversation.selected_task,
             prompt,
             configured_executable,
-            self.model.permission_mode,
+            self.model.conversation.permission_mode,
             &attachments,
         );
         if started {
-            self.model.attachments.clear();
-            self.model.attachment_error = None;
+            self.model.conversation.attachments.clear();
+            self.model.conversation.attachment_error = None;
         }
         started
     }
 
     pub(crate) fn send_queued_message(&mut self, message_id: Uuid) -> bool {
-        let Some(message) = self
-            .model
+        self.send_queued_message_in(self.model.conversation.id, message_id)
+    }
+
+    pub(crate) fn send_queued_message_in(&mut self, context: Uuid, message_id: Uuid) -> bool {
+        let Some(message) = self.model[context]
             .queued_messages
             .iter()
             .find(|message| message.id == message_id)
@@ -768,11 +192,14 @@ impl Presenter {
         else {
             return false;
         };
-        if self.model.active_run.is_some() || self.model.selected_task != Some(message.task_id) {
+        if self.model[context].active_run.is_some()
+            || self.model[context].selected_task != Some(message.task_id)
+        {
             return false;
         }
-        let executable = self.model.executable.clone();
-        if !self.start_run_with_attachments(
+        let executable = self.model[context].executable.clone();
+        if !self.start_run_with_attachments_in(
+            context,
             Some(message.task_id),
             &message.prompt,
             &executable,
@@ -781,37 +208,48 @@ impl Presenter {
         ) {
             return false;
         }
-        self.model
+        self.model[context]
             .queued_messages
             .retain(|queued| queued.id != message_id);
         true
     }
 
     pub(crate) fn remove_queued_message(&mut self, message_id: Uuid) {
-        if self.model.steering_message == Some(message_id) {
+        if self.model.conversation.steering_message == Some(message_id) {
             return;
         }
         self.model
+            .conversation
             .queued_messages
             .retain(|message| message.id != message_id);
     }
 
     pub(crate) fn steer_queued_message(&mut self, message_id: Uuid) -> bool {
-        if !self.model.can_queue() || self.model.steering_message.is_some() {
+        if !self.model.can_queue() || self.model.conversation.steering_message.is_some() {
             return false;
         }
-        let Some(index) = self.model.queued_messages.iter().position(|message| {
-            message.id == message_id && Some(message.task_id) == self.model.active_task
-        }) else {
+        let Some(index) = self
+            .model
+            .conversation
+            .queued_messages
+            .iter()
+            .position(|message| {
+                message.id == message_id
+                    && Some(message.task_id) == self.model.conversation.active_task
+            })
+        else {
             return false;
         };
-        let run_id = self.model.active_run.unwrap();
-        if !self.model.queued_messages[index].attachments.is_empty() {
+        let run_id = self.model.conversation.active_run.unwrap();
+        if !self.model.conversation.queued_messages[index]
+            .attachments
+            .is_empty()
+        {
             self.model.log_status("含附件的消息将在下一轮发送。".into());
             return false;
         }
-        if self.model.active_permission_mode
-            != Some(self.model.queued_messages[index].permission_mode)
+        if self.model.conversation.active_permission_mode
+            != Some(self.model.conversation.queued_messages[index].permission_mode)
         {
             self.model
                 .log_status("排队消息的权限与当前轮次不同，请等待下一轮发送。".into());
@@ -820,7 +258,9 @@ impl Presenter {
         let command = CommandEnvelope::new(Command::RunSteer {
             run_id,
             message_id,
-            prompt: self.model.queued_messages[index].prompt.clone(),
+            prompt: self.model.conversation.queued_messages[index]
+                .prompt
+                .clone(),
         });
         if !self
             .runner
@@ -832,9 +272,14 @@ impl Presenter {
             return false;
         }
         // A Steer that races with turn completion becomes the next queued message.
-        let message = self.model.queued_messages.remove(index).unwrap();
-        self.model.queued_messages.push_front(message);
-        self.model.steering_message = Some(message_id);
+        let message = self
+            .model
+            .conversation
+            .queued_messages
+            .remove(index)
+            .unwrap();
+        self.model.conversation.queued_messages.push_front(message);
+        self.model.conversation.steering_message = Some(message_id);
         self.model.log_status("等待工具执行结束后介入…".into());
         true
     }
@@ -842,6 +287,7 @@ impl Presenter {
     pub(crate) fn set_user_ask_question(&mut self, request_id: Uuid, index: usize) -> bool {
         let Some(request) = self
             .model
+            .conversation
             .pending_user_asks
             .iter_mut()
             .find(|request| request.request_id == request_id)
@@ -858,6 +304,7 @@ impl Presenter {
     pub(crate) fn toggle_user_ask_collapsed(&mut self, request_id: Uuid) -> bool {
         let Some(request) = self
             .model
+            .conversation
             .pending_user_asks
             .iter_mut()
             .find(|request| request.request_id == request_id)
@@ -874,10 +321,16 @@ impl Presenter {
         question_id: &str,
         text: String,
     ) -> bool {
-        let Some(request) = self.model.pending_user_asks.iter_mut().find(|request| {
-            request.request_id == request_id
-                && request.submission == UserAskSubmissionState::Pending
-        }) else {
+        let Some(request) = self
+            .model
+            .conversation
+            .pending_user_asks
+            .iter_mut()
+            .find(|request| {
+                request.request_id == request_id
+                    && request.submission == UserAskSubmissionState::Pending
+            })
+        else {
             return false;
         };
         let Some(question) = request
@@ -927,10 +380,16 @@ impl Presenter {
         option_id: &str,
         checked: bool,
     ) -> bool {
-        let Some(request) = self.model.pending_user_asks.iter_mut().find(|request| {
-            request.request_id == request_id
-                && request.submission == UserAskSubmissionState::Pending
-        }) else {
+        let Some(request) = self
+            .model
+            .conversation
+            .pending_user_asks
+            .iter_mut()
+            .find(|request| {
+                request.request_id == request_id
+                    && request.submission == UserAskSubmissionState::Pending
+            })
+        else {
             return false;
         };
         let Some(question) = request
@@ -971,18 +430,24 @@ impl Presenter {
     }
 
     pub(crate) fn can_submit_user_ask(&self, request_id: Uuid) -> bool {
-        self.model.active_run.is_some()
-            && !self.model.run_cancelling
-            && self.model.pending_user_asks.iter().any(|request| {
-                request.request_id == request_id
-                    && request.submission == UserAskSubmissionState::Pending
-                    && request.answers().is_some()
-            })
+        self.model.conversation.active_run.is_some()
+            && !self.model.conversation.run_cancelling
+            && self
+                .model
+                .conversation
+                .pending_user_asks
+                .iter()
+                .any(|request| {
+                    request.request_id == request_id
+                        && request.submission == UserAskSubmissionState::Pending
+                        && request.answers().is_some()
+                })
     }
 
     pub(crate) fn submit_user_ask(&mut self, request_id: Uuid) -> bool {
         let Some(answers) = self
             .model
+            .conversation
             .pending_user_asks
             .iter()
             .find(|request| request.request_id == request_id)
@@ -998,13 +463,24 @@ impl Presenter {
         request_id: Uuid,
         answers: Vec<UserAskAnswer>,
     ) -> bool {
-        let Some(run_id) = self.model.active_run.filter(|_| !self.model.run_cancelling) else {
+        let Some(run_id) = self
+            .model
+            .conversation
+            .active_run
+            .filter(|_| !self.model.conversation.run_cancelling)
+        else {
             return false;
         };
-        let Some(index) = self.model.pending_user_asks.iter().position(|request| {
-            request.request_id == request_id
-                && request.submission == UserAskSubmissionState::Pending
-        }) else {
+        let Some(index) = self
+            .model
+            .conversation
+            .pending_user_asks
+            .iter()
+            .position(|request| {
+                request.request_id == request_id
+                    && request.submission == UserAskSubmissionState::Pending
+            })
+        else {
             return false;
         };
         let submitted_answers = answers.clone();
@@ -1015,7 +491,7 @@ impl Presenter {
             .and_then(|runner| runner.answer_user_ask(run_id, request_id, answers));
         match result {
             Ok(()) => {
-                let request = &mut self.model.pending_user_asks[index];
+                let request = &mut self.model.conversation.pending_user_asks[index];
                 request.submission = UserAskSubmissionState::Submitting;
                 request.error = None;
                 request.submitted_answers = Some(submitted_answers);
@@ -1024,7 +500,7 @@ impl Presenter {
             }
             Err(error) => {
                 let message = format!("无法提交 User Ask 回答：{error}");
-                self.model.pending_user_asks[index].error = Some(message.clone());
+                self.model.conversation.pending_user_asks[index].error = Some(message.clone());
                 self.model.set_run_status(message.into());
                 false
             }
@@ -1055,10 +531,30 @@ impl Presenter {
         permission_mode: PermissionMode,
         attachments: &[nexus_domain::Attachment],
     ) -> bool {
-        if let Err(error) =
-            nexus_harness_core::validate_attachments(attachments, self.model.selected_harness)
-        {
-            self.report_attachment_error(error);
+        self.start_run_with_attachments_in(
+            self.model.conversation.id,
+            task_id,
+            prompt,
+            configured_executable,
+            permission_mode,
+            attachments,
+        )
+    }
+
+    pub(super) fn start_run_with_attachments_in(
+        &mut self,
+        context: Uuid,
+        task_id: Option<Uuid>,
+        prompt: &str,
+        configured_executable: &str,
+        permission_mode: PermissionMode,
+        attachments: &[nexus_domain::Attachment],
+    ) -> bool {
+        if let Err(error) = nexus_harness_core::validate_attachments(
+            attachments,
+            self.model[context].selected_harness,
+        ) {
+            self.report_attachment_error_in(context, error);
             return false;
         }
         if self.model.updates.state.is_installing() {
@@ -1066,14 +562,13 @@ impl Presenter {
                 .log_status("正在安装应用更新，重启后可继续任务。".into());
             return false;
         }
-        if self.model.active_run.is_some()
+        if self.model[context].active_run.is_some()
             || self.model.harness_manager.operating.is_some()
             || self.model.occupied_run_slots() >= 2
         {
             return false;
         }
-        let project_id = self
-            .model
+        let project_id = self.model[context]
             .selected_project
             .as_ref()
             .map(|project| project.id);
@@ -1086,28 +581,28 @@ impl Presenter {
         if configured_executable.is_empty() {
             self.model.log_status(LocalizedText::new(
                 "{0} 可执行文件不能为空。",
-                &[("0", (self.model.selected_harness).to_string())],
+                &[("0", (self.model[context].selected_harness).to_string())],
             ));
             return false;
         }
         let profile_ready = self
             .model
-            .selected_provider_profile()
+            .selected_provider_profile_in(context)
             .is_some_and(|profile| profile.credential_configured);
         let Some(probe) = self
             .model
-            .selected_probe()
+            .selected_probe_in(context)
             .filter(|probe| probe.available && (probe.authenticated || profile_ready))
         else {
             self.model.log_status(LocalizedText::new(
                 "{0} 尚未就绪，请先完成探测和登录。",
-                &[("0", (self.model.selected_harness).to_string())],
+                &[("0", (self.model[context].selected_harness).to_string())],
             ));
             return false;
         };
         let executable = probe.executable.clone();
         let harness_version = probe.version.clone();
-        let harness = self.model.selected_harness;
+        let harness = self.model[context].selected_harness;
         let session_id = if let Some(task_id) = task_id {
             let config = match self.storage.conversation_config(task_id) {
                 Ok(Some(config)) => config,
@@ -1138,14 +633,14 @@ impl Presenter {
         } else {
             None
         };
-        if !self.model.catalog_selection_is_valid() {
+        if !self.model.catalog_selection_is_valid_in(context) {
             self.model.log_status(LocalizedText::new(
                 "当前 {harness} 模型或 effort 未通过目录验证，请调整选择后重试。",
                 &[("harness", (harness).to_string())],
             ));
             return false;
         }
-        let environment = match self.provider_launch_configuration(harness) {
+        let environment = match self.provider_launch_configuration_in(context, harness) {
             Ok(configuration) => configuration,
             Err(error) => {
                 self.model.log_status(LocalizedText::new(
@@ -1155,25 +650,30 @@ impl Presenter {
                 return false;
             }
         };
-        let ResolvedModelSelection { model, effort } = self.model.resolved_model_selection();
+        let ResolvedModelSelection { model, effort } =
+            self.model.resolved_model_selection_in(context);
         let title_generation = session_id
             .is_none()
-            .then(|| self.generation_configuration(GenerationKind::Title).ok())
+            .then(|| {
+                self.generation_configuration_in(context, GenerationKind::Title)
+                    .ok()
+            })
             .flatten();
         let title = compact_task_title(&prompt).unwrap_or_else(|| "新任务".into());
         if task_id.is_none()
-            && self.model.selected_workspace.is_none()
-            && self.model.workspace_draft.kind == WorkspaceKind::Worktree
+            && self.model[context].selected_workspace.is_none()
+            && self.model[context].workspace_draft.kind == WorkspaceKind::Worktree
         {
-            let started = self.begin_worktree(&prompt, &configured_executable, permission_mode);
-            if started && let Some(pending) = &mut self.model.pending_workspace_start {
+            let started =
+                self.begin_worktree_in(context, &prompt, &configured_executable, permission_mode);
+            if started && let Some(pending) = &mut self.model[context].pending_workspace_start {
                 pending.attachments = attachments.to_vec();
             }
             return started;
         }
         let workspace = if let Some(task_id) = task_id {
             self.storage.task_workspace(task_id)
-        } else if let Some(workspace) = &self.model.selected_workspace {
+        } else if let Some(workspace) = &self.model[context].selected_workspace {
             Ok(Some(workspace.clone()))
         } else if let Some(project_id) = project_id {
             self.storage.workspace(project_id)
@@ -1264,24 +764,26 @@ impl Presenter {
                     .log_status("无法保存任务运行，已请求停止 Runner。".into());
                 return false;
             }
-            self.model.active_run = Some(run_id);
-            self.model.active_checkout = Some(checkout);
-            self.model.active_run_started_at = Some(Instant::now());
-            self.model.active_run_elapsed_seconds = Some(0);
-            self.model.active_task = Some(task_id);
-            self.model.active_harness = Some(harness);
-            self.model.active_permission_mode = Some(permission_mode);
-            self.model.selected_task = Some(task_id);
-            self.model.selected_workspace = self
+            self.model[context].active_run = Some(run_id);
+            self.model[context].active_checkout = Some(checkout);
+            self.model[context].active_run_started_at = Some(Instant::now());
+            self.model[context].active_run_elapsed_seconds = Some(0);
+            self.model[context].active_task = Some(task_id);
+            self.model[context].active_harness = Some(harness);
+            self.model[context].active_permission_mode = Some(permission_mode);
+            self.model[context].selected_task = Some(task_id);
+            self.model[context].selected_workspace = self
                 .storage
                 .task_workspace(task_id)
                 .ok()
                 .flatten()
                 .or(Some(workspace));
-            self.model.messages = self.storage.messages(task_id).unwrap_or_default();
-            self.model.completed_runs = self.storage.completed_runs(task_id).unwrap_or_default();
-            self.model
-                .set_run_status(LocalizedText::translated(|language| {
+            self.model[context].messages = self.storage.messages(task_id).unwrap_or_default();
+            self.model[context].completed_runs =
+                self.storage.completed_runs(task_id).unwrap_or_default();
+            self.model.set_run_status_in(
+                context,
+                LocalizedText::translated(|language| {
                     let effort_label = match language {
                         Language::Chinese => effort.to_string(),
                         Language::English => language.effort(effort).to_owned(),
@@ -1290,7 +792,8 @@ impl Presenter {
                         "正在启动 {harness} · {effort}",
                         &[("harness", harness.to_string()), ("effort", effort_label)],
                     )
-                }));
+                }),
+            );
             let _ = self
                 .storage
                 .set_setting(executable_setting_key(harness), &configured_executable);
@@ -1313,13 +816,18 @@ impl Presenter {
         request_id: Uuid,
         option: Option<usize>,
     ) -> bool {
-        if self.model.active_run != Some(run_id)
-            || self.model.run_cancelling
-            || self.model.responding_approval.is_some()
-            || !self.model.pending_approvals.front().is_some_and(|request| {
-                request.request_id == request_id
-                    && option.is_none_or(|index| index < request.options.len())
-            })
+        if self.model.conversation.active_run != Some(run_id)
+            || self.model.conversation.run_cancelling
+            || self.model.conversation.responding_approval.is_some()
+            || !self
+                .model
+                .conversation
+                .pending_approvals
+                .front()
+                .is_some_and(|request| {
+                    request.request_id == request_id
+                        && option.is_none_or(|index| index < request.options.len())
+                })
         {
             return false;
         }
@@ -1337,13 +845,13 @@ impl Presenter {
                 .set_run_status("审批回复发送失败，请重试或停止任务。".into());
             return false;
         }
-        self.model.responding_approval = Some(request_id);
+        self.model.conversation.responding_approval = Some(request_id);
         self.model.set_run_status("正在发送审批回复…".into());
         true
     }
 
     pub(super) fn request_cancel(&mut self) -> Result<(), String> {
-        let Some(run_id) = self.model.active_run else {
+        let Some(run_id) = self.model.conversation.active_run else {
             return Err("没有运行中的任务".into());
         };
         let runner = self
@@ -1353,16 +861,17 @@ impl Presenter {
         runner
             .send(CommandEnvelope::new(Command::RunCancel { run_id }))
             .map_err(|error| error.to_string())?;
-        self.model.run_cancelling = true;
-        self.model.pending_approvals.clear();
-        self.model.responding_approval = None;
+        self.model.conversation.run_cancelling = true;
+        self.model.conversation.pending_approvals.clear();
+        self.model.conversation.responding_approval = None;
         let _ = self
             .storage
             .update_run_status(run_id, RunStatus::Cancelling);
         let harness = self
             .model
+            .conversation
             .active_harness
-            .unwrap_or(self.model.selected_harness);
+            .unwrap_or(self.model.conversation.selected_harness);
         self.model.set_run_status(LocalizedText::new(
             "正在停止 {harness}…",
             &[("harness", (harness).to_string())],
@@ -1371,7 +880,7 @@ impl Presenter {
     }
 }
 
-fn format_user_ask_request(language: Language, questions: &[UserAskQuestion]) -> String {
+pub(super) fn format_user_ask_request(language: Language, questions: &[UserAskQuestion]) -> String {
     let mut lines = vec![language.text("Agent 提问").to_owned()];
     for (index, question) in questions.iter().enumerate() {
         lines.push(format!("{}. {}", index + 1, question.prompt));
@@ -1391,7 +900,7 @@ fn format_user_ask_request(language: Language, questions: &[UserAskQuestion]) ->
     lines.join("\n")
 }
 
-fn format_user_ask_result(
+pub(super) fn format_user_ask_result(
     language: Language,
     request: &PendingUserAsk,
     status: UserAskStatus,
@@ -1432,7 +941,7 @@ fn format_user_ask_result(
     lines.join("\n")
 }
 
-fn user_ask_status_text(language: Language, status: UserAskStatus) -> &'static str {
+pub(super) fn user_ask_status_text(language: Language, status: UserAskStatus) -> &'static str {
     language.text(match status {
         UserAskStatus::Answered => "User Ask 已回答",
         UserAskStatus::Cancelled => "User Ask 已取消",

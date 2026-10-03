@@ -5,6 +5,120 @@ use crate::{
 };
 
 impl Presenter {
+    pub(crate) fn can_prepare_issue_run(
+        &self,
+        provider: IssueProvider,
+        kind: IssueLaunchKind,
+    ) -> bool {
+        let issues = self.model.issues(provider);
+        if !issues.enabled
+            || self.model.conversation.selected_project.is_none()
+            || issues.repository.is_none()
+        {
+            return false;
+        }
+        match kind {
+            IssueLaunchKind::Pull(kind) => {
+                let pulls = &issues.pulls;
+                pulls.detail_request.is_none()
+                    && pulls.detail_error.is_none()
+                    && pulls.action_request.is_none()
+                    && pulls
+                        .detail
+                        .as_ref()
+                        .is_some_and(|detail| detail.can_run(provider, kind))
+            }
+            IssueLaunchKind::Create | IssueLaunchKind::Process => {
+                issues.action_request.is_none()
+                    && (kind == IssueLaunchKind::Create
+                        || (issues.detail_request.is_none()
+                            && issues.comments_request.is_none()
+                            && issues.detail.is_some()
+                            && issues.comments.is_some()))
+            }
+        }
+    }
+
+    pub(crate) fn prepare_issue_run(
+        &mut self,
+        provider: IssueProvider,
+        kind: IssueLaunchKind,
+    ) -> Option<Uuid> {
+        if !self.can_prepare_issue_run(provider, kind) {
+            return None;
+        }
+        self.cancel_voice();
+        let previous = self.model.fork_conversation();
+        self.reset_workspace_draft();
+        if self.model.conversation.project_is_git && self.issue_local_checkout_running() {
+            self.model.conversation.workspace_draft.kind =
+                crate::model::workspace::WorkspaceKind::Worktree;
+        }
+        self.refresh_model_catalog();
+        Some(previous)
+    }
+
+    pub(crate) fn cancel_issue_run(&mut self, context: Uuid, previous: Uuid) {
+        if self.model.conversation.id == context {
+            self.model.activate_conversation(previous);
+        }
+        if self
+            .model
+            .conversations
+            .get(&context)
+            .is_some_and(|conversation| {
+                conversation.active_run.is_none()
+                    && conversation.pending_workspace_start.is_none()
+                    && conversation.selected_task.is_none()
+                    && self.model.workspace_operation_context != Some(context)
+            })
+        {
+            self.model.conversations.remove(&context);
+        }
+    }
+
+    fn issue_local_checkout_running(&self) -> bool {
+        self.model
+            .conversation
+            .selected_project
+            .as_ref()
+            .is_some_and(|project| {
+                self.model.all_conversations().any(|conversation| {
+                    conversation.active_run.is_some()
+                        && conversation
+                            .active_checkout
+                            .as_ref()
+                            .is_some_and(|checkout| {
+                                Path::new(&project.canonical_path).starts_with(checkout)
+                            })
+                })
+            })
+    }
+
+    pub(crate) fn issue_run_blocker(&self) -> Option<LocalizedText> {
+        use crate::model::workspace::WorkspaceKind;
+        let message = if self.model.occupied_run_slots() >= 2 {
+            "最多同时运行两个任务，请等待一个任务结束。"
+        } else if self.model.conversation.workspace_draft.kind == WorkspaceKind::Worktree
+            && self.model.workspace_busy
+        {
+            "请等待当前 Worktree 操作完成"
+        } else if self.model.conversation.workspace_draft.kind == WorkspaceKind::Worktree
+            && self.model.conversation.workspace_draft.base.is_empty()
+        {
+            "请选择来源分支。"
+        } else if self.model.conversation.workspace_draft.kind == WorkspaceKind::Local
+            && self.issue_local_checkout_running()
+        {
+            "本地目录已有任务运行，请选择 Worktree 或等待任务结束。"
+        } else if !self.model.can_submit() {
+            "所选 Harness 尚未就绪，请检查模型、配置和登录状态。"
+        } else {
+            return None;
+        };
+        Some(message.into())
+    }
+
     pub(super) fn reset_issues_project(&mut self) {
         for provider in IssueProvider::ALL {
             self.reset_issue_provider(provider);
@@ -29,7 +143,8 @@ impl Presenter {
             cli: self.model.issues(provider).cli.clone(),
             ..IssuesModel::default()
         };
-        if self.model.issues(provider).enabled && self.model.selected_project.is_some() {
+        if self.model.issues(provider).enabled && self.model.conversation.selected_project.is_some()
+        {
             self.inspect_issues(provider);
         }
     }
@@ -41,6 +156,7 @@ impl Presenter {
         let id = Uuid::new_v4();
         let path = self
             .model
+            .conversation
             .selected_project
             .as_ref()
             .map(|project| project.canonical_path.clone().into());
@@ -207,19 +323,18 @@ impl Presenter {
         extra: &str,
         configured_executable: &str,
     ) -> bool {
-        if let IssueLaunchKind::Pull(kind) = kind {
-            return self.start_pull_run(provider, kind, extra, configured_executable);
+        if !self.can_prepare_issue_run(provider, kind)
+            || self.model.conversation.selected_task.is_some()
+            || (kind == IssueLaunchKind::Create && extra.trim().is_empty())
+        {
+            return false;
+        }
+        if let Some(message) = self.issue_run_blocker() {
+            self.model.log_status(message);
+            return false;
         }
         let prompt = {
             let issues = self.model.issues(provider);
-            if !issues.enabled
-                || self.model.selected_project.is_none()
-                || issues.detail_request.is_some()
-                || issues.comments_request.is_some()
-                || issues.action_request.is_some()
-            {
-                return false;
-            }
             match kind {
                 IssueLaunchKind::Create => {
                     let Some(repository) = issues.repository.as_deref() else {
@@ -237,22 +352,31 @@ impl Presenter {
                     };
                     issue.chat_prompt(provider, repository, comments, extra)
                 }
-                IssueLaunchKind::Pull(_) => unreachable!(),
+                IssueLaunchKind::Pull(kind) => {
+                    let (Some(detail), Some(repository)) =
+                        (issues.pulls.detail.as_ref(), issues.repository.as_deref())
+                    else {
+                        return false;
+                    };
+                    detail.chat_prompt(provider, repository, kind, extra)
+                }
             }
         };
-        self.new_task();
         let started = self.start_run(
             None,
             &prompt,
             configured_executable,
-            self.model.permission_mode,
+            self.model.conversation.permission_mode,
         );
         if started {
+            for provider in IssueProvider::ALL {
+                self.model.issues_mut(provider).opened = false;
+            }
             self.model.log_status(
                 match kind {
                     IssueLaunchKind::Create => "已启动 Harness 创建 Issue。",
                     IssueLaunchKind::Process => "已启动 Harness 处理 Issue。",
-                    IssueLaunchKind::Pull(_) => unreachable!(),
+                    IssueLaunchKind::Pull(_) => "已启动 Harness 处理 PR。",
                 }
                 .into(),
             );
@@ -369,10 +493,18 @@ impl Presenter {
                         issues.detection_error = Some(error);
                     }
                 }
-                if issues.opened && issues.cli.is_some() && issues.issues.is_empty() {
-                    let page = issues.page;
-                    let filter = issues.filter;
-                    self.load_issues(provider, page, filter);
+                if issues.opened && issues.cli.is_some() {
+                    if issues.pulls.opened {
+                        if issues.pulls.pulls.is_empty() {
+                            let page = issues.pulls.page;
+                            let filter = issues.pulls.filter;
+                            self.load_pull_requests(provider, page, filter);
+                        }
+                    } else if issues.issues.is_empty() {
+                        let page = issues.page;
+                        let filter = issues.filter;
+                        self.load_issues(provider, page, filter);
+                    }
                 }
             }
             Response::List(result) if issues.list_request == Some(event.id) => {

@@ -12,7 +12,8 @@ impl NexusView {
         let colors = palette(cx);
         let model = self.presenter.model();
         let compact = window.viewport_size().height < px(740.);
-        let empty = model.messages.is_empty() && model.streaming_text.is_empty();
+        let empty =
+            model.conversation.messages.is_empty() && model.conversation.streaming_text.is_empty();
         div()
             .relative()
             .bg(rgb(colors.canvas))
@@ -43,23 +44,27 @@ impl NexusView {
                                 element.child(self.render_welcome(colors, compact, cx))
                             })
                             .children(
-                                timeline_items(&model.messages, &model.completed_runs)
-                                    .iter()
-                                    .map(|item| self.render_timeline_item(item, window, cx)),
+                                timeline_items(
+                                    &model.conversation.messages,
+                                    &model.conversation.completed_runs,
+                                )
+                                .iter()
+                                .map(|item| self.render_timeline_item(item, window, cx)),
                             )
-                            .when(!model.streaming_text.is_empty(), |element| {
+                            .when(!model.conversation.streaming_text.is_empty(), |element| {
                                 element.child(self.message_card(
                                     "streaming-message",
                                     MessageRole::Assistant,
-                                    &model.streaming_text,
+                                    &model.conversation.streaming_text,
                                     MessageKind::Text,
                                     window,
                                     cx,
                                 ))
                             })
                             .when(
-                                model.active_run.is_some()
-                                    && model.selected_task == model.active_task,
+                                model.conversation.active_run.is_some()
+                                    && model.conversation.selected_task
+                                        == model.conversation.active_task,
                                 |element| {
                                     element.child(
                                         div()
@@ -69,17 +74,21 @@ impl NexusView {
                                             .gap_3()
                                             .text_size(px(13.))
                                             .text_color(rgb(colors.text_secondary))
-                                            .child(live_status_dot(
+                                            .child(bouncing_dots(
                                                 rgb(colors.accent).into(),
                                                 !self.reduced_motion,
                                             ))
                                             .child(
                                                 div().flex_1().min_w_0().child(
-                                                    model.run_status.render(locale).to_owned(),
+                                                    model
+                                                        .conversation
+                                                        .run_status
+                                                        .render(locale)
+                                                        .to_owned(),
                                                 ),
                                             )
                                             .when_some(
-                                                model.active_run_elapsed_seconds,
+                                                model.conversation.active_run_elapsed_seconds,
                                                 |element, seconds| {
                                                     element.child(
                                                         div()
@@ -239,7 +248,7 @@ impl NexusView {
     ) -> impl IntoElement {
         let locale = self.presenter.model().language;
         let model = self.presenter.model();
-        let project = model.selected_project.as_ref();
+        let project = model.conversation.selected_project.as_ref();
         let has_project = project.is_some();
         let selector = if has_project {
             "workspace-empty-agent-status"
@@ -312,8 +321,12 @@ impl NexusView {
                         .gap_2()
                         .text_size(px(12.))
                         .text_color(rgb(colors.text_secondary))
-                        .child(harness_icon(model.selected_harness, colors, 16.))
-                        .child(model.selected_harness.to_string()),
+                        .child(harness_icon(
+                            model.conversation.selected_harness,
+                            colors,
+                            16.,
+                        ))
+                        .child(model.conversation.selected_harness.to_string()),
                 )
             })
             .when(!has_project, |element| {
@@ -360,8 +373,8 @@ mod tests {
         cx.update(theme::configure_theme);
         let (mut presenter, runner, _directory) = fixture();
         assert!(presenter.submit("Inspect the project", "claude"));
-        let run_id = presenter.model().active_run.unwrap();
-        let task_id = presenter.model().selected_task.unwrap();
+        let run_id = presenter.model().conversation.active_run.unwrap();
+        let task_id = presenter.model().conversation.selected_task.unwrap();
         for event in [
             Event::RunMessageCompleted {
                 run_id,
@@ -391,10 +404,10 @@ mod tests {
             runner.emit(event);
         }
         presenter.drain_events();
-        let first = presenter.model().messages[1].id;
-        let tool = presenter.model().messages[2].id;
-        let after_tools = presenter.model().messages[4].id;
-        let answer = presenter.model().messages.last().unwrap().id;
+        let first = presenter.model().conversation.messages[1].id;
+        let tool = presenter.model().conversation.messages[2].id;
+        let after_tools = presenter.model().conversation.messages[4].id;
+        let answer = presenter.model().conversation.messages.last().unwrap().id;
         let selector: &'static str = format!("process-{first}").leak();
         let label_selector: &'static str = format!("process-label-{first}").leak();
         let content_selector: &'static str = format!("process-content-{first}").leak();
@@ -512,6 +525,78 @@ mod tests {
     }
 
     #[gpui::test]
+    fn running_tools_bounce_while_silent_rest_under_reduced_motion_and_clear_on_result(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        let (mut presenter, runner, _directory) = fixture();
+        assert!(presenter.submit("Run the suite", "claude"));
+        let run_id = presenter.model().conversation.active_run.unwrap();
+        runner.emit(Event::RunToolStarted {
+            run_id,
+            tool_id: "suite".into(),
+            name: "Command".into(),
+            summary: "cargo test".into(),
+        });
+        presenter.drain_events();
+        let tool = presenter.model().conversation.messages.last().unwrap().id;
+        let batch_selector: &'static str = format!("tool-batch-{tool}").leak();
+        let batch_running: &'static str = format!("tool-batch-running-{tool}").leak();
+        let row_running: &'static str = format!("tool-row-running-{tool}").leak();
+        let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
+        cx.simulate_resize(size(px(1280.), px(900.)));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(batch_running).is_some());
+        let trigger = cx.debug_bounds(batch_selector).unwrap().center();
+        cx.simulate_click(trigger, Default::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(row_running).is_some());
+
+        // No new events arrive, yet the indicator keeps painting frames.
+        let frame = |cx: &mut gpui::VisualTestContext| {
+            cx.executor().advance_clock(Duration::from_secs(90));
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                let _ = window.draw(cx);
+            });
+        };
+        let timeline = view.read_with(cx, |view, _| view.timeline_pane.clone());
+        let renders = timeline.read_with(cx, |pane, _| pane.render_count);
+        frame(cx);
+        assert!(timeline.read_with(cx, |pane, _| pane.render_count) > renders);
+
+        view.update_in(cx, |view, window, cx| {
+            view.set_appearance(
+                AppearanceSettings {
+                    reduced_motion: true,
+                    ..view.presenter.model().appearance
+                },
+                window,
+                cx,
+            )
+        });
+        // Drain the frame the last animated paint had already requested.
+        frame(cx);
+        assert!(cx.debug_bounds(row_running).is_some());
+        let renders = timeline.read_with(cx, |pane, _| pane.render_count);
+        frame(cx);
+        frame(cx);
+        assert_eq!(timeline.read_with(cx, |pane, _| pane.render_count), renders);
+
+        runner.emit(Event::RunToolCompleted {
+            run_id,
+            tool_id: "suite".into(),
+            output: "Tests passed.".into(),
+            is_error: false,
+        });
+        view.update(cx, |view, cx| view.poll_events(Instant::now(), cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(batch_running).is_none());
+        assert!(cx.debug_bounds(row_running).is_none());
+    }
+
+    #[gpui::test]
     fn run_elapsed_repaints_without_output_or_scroll_jumps_and_clears_on_exit(
         cx: &mut TestAppContext,
     ) {
@@ -519,17 +604,17 @@ mod tests {
         cx.update(theme::configure_theme);
         let (mut presenter, runner, _directory) = fixture();
         assert!(presenter.submit("previous task", "claude"));
-        let previous_task = presenter.model().selected_task.unwrap();
+        let previous_task = presenter.model().conversation.selected_task.unwrap();
         runner.emit(Event::RunExited {
-            run_id: presenter.model().active_run.unwrap(),
+            run_id: presenter.model().conversation.active_run.unwrap(),
             status: RunStatus::Completed,
             exit_code: Some(0),
         });
         presenter.drain_events();
         presenter.new_task();
         assert!(presenter.submit(&"Long prompt for scrolling.\n\n".repeat(80), "claude"));
-        let run_id = presenter.model().active_run.unwrap();
-        let active_task = presenter.model().selected_task.unwrap();
+        let run_id = presenter.model().conversation.active_run.unwrap();
+        let active_task = presenter.model().conversation.selected_task.unwrap();
         let now = Instant::now();
         let (view, cx) = cx.add_window_view(|window, cx| {
             let mut view = NexusView::new(presenter, window, cx);
@@ -563,7 +648,14 @@ mod tests {
 
             view.update(cx, |view, cx| {
                 view.poll_events(now + Duration::from_secs(seconds), cx);
-                assert!(view.presenter.model().active_run_elapsed_seconds.unwrap() >= seconds);
+                assert!(
+                    view.presenter
+                        .model()
+                        .conversation
+                        .active_run_elapsed_seconds
+                        .unwrap()
+                        >= seconds
+                );
             });
             cx.run_until_parked();
 

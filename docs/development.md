@@ -116,27 +116,51 @@ flowchart TB
     Infrastructure --> ACP[可选 ACP / 模型目录]
 ```
 
-- `crates/domain`：领域状态、模型和思考层级。
-- `crates/protocol`：Desktop 与 Runner 的版本化 JSONL 协议。
-- `crates/harness-core`：Harness 共用的启动规格、事件和可执行文件解析。
+- `crates/domain`：领域状态、模型、思考层级；`harness.rs` 集中维护接入名称、默认命令、环境变量名、安装包与可用传输方式。
+- `crates/protocol`：Desktop 与 Runner 的版本化 JSONL 协议，以及 `remote.rs` 中的远程 HTTP 数据契约。
+- `crates/harness-core`：Harness 共用的启动规格、事件、可执行文件解析和带截止时间的非交互探测。
 - `crates/harness-claude`：Claude Code 探测、启动参数、事件解码与 Anthropic 兼容 `/v1/models` 模型目录发现。
 - `crates/harness-codex`：Codex CLI 探测、App Server 启动配置和事件适配。
 - `crates/harness-omp`：Oh My Pi 探测、受控写入模式和 JSON 事件解码。
 - `crates/harness-pi`：Pi RPC、临时审批扩展、原生 Session 文件与模型目录。
 - `crates/harness-cli`：复用 Claude 事件解码的 Qoder / Qoder CN / CodeBuddy stream-json 接入。
 - `crates/harness-acp`：Kimi Code / Qoder / CodeBuddy / OpenCode / DeepSeek Harness 共用的 ACP v1 握手、会话、模型配置、审批和事件适配。
+- `crates/harness-cli/src/command_code.rs`：Command Code 的无交互 JSON 事件、会话与模型目录适配。
 - `apps/runner/src/transport.rs`：JSONL 命令读取、协议版本校验和事件写出。
-- `apps/runner/src/application`：命令调度、双任务并发、任务与 checkout 互斥、取消和统一事件转换。
-- `apps/runner/src/infrastructure`：Harness 适配器选择、子进程执行和平台相关的进程树清理。
-- `apps/desktop/src/bootstrap.rs`：窗口、主题、存储和 Runner 的启动装配。
-- `apps/desktop/src/model`：界面状态、会话数据和提交可用性，不依赖 GPUI。
-- `apps/desktop/src/presenter`：项目选择、配置、提交、远程命令、事件处理和持久化协调，不依赖 GPUI；通过 `RunnerPort` 注入真实或测试 Runner。
-- `apps/desktop/src/view`：GPUI 渲染、控件状态和事件转交，按侧栏、时间线、设置、组件和主题拆分。
-- `apps/desktop/src/infrastructure`：平台数据目录、SQLite、系统凭据库、Runner 进程通信、Worktree 生命周期和本地 Git 成果接收。
+- `apps/runner/src/application`：命令调度、双任务并发、任务与 checkout 互斥；`session` 管理会话进程、审批、提问和输入回执，`generation` 管理后台文本生成。
+- `apps/runner/src/infrastructure`：Harness 适配器选择、进程命令装配和平台相关的进程树清理，不反向依赖应用层。
+- `apps/desktop/src/bootstrap.rs`：窗口、主题、存储、Runner 和远程服务的启动装配。
+- `apps/desktop/src/model`：应用状态、会话状态和提交可用性，不依赖 GPUI；语音 Provider 定义也位于这一层。
+- `apps/desktop/src/presenter`：通过 `RunnerPort` 注入真实或测试 Runner；按任务管理、接入配置、模型目录、凭据、执行和后台事件分工。
+- `apps/desktop/src/view`：GPUI 渲染、控件状态和事件转交；Provider 表单与模型选择器各自封装控件状态，设置页按功能拆分。
+- `apps/desktop/src/infrastructure`：平台数据目录、SQLite、系统凭据库、Runner 进程通信、Worktree 生命周期和本地 Git 成果接收；附件文件处理独立于 SQLite，安装工作器独立于安装来源识别。
 - `apps/desktop/src/remote_control.rs`：带令牌鉴权的 HTTP/WebSocket 服务及静态资源托管。
 - `apps/remote-web`：React + Vite 静态 Remote Client，生产构建产物嵌入 Desktop。
 
 View 只能通过 Presenter 的只读 `model()` 获取业务状态，通过 Presenter 方法发起操作。SQLite 格式保持向后兼容；Desktop 与 Runner 使用配对的版本化 JSONL 协议，并拒绝不匹配的外置 Runner。已有领域与 Harness crate 继续复用，不额外引入框架或空 crate。
+
+### 维护边界
+
+- 新增 Harness 时先补充 `HarnessKind::ALL` 与 `info()`。表单默认值、安装包、文档入口和传输选择由这份定义驱动；各 CLI 的协议差异留在适配器中。Claude、Codex 的目录发现与事件解码分别位于 `catalog`、`decoder` 模块。
+- `AppModel` 保存应用级状态，`ConversationState` 保存单个会话的数据。当前界面访问 `model.conversation`；后台事件先定位所属会话，再通过带 `context` 的方法访问 `model[context]`。后台回调不得临时切换界面选择来复用前台方法。
+- Presenter 构造函数负责装配状态；监听端口、创建远程令牌由 bootstrap 发起。测试通过 Fake Runner 和 Fake Credential Store 隔离子进程与系统凭据库。
+- 数据库升级集中在 `storage/migrations.rs`，初始表定义位于 `schema.sql`。版本 10 将历史版本的列补齐、表重建和工作区回填纳入一个事务，成功后才更新 `user_version`；更高版本数据库会被拒绝。后续迁移应添加明确的版本条件，并保留失败回滚、旧记录兼容和重启恢复测试。每次启动的中断恢复位于 `storage/recovery.rs`。
+- Presenter 和 View 的测试按功能组织，共享 fixture 留在对应 `tests/mod.rs`。涉及后台处理的变更，应覆盖“另一个会话处于选中状态”的场景。避免为了缩短文件而复制 fixture 或增加只有一个调用者的通用框架。
+
+### 远程协议契约
+
+远程状态和启动请求定义在 `crates/protocol/src/remote.rs`，消息复用领域类型。`remote-contract.fixture.ts` 由真实 Rust 序列化生成，覆盖状态、空值、可省略字段和当前枚举值；Rust 测试检查样本未过期，TypeScript 的 `satisfies` 检查网页声明是否接受这些载荷。它是编译期兼容检查，不替代运行时输入校验。
+
+修改这些数据类型后，在仓库根目录执行并审阅生成差异：
+
+```sh
+cargo run -p nexus-protocol --example remote_contract --locked > apps/remote-web/src/remote-contract.fixture.ts
+cargo test -p nexus-protocol --test remote_contract --locked
+npm --prefix apps/remote-web run typecheck
+npm --prefix apps/remote-web run build
+```
+
+新增思考强度、消息种类或状态时，同时补充 `crates/protocol/tests/support/remote_contract.rs` 的枚举样本。HTTP 字段或序列化规则变更需要显式兼容决策，不能只更新快照来消除测试失败。
 
 ### Harness 协议
 
@@ -159,9 +183,9 @@ cargo test --workspace --locked
 cargo build --workspace --locked
 ```
 
-[CI 工作流](https://github.com/ji233-Sun/nexus-agent/blob/main/.github/workflows/ci.yml) 在推送到 main、PR 和手动触发时，于 Ubuntu、macOS、Windows 执行以上检查。Remote Web 的类型检查和静态资源构建命令见[修改远程页面](#修改远程页面)。
+[CI 工作流](https://github.com/ji233-Sun/nexus-agent/blob/main/.github/workflows/ci.yml) 在推送到 main、PR 和手动触发时，于 Ubuntu、macOS、Windows 执行以上检查。Linux 还会检查 Remote Web 类型与构建产物是否和已提交的内嵌资源一致，命令见[修改远程页面](#修改远程页面)。
 
-Presenter 测试使用内存 SQLite 与 Fake Runner，GPUI 测试验证界面交互；Fake Harness 测试验证子进程、协议、流式输出、取消和关闭，不调用真实模型。
+Presenter 测试使用内存 SQLite、Fake Runner 与 Fake Credential Store，GPUI 测试验证界面交互；Fake Harness 测试验证子进程、协议、流式输出、取消和关闭，不调用真实模型。Runner 测试隔离 Claude 用户配置与认证环境；目录单元测试显式注入环境读取函数，避免修改全局环境。探测回归包含 Oh My Pi 原有的两次 60 秒超时等待。
 
 <details>
 <summary>滚动性能测试与发布构建</summary>
@@ -237,7 +261,7 @@ ACP 模型目录通过无 Prompt 的 `session/new` 获取，CLI 可能保存空�
 
 本次实际验证版本：Pi 0.85.1、Kimi Code 0.42.0、Qoder CLI 1.1.48、CodeBuddy 2.147.0。Kimi Code 使用官方安装器布局（`~/.kimi-code/bin/kimi`），核对 ACP 握手、会话模式/模型配置与 `kimi -p --output-format stream-json` 文本生成；Pi 使用隔离配置和本地模拟模型验证了审批、工具、标题与跨进程续聊；Qoder 验证原生启动参数和未认证错误，国内包 1.1.48 核对命令、Token 环境变量及安装来源；CodeBuddy 验证原生握手及 ACP 模型目录。真实账号模型调用、Windows / Linux 实机运行尚未验证。
 
-标题与提交说明统一通过 `TextGenerationConfig` / `prepare_text_generation` 执行；Kimi Code 通过 `kimi -p --output-format stream-json` 与只读 Markdown Agent（`tools: []`）生成文本，避免工具调用并限制输出为最终消息。StartRun 包含默认 CLI 的 transport，HarnessProbe 包含环境配置以支持地区探测；当前 Desktop / Runner 协议版本为 19，包含 Claude API 模型目录的 `claude_api` 来源。旧版外置 Runner 会被版本检查拒绝，需与 Desktop 同步更新。
+标题与提交说明统一通过 `TextGenerationConfig` / `prepare_text_generation` 执行；Kimi Code 通过 `kimi -p --output-format stream-json` 与只读 Markdown Agent（`tools: []`）生成文本，避免工具调用并限制输出为最终消息。StartRun 包含默认 CLI 的 transport，HarnessProbe 包含环境配置以支持地区探测；当前 Desktop / Runner 协议版本为 20，包含 Command Code 的 Harness 与模型来源。旧版外置 Runner 会被版本检查拒绝，需与 Desktop 同步更新。
 
 ### 修改 PDF 界面
 

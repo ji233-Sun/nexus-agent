@@ -1,6 +1,21 @@
 use crate::i18n::LocalizedText;
-use crate::infrastructure::voice::Provider;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum Provider {
+    MacOs,
+    Mimo,
+}
+
+#[cfg(target_os = "macos")]
+const PROVIDERS: &[Provider] = &[Provider::MacOs, Provider::Mimo];
+#[cfg(not(target_os = "macos"))]
+const PROVIDERS: &[Provider] = &[Provider::Mimo];
+
+pub(crate) fn supported_providers() -> &'static [Provider] {
+    PROVIDERS
+}
 
 #[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]

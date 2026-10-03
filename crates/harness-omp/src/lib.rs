@@ -276,26 +276,25 @@ pub async fn probe(configured_executable: &str) -> HarnessProbe {
     };
 
     let deadline = tokio::time::Instant::now() + PROBE_TIMEOUT;
-    let mut version_command = Command::new(&executable);
-    hide_console_window(version_command.as_std_mut());
-    let version = tokio::time::timeout_at(
-        deadline,
-        version_command.arg("--version").kill_on_drop(true).output(),
-    )
-    .await;
-    let Ok(Ok(version)) = version else {
-        return HarnessProbe {
-            harness: HarnessKind::Omp,
-            available: false,
-            authenticated: false,
-            executable: executable.display().to_string(),
-            version: None,
-            message: if version.is_err() {
-                "Oh My Pi 版本探测超时，请重试。".into()
-            } else {
-                "Oh My Pi 存在，但无法执行。请检查文件权限。".into()
-            },
-        };
+    let mut version_command = nexus_harness_core::probe::command(&executable);
+    let version =
+        nexus_harness_core::probe::output(version_command.arg("--version"), deadline).await;
+    let version = match version {
+        Ok(version) => version,
+        Err(error) => {
+            return HarnessProbe {
+                harness: HarnessKind::Omp,
+                available: false,
+                authenticated: false,
+                executable: executable.display().to_string(),
+                version: None,
+                message: if error.kind() == std::io::ErrorKind::TimedOut {
+                    "Oh My Pi 版本探测超时，请重试。".into()
+                } else {
+                    "Oh My Pi 存在，但无法执行。请检查文件权限。".into()
+                },
+            };
+        }
     };
     if !version.status.success() {
         return HarnessProbe {
@@ -308,20 +307,15 @@ pub async fn probe(configured_executable: &str) -> HarnessProbe {
         };
     }
     let version = String::from_utf8_lossy(&version.stdout).trim().to_owned();
-    let mut models_command = Command::new(&executable);
-    hide_console_window(models_command.as_std_mut());
-    let models = tokio::time::timeout_at(
-        deadline,
-        models_command
-            .args(["models", "--json"])
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await;
-    let timed_out = models.is_err();
+    let mut models_command = nexus_harness_core::probe::command(&executable);
+    let models =
+        nexus_harness_core::probe::output(models_command.args(["models", "--json"]), deadline)
+            .await;
+    let timed_out = models
+        .as_ref()
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::TimedOut);
     let authenticated = models
         .ok()
-        .and_then(Result::ok)
         .filter(|output| output.status.success())
         .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
         .and_then(|value| value.get("models").and_then(Value::as_array).map(Vec::len))
@@ -1065,6 +1059,17 @@ mod tests {
         assert!(
             matches!(decoder.decode_line(&plain.to_string()).unwrap().as_slice(),
             [DecodedEvent::ToolCompleted {output,..}] if output == &code)
+        );
+        let media = json!({"content": [
+            {"type": "text", "text": "Read image"},
+            {"type": "image", "mimeType": "image/png", "data": "aW1hZ2U="}
+        ]});
+        let completed = json!({"type": "tool_execution_end", "toolCallId": "image",
+            "result": media, "isError": false});
+        assert!(
+            matches!(decoder.decode_line(&completed.to_string()).unwrap().as_slice(),
+            [DecodedEvent::ToolCompleted { output, .. }]
+                if serde_json::from_str::<Value>(output).unwrap() == media)
         );
     }
 

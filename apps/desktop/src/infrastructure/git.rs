@@ -104,6 +104,37 @@ pub(crate) fn local_branches(path: &Path) -> Result<Vec<String>> {
     .collect())
 }
 
+pub(crate) fn worktree_base_branches(path: &Path) -> Result<Vec<String>> {
+    let mut branches: Vec<_> = git(
+        path,
+        &[
+            "for-each-ref",
+            "--format=%(refname:lstrip=2)\t%(symref)",
+            "refs/heads/",
+            "refs/remotes/",
+        ],
+    )?
+    .lines()
+    .filter_map(|line| {
+        let (name, symbolic_target) = line.split_once('\t')?;
+        symbolic_target.is_empty().then(|| name.to_owned())
+    })
+    .collect();
+    branches.sort();
+    branches.dedup();
+    Ok(branches)
+}
+
+pub(crate) fn worktree_base_ref(path: &Path, base: &str) -> Result<String> {
+    for namespace in ["refs/remotes", "refs/heads"] {
+        let reference = format!("{namespace}/{base}");
+        if git(path, &["show-ref", "--verify", "--quiet", &reference]).is_ok() {
+            return Ok(reference);
+        }
+    }
+    anyhow::bail!("来源分支不存在：{base}")
+}
+
 fn with_repository<T>(path: &Path, operation: impl FnOnce() -> Result<T>) -> Result<T> {
     let key = repository(path)?;
     let lock = REPOSITORY_LOCKS
