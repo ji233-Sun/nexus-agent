@@ -283,9 +283,16 @@ fn creating_an_issue_starts_a_run_with_the_filed_content_and_current_selection()
 
 #[test]
 fn issue_launch_runs_in_parallel_while_a_session_is_executing() {
-    use crate::{infrastructure::issues::Response, model::issues::IssueLaunchKind};
+    use crate::{
+        infrastructure::{issues::Response, pull_requests::Response as PullResponse},
+        model::{issues::IssueLaunchKind, pull_requests::PullRunKind},
+    };
     for provider in IssueProvider::ALL {
-        for kind in [IssueLaunchKind::Create, IssueLaunchKind::Process] {
+        for kind in [
+            IssueLaunchKind::Create,
+            IssueLaunchKind::Process,
+            IssueLaunchKind::Pull(PullRunKind::Review),
+        ] {
             let (mut presenter, runner, _directory, first) = worktree_fixture("先执行的任务");
             assert_eq!(presenter.model.conversation.active_run, Some(first.run_id));
             seed_issues(&mut presenter, provider);
@@ -302,9 +309,19 @@ fn issue_launch_runs_in_parallel_while_a_session_is_executing() {
                     Response::Comments(Ok(vec![cnb_comment("1")])),
                 );
             }
+            if matches!(kind, IssueLaunchKind::Pull(_)) {
+                seed_pull_requests(&mut presenter, provider);
+                presenter.select_pull_request(provider, "2".into());
+                finish_issue_request(
+                    &mut presenter,
+                    provider,
+                    Response::PullRequests(PullResponse::Detail(Ok(Box::new(pull_detail("2"))))),
+                );
+            }
             let extra = match kind {
                 IssueLaunchKind::Create => "并行提交的 Issue",
                 IssueLaunchKind::Process => "并行处理的补充信息",
+                IssueLaunchKind::Pull(_) => "并行审查 PR 的补充信息",
             };
             let previous = presenter.prepare_issue_run(provider, kind).unwrap();
             assert_eq!(presenter.model[previous].active_run, Some(first.run_id));
@@ -346,6 +363,10 @@ fn issue_launch_runs_in_parallel_while_a_session_is_executing() {
             assert!(second.prompt.contains(extra));
             assert_eq!(presenter.model.conversation.active_run, Some(second.run_id));
             assert_eq!(presenter.model.active_run_count(), 2);
+            if matches!(kind, IssueLaunchKind::Pull(_)) {
+                assert!(second.prompt.contains("发布到这个 PR 下"));
+                assert!(second.prompt.contains("Last conversation reply"));
+            }
         }
     }
 }
@@ -856,4 +877,286 @@ fn cnb_inspection_keeps_repository_visible_when_cli_is_missing_and_rejects_stale
     assert!(presenter.model.cnb.list_request.is_some());
     presenter.new_task();
     assert!(!presenter.model.cnb.opened);
+}
+
+#[test]
+fn pull_requests_navigation_pagination_and_failed_refresh_keep_results_isolated() {
+    use crate::infrastructure::{
+        issues::{Event, Response},
+        pull_requests::Response as PullResponse,
+    };
+    use crate::model::{
+        issues::{IssueFilter, IssueLaunchKind},
+        pull_requests::{PullPage, PullRunKind},
+    };
+    let (mut presenter, _, _directory) = fixture();
+    for provider in IssueProvider::ALL {
+        seed_pull_requests(&mut presenter, provider);
+    }
+    let provider = IssueProvider::GitHub;
+    let cli = presenter.model.github.cli.take().unwrap();
+    presenter.model.github.pulls.pulls.clear();
+    presenter.open_pull_requests(provider);
+    assert!(presenter.model.github.pulls.list_request.is_none());
+    presenter.model.github.detection_request = Some(Uuid::new_v4());
+    finish_issue_request(
+        &mut presenter,
+        provider,
+        Response::Inspection {
+            repository: Some("team/project".into()),
+            cli: Ok(cli),
+        },
+    );
+    assert!(presenter.model.github.list_request.is_none());
+    finish_issue_request(
+        &mut presenter,
+        provider,
+        Response::PullRequests(PullResponse::List(Ok(PullPage {
+            pulls: vec![pull_detail("2").pull, pull_detail("3").pull],
+            total: 61,
+            next_cursor: None,
+        }))),
+    );
+    presenter.select_pull_request(provider, "2".into());
+    let obsolete = presenter.model.github.pulls.detail_request.unwrap();
+    presenter.select_pull_request(provider, "3".into());
+    presenter.handle_issue_event(Event {
+        id: obsolete,
+        provider,
+        response: Response::PullRequests(PullResponse::Detail(Ok(Box::new(pull_detail("2"))))),
+    });
+    assert!(presenter.model.github.pulls.detail.is_none());
+    finish_issue_request(
+        &mut presenter,
+        provider,
+        Response::PullRequests(PullResponse::Detail(Err("failed".into()))),
+    );
+    assert!(
+        presenter
+            .prepare_issue_run(provider, IssueLaunchKind::Pull(PullRunKind::Review))
+            .is_none()
+    );
+    presenter.refresh_pull_request(provider);
+    assert!(presenter.model.github.pulls.detail_request.is_some());
+    finish_issue_request(
+        &mut presenter,
+        provider,
+        Response::PullRequests(PullResponse::Detail(Ok(Box::new(pull_detail("3"))))),
+    );
+    presenter.load_pull_requests(provider, 1, IssueFilter::Open);
+    finish_issue_request(
+        &mut presenter,
+        provider,
+        Response::PullRequests(PullResponse::List(Ok(PullPage {
+            pulls: vec![pull_detail("2").pull],
+            total: 61,
+            next_cursor: Some("next".into()),
+        }))),
+    );
+    presenter.load_pull_requests(provider, 2, IssueFilter::Open);
+    assert_eq!(presenter.model.github.pulls.page, 2);
+    assert!(presenter.model.github.pulls.pulls.is_empty());
+    assert_eq!(presenter.model.cnb.pulls.pulls.len(), 2);
+    let stale_list = presenter.model.github.pulls.list_request.unwrap();
+    presenter.new_projectless_task();
+    presenter.handle_issue_event(Event {
+        id: stale_list,
+        provider,
+        response: Response::PullRequests(PullResponse::List(Ok(PullPage {
+            pulls: vec![pull_detail("2").pull],
+            total: 1,
+            next_cursor: None,
+        }))),
+    });
+    assert!(presenter.model.github.pulls.pulls.is_empty());
+    assert!(presenter.model.github.pulls.page_cursors.is_empty());
+    assert!(presenter.model.cnb.pulls.pulls.is_empty());
+}
+
+#[test]
+fn pull_requests_actions_require_confirmation_block_duplicates_and_update_lists() {
+    use crate::{
+        infrastructure::{issues::Response, pull_requests::Response as PullResponse},
+        model::pull_requests::{MergeMethod, PullAction},
+    };
+    for provider in IssueProvider::ALL {
+        for action in [PullAction::Close, PullAction::Merge(MergeMethod::Squash)] {
+            let (mut presenter, _, _directory) = fixture();
+            seed_pull_requests(&mut presenter, provider);
+            presenter.select_pull_request(provider, "2".into());
+            finish_issue_request(
+                &mut presenter,
+                provider,
+                Response::PullRequests(PullResponse::Detail(Ok(Box::new(pull_detail("2"))))),
+            );
+            presenter.act_on_pull_request(provider);
+            assert!(
+                presenter
+                    .model
+                    .issues(provider)
+                    .pulls
+                    .action_request
+                    .is_none()
+            );
+            presenter.confirm_pull_action(provider, Some(action));
+            assert!(
+                presenter
+                    .model
+                    .issues(provider)
+                    .pulls
+                    .action_request
+                    .is_none()
+            );
+            presenter.confirm_pull_action(provider, None);
+            presenter.act_on_pull_request(provider);
+            assert!(
+                presenter
+                    .model
+                    .issues(provider)
+                    .pulls
+                    .action_request
+                    .is_none()
+            );
+            presenter.confirm_pull_action(provider, Some(action));
+            presenter.act_on_pull_request(provider);
+            let request = presenter.model.issues(provider).pulls.action_request;
+            presenter.act_on_pull_request(provider);
+            presenter.select_pull_request(provider, "3".into());
+            assert_eq!(
+                presenter.model.issues(provider).pulls.action_request,
+                request
+            );
+            assert_eq!(
+                presenter
+                    .model
+                    .issues(provider)
+                    .pulls
+                    .detail_number
+                    .as_deref(),
+                Some("2")
+            );
+            finish_issue_request(
+                &mut presenter,
+                provider,
+                Response::PullRequests(PullResponse::Action(Err("failed".into()))),
+            );
+            assert_eq!(presenter.model.issues(provider).pulls.pulls.len(), 2);
+            assert_eq!(
+                presenter
+                    .model
+                    .issues(provider)
+                    .pulls
+                    .detail
+                    .as_ref()
+                    .unwrap()
+                    .pull
+                    .state,
+                "open"
+            );
+            assert!(
+                presenter
+                    .model
+                    .issues(provider)
+                    .pulls
+                    .action_error
+                    .is_some()
+            );
+            presenter.confirm_pull_action(provider, Some(action));
+            presenter.act_on_pull_request(provider);
+            let mut result = pull_detail("2").pull;
+            result.state = if action == PullAction::Close {
+                "closed"
+            } else {
+                "merged"
+            }
+            .into();
+            finish_issue_request(
+                &mut presenter,
+                provider,
+                Response::PullRequests(PullResponse::Action(Ok(Box::new(result)))),
+            );
+            assert_eq!(presenter.model.issues(provider).pulls.pulls.len(), 1);
+            assert_eq!(presenter.model.issues(provider).pulls.total, 60);
+            assert!(
+                presenter
+                    .model
+                    .issues(provider)
+                    .pulls
+                    .action_success
+                    .is_some()
+            );
+        }
+    }
+}
+
+#[test]
+fn pull_requests_launch_preserves_selection_and_includes_all_review_ci_and_stack_context() {
+    use crate::{
+        infrastructure::{issues::Response, pull_requests::Response as PullResponse},
+        model::{
+            issues::IssueLaunchKind,
+            pull_requests::{PullRunKind, pull_url},
+        },
+    };
+    for provider in IssueProvider::ALL {
+        for kind in [
+            PullRunKind::ResolveConflicts,
+            PullRunKind::Review,
+            PullRunKind::AddressReviews,
+            PullRunKind::FixCi,
+            PullRunKind::Stack,
+        ] {
+            let (mut presenter, runner, _directory) = fixture();
+            seed_pull_requests(&mut presenter, provider);
+            presenter.select_permission_mode(PermissionMode::Yolo);
+            presenter.select_pull_request(provider, "2".into());
+            let launch = IssueLaunchKind::Pull(kind);
+            assert!(presenter.prepare_issue_run(provider, launch).is_none());
+            finish_issue_request(
+                &mut presenter,
+                provider,
+                Response::PullRequests(PullResponse::Detail(Ok(Box::new(pull_detail("2"))))),
+            );
+            if provider == IssueProvider::Cnb && kind == PullRunKind::Stack {
+                assert!(presenter.prepare_issue_run(provider, launch).is_none());
+                continue;
+            }
+            let previous = presenter.prepare_issue_run(provider, launch).unwrap();
+            assert!(presenter.start_issue_run(
+                provider,
+                IssueLaunchKind::Pull(kind),
+                "Extra requirements",
+                "claude"
+            ));
+            let start = last_start(&runner);
+            assert_eq!(start.permission_mode, PermissionMode::Yolo);
+            assert_eq!(start.harness, HarnessKind::Claude);
+            for text in [
+                &pull_url(provider, "team/project", "2"),
+                "PR body **Markdown**",
+                "Other Agent finding",
+                "Last conversation reply",
+                "other-agent",
+                "T1",
+                "src/main.rs:12",
+                "Test failed",
+                "Extra requirements",
+            ] {
+                assert!(start.prompt.contains(text), "{text}");
+            }
+            if kind == PullRunKind::Review {
+                assert!(start.prompt.contains("发布到这个 PR 下"));
+            }
+            if kind == PullRunKind::AddressReviews && provider == IssueProvider::GitHub {
+                assert!(start.prompt.contains("resolve 对应 review thread"));
+            }
+            assert!(presenter.model.conversation.selected_task.is_some());
+            assert_eq!(
+                presenter.model[previous].permission_mode,
+                PermissionMode::Yolo
+            );
+            assert!(presenter.model.opened_issues().is_none());
+            assert!(!presenter.start_issue_run(provider, launch, "", "claude"));
+        }
+    }
 }

@@ -10,6 +10,7 @@ pub(crate) mod harness_installation;
 pub(crate) mod issues;
 pub(crate) mod paths;
 pub(crate) mod pdf;
+pub(crate) mod pull_requests;
 pub(crate) mod runner_client;
 pub(crate) mod sound;
 #[cfg(target_os = "macos")]

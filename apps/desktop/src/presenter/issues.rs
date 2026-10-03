@@ -11,15 +11,32 @@ impl Presenter {
         kind: IssueLaunchKind,
     ) -> bool {
         let issues = self.model.issues(provider);
-        issues.enabled
-            && self.model.conversation.selected_project.is_some()
-            && issues.repository.is_some()
-            && issues.action_request.is_none()
-            && (kind == IssueLaunchKind::Create
-                || (issues.detail_request.is_none()
-                    && issues.comments_request.is_none()
-                    && issues.detail.is_some()
-                    && issues.comments.is_some()))
+        if !issues.enabled
+            || self.model.conversation.selected_project.is_none()
+            || issues.repository.is_none()
+        {
+            return false;
+        }
+        match kind {
+            IssueLaunchKind::Pull(kind) => {
+                let pulls = &issues.pulls;
+                pulls.detail_request.is_none()
+                    && pulls.detail_error.is_none()
+                    && pulls.action_request.is_none()
+                    && pulls
+                        .detail
+                        .as_ref()
+                        .is_some_and(|detail| detail.can_run(provider, kind))
+            }
+            IssueLaunchKind::Create | IssueLaunchKind::Process => {
+                issues.action_request.is_none()
+                    && (kind == IssueLaunchKind::Create
+                        || (issues.detail_request.is_none()
+                            && issues.comments_request.is_none()
+                            && issues.detail.is_some()
+                            && issues.comments.is_some()))
+            }
+        }
     }
 
     pub(crate) fn prepare_issue_run(
@@ -162,6 +179,13 @@ impl Presenter {
         }
         for other in IssueProvider::ALL {
             self.model.issues_mut(other).opened = other == provider;
+        }
+        let pulls = &self.model.issues(provider).pulls;
+        if pulls.opened {
+            if pulls.pulls.is_empty() && pulls.list_request.is_none() {
+                self.load_pull_requests(provider, 1, pulls.filter);
+            }
+            return;
         }
         if self.model.issues(provider).issues.is_empty()
             && self.model.issues(provider).list_request.is_none()
@@ -328,6 +352,14 @@ impl Presenter {
                     };
                     issue.chat_prompt(provider, repository, comments, extra)
                 }
+                IssueLaunchKind::Pull(kind) => {
+                    let (Some(detail), Some(repository)) =
+                        (issues.pulls.detail.as_ref(), issues.repository.as_deref())
+                    else {
+                        return false;
+                    };
+                    detail.chat_prompt(provider, repository, kind, extra)
+                }
             }
         };
         let started = self.start_run(
@@ -344,6 +376,7 @@ impl Presenter {
                 match kind {
                     IssueLaunchKind::Create => "已启动 Harness 创建 Issue。",
                     IssueLaunchKind::Process => "已启动 Harness 处理 Issue。",
+                    IssueLaunchKind::Pull(_) => "已启动 Harness 处理 PR。",
                 }
                 .into(),
             );
@@ -432,6 +465,10 @@ impl Presenter {
     }
 
     pub(super) fn handle_issue_event(&mut self, event: Event) {
+        if let Response::PullRequests(response) = event.response {
+            self.handle_pull_event(event.id, event.provider, response);
+            return;
+        }
         let provider = event.provider;
         let issues = self.model.issues_mut(provider);
         match event.response {
@@ -456,10 +493,18 @@ impl Presenter {
                         issues.detection_error = Some(error);
                     }
                 }
-                if issues.opened && issues.cli.is_some() && issues.issues.is_empty() {
-                    let page = issues.page;
-                    let filter = issues.filter;
-                    self.load_issues(provider, page, filter);
+                if issues.opened && issues.cli.is_some() {
+                    if issues.pulls.opened {
+                        if issues.pulls.pulls.is_empty() {
+                            let page = issues.pulls.page;
+                            let filter = issues.pulls.filter;
+                            self.load_pull_requests(provider, page, filter);
+                        }
+                    } else if issues.issues.is_empty() {
+                        let page = issues.page;
+                        let filter = issues.filter;
+                        self.load_issues(provider, page, filter);
+                    }
                 }
             }
             Response::List(result) if issues.list_request == Some(event.id) => {
