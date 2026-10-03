@@ -7,6 +7,7 @@ mod lifecycle;
 mod model_picker;
 mod pane;
 mod pdf;
+mod pull_requests;
 mod review;
 mod settings;
 mod sidebar;
@@ -2404,6 +2405,113 @@ mod catalog_model_tests {
             assert_eq!(view.prompt_input.read(cx).value(), "替换文字");
             assert_eq!(view.presenter.model().attachments.len(), 1);
         });
+    }
+
+    #[gpui::test]
+    fn pull_requests_page_confirms_actions_and_launches_review_with_full_context(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::{
+            infrastructure::{issues::Response, pull_requests::Response as PullResponse},
+            presenter::tests::{finish_issue_request, pull_detail, seed_pull_requests},
+        };
+        cx.update(gpui_kit::init);
+        cx.update(theme::configure_theme);
+        for provider in IssueProvider::ALL {
+            let (mut presenter, _, _directory) = fixture();
+            presenter.set_language(Language::English);
+            seed_pull_requests(&mut presenter, provider);
+            let selector =
+                |suffix: &str| -> &'static str { format!("{}-{suffix}", provider.key()).leak() };
+            presenter.open_issues(provider);
+            let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
+            cx.simulate_resize(gpui::size(px(1120.), px(900.)));
+            cx.run_until_parked();
+            click_debug(cx, selector("pull-tab"));
+            cx.run_until_parked();
+            assert!(cx.debug_bounds(selector("pull-list")).is_some());
+            assert!(cx.debug_bounds("composer-surface").is_none());
+            click_debug(cx, selector("pull-2"));
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("issue-launch-surface").is_none());
+            view.update(cx, |view, cx| {
+                finish_issue_request(
+                    &mut view.presenter,
+                    provider,
+                    Response::PullRequests(PullResponse::Detail(Ok(Box::new(pull_detail("2"))))),
+                );
+                cx.notify();
+            });
+            cx.run_until_parked();
+            assert!(cx.debug_bounds(selector("pull-detail")).is_some());
+            assert!(cx.debug_bounds(selector("pull-checks")).is_some());
+            assert!(cx.debug_bounds(selector("pull-thread-T1")).is_some());
+            click_debug(cx, selector("pull-close"));
+            cx.run_until_parked();
+            view.update(cx, |view, _| {
+                assert!(
+                    view.presenter
+                        .model()
+                        .issues(provider)
+                        .pulls
+                        .action_request
+                        .is_none()
+                )
+            });
+            click_debug(cx, selector("pull-confirm"));
+            view.update(cx, |view, cx| {
+                assert!(
+                    view.presenter
+                        .model()
+                        .issues(provider)
+                        .pulls
+                        .action_request
+                        .is_some()
+                );
+                finish_issue_request(
+                    &mut view.presenter,
+                    provider,
+                    Response::PullRequests(PullResponse::Action(Err("fixture failure".into()))),
+                );
+                cx.notify();
+            });
+            cx.run_until_parked();
+            click_debug(cx, selector("pull-run-1"));
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("issue-launch-surface").is_some());
+            let surface = cx.debug_bounds("issue-launch-surface").unwrap();
+            let card = cx.debug_bounds("issue-launch-card").unwrap();
+            assert!(card.left() >= surface.left() && card.right() <= surface.right());
+            view.update_in(cx, |view, window, cx| {
+                view.issue_launch_input.update(cx, |input, cx| {
+                    input.set_value("Focus on regression risks", window, cx)
+                });
+            });
+            cx.run_until_parked();
+            click_debug(cx, "issue-launch-start");
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("issue-launch-surface").is_none());
+            assert!(cx.debug_bounds("composer-surface").is_some());
+            view.update(cx, |view, _| {
+                let prompt = &view
+                    .presenter
+                    .model()
+                    .messages
+                    .iter()
+                    .find(|message| message.role == MessageRole::User)
+                    .unwrap()
+                    .content;
+                for text in [
+                    "发布到这个 PR 下",
+                    "Last conversation reply",
+                    "other-agent",
+                    "Focus on regression risks",
+                ] {
+                    assert!(prompt.contains(text), "{text}");
+                }
+                assert!(view.presenter.model().active_run.is_some());
+            });
+        }
     }
 
     #[gpui::test]

@@ -76,6 +76,16 @@ Worktree 的「查看完整差异」显示相对创建基准的已提交变更�
 
 请求在后台执行；未安装 CLI、登录或权限问题、网络超时均会提示重试或配置入口。浏览 CNB 不会创建会话，也不会中断正在运行的任务。
 
+## CNB / GitHub PR 管理
+
+在 **设置 → Source Control** 启用对应平台并检测 CLI（CNB 使用 `cnb login`，GitHub 使用 `gh auth login --hostname github.com`）。打开匹配 remote 的项目后，从侧栏的 **CNB / GitHub → PR** 浏览未关闭和已关闭的 PR。列表每页 30 条；详情显示来源与目标分支、合并状态、Markdown 正文、全部评论、审查结论、审查 conversations 及当前 Head 的 CI。GitHub 的已关闭列表包含已合并 PR。
+
+- **合并 / 关闭 PR**：选择 merge、squash 或 rebase 后确认合并，或确认关闭。操作前重新核对 head/base 提交与可合并状态；GitHub 合并还通过 `--match-head-commit` 固定 Head。平台的仓库权限、分支保护和 CI 规则仍然生效。合并队列尚未完成时提示刷新，完成操作后更新列表。
+- **处理 PR 冲突 / 审查并评论 PR / 处理审查意见 / 处理 CI 报错**：复用 Issue 的 Harness、模型、思考层级和权限选择弹窗，附加补充信息后启动普通侧栏任务。只有完整上下文读取成功后才可启动。审查任务明确要求向 PR 发布结论；处理审查意见会携带所有作者的结论、thread ID、文件位置和完整回复，要求逐条修复、回复，并 resolve 已解决的 GitHub conversations。CI 修复任务要求读取失败日志、修复根因并验证新 CI。
+- **GitHub Stack PR**：分页读取所有开放 PR，按来源仓库、head 和 base 分支关系识别依赖，按父 PR 到子 PR 的顺序展示，可点击切换成员或启动 **处理 Stack PR**。任务要求重新核对依赖、同步下游分支，并分别处理冲突、审查意见和 CI；不会一键合并整个 Stack。
+
+任务启动时携带 PR 链接和快照，Harness 会重新读取最新状态并针对该 PR 来源分支操作。CLI 需要 PR、评论、审查和 CI 的读取权限；合并、关闭，以及 Harness 发布审查、回复、推送修复还需要相应写入权限。真实模型完成修复的效果取决于所选 Harness 与模型。
+
 ## 模型与服务商
 
 Nexus 从当前 Harness 的模型目录读取可选模型、默认模型和支持的思考层级。可以跟随 CLI 默认，也可以选择目录中可用的模型；列表与能力取决于 CLI 版本、项目配置和账号权限。

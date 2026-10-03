@@ -2,7 +2,7 @@ use super::*;
 use crate::model::issues::{Issue, IssueAction, IssueFilter, IssueLaunchKind, Label, PAGE_SIZE};
 use gpui_kit::component::{scroll::ScrollableElement as _, spinner::Spinner};
 
-// A pending "quick issue" launch started from the issue page. The harness runs
+// A pending issue/PR launch started from the source control page. The harness runs
 // with the composer's current Harness/model/effort/permission selection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct IssueLaunch {
@@ -75,11 +75,17 @@ impl NexusView {
             || model.occupied_run_slots() >= 2
             || !issues.enabled
             || issues.repository.is_none()
-            || issues.detail_request.is_some()
-            || issues.comments_request.is_some()
-            || issues.action_request.is_some()
+            || (!matches!(kind, IssueLaunchKind::Pull(_))
+                && (issues.detail_request.is_some()
+                    || issues.comments_request.is_some()
+                    || issues.action_request.is_some()))
             || (kind == IssueLaunchKind::Process
                 && (issues.detail.is_none() || issues.comments.is_none()))
+            || (matches!(kind, IssueLaunchKind::Pull(_))
+                && (issues.pulls.detail.is_none()
+                    || issues.pulls.detail_request.is_some()
+                    || issues.pulls.detail_error.is_some()
+                    || issues.pulls.action_request.is_some()))
         {
             return;
         }
@@ -87,7 +93,9 @@ impl NexusView {
             IssueLaunchKind::Create => model
                 .language
                 .text("描述要提交的 Issue，例如现象、期望结果和复现步骤。"),
-            IssueLaunchKind::Process => model.language.text("补充信息（选填）"),
+            IssueLaunchKind::Process | IssueLaunchKind::Pull(_) => {
+                model.language.text("补充信息（选填）")
+            }
         };
         self.issue_launch_input.update(cx, |input, cx| {
             input.set_value("", window, cx);
@@ -145,7 +153,7 @@ impl NexusView {
         let repository = issues.repository.clone().unwrap_or_default();
         let content = self.issue_launch_input.read(cx).value();
         let can_launch = model.can_submit()
-            && (launch.kind == IssueLaunchKind::Process || !content.trim().is_empty());
+            && (launch.kind != IssueLaunchKind::Create || !content.trim().is_empty());
         let (title, label, action) = match launch.kind {
             IssueLaunchKind::Create => (
                 locale.text("快捷提 Issue"),
@@ -157,6 +165,11 @@ impl NexusView {
                 locale.text("补充信息（选填）"),
                 locale.text("启动处理"),
             ),
+            IssueLaunchKind::Pull(kind) => (
+                locale.text(kind.label()),
+                locale.text("补充信息（选填）"),
+                locale.text("启动处理"),
+            ),
         };
         let target = match launch.kind {
             IssueLaunchKind::Create => format!("{} · {repository}", launch.provider.name()),
@@ -164,6 +177,12 @@ impl NexusView {
                 .detail
                 .as_ref()
                 .map(|issue| format!("#{} {}", issue.number, issue.title))
+                .unwrap_or_default(),
+            IssueLaunchKind::Pull(_) => issues
+                .pulls
+                .detail
+                .as_ref()
+                .map(|detail| format!("#{} {}", detail.pull.number, detail.pull.title))
                 .unwrap_or_default(),
         };
         let mut start = Button::new("issue-launch-start")
@@ -478,7 +497,7 @@ impl NexusView {
             })
     }
 
-    fn render_issue_markdown(
+    pub(super) fn render_issue_markdown(
         &self,
         provider: IssueProvider,
         id: String,
@@ -853,28 +872,51 @@ impl NexusView {
                 div()
                     .px_5()
                     .pt_2()
+                    .flex()
+                    .gap_1()
                     .flex_none()
                     .border_b_1()
                     .border_color(rgb(colors.border))
                     .bg(rgb(colors.surface))
-                    .child(
+                    .children([false, true].map(|pull_tab| {
+                        let selected = issues.pulls.opened == pull_tab;
+                        let tab = if pull_tab { "pull-tab" } else { "issue-tab" };
                         div()
-                            .debug_selector(move || format!("{}-issue-tab", provider.key()))
+                            .id(SharedString::from(format!("{}-{tab}", provider.key())))
+                            .debug_selector(move || format!("{}-{tab}", provider.key()))
                             .w(px(120.))
                             .px_4()
                             .py_3()
                             .rounded_t(px(8.))
-                            .bg(rgb(colors.canvas))
+                            .bg(rgb(if selected {
+                                colors.canvas
+                            } else {
+                                colors.surface
+                            }))
                             .border_b_2()
-                            .border_color(rgb(colors.accent))
+                            .border_color(rgb(if selected {
+                                colors.accent
+                            } else {
+                                colors.surface
+                            }))
+                            .cursor_pointer()
                             .flex()
                             .items_center()
                             .gap_2()
                             .text_size(px(13.))
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .child(Icon::new(IconName::Inbox).size(px(15.)))
-                            .child("Issue"),
-                    ),
+                            .child(if pull_tab { "PR" } else { "Issue" })
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                if pull_tab {
+                                    app.presenter.open_pull_requests(provider);
+                                } else {
+                                    app.presenter.open_issue_tab(provider);
+                                }
+                                app.issues_scroll.set_offset(gpui::point(px(0.), px(0.)));
+                                cx.notify();
+                            }))
+                    })),
             )
             .child(if issues.cli.is_none() {
                 div()
@@ -914,6 +956,8 @@ impl NexusView {
                         )),
                     )
                     .into_any_element()
+            } else if issues.pulls.opened {
+                self.render_pull_requests(provider, cx).into_any_element()
             } else if issues.detail_number.is_some() {
                 self.render_issue_detail(provider, cx).into_any_element()
             } else {

@@ -64,6 +64,13 @@ impl Presenter {
         for other in IssueProvider::ALL {
             self.model.issues_mut(other).opened = other == provider;
         }
+        let pulls = &self.model.issues(provider).pulls;
+        if pulls.opened {
+            if pulls.pulls.is_empty() && pulls.list_request.is_none() {
+                self.load_pull_requests(provider, 1, pulls.filter);
+            }
+            return;
+        }
         if self.model.issues(provider).issues.is_empty()
             && self.model.issues(provider).list_request.is_none()
         {
@@ -200,6 +207,9 @@ impl Presenter {
         extra: &str,
         configured_executable: &str,
     ) -> bool {
+        if let IssueLaunchKind::Pull(kind) = kind {
+            return self.start_pull_run(provider, kind, extra, configured_executable);
+        }
         let prompt = {
             let issues = self.model.issues(provider);
             if !issues.enabled
@@ -227,6 +237,7 @@ impl Presenter {
                     };
                     issue.chat_prompt(provider, repository, comments, extra)
                 }
+                IssueLaunchKind::Pull(_) => unreachable!(),
             }
         };
         self.new_task();
@@ -241,6 +252,7 @@ impl Presenter {
                 match kind {
                     IssueLaunchKind::Create => "已启动 Harness 创建 Issue。",
                     IssueLaunchKind::Process => "已启动 Harness 处理 Issue。",
+                    IssueLaunchKind::Pull(_) => unreachable!(),
                 }
                 .into(),
             );
@@ -329,6 +341,10 @@ impl Presenter {
     }
 
     pub(super) fn handle_issue_event(&mut self, event: Event) {
+        if let Response::PullRequests(response) = event.response {
+            self.handle_pull_event(event.id, event.provider, response);
+            return;
+        }
         let provider = event.provider;
         let issues = self.model.issues_mut(provider);
         match event.response {

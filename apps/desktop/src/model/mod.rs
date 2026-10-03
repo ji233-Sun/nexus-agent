@@ -1,5 +1,6 @@
 pub(crate) mod harness_installation;
 pub(crate) mod issues;
+pub(crate) mod pull_requests;
 pub(crate) mod tools;
 pub(crate) mod updates;
 pub(crate) mod voice;

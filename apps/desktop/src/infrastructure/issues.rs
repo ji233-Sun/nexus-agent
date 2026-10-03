@@ -47,6 +47,7 @@ pub(crate) enum ActionResult {
 }
 
 pub(crate) enum Response {
+    PullRequests(super::pull_requests::Response),
     Inspection {
         repository: Option<String>,
         cli: Result<Cli, LocalizedText>,
@@ -84,6 +85,32 @@ impl Default for Client {
 }
 
 impl Client {
+    pub(crate) fn request_pulls(
+        &self,
+        id: Uuid,
+        provider: IssueProvider,
+        cli: Cli,
+        repository: String,
+        request: super::pull_requests::Request,
+    ) -> Result<()> {
+        #[cfg(test)]
+        if self.fake {
+            return Ok(());
+        }
+        let sender = self.sender.clone();
+        std::thread::Builder::new()
+            .name(format!("nexus-{}-pulls", provider.key()))
+            .spawn(move || {
+                let response = super::pull_requests::handle(provider, &cli, &repository, request);
+                let _ = sender.send(Event {
+                    id,
+                    provider,
+                    response: Response::PullRequests(response),
+                });
+            })?;
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn fake() -> Self {
         Self {

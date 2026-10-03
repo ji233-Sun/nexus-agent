@@ -95,6 +95,7 @@ impl IssueProvider {
 pub(crate) enum IssueLaunchKind {
     Create,
     Process,
+    Pull(super::pull_requests::PullRunKind),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -319,6 +320,7 @@ pub(crate) struct IssuePage {
 }
 
 pub(crate) struct IssuesModel {
+    pub(crate) pulls: super::pull_requests::PullRequestsModel,
     pub(crate) enabled: bool,
     pub(crate) opened: bool,
     pub(crate) cli: Option<Cli>,
@@ -351,6 +353,7 @@ pub(crate) struct IssuesModel {
 impl Default for IssuesModel {
     fn default() -> Self {
         Self {
+            pulls: super::pull_requests::PullRequestsModel::default(),
             enabled: true,
             opened: false,
             cli: None,
