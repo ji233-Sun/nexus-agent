@@ -127,7 +127,7 @@ flowchart TB
 - `crates/harness-acp`：Kimi Code / Qoder / CodeBuddy / OpenCode / DeepSeek Harness 共用的 ACP v1 握手、会话、模型配置、审批和事件适配。
 - `crates/harness-cli/src/command_code.rs`：Command Code 的无交互 JSON 事件、会话与模型目录适配。
 - `apps/runner/src/transport.rs`：JSONL 命令读取、协议版本校验和事件写出。
-- `apps/runner/src/application`：命令调度、双任务并发、任务与 checkout 互斥；`session` 管理会话进程、审批、提问和输入回执，`generation` 管理后台文本生成。
+- `apps/runner/src/application`：命令调度、多任务并发、任务与 checkout 互斥；`session` 管理会话进程、审批、提问和输入回执，`generation` 管理后台文本生成。
 - `apps/runner/src/infrastructure`：Harness 适配器选择、进程命令装配和平台相关的进程树清理，不反向依赖应用层。
 - `apps/desktop/src/bootstrap.rs`：窗口、主题、存储、Runner 和远程服务的启动装配。
 - `apps/desktop/src/model`：应用状态、会话状态和提交可用性，不依赖 GPUI；语音 Provider 定义也位于这一层。
@@ -186,6 +186,27 @@ cargo build --workspace --locked
 [CI 工作流](https://github.com/ji233-Sun/nexus-agent/blob/main/.github/workflows/ci.yml) 在推送到 main、PR 和手动触发时，于 Ubuntu、macOS、Windows 执行以上检查。Linux 还会检查 Remote Web 类型与构建产物是否和已提交的内嵌资源一致，命令见[修改远程页面](#修改远程页面)。
 
 Presenter 测试使用内存 SQLite、Fake Runner 与 Fake Credential Store，GPUI 测试验证界面交互；Fake Harness 测试验证子进程、协议、流式输出、取消和关闭，不调用真实模型。Runner 测试隔离 Claude 用户配置与认证环境；目录单元测试显式注入环境读取函数，避免修改全局环境。探测回归包含 Oh My Pi 原有的两次 60 秒超时等待。
+
+### Issue #209 并发验收记录
+
+2026-10-03，在 macOS 27.0（26A5378n）验证多个 Worktree 并发。基线 `92737f2` 已支持运行中打开独立 Issue 配置，但 Desktop 和 Runner 仍限制最多两个任务；将现有并发测试扩展到第三个 Worktree 后，基线在第三次提交时失败。修复移除固定数量限制，沿用现有会话状态和 checkout 互斥，没有新增依赖、配置、协议或存储格式。
+
+以下检查全部通过：
+
+```sh
+cargo test -p nexus-desktop --bin nexus-desktop --locked -- presenter::tests::concurrency:: presenter::tests::issues:: presenter::tests::remote:: view::tests::issues:: view::tests::navigation::
+cargo test -p nexus-runner --locked -- multiple_checkouts_run_together same_task_is_rejected
+cargo fmt --all -- --check
+cargo clippy -p nexus-desktop -p nexus-runner --all-targets --locked -- -D warnings
+cargo build -p nexus-desktop -p nexus-runner --locked
+git diff --check
+```
+
+Desktop 的 30 项测试覆盖三到四个独立任务并发、在运行中的本地任务和 Worktree 任务上打开快捷提 Issue、占用目录提示与草稿保留、项目行新建对话、`⌘ / Ctrl N`、远程启动第三个 Worktree，以及切换会话后的输出、队列、审批和取消隔离。Runner 的 2 项测试中，协议回归使用真实 Runner 子进程与 Fake Harness，验证三个 checkout 同时等待审批、跨任务审批拒绝和取消一个任务后其余任务继续完成；单元测试验证同任务重复启动被拒绝。
+
+实机入口核查使用已安装的 `nightly-2026-10-02-1790924616-92737f2822a3`：项目行有「新建对话」，侧栏「新建任务」标注 `⌘N`，菜单栏提供「新建任务」。操作项目行入口与 `⌘N` 后，界面仍为同一主窗口中的「新建任务」页面。当前没有应用内「新建原生对话窗口」入口；新会话与原生窗口是不同路径。
+
+实机所选 Codex CLI 显示 Harness 尚未就绪，运行中操作的验收来自上述 Presenter、GPUI 和 Runner 测试。真实 Harness 创建 GitHub Issue 并返回可访问链接、Windows/Linux 原生界面仍待实机验收；当前也未提供共享任务状态的多个原生对话窗口。本次检查不代表这些场景已通过。
 
 <details>
 <summary>滚动性能测试与发布构建</summary>

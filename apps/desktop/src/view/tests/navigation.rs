@@ -1,6 +1,67 @@
 use super::*;
 
 #[gpui::test]
+fn new_conversation_entries_start_independent_worktrees_while_tasks_are_running(
+    cx: &mut gpui::TestAppContext,
+) {
+    use crate::presenter::tests::{start_test_worktree, worktree_fixture};
+    cx.executor().allow_parking();
+    cx.update(gpui_kit::init);
+    cx.update(theme::configure_theme);
+    let (presenter, runner, _directory, first) = worktree_fixture("first task");
+    let project = presenter
+        .model()
+        .conversation
+        .selected_project
+        .as_ref()
+        .unwrap()
+        .id;
+    let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
+    cx.run_until_parked();
+    let project_row = cx
+        .debug_bounds(format!("sidebar-project-{project}").leak())
+        .unwrap();
+    cx.simulate_mouse_move(project_row.center(), None, Default::default());
+    click_debug(cx, format!("project-new-task-{project}").leak());
+    cx.run_until_parked();
+    let second = view.update(cx, |view, cx| {
+        assert!(view.presenter.model().conversation.selected_task.is_none());
+        assert!(view.presenter.model().can_submit());
+        let start = start_test_worktree(&mut view.presenter, &runner, "second task");
+        cx.notify();
+        start
+    });
+    cx.run_until_parked();
+    cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+        "cmd-n"
+    } else {
+        "ctrl-n"
+    });
+    cx.run_until_parked();
+    view.update(cx, |view, cx| {
+        assert!(view.presenter.model().conversation.selected_task.is_none());
+        assert!(view.presenter.model().can_submit());
+        let third = start_test_worktree(&mut view.presenter, &runner, "third task");
+        assert_eq!(view.presenter.model().active_run_count(), 3);
+        assert_ne!(first.cwd, second.cwd);
+        assert_ne!(third.cwd, first.cwd);
+        assert_ne!(third.cwd, second.cwd);
+        for task in [first, second, third] {
+            view.presenter.select_task(task.task_id);
+            assert_eq!(
+                view.presenter.model().conversation.active_run,
+                Some(task.run_id)
+            );
+            assert_eq!(
+                view.presenter.model().working_directory(),
+                Some(task.cwd.as_str())
+            );
+        }
+        cx.notify();
+    });
+}
+
+#[gpui::test]
 fn worktree_selectors_share_the_directory_row_and_select_existing_branches(
     cx: &mut gpui::TestAppContext,
 ) {

@@ -564,7 +564,6 @@ impl Presenter {
         }
         if self.model[context].active_run.is_some()
             || self.model.harness_manager.operating.is_some()
-            || self.model.occupied_run_slots() >= 2
         {
             return false;
         }

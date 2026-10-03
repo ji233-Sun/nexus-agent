@@ -351,7 +351,6 @@ impl AppModel {
             .selected_provider_profile_in(context)
             .is_some_and(|profile| profile.credential_configured);
         self[context].active_run.is_none()
-            && self.occupied_run_slots() < 2
             && self
                 .working_directory_in(context)
                 .is_some_and(|path| !self.workspace_locked(std::path::Path::new(path)))

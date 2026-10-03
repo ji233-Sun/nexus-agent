@@ -206,7 +206,7 @@ async fn next_approval(runner: &mut TestRunner, run_id: Uuid) -> nexus_protocol:
 }
 
 #[tokio::test]
-async fn two_checkouts_run_together_and_cancel_and_approval_are_scoped() {
+async fn multiple_checkouts_run_together_and_cancel_and_approval_are_scoped() {
     let fixtures = tempfile::tempdir().unwrap();
     let executable = fake_harness(fixtures.path());
     let first_dir = tempfile::tempdir().unwrap();
@@ -255,18 +255,11 @@ async fn two_checkouts_run_together_and_cancel_and_approval_are_scoped() {
         third_dir.path(),
         executable,
         HarnessKind::Claude,
-        "must wait",
+        "approval-round-trip",
     );
     third.title_generation = None;
     runner.send(Command::RunStart(third.clone())).await;
-    let rejected = runner.collect_run(third.run_id, RunStatus::Failed).await;
-    assert!(rejected.iter().any(|event| matches!(
-        event,
-        Event::RunFailed {
-            code: nexus_protocol::ErrorCode::RunAlreadyActive,
-            ..
-        }
-    )));
+    let third_approval = next_approval(&mut runner, third.run_id).await;
 
     runner
         .send(Command::RunApprovalRespond {
@@ -302,6 +295,15 @@ async fn two_checkouts_run_together_and_cancel_and_approval_are_scoped() {
         .collect_run(second.run_id, RunStatus::Completed)
         .await;
     assert!(events.iter().any(|event| matches!(event, Event::RunMessageCompleted { run_id, text } if *run_id == second.run_id && text.contains("approved"))));
+    runner
+        .send(Command::RunApprovalRespond {
+            run_id: third.run_id,
+            request_id: third_approval.request_id,
+            option: Some(0),
+        })
+        .await;
+    let events = runner.collect_run(third.run_id, RunStatus::Completed).await;
+    assert!(events.iter().any(|event| matches!(event, Event::RunMessageCompleted { run_id, text } if *run_id == third.run_id && text.contains("approved"))));
     runner.shutdown().await;
 }
 

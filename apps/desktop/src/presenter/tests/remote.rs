@@ -1,6 +1,34 @@
 use super::*;
 
 #[test]
+fn remote_start_can_launch_a_third_task_in_an_independent_worktree() {
+    let (mut presenter, runner, _directory, first) = worktree_fixture("first");
+    presenter.new_task();
+    let second = start_test_worktree(&mut presenter, &runner, "second");
+    let project_id = presenter
+        .model
+        .conversation
+        .selected_project
+        .as_ref()
+        .unwrap()
+        .id;
+    let (reply, mut response) = tokio::sync::oneshot::channel();
+    presenter.handle_remote_command(RemoteCommand::StartRun {
+        project_id,
+        prompt: "third".into(),
+        reply,
+    });
+    assert_eq!(response.try_recv().unwrap(), Ok(()));
+    finish_workspace_operation(&mut presenter);
+    emit_current_catalog(&presenter, &runner, claude_aliases());
+    presenter.drain_events();
+    let third = last_start(&runner);
+    assert_eq!(presenter.model.active_run_count(), 3);
+    assert_ne!(third.cwd, first.cwd);
+    assert_ne!(third.cwd, second.cwd);
+}
+
+#[test]
 fn expired_remote_start_does_not_change_selection_or_start_a_run() {
     let (mut presenter, runner, _directory) = fixture();
     assert!(presenter.select_harness(HarnessKind::Codex, "claude"));

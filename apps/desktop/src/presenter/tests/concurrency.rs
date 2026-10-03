@@ -38,9 +38,21 @@ fn concurrent_worktree_tasks_isolate_output_approvals_queue_and_cancellation() {
     assert_eq!(presenter.model.conversation.streaming_text, "second output");
     assert!(presenter.model.conversation.pending_approvals.is_empty());
     presenter.new_task();
-    assert!(!presenter.submit("third must wait", "claude"));
+    let third = start_test_worktree(&mut presenter, &runner, "third");
+    assert_eq!(presenter.model.active_run_count(), 3);
+    assert_ne!(third.cwd, first.cwd);
+    assert_ne!(third.cwd, second.cwd);
+    assert!(presenter.submit("third follow-up", "claude"));
+    runner.emit(Event::RunOutputDelta {
+        run_id: third.run_id,
+        text: "third output".into(),
+    });
+    presenter.drain_events();
+    assert_eq!(presenter.model.conversation.streaming_text, "third output");
+    assert!(presenter.model.conversation.pending_approvals.is_empty());
     presenter.select_task(first.task_id);
     assert_eq!(presenter.model.conversation.streaming_text, "first output");
+    assert_eq!(presenter.model.conversation.queued_messages.len(), 1);
     assert!(presenter.respond_approval(first.run_id, approval_id, Some(0)));
     assert!(
         matches!(runner.0.borrow().commands.last().unwrap().command, Command::RunApprovalRespond { run_id, .. } if run_id == first.run_id)
@@ -72,9 +84,19 @@ fn concurrent_worktree_tasks_isolate_output_approvals_queue_and_cancellation() {
         exit_code: None,
     });
     presenter.drain_events();
-    assert_eq!(presenter.model.active_run_count(), 1);
+    assert_eq!(presenter.model.active_run_count(), 2);
     assert!(presenter.model.task_running(first.task_id));
     assert!(!presenter.model.task_running(second.task_id));
+    presenter.select_task(third.task_id);
+    assert_eq!(presenter.model.conversation.active_run, Some(third.run_id));
+    assert_eq!(presenter.model.conversation.streaming_text, "third output");
+    assert_eq!(presenter.model.conversation.queued_messages.len(), 1);
+    assert_eq!(
+        presenter.model.conversation.queued_messages[0].prompt,
+        "third follow-up"
+    );
+    assert!(presenter.model.conversation.pending_approvals.is_empty());
+    assert!(!presenter.model.conversation.run_cancelling);
 }
 
 #[test]

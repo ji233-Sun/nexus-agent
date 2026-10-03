@@ -38,7 +38,6 @@
   "CNB 请求失败：{error}": "CNB request failed: {error}",
   "用 AI 处理": "Handle with AI",
   "快捷提 Issue": "Quick issue",
-  "最多同时运行两个任务，请等待一个任务结束。": "Up to two tasks can run at once. Wait for a task to finish.",
   "本地目录已有任务运行，请选择 Worktree 或等待任务结束。": "A task is running in the local directory. Choose Worktree or wait for it to finish.",
   "所选 Harness 尚未就绪，请检查模型、配置和登录状态。": "The selected harness is not ready. Check the model, configuration, and sign-in status.",
   "用 AI 处理 Issue": "Handle issue with AI",

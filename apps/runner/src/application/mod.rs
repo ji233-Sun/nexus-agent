@@ -400,8 +400,7 @@ async fn start_run(
     };
 
     let checkout = checkout_directory(&cwd).await;
-    if guard.len() >= 2
-        || guard.contains_key(&request.run_id)
+    if guard.contains_key(&request.run_id)
         || guard
             .values()
             .any(|run| run.task_id == request.task_id || run.checkout == checkout)
@@ -410,8 +409,7 @@ async fn start_run(
             .send(Event::RunFailed {
                 run_id: request.run_id,
                 code: ErrorCode::RunAlreadyActive,
-                message: "最多支持两个独立任务并发；同一任务或 checkout 必须等待当前运行结束。"
-                    .into(),
+                message: "同一任务或 checkout 已有任务运行，请等待结束或使用独立 Worktree。".into(),
             })
             .await;
         emitter
