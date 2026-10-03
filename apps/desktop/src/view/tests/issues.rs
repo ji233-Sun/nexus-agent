@@ -316,7 +316,7 @@ fn issue_launch_dialog_opens_and_launches_while_a_session_is_executing(
         infrastructure::issues::Response,
         presenter::tests::{
             cnb_comment, cnb_issue, finish_issue_request, finish_workspace_operation, seed_issues,
-            worktree_fixture,
+            start_test_worktree, worktree_fixture,
         },
     };
     // Media loading uses Tokio workers outside GPUI's deterministic test scheduler.
@@ -324,6 +324,11 @@ fn issue_launch_dialog_opens_and_launches_while_a_session_is_executing(
     cx.update(gpui_kit::init);
     cx.update(theme::configure_theme);
     let (mut presenter, runner, _directory, first) = worktree_fixture("正在执行的任务");
+    presenter.new_task();
+    let second = start_test_worktree(&mut presenter, &runner, "第二个任务");
+    presenter.new_task();
+    let third = start_test_worktree(&mut presenter, &runner, "第三个任务");
+    presenter.select_task(first.task_id);
     seed_issues(&mut presenter, IssueProvider::Cnb);
     presenter.open_issues(IssueProvider::Cnb);
     presenter.select_issue(IssueProvider::Cnb, "1".into());
@@ -446,7 +451,7 @@ fn issue_launch_dialog_opens_and_launches_while_a_session_is_executing(
     });
     view.update(cx, |view, _| {
         view.presenter.drain_events();
-        assert_eq!(view.presenter.model().active_run_count(), 2);
+        assert_eq!(view.presenter.model().active_run_count(), 4);
         assert_eq!(
             view.presenter.model().conversation.selected_harness,
             HarnessKind::Codex
@@ -465,6 +470,119 @@ fn issue_launch_dialog_opens_and_launches_while_a_session_is_executing(
             .map(|message| message.content.clone())
             .expect("user prompt");
         assert!(prompt.contains("并行提交的缺陷"));
+        for task in [first, second, third] {
+            view.presenter.select_task(task.task_id);
+            assert_eq!(
+                view.presenter.model().conversation.active_run,
+                Some(task.run_id)
+            );
+            assert_eq!(
+                view.presenter.model().working_directory(),
+                Some(task.cwd.as_str())
+            );
+            assert!(!view.presenter.model().conversation.run_cancelling);
+        }
+    });
+}
+
+#[gpui::test]
+fn github_quick_issue_keeps_the_draft_when_the_local_checkout_is_occupied(
+    cx: &mut gpui::TestAppContext,
+) {
+    use crate::{
+        model::workspace::WorkspaceKind,
+        presenter::tests::{finish_workspace_operation, seed_issues, worktree_fixture},
+    };
+    cx.executor().allow_parking();
+    cx.update(gpui_kit::init);
+    cx.update(theme::configure_theme);
+    let (mut presenter, runner, _directory, first) = worktree_fixture("Worktree task");
+    presenter.new_task();
+    presenter.select_workspace_kind(WorkspaceKind::Local);
+    assert!(presenter.submit("local task", "claude"));
+    let local_run = presenter.model().conversation.active_run.unwrap();
+    seed_issues(&mut presenter, IssueProvider::GitHub);
+    let (view, cx) = cx.add_window_view(|window, cx| NexusView::new(presenter, window, cx));
+    cx.simulate_resize(gpui::size(px(1120.), px(900.)));
+    cx.run_until_parked();
+    click_debug(cx, "sidebar-github");
+    cx.run_until_parked();
+    click_debug(cx, "github-new-issue");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("issue-launch-surface").is_some());
+    view.update_in(cx, |view, window, cx| {
+        assert_eq!(
+            view.presenter.model().conversation.workspace_draft.kind,
+            WorkspaceKind::Worktree
+        );
+        view.issue_launch_input.update(cx, |input, cx| {
+            input.set_value("保留 Issue 草稿", window, cx)
+        });
+    });
+    cx.run_until_parked();
+    click_debug(cx, "workspace-mode");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("down enter");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("issue-launch-blocker").is_some());
+    click_debug(cx, "issue-launch-start");
+    cx.run_until_parked();
+    view.read_with(cx, |view, cx| {
+        assert_eq!(view.issue_launch_input.read(cx).value(), "保留 Issue 草稿");
+        assert_eq!(view.presenter.model().active_run_count(), 2);
+        assert!(
+            view.presenter
+                .issue_run_blocker()
+                .unwrap()
+                .render(Language::Chinese)
+                .contains("本地目录已有任务")
+        );
+    });
+    click_debug(cx, "workspace-mode");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("down down enter");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("issue-launch-blocker").is_none());
+    click_debug(cx, "issue-launch-start");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("issue-launch-surface").is_none());
+    view.update(cx, |view, cx| {
+        finish_workspace_operation(&mut view.presenter);
+        if let ModelCatalogState::Loading { request_id, .. } =
+            view.presenter.model().conversation.model_catalog
+        {
+            runner.emit(Event::ModelCatalogLoaded {
+                request_id,
+                harness: HarnessKind::Claude,
+                models: vec![],
+            });
+        }
+        view.presenter.drain_events();
+        assert_eq!(view.presenter.model().active_run_count(), 3);
+        assert!(
+            view.presenter
+                .model()
+                .conversation
+                .messages
+                .iter()
+                .any(|message| message.content.contains("保留 Issue 草稿"))
+        );
+        view.presenter.select_task(first.task_id);
+        assert_eq!(
+            view.presenter.model().conversation.active_run,
+            Some(first.run_id)
+        );
+        assert_eq!(
+            view.presenter.model().working_directory(),
+            Some(first.cwd.as_str())
+        );
+        assert!(
+            view.presenter
+                .model()
+                .all_conversations()
+                .any(|conversation| conversation.active_run == Some(local_run))
+        );
+        cx.notify();
     });
 }
 

@@ -80,9 +80,7 @@ impl Presenter {
 
     pub(crate) fn issue_run_blocker(&self) -> Option<LocalizedText> {
         use crate::model::workspace::WorkspaceKind;
-        let message = if self.model.occupied_run_slots() >= 2 {
-            "最多同时运行两个任务，请等待一个任务结束。"
-        } else if self.model.conversation.workspace_draft.kind == WorkspaceKind::Worktree
+        let message = if self.model.conversation.workspace_draft.kind == WorkspaceKind::Worktree
             && self.model.workspace_busy
         {
             "请等待当前 Worktree 操作完成"

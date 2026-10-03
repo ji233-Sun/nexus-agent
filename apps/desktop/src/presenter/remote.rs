@@ -34,7 +34,7 @@ impl Presenter {
                 }
                 let result = if prompt.trim().is_empty() {
                     Err("Prompt 不能为空。".into())
-                } else if self.model.occupied_run_slots() >= 2 || self.model.workspace_busy {
+                } else if self.model.workspace_busy {
                     Err("已有任务正在执行".into())
                 } else if let Some(project) = self
                     .model

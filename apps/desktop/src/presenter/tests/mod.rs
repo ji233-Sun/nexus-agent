@@ -191,7 +191,11 @@ pub(crate) fn finish_workspace_operation(presenter: &mut Presenter) {
     }
 }
 
-fn start_test_worktree(presenter: &mut Presenter, runner: &FakeRunner, prompt: &str) -> StartRun {
+pub(crate) fn start_test_worktree(
+    presenter: &mut Presenter,
+    runner: &FakeRunner,
+    prompt: &str,
+) -> StartRun {
     presenter.select_workspace_kind(crate::model::workspace::WorkspaceKind::Worktree);
     assert!(presenter.submit(prompt, "claude"));
     finish_workspace_operation(presenter);

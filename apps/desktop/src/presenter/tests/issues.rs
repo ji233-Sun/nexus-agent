@@ -520,13 +520,19 @@ fn issue_configuration_defaults_to_worktree_when_the_local_checkout_is_occupied(
     presenter
         .prepare_issue_run(IssueProvider::Cnb, IssueLaunchKind::Create)
         .unwrap();
-    assert!(
-        presenter
-            .issue_run_blocker()
-            .unwrap()
-            .render(Language::Chinese)
-            .contains("最多同时运行两个任务")
-    );
+    assert!(presenter.issue_run_blocker().is_none());
+    assert!(presenter.start_issue_run(
+        IssueProvider::Cnb,
+        IssueLaunchKind::Create,
+        "third issue task",
+        "claude"
+    ));
+    finish_workspace_operation(&mut presenter);
+    emit_current_catalog(&presenter, &runner, claude_aliases());
+    presenter.drain_events();
+    assert_eq!(presenter.model.active_run_count(), 3);
+    assert_ne!(last_start(&runner).cwd, first.cwd);
+    assert_eq!(presenter.model[previous].active_run, Some(first.run_id));
 }
 
 #[test]
