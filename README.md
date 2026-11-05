@@ -1,3 +1,5 @@
+# 本项目已被归档，一个更强大的Agent桌面端正在开发中，敬请期待……
+
 <p align="center">
   <img src="docs/assets/readme-hero.svg" width="1200" alt="Nexus Agent — 统一管理你的本地编码 Agent，支持 Claude Code、Codex CLI 和 Oh My Pi。">
 </p>
