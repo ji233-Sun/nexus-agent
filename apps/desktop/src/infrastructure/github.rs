@@ -107,7 +107,7 @@ fn decode<T: DeserializeOwned>(value: Value) -> Result<T> {
         .map_err(|_| "GitHub 返回了无效数据，请检查 gh 版本后重试。".into())
 }
 
-async fn api(
+pub(super) async fn api(
     cli: &Cli,
     endpoint: &str,
     method: &str,
@@ -317,7 +317,11 @@ struct GitHubComment {
     created_at: String,
 }
 
-async fn load_comments(cli: &Cli, repository: &str, number: &str) -> Result<Vec<Comment>> {
+pub(super) async fn load_comments(
+    cli: &Cli,
+    repository: &str,
+    number: &str,
+) -> Result<Vec<Comment>> {
     let endpoint = format!(
         "{}/comments?per_page=100",
         issue_endpoint(repository, number)?

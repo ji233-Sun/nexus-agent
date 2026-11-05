@@ -12,6 +12,7 @@ mod navigation;
 mod pane;
 mod pdf;
 mod provider_profiles;
+mod pull_requests;
 mod review;
 mod settings;
 mod sidebar;

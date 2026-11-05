@@ -325,7 +325,7 @@ fn parse_page(output: &str) -> Result<IssuePage> {
     })
 }
 
-fn page_total(response: &Value) -> Option<usize> {
+pub(super) fn page_total(response: &Value) -> Option<usize> {
     response["total"]
         .as_u64()
         .or_else(|| response["header"]["x-cnb-total"].as_str()?.parse().ok())?

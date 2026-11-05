@@ -154,6 +154,68 @@ pub(crate) fn seed_issues(presenter: &mut Presenter, provider: IssueProvider) {
     };
 }
 
+pub(crate) fn pull_detail(number: &str) -> crate::model::pull_requests::PullDetail {
+    use crate::model::pull_requests::{Check, PullDetail, PullRequest, Review, ReviewThread};
+    let pull = PullRequest {
+        number: number.into(),
+        title: format!("PR {number}"),
+        body: "PR body **Markdown**".into(),
+        state: "open".into(),
+        author: "author".into(),
+        head_repository: "team/project".into(),
+        head_branch: format!("feat/pr-{number}"),
+        base_branch: "main".into(),
+        head_sha: "b".repeat(40),
+        base_sha: "a".repeat(40),
+        draft: false,
+        merge_status: "MERGEABLE · CLEAN".into(),
+        mergeable: true,
+    };
+    let mut root = cnb_comment("31");
+    root.body = "Other Agent finding".into();
+    let mut reply = cnb_comment("32");
+    reply.body = "Last conversation reply".into();
+    PullDetail {
+        pull: pull.clone(),
+        comments: vec![cnb_comment("99")],
+        reviews: vec![Review {
+            id: "9".into(),
+            author: "other-agent".into(),
+            state: "CHANGES_REQUESTED".into(),
+            body: "Review finding".into(),
+        }],
+        threads: vec![ReviewThread {
+            id: "T1".into(),
+            path: "src/main.rs".into(),
+            line: Some(12),
+            resolved: false,
+            outdated: false,
+            comments: vec![root, reply],
+        }],
+        checks: vec![Check {
+            name: "test".into(),
+            state: "failure".into(),
+            description: "Test failed".into(),
+            url: "https://github.com/team/project/actions/runs/8".into(),
+        }],
+        stack: vec![
+            PullRequest {
+                number: "1".into(),
+                head_branch: "parent".into(),
+                ..pull.clone()
+            },
+            pull,
+        ],
+    }
+}
+
+pub(crate) fn seed_pull_requests(presenter: &mut Presenter, provider: IssueProvider) {
+    seed_issues(presenter, provider);
+    presenter.model.issues_mut(provider).pulls.pulls =
+        vec![pull_detail("2").pull, pull_detail("3").pull];
+    presenter.model.issues_mut(provider).pulls.total = 61;
+}
+
 pub(crate) fn finish_issue_request(
     presenter: &mut Presenter,
     provider: IssueProvider,
@@ -171,6 +233,16 @@ pub(crate) fn finish_issue_request(
             .action_request
             .map(|(id, _)| id),
         Response::NpcAction(_) => presenter.model.issues(provider).npc_request,
+        Response::PullRequests(response) => {
+            let pulls = &presenter.model.issues(provider).pulls;
+            match response {
+                crate::infrastructure::pull_requests::Response::List(_) => pulls.list_request,
+                crate::infrastructure::pull_requests::Response::Detail(_) => pulls.detail_request,
+                crate::infrastructure::pull_requests::Response::Action(_) => {
+                    pulls.action_request.map(|(id, _)| id)
+                }
+            }
+        }
     }
     .expect("pending issue request");
     presenter.handle_issue_event(Event {

@@ -5,6 +5,7 @@ mod generation;
 mod harness_installation;
 mod issues;
 mod provider_profiles;
+mod pull_requests;
 mod remote;
 mod runs;
 mod tasks;
